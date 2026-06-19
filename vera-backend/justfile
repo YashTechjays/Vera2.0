@@ -40,10 +40,10 @@ down:
 
 # Database
 migrate:
-    uv run alembic upgrade head
+    uv run --package control_plane alembic upgrade head
 
 makemigration message:
-    uv run alembic revision --autogenerate -m "{{message}}"
+    uv run --package control_plane alembic revision --autogenerate -m "{{message}}"
 
 # Seed the shared sample admin (admin@veratechsolutions.example / dev-password-change-me)
 seed:
@@ -52,6 +52,10 @@ seed:
 # Seed your own admin login into the sample tenant: just seed-user you@x.com secret
 seed-user email password:
     SEED_ADMIN_EMAIL="{{email}}" SEED_ADMIN_PASSWORD="{{password}}" uv run python scripts/seed.py
+
+# Seed ONLY the baseline form schemas (IBV Form Standard DSL)
+seed-schemas:
+    uv run python scripts/seed.py --schemas
 
 # Run apps
 api:
