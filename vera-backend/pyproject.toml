@@ -1,0 +1,90 @@
+[project]
+name = "vera-backend"
+version = "0.1.0"
+description = "Vera 2.0 — HIPAA-compliant multi-tenant voice-AI backend (monorepo root)"
+requires-python = ">=3.12,<3.13"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/*"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.16",
+    "mypy>=1.14",
+    "pytest>=9.0",
+    "pytest-asyncio>=1.4",
+    "pytest-cov>=7.1",
+    "httpx>=0.28",
+    "pre-commit>=4.6",
+    "fakeredis>=2.26",
+    "qrcode>=7.4",
+]
+
+# ---------------------------------------------------------------------------
+# Lint / format — packages/phi_codec is vendored (upstream: phi-codec-vault
+# repo) and keeps its own style; we don't rewrite vendored code.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["packages/phi_codec"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # bugbear
+    "SIM",   # simplify
+    "C4",    # comprehensions
+    "RUF",   # ruff-specific
+    "ASYNC", # async pitfalls
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# require() returns a fastapi.Depends — safe in argument defaults by design.
+extend-immutable-calls = ["fastapi.Depends", "control_plane.auth.rbac.require"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vera_core", "control_plane", "agent_worker", "phi_codec"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["SIM117"]  # nested `with` reads better in test arrange blocks
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+pretty = true
+files = [
+    "packages/vera_core/src",
+    "apps/control_plane/src",
+    "apps/agent_worker/src",
+    "tests",
+]
+exclude = ["packages/phi_codec"]
+plugins = ["pydantic.mypy"]
+
+# Vendored phi_codec is not strict-typed; values crossing into vera_core.phi
+# are cast at the boundary.
+[[tool.mypy.overrides]]
+module = ["phi_codec", "phi_codec.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests", "packages/phi_codec/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+addopts = "-q"

@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: vera
+          POSTGRES_PASSWORD: vera
+          POSTGRES_DB: vera
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vera -d vera"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      - name: Sync workspace (locked)
+        run: uv sync --all-packages --locked
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Typecheck
+        run: uv run mypy
+
+      - name: Migrate + seed (also exercises migration 0001 itself)
+        run: |
+          uv run alembic upgrade head
+          uv run python scripts/seed.py
+
+      - name: Test
+        # The vendored latency benchmark asserts a wall-clock p95 budget;
+        # shared runners make it meaningless/flaky. It still runs locally.
+        run: >-
+          uv run pytest
+          --deselect packages/phi_codec/tests/test_recall.py::test_latency_budget_regex_path

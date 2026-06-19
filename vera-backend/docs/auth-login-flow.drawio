@@ -1,0 +1,173 @@
+<mxfile host="app.diagrams.net" agent="claude-code" version="24.0.0">
+  <diagram name="Auth Login Flow" id="auth-login-flow">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="2200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ===== TITLES ===== -->
+        <mxCell id="title" value="Vera control-plane login &amp; verify flow" style="text;html=1;fontSize=20;fontStyle=1;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="700" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-pw-title" value="A. Password login&#10;(IMPLEMENTED — api/v1/auth.py)" style="text;html=1;fontSize=14;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="340" y="40" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-gcip-title" value="B. GCIP SSO login&#10;(SCAFFOLDED — not built yet)" style="text;html=1;fontSize=14;fontStyle=1;align=center;fillColor=#ffe6cc;strokeColor=#d79b00;rounded=1;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="40" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-fail-title" value="Failure exits&#10;(uniform 401)" style="text;html=1;fontSize=13;fontStyle=1;align=center;fillColor=#f8cecc;strokeColor=#b85450;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ===== PASSWORD LANE ===== -->
+        <mxCell id="PA" value="Browser&#10;POST /tenants/{tenant_slug}/auth/login&#10;{ email, password }" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="340" y="100" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="PB" value="password &gt; MAX_PASSWORD_BYTES ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="380" y="190" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="PC" value="resolve_tenant_id(slug) → tenant UUID&#10;(SECURITY DEFINER resolve_tenant_by_slug;&#10;None ⇒ uniform 401), then&#10;tenant_session(tenant_id): SET LOCAL app.tenant_id → RLS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="300" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="PD" value="resolve_login_provider(PASSWORD)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="410" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="PE" value="provider enabled?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="390" y="490" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="PF" value="_load_password_creds(email)&#10;verify_password(password, hash)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="610" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="PG" value="creds valid?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="390" y="710" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="PH" value="provider.enforce_mfa  OR  creds.mfa_enabled ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="370" y="830" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- MFA challenge sub-flow -->
+        <mxCell id="PMa" value="store.put(MFA_NS, challenge)&#10;audit MFA_CHALLENGE&#10;→ return { mfa_required: true, challenge_token }" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="970" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="PM1" value="Browser&#10;POST /tenants/{tenant_id}/auth/mfa/verify&#10;{ challenge_token, code }" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1080" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="PM2" value="store.get(MFA_NS) — challenge.tenant_id == tenant_id&#10;mfa.verify(secret_ref, code)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1190" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="PM3" value="code valid?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1290" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="PM4" value="delete MFA challenge token" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1410" width="300" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ===== GCIP LANE ===== -->
+        <mxCell id="GA" value="Browser ⇄ GCIP (OIDC / SAML)&#10;scoped to tenant.gcip_tenant_id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="100" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="GB" value="GCIP returns signed ID token" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="200" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="GC" value="POST SSO login endpoint (GCIP token)&#10;⚠ ENDPOINT NOT IMPLEMENTED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;dashed=1;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="760" y="300" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="GD" value="GCIP TokenVerifier&#10;validate signature / audience / gcip_tenant_id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="410" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="GE" value="token valid?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="810" y="510" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="GF" value="match token.sub → app_user.gcip_uid&#10;→ resolve internal app_user.id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="630" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="Gnote" value="Same verify path downstream — MFA may be&#10;delegated to the IdP. Provider-agnostic by design&#10;(auth/identity.py: TokenVerifier protocol)." style="text;html=1;align=left;fontSize=11;fontStyle=2;fillColor=#fff8f0;strokeColor=#d79b00;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="720" width="300" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ===== FAILURE EXITS ===== -->
+        <mxCell id="F1" value="401 invalid credentials&#10;(password too long — audited LOGIN_FAILURE)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="40" y="195" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="F2" value="401 (UN-audited)&#10;unknown tenant / no enabled provider&#10;— FK to tenant may not exist" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="40" y="495" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="F3" value="audit LOGIN_FAILURE&#10;→ 401 invalid credentials" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="40" y="715" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="F4" value="audit LOGIN_FAILURE&#10;→ 401 invalid credentials" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1295" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="GF1" value="401 invalid token" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="1130" y="520" width="160" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ===== CONVERGENCE: mint session ===== -->
+        <mxCell id="CV" value="Mint opaque session token&#10;store.put(SESSION_NS, mfa_passed=True, TTL)&#10;stamp last_login_at (DB now())&#10;audit LOGIN_SUCCESS&#10;→ return { session_token }" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="490" y="1540" width="340" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- ===== SHARED VERIFY PATH ===== -->
+        <mxCell id="sv-title" value="C. Shared opaque-session verify path — runs on EVERY subsequent request&#10;(identical regardless of how login happened — Redis token, no JWT)" style="text;html=1;fontSize=13;fontStyle=1;align=center;fillColor=#e1d5e7;strokeColor=#9673a6;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="455" y="1690" width="410" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="SV1" value="Request: Authorization: Bearer &lt;opaque token&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="490" y="1760" width="340" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="SV2" value="1. Authenticate — SessionVerifier.verify&#10;→ VerifiedIdentity (rejects mfa/expired tokens)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="490" y="1840" width="340" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="SV3" value="2. Authorize — tenant_guard + RBAC require(perm)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="490" y="1930" width="340" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="SV4" value="3. tenant-scoped session → query → 4. audit disclosure → 5. minimized response (Cache-Control: no-store)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="490" y="2010" width="340" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ===== EDGES: password lane ===== -->
+        <mxCell id="ePA-PB" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PA" target="PB"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePB-F1" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PB" target="F1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePB-PC" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PB" target="PC"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePC-PD" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PC" target="PD"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePD-PE" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PD" target="PE"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePE-F2" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PE" target="F2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePE-PF" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PE" target="PF"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePF-PG" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PF" target="PG"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePG-F3" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PG" target="F3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePG-PH" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PG" target="PH"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePH-PMa" value="yes (MFA)" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PH" target="PMa"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePH-CV" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PH" target="CV">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="700" y="875" /><mxPoint x="700" y="1590" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ePMa-PM1" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="PMa" target="PM1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePM1-PM2" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PM1" target="PM2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePM2-PM3" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PM2" target="PM3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePM3-F4" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PM3" target="F4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePM3-PM4" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PM3" target="PM4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ePM4-CV" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="PM4" target="CV"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- ===== EDGES: GCIP lane ===== -->
+        <mxCell id="eGA-GB" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="GA" target="GB"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eGB-GC" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="GB" target="GC"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eGC-GD" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="GC" target="GD"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eGD-GE" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="GD" target="GE"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eGE-GF1" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="GE" target="GF1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eGE-GF" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="GE" target="GF"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eGF-CV" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;" edge="1" parent="1" source="GF" target="CV">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="910" y="1590" /></Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ===== EDGES: shared path ===== -->
+        <mxCell id="eCV-SV1" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="CV" target="SV1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eSV1-SV2" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="SV1" target="SV2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eSV2-SV3" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="SV2" target="SV3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eSV3-SV4" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" parent="1" source="SV3" target="SV4"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

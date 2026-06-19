@@ -1,0 +1,65 @@
+# Vera backend — task runner. `just` lists recipes, `just check` runs the full gate.
+
+# Load .env into the recipe environment (no-op if absent). Lets non-VERA_ process
+# vars like LOCAL_KMS_MASTER_KEY — read via os.environ, not pydantic Settings —
+# reach `just api`/`worker`/`seed` from .env instead of a manual shell export.
+set dotenv-load := true
+
+default:
+    @just --list
+
+# Install/refresh the workspace venv from the lockfile
+bootstrap:
+    uv sync --all-packages
+
+# Format code in place
+fmt:
+    uv run ruff format .
+    uv run ruff check --fix .
+
+# Lint (no changes)
+lint:
+    uv run ruff format --check .
+    uv run ruff check .
+
+typecheck:
+    uv run mypy
+
+test *args:
+    uv run pytest {{args}}
+
+# Full local gate — what CI runs
+check: lint typecheck test
+
+# Local infra (Postgres + Redis)
+up:
+    docker compose up -d --wait
+
+down:
+    docker compose down
+
+# Database
+migrate:
+    uv run alembic upgrade head
+
+makemigration message:
+    uv run alembic revision --autogenerate -m "{{message}}"
+
+# Seed the shared sample admin (admin@veratechsolutions.example / dev-password-change-me)
+seed:
+    uv run python scripts/seed.py
+
+# Seed your own admin login into the sample tenant: just seed-user you@x.com secret
+seed-user email password:
+    SEED_ADMIN_EMAIL="{{email}}" SEED_ADMIN_PASSWORD="{{password}}" uv run python scripts/seed.py
+
+# Run apps
+api:
+    uv run uvicorn control_plane.main:app --reload --port 8000
+
+worker:
+    uv run python -m agent_worker.main dev
+
+# Print a QR code from an otpauth:// URI for local MFA testing (no network, secret stays local)
+mfa-qr uri:
+    uv run python scripts/mfa_qr.py '{{uri}}'

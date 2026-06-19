@@ -1,0 +1,392 @@
+"""Integration tests for the tenant-admin surfaces: user invites, role admin,
+provider toggles, and API-key management — over a live RLS-enforcing connection.
+
+The `admin` persona holds TENANT_ADMIN (which now includes `users:manage`,
+`roles:manage`, `tenant:auth:configure`, `apikeys:manage`); `norole` holds nothing.
+"""
+
+from uuid import UUID, uuid4
+
+import httpx
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from control_plane.auth.api_key import resolve_api_key
+from control_plane.email import InMemoryEmailSender
+from tests.integration.control_plane.conftest import RBACWorld
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _idem() -> dict[str, str]:
+    return {"Idempotency-Key": str(uuid4())}
+
+
+# --- auth/me (session hydration, no permission gate) -------------------------
+
+
+async def test_me_self_read_allowed_without_any_permission(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # A user with no roles can still read their OWN session — /me has no permission gate.
+    resp = await client.get("/api/v1/auth/me", headers=_auth(rbac_world.norole_token))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["roles"] == []
+    assert data["permissions"] == []
+    assert data["email"] == "norole@test.example"
+
+
+async def test_me_lists_admin_roles_and_permissions(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get("/api/v1/auth/me", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert "TENANT_ADMIN" in data["roles"]
+    assert len(data["permissions"]) > 0
+
+
+# --- users / invitations -----------------------------------------------------
+
+
+async def test_invite_returns_link_and_captures_email(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, email_sender: InMemoryEmailSender
+) -> None:
+    before = len(email_sender.sent)
+    resp = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "newhire@test.example", "name": "New Hire", "send_email": True},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["invite_url"].startswith("http")
+    assert "token=" in data["invite_url"]
+    assert data["email_sent"] is True
+    # Email captured by the in-memory sender, link present, raw token never logged.
+    assert len(email_sender.sent) == before + 1
+    assert "token=" in email_sender.sent[-1].body
+    assert email_sender.sent[-1].to == "newhire@test.example"
+
+
+async def test_invite_link_only_skips_email(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, email_sender: InMemoryEmailSender
+) -> None:
+    before = len(email_sender.sent)
+    resp = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "linkonly@test.example", "name": "", "send_email": False},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["email_sent"] is False
+    assert len(email_sender.sent) == before  # no email delivered
+
+
+async def test_invite_then_accept_activates_user(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tid = rbac_world.tenant_id
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "accepts@test.example", "name": "Accepts", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    user_id = invite.json()["data"]["user_id"]
+    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+
+    accept = await client.post(
+        f"/api/v1/tenants/{tid}/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert accept.status_code == 200, accept.text
+    # No password provider configured in this tenant ⇒ no MFA enforced ⇒ active now.
+    assert accept.json()["data"]["mfa_required"] is False
+
+    async with admin_sessionmaker() as session:
+        status = await session.scalar(
+            text("SELECT status FROM app_user WHERE id = :i").bindparams(i=UUID(user_id))
+        )
+        identity = await session.scalar(
+            text(
+                "SELECT count(*) FROM user_identity WHERE app_user_id = :i"
+                " AND provider_type = 'password'"
+            ).bindparams(i=UUID(user_id))
+        )
+    assert status == "active"
+    assert identity == 1
+
+
+async def test_accept_is_single_use(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
+    tid = rbac_world.tenant_id
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "once@test.example", "send_email": False},
+    )
+    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    first = await client.post(
+        f"/api/v1/tenants/{tid}/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert first.status_code == 200
+    second = await client.post(
+        f"/api/v1/tenants/{tid}/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert second.status_code == 401  # token consumed
+
+
+async def test_deactivate_user(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "deactivate@test.example", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    resp = await client.post(
+        f"/api/v1/users/{user_id}/deactivate",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    async with admin_sessionmaker() as session:
+        status = await session.scalar(
+            text("SELECT status FROM app_user WHERE id = :i").bindparams(i=UUID(user_id))
+        )
+    assert status == "deactivated"
+
+
+async def test_admin_endpoint_denied_without_permission(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        "/api/v1/users",
+        headers=_auth(rbac_world.norole_token),
+    )
+    assert resp.status_code == 403
+
+
+# --- roles -------------------------------------------------------------------
+
+
+async def test_create_custom_role_appears_in_list(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "BILLING_VIEWER", "permission_ids": []},
+    )
+    assert created.status_code == 200, created.text
+    listing = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    names = {r["name"] for r in listing.json()["data"]}
+    assert "BILLING_VIEWER" in names  # custom role
+    assert "SUPER_ADMIN" in names  # global system role visible via catalog RLS
+
+
+async def test_assign_and_revoke_role(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "roleme@test.example", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+
+    assign = await client.post(
+        f"/api/v1/users/{user_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": supervisor_id},
+    )
+    assert assign.status_code == 200, assign.text
+    # Duplicate assignment is a conflict.
+    dup = await client.post(
+        f"/api/v1/users/{user_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": supervisor_id},
+    )
+    assert dup.status_code == 409
+
+    revoke = await client.request(
+        "DELETE",
+        f"/api/v1/users/{user_id}/roles/{supervisor_id}",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert revoke.status_code == 200, revoke.text
+    revoke_again = await client.request(
+        "DELETE",
+        f"/api/v1/users/{user_id}/roles/{supervisor_id}",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert revoke_again.status_code == 404
+
+
+async def test_super_admin_role_not_tenant_assignable(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "noescalate@test.example", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    # SUPER_ADMIN is a global role and visible, but it carries platform perms, so a
+    # tenant must not be able to assign it (privilege escalation guard).
+    super_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPER_ADMIN")
+    resp = await client.post(
+        f"/api/v1/users/{user_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": super_admin_id},
+    )
+    assert resp.status_code == 403
+
+
+async def test_invite_cannot_grant_platform_role(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # The invite seam must apply the same guard as assign_role (it bypasses it).
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    super_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPER_ADMIN")
+    resp = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={
+            "email": "viainvite@test.example",
+            "send_email": False,
+            "role_ids": [super_admin_id],
+        },
+    )
+    assert resp.status_code == 403
+
+
+async def test_create_role_rejects_platform_permission(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A tenant must not be able to mint a custom role carrying a platform perm.
+    async with admin_sessionmaker() as session:
+        platform_perm_id = await session.scalar(
+            text("SELECT id FROM permission WHERE code = 'platform:elevations:read'")
+        )
+    resp = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "SNEAKY", "permission_ids": [str(platform_perm_id)]},
+    )
+    assert resp.status_code == 403
+
+
+# --- providers ---------------------------------------------------------------
+
+
+async def test_provider_toggle_and_mfa_rule(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # Enabling password without MFA enforcement is rejected (spec rule).
+    bad = await client.patch(
+        "/api/v1/auth/providers/password",
+        headers=_auth(rbac_world.admin_token),
+        json={"enabled": True, "enforce_mfa": False},
+    )
+    assert bad.status_code == 400, bad.text
+
+    good = await client.patch(
+        "/api/v1/auth/providers/password",
+        headers=_auth(rbac_world.admin_token),
+        json={"enabled": True, "enforce_mfa": True},
+    )
+    assert good.status_code == 200, good.text
+
+    listing = await client.get("/api/v1/auth/providers", headers=_auth(rbac_world.admin_token))
+    password = next(p for p in listing.json()["data"] if p["provider_type"] == "password")
+    assert password["enabled"] is True
+    assert password["enforce_mfa"] is True
+
+
+async def test_provider_unknown_type_rejected(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.patch(
+        "/api/v1/auth/providers/telepathy",
+        headers=_auth(rbac_world.admin_token),
+        json={"enabled": True, "enforce_mfa": True},
+    )
+    assert resp.status_code == 400
+
+
+# --- API keys ----------------------------------------------------------------
+
+
+async def test_api_key_issue_verify_revoke(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tid = rbac_world.tenant_id
+    created = await client.post(
+        "/api/v1/api-keys",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "AppScript intake", "scope": "intake:write"},
+    )
+    assert created.status_code == 200, created.text
+    payload = created.json()["data"]
+    token = payload["token"]
+    key_id = payload["id"]
+
+    # The verifier resolves the token to the tenant + scope (RLS-enforcing session).
+    principal = await resolve_api_key(token, rls_sessionmaker)
+    assert principal is not None
+    assert principal.tenant_id == tid
+    assert principal.scope == "intake:write"
+
+    # A tampered secret does not verify.
+    assert await resolve_api_key(token + "x", rls_sessionmaker) is None
+
+    revoke = await client.post(
+        f"/api/v1/api-keys/{key_id}/revoke",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert revoke.status_code == 200, revoke.text
+    # Revoked key no longer authenticates.
+    assert await resolve_api_key(token, rls_sessionmaker) is None
+
+    listing = await client.get("/api/v1/api-keys", headers=_auth(rbac_world.admin_token))
+    row = next(k for k in listing.json()["data"] if k["id"] == key_id)
+    assert row["revoked"] is True
+    assert "token" not in row  # secret never returned on list
+
+
+async def test_api_key_unknown_scope_rejected(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.post(
+        "/api/v1/api-keys",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "typo", "scope": "intake:wrlte"},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+async def test_api_key_scopes_catalog(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
+    resp = await client.get(
+        "/api/v1/api-keys/scopes",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    catalog = resp.json()["data"]
+    codes = {entry["code"] for entry in catalog}
+    assert "intake:write" in codes
+    assert all(entry["description"] for entry in catalog)  # every scope is labelled

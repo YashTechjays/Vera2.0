@@ -1,0 +1,39 @@
+# Local dev infra only — production runs Cloud SQL + Memorystore.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: vera
+      POSTGRES_PASSWORD: vera          # local dev only
+      POSTGRES_DB: vera
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vera -d vera"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # SMTP sandbox for workforce invite emails — catches all mail (never relays).
+  # The image's default CMD already runs sendria on 0.0.0.0 (SMTP 1025, HTTP 1080);
+  # VERA_SMTP_* defaults point here. Captured mail is viewable at http://localhost:1080.
+  sendria:
+    image: msztolcman/sendria:v2.2.2.0
+    ports:
+      - "1025:1025"
+      - "1080:1080"
+
+volumes:
+  pgdata:

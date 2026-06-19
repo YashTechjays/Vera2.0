@@ -1,0 +1,19 @@
+[project]
+name = "agent-worker"
+version = "0.1.0"
+description = "Vera agent worker — LiveKit Agents worker, dispatched to rooms by agent_name"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "livekit-agents>=1.5.17",
+    "vera-core",
+]
+
+[tool.uv.sources]
+vera-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_worker"]

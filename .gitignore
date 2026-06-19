@@ -1,0 +1,40 @@
+# Root safety net for the Vera2.0 monorepo.
+# Per-folder .gitignore files (vera-backend, vera-frontend) still apply.
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Dependencies / build artifacts (any depth)
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/build/
+**/.next/
+**/__pycache__/
+**/.venv/
+**/venv/
+
+# Secrets / environment (never commit — PHI/HIPAA)
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/*-key.json
+**/*credentials*.json
+
+# Local tool caches
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+
+# Local Claude settings (may hold tokens)
+**/.claude/settings.local.json
+
+# Terraform state
+**/.terraform/
+**/*.tfstate*

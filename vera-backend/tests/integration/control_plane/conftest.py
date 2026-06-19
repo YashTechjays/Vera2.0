@@ -1,0 +1,206 @@
+"""A real RBAC world (live Postgres, RLS-enforcing connection) and an app whose
+sessions are minted into an in-memory store — everything else is production
+wiring. Sessions stand in for a completed login so these tests exercise the
+verify path (SessionVerifier -> tenant_guard -> require) without re-running the
+password/MFA dance, which has its own tests."""
+
+from collections.abc import AsyncGenerator
+from uuid import UUID
+
+import httpx
+import pytest
+from fastapi import FastAPI
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from control_plane.auth.invitations import InMemoryInvitationStore
+from control_plane.auth.permission_cache import InMemoryPermissionCache
+from control_plane.auth.session import SESSION_NS, InMemorySessionStore, SessionData
+from control_plane.email import InMemoryEmailSender
+from control_plane.main import create_app
+from scripts.seed import _seed_permissions, _seed_system_roles
+from vera_core.config import Settings
+from vera_core.config.kms import LocalDevKMS
+from vera_core.db import uuid7
+from vera_core.models import AppUser, Tenant, UserRole
+
+_LONG_TTL = 3600
+
+
+class RBACWorld:
+    def __init__(self, tenant_id: UUID, other_tenant_id: UUID) -> None:
+        self.tenant_id = tenant_id
+        self.other_tenant_id = other_tenant_id
+        # Filled once sessions are minted (see rbac_world).
+        self.admin_token = ""
+        self.norole_token = ""
+        self.ghost_token = ""
+
+
+async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
+    return await store.put(
+        SESSION_NS,
+        SessionData(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            email=email,
+            subject=email,
+            provider_type="password",
+            mfa_passed=True,
+            account_type="tenant",
+            # slug == UUID string in this world, so the guard's fast path matches the
+            # UUID-in-URL test helpers without a DB resolve.
+            tenant_slug=str(tenant_id),
+        ),
+        _LONG_TTL,
+    )
+
+
+@pytest.fixture(scope="session")
+def session_store() -> InMemorySessionStore:
+    return InMemorySessionStore()
+
+
+@pytest.fixture(scope="session")
+async def rbac_world(
+    database_url: str, session_store: InMemorySessionStore
+) -> AsyncGenerator[RBACWorld]:
+    """Two tenants; in the first: default roles, an admin user, and a roleless
+    user. Built as superuser (provisioning is privileged), removed afterwards.
+    Mints a session token for each persona into the shared in-memory store."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(database_url)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id, other_tenant_id = uuid7(), uuid7()
+    suffix = tenant_id.hex[:8]
+    world = RBACWorld(tenant_id, other_tenant_id)
+
+    async with sessionmaker() as session, session.begin():
+        # slug == the tenant UUID string so the existing UUID-in-URL test helpers
+        # resolve through the slug column unchanged (a UUID is a valid slug).
+        session.add(
+            Tenant(id=tenant_id, slug=str(tenant_id), name=f"Authz test {suffix}", status="active")
+        )
+        session.add(
+            Tenant(
+                id=other_tenant_id,
+                slug=str(other_tenant_id),
+                name=f"Authz other {suffix}",
+                status="active",
+            )
+        )
+        await session.flush()
+        permission_ids = await _seed_permissions(session)
+        await _seed_system_roles(session, permission_ids)
+
+        admin_role = (
+            await session.execute(
+                text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'TENANT_ADMIN'")
+            )
+        ).scalar_one()
+        admin = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="admin@test.example",
+            name="Admin",
+            status="active",
+        )
+        norole = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="norole@test.example",
+            name="No Role",
+            status="active",
+        )
+        session.add_all([admin, norole])
+        await session.flush()
+        session.add(UserRole(tenant_id=tenant_id, app_user_id=admin.id, role_id=admin_role))
+        admin_id, norole_id = admin.id, norole.id
+
+    world.admin_token = await _mint(
+        session_store, user_id=admin_id, tenant_id=tenant_id, email="admin@test.example"
+    )
+    world.norole_token = await _mint(
+        session_store, user_id=norole_id, tenant_id=tenant_id, email="norole@test.example"
+    )
+    # A valid session whose user_id has no app_user row -> "unknown user" deny.
+    world.ghost_token = await _mint(
+        session_store, user_id=uuid7(), tenant_id=tenant_id, email="ghost@test.example"
+    )
+
+    yield world
+
+    async with sessionmaker() as session, session.begin():
+        for table in (
+            "audit_log",
+            "auth_audit_log",
+            "api_key",
+            "user_role",
+            "role_permission",
+            "role",
+            "user_identity",
+            "app_user",
+            "sso_provider",
+        ):
+            await session.execute(
+                text(f"DELETE FROM {table} WHERE tenant_id IN (:a, :b)").bindparams(
+                    a=tenant_id, b=other_tenant_id
+                )
+            )
+        await session.execute(
+            text("DELETE FROM tenant WHERE id IN (:a, :b)").bindparams(
+                a=tenant_id, b=other_tenant_id
+            )
+        )
+    await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def email_sender() -> InMemoryEmailSender:
+    return InMemoryEmailSender()
+
+
+@pytest.fixture(scope="session")
+def invitation_store() -> InMemoryInvitationStore:
+    return InMemoryInvitationStore()
+
+
+@pytest.fixture(scope="session")
+async def authz_app(
+    rls_database_url: str,
+    rbac_world: RBACWorld,
+    session_store: InMemorySessionStore,
+    email_sender: InMemoryEmailSender,
+    invitation_store: InMemoryInvitationStore,
+) -> AsyncGenerator[FastAPI]:
+    """The app talks to Postgres as the NON-superuser role: RLS is live under
+    the whole request path, including the audit writer. The session store is the
+    same instance rbac_world minted tokens into; email + invites are in-memory so
+    the invite flow runs without Redis/SMTP."""
+    settings = Settings(_env_file=None, database_url=rls_database_url)
+    app = create_app(
+        settings,
+        session_store=session_store,
+        kms=LocalDevKMS(master_key=b"a" * 32),
+        permission_cache=InMemoryPermissionCache(),
+        email_sender=email_sender,
+        invitation_store=invitation_store,
+    )
+    async with app.router.lifespan_context(app):
+        yield app
+
+
+@pytest.fixture
+async def client(authz_app: FastAPI) -> AsyncGenerator[httpx.AsyncClient]:
+    transport = httpx.ASGITransport(app=authz_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture
+async def admin_session(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> AsyncGenerator[AsyncSession]:
+    async with admin_sessionmaker() as session:
+        yield session
