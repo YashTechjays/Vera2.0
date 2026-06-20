@@ -47,7 +47,8 @@ services:
   # Langfuse v3 self-hosted observability stack
   # All service/volume names are prefixed "langfuse-" to avoid collisions with
   # the app postgres (5432) and redis (6379) services above.
-  # Only langfuse-web (3000) and langfuse-minio (9090→9000) are host-mapped.
+  # Only langfuse-web (4000→3000) and langfuse-minio (9090→9000) are host-mapped.
+  # Host port 3000 is reserved for the frontend React app.
   # ---------------------------------------------------------------------------
 
   langfuse-postgres:
@@ -125,7 +126,7 @@ services:
       langfuse-minio:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "4000:3000"
     environment: &langfuse-env
       DATABASE_URL: "postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse"
       CLICKHOUSE_MIGRATION_URL: "clickhouse://langfuse-clickhouse:9000"
@@ -162,7 +163,7 @@ services:
       LANGFUSE_INIT_USER_EMAIL: "admin@vera.local"
       LANGFUSE_INIT_USER_NAME: "Admin"
       LANGFUSE_INIT_USER_PASSWORD: "local-dev-password"
-      NEXTAUTH_URL: "http://localhost:3000"
+      NEXTAUTH_URL: "http://localhost:4000"
       NEXTAUTH_SECRET: "local-dev-nextauth-secret-do-not-use-in-prod"
       ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       SALT: "local-dev-salt-do-not-use-in-prod"
