@@ -3,7 +3,13 @@ the whole schema on `Base.metadata` (used by Alembic and `create_all`)."""
 
 from .app_user import AppUser
 from .audit_log import AuditLog
-from .auth import AuthAuditLog, SsoProvider, TenantElevation, UserIdentity
+from .auth import (
+    AuthAuditLog,
+    PlatformLoginProvider,
+    SsoProvider,
+    TenantElevation,
+    UserIdentity,
+)
 from .authoring import FormSchema, Prompt, PromptVersion, SchemaVersion
 from .call import Call, CallEvent, CallLineage
 from .field_answer import CallFormSnapshot, DisputeAction, FieldAnswer, FieldEvaluation
@@ -45,6 +51,7 @@ __all__ = [
     "IvrPlaybook",
     "PatientForm",
     "Permission",
+    "PlatformLoginProvider",
     "Prompt",
     "PromptVersion",
     "Recording",

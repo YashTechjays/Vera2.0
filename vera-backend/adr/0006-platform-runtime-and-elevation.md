@@ -4,6 +4,9 @@ Date: 2026-06-16 · Status: Accepted — A/B/C implemented (migration `0002`); *
 · Update 2026-06-19: token-scoped self-session endpoints (`/auth/me`, `/auth/logout`,
 `/auth/session/keepalive`) + session idle/absolute-cap lifecycle implemented (see §A,
 `vera2-database-design.md` §3.5.2)
+· Update 2026-06-21: interim local **password + mandatory TOTP** platform login landed
+(`/api/v1/platform/auth/*`, migration `0011`, `bootstrap_platform_admin.py`) behind a
+provider seam — a stand-in for §D until GCIP provisioning unblocks (see §D-interim)
 
 > **Compliance caveat.** `vera2-database-design.md` §5.1 flags `tenant_elevation` as
 > *subject to change pending compliance review*. A/B/C are built but inert until a
@@ -93,16 +96,46 @@ role — **never `BYPASSRLS`** on the app role (§3.5.9):
 Each sets a fixed `search_path` and is the *only* sanctioned write path for its
 table.
 
-### D. GCIP as a login provider — **DEFERRED**
+### D. GCIP as a login provider — **DEFERRED** (interim password+MFA login landed 2026-06-21)
 - Re-introduce GCIP token verification as a **login path** (`/auth/sso` or a
   token-exchange endpoint) that, on success, mints the same opaque session —
   not as a request-time `TokenVerifier`. Per-tenant enablement via the existing
   `sso_provider` row (`provider_type='google_oidc'`, `gcip_provider_id`).
-- **Not implemented in this pass.** GCIP *is* the production platform-operator
-  login path, and it is blocked on GCIP tenant provisioning (DevOps). Until it
-  lands there is no first-class platform login: platform operators are seeded and
-  exercised via minted opaque sessions (the established test pattern). The A/B/C
-  runtime does not depend on D — only the human-facing login does.
+- **GCIP not implemented in this pass.** GCIP *is* the production platform-operator
+  login path, and it is blocked on GCIP tenant provisioning (DevOps).
+
+#### D-interim — local password + mandatory TOTP platform login (landed 2026-06-21)
+Because GCIP is blocked on DevOps but operators need a first-class login now, an
+interim local login landed behind a provider seam so GCIP can drop in later:
+- **`POST /api/v1/platform/auth/login` + `/mfa/verify`** (`api/v1/platform_auth.py`) —
+  the tenant-less sibling of the tenant login: no `{tenant_slug}` (the operator belongs
+  to no tenant). Credentials + provider config resolve inside a `platform_session`
+  (`app.platform='on'`, no tenant GUC) — exactly the RLS context that exposes the
+  NULL-tenant `app_user` / `user_identity` / `platform_login_provider` rows and zero PHI.
+- **MFA is mandatory.** Login never mints a session directly; it always returns a
+  `verify` challenge completed at `/mfa/verify`, which mints the
+  `account_type='platform'`, `tenant_id=None` session. Failures are a uniform 401
+  (no operator/provider enumeration); outcomes audit to `auth_audit_log` with
+  `tenant_id=NULL`.
+- **Provider seam:** a single NULL-tenant `platform_login_provider` row
+  (`provider_type='password'`, `enforce_mfa=true`), seeded by migration `0011`,
+  gates the path — flipping `enabled=false` disables password login globally, and a
+  future `google_oidc` row is where GCIP plugs in. `user_identity.tenant_id` was made
+  nullable and both tables put on `platform_readable_rls_policy_ddl` (same migration).
+- **Operator #1 is bootstrapped, not invited.** `scripts/bootstrap_platform_admin.py`
+  (`just bootstrap-platform`) is a run-once, idempotent seed of the FIRST operator
+  (NULL-tenant platform `app_user` + password identity + global SUPER_ADMIN grant +
+  inline MFA enrollment, printing the `otpauth://` URI once). It no-ops if any platform
+  operator already exists; subsequent operators come via the platform invite flow.
+- **Two RLS-imposed limitations** (the platform-readable policy's WITH CHECK is strict
+  equality, so the RLS-bound app role cannot UPDATE a NULL-tenant row):
+  1. **TOTP is the only second factor** — recovery-code consumption mutates the identity
+     row and would fail the WITH CHECK; `mfa.verify` accepts a current TOTP as a pure read.
+  2. **No `last_login_at` stamping** — login time is recorded via the `LOGIN_SUCCESS`
+     auth-audit row instead. Lifting either needs a SECURITY DEFINER write path (see
+     `devops-todo.md`), to land with §C-style functions.
+- **This interim path is replaced, not extended, by GCIP.** When §D lands, GCIP becomes
+  the authority and this local password provider should be disabled in production.
 - **Tenant URLs carry a `tenant.slug`, not the UUID** (resolved to the tenant id at
   login via the `resolve_tenant_by_slug` SECURITY DEFINER fn, since the `tenant` RLS
   policy is fail-closed pre-auth). The slug is a convenience layer only — GCIP
@@ -150,9 +183,10 @@ table.
 - Tooling/tests need a platform-session fixture and a privileged role to own the
   functions, distinct from the `vera_rls_test` role used today.
 - With A/B/C landed: the runtime exists and is tested, but stays inert until an
-  operator + a grant are seeded. Without GCIP (§D) there is no production platform
-  login yet, so no operator can authenticate in production — the safe failure mode
-  holds until both §D and compliance sign-off land.
+  operator + a grant are seeded. The interim password+MFA login (§D-interim, landed
+  2026-06-21) now provides a first-class platform login so an operator *can* be
+  bootstrapped and authenticate; GCIP (§D) remains the intended production path and
+  replaces it. Scoped elevation still waits on compliance sign-off before production use.
 
 ## References
 - `vera2-database-design.md` §3.5.4 (scoped elevation), §3.5.7, §3.5.9 (platform tier).

@@ -57,6 +57,10 @@ seed-user email password:
 seed-schemas:
     uv run python scripts/seed.py --schemas
 
+# Bootstrap platform operator #1 (SUPER_ADMIN, password+MFA): just bootstrap-platform you@x.com secret
+bootstrap-platform email password:
+    BOOTSTRAP_ADMIN_EMAIL="{{email}}" BOOTSTRAP_ADMIN_PASSWORD="{{password}}" uv run python scripts/bootstrap_platform_admin.py
+
 # Run apps
 api:
     uv run uvicorn control_plane.main:app --reload --port 8000

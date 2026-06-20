@@ -196,9 +196,14 @@ class _PasswordCreds:
     account_type: str
 
 
-async def _load_password_creds(session: AsyncSession, email: str) -> _PasswordCreds | None:
-    """Resolve an active user's password credentials within the tenant session.
-    Returns plain values (no lazy ORM attributes) so they survive the session."""
+async def _load_password_creds(
+    session: AsyncSession, email: str, *, account_type: str | None = None
+) -> _PasswordCreds | None:
+    """Resolve an active user's password credentials within the current session.
+    Returns plain values (no lazy ORM attributes) so they survive the session.
+    `account_type` pins the plane (e.g. 'platform') so a stray row from the other
+    plane can never authenticate here; left unset for tenant login (RLS already
+    confines the session to one tenant)."""
     row = (
         await session.execute(
             select(
@@ -213,6 +218,7 @@ async def _load_password_creds(session: AsyncSession, email: str) -> _PasswordCr
                 UserIdentity.provider_type == ProviderKind.PASSWORD.value,
                 UserIdentity.email == email,
                 AppUser.status == "active",
+                *([AppUser.account_type == account_type] if account_type is not None else []),
             )
         )
     ).first()
