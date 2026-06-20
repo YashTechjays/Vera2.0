@@ -1,0 +1,138 @@
+import { useState, type FormEvent } from "react"
+import { useNavigate, useParams, useSearchParams } from "react-router-dom"
+import { QRCodeSVG } from "qrcode.react"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { PasswordInput } from "@/components/ui/password-input"
+import { Label } from "@/components/ui/label"
+import { ApiError } from "@/lib/api/client"
+import { RecoveryCodes } from "@/components/auth/RecoveryCodes"
+import { acceptInvite, activateInviteMfa } from "@/lib/auth/api"
+
+type Phase =
+  | { kind: "password" }
+  | { kind: "mfa"; mfaToken: string; provisioningUri: string | null }
+  | { kind: "recovery"; codes: string[] }
+  | { kind: "done" }
+
+export function AcceptInvite() {
+  const { tenantSlug = "" } = useParams()
+  const [params] = useSearchParams()
+  const token = params.get("token") ?? ""
+  const navigate = useNavigate()
+
+  const [phase, setPhase] = useState<Phase>({ kind: "password" })
+  const [password, setPassword] = useState("")
+  const [code, setCode] = useState("")
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const loginHref = `/tenants/${tenantSlug}/login`
+
+  async function onSetPassword(e: FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      const res = await acceptInvite(tenantSlug, token, password)
+      if (res.mfa_required) {
+        setPhase({ kind: "mfa", mfaToken: res.mfa_token ?? "", provisioningUri: res.provisioning_uri })
+      } else {
+        setPhase({ kind: "done" })
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "This invitation is invalid or has expired.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onActivateMfa(e: FormEvent) {
+    e.preventDefault()
+    if (phase.kind !== "mfa") return
+    setError(null)
+    setBusy(true)
+    try {
+      const res = await activateInviteMfa(tenantSlug, phase.mfaToken, code)
+      setPhase({ kind: "recovery", codes: res.recovery_codes })
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Activation failed.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!token) {
+    return (
+      <CenteredCard title="Invalid invitation" desc="This invite link is missing its token.">
+        <Button className="w-full" onClick={() => navigate(loginHref)}>Go to sign in</Button>
+      </CenteredCard>
+    )
+  }
+
+  if (phase.kind === "recovery") {
+    return (
+      <CenteredCard title="Account ready" desc="Save your recovery codes, then sign in.">
+        <RecoveryCodes codes={phase.codes} onContinue={() => navigate(loginHref)} />
+      </CenteredCard>
+    )
+  }
+  if (phase.kind === "done") {
+    return (
+      <CenteredCard title="Account active" desc="Your account is ready.">
+        <Button className="w-full" onClick={() => navigate(loginHref)}>Sign in</Button>
+      </CenteredCard>
+    )
+  }
+  if (phase.kind === "mfa") {
+    return (
+      <CenteredCard title="Set up two-factor" desc="Scan the QR code, then enter a code to finish.">
+        <div className="space-y-4">
+          {phase.provisioningUri && (
+            <div className="flex justify-center rounded-md bg-white p-4">
+              <QRCodeSVG value={phase.provisioningUri} size={180} />
+            </div>
+          )}
+          <form onSubmit={onActivateMfa} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="code">Authentication code</Label>
+              <Input id="code" inputMode="numeric" autoComplete="one-time-code" required
+                value={code} onChange={(e) => setCode(e.target.value)} />
+            </div>
+            {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+            <Button type="submit" className="w-full" disabled={busy}>{busy ? "Activating…" : "Activate"}</Button>
+          </form>
+        </div>
+      </CenteredCard>
+    )
+  }
+
+  return (
+    <CenteredCard title="Accept your invitation" desc="Choose a password to activate your account.">
+      <form onSubmit={onSetPassword} className="space-y-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="password">Password</Label>
+          <PasswordInput id="password" autoComplete="new-password" required minLength={8}
+            value={password} onChange={(e) => setPassword(e.target.value)} />
+        </div>
+        {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+        <Button type="submit" className="w-full" disabled={busy}>{busy ? "Saving…" : "Set password"}</Button>
+      </form>
+    </CenteredCard>
+  )
+}
+
+function CenteredCard({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle className="text-lg">{title}</CardTitle>
+          <CardDescription>{desc}</CardDescription>
+        </CardHeader>
+        <CardContent>{children}</CardContent>
+      </Card>
+    </div>
+  )
+}
