@@ -53,12 +53,20 @@ seed:
 seed-user email password:
     SEED_ADMIN_EMAIL="{{email}}" SEED_ADMIN_PASSWORD="{{password}}" uv run python scripts/seed.py
 
+# Seed ONLY the baseline form schemas (IBV Form Standard DSL)
+seed-schemas:
+    uv run python scripts/seed.py --schemas
+
 # Run apps
 api:
     uv run uvicorn control_plane.main:app --reload --port 8000
 
 worker:
     uv run python -m agent_worker.main dev
+
+# Drive the cascade from your terminal mic/speaker (no server/control-plane/DB; needs vendor keys + Vertex ADC + VERA_ENV=local)
+worker-console:
+    uv run python -m agent_worker.main console
 
 # Print a QR code from an otpauth:// URI for local MFA testing (no network, secret stays local)
 mfa-qr uri:

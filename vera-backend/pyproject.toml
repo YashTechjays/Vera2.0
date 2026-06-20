@@ -55,6 +55,7 @@ known-first-party = ["vera_core", "control_plane", "agent_worker", "phi_codec"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["SIM117"]  # nested `with` reads better in test arrange blocks
+"apps/agent_worker/src/agent_worker/prompt.py" = ["E501"]  # verbatim prompt strings exceed line limit by design
 
 # ---------------------------------------------------------------------------
 # Types
@@ -83,7 +84,7 @@ ignore_missing_imports = true
 # Tests
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["tests", "packages/phi_codec/tests"]
+testpaths = ["tests", "packages/phi_codec/tests", "apps/agent_worker/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"

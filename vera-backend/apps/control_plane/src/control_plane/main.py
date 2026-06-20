@@ -15,6 +15,7 @@ from control_plane.auth.session import RedisSessionStore, SessionStore, SessionV
 from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
+from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
 from control_plane.request_context import RequestIdMiddleware
 from vera_core.audit import (
     AuditSink,
@@ -22,9 +23,10 @@ from vera_core.audit import (
     DatabaseAuditWriter,
     DatabaseAuthAuditWriter,
 )
-from vera_core.config import Settings, get_settings
+from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_settings
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
+from vera_core.observability.otel import configure_observability
 from vera_core.redis import create_redis
 
 
@@ -40,6 +42,8 @@ def create_app(
     idempotency: IdempotencyStore | None = None,
     email_sender: EmailSender | None = None,
     invitation_store: InvitationStore | None = None,
+    livekit: LiveKitGateway | None = None,
+    secrets: SecretProvider | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -74,6 +78,12 @@ def create_app(
         app.state.idempotency = idempotency or RedisIdempotencyStore(_redis())
         app.state.token_verifier = token_verifier or SessionVerifier(store)
         app.state.kms = kms or build_kms(settings)
+        app.state.secrets = secrets or EnvSecretProvider()
+        app.state.livekit = livekit or (
+            build_livekit_gateway(settings, app.state.secrets)
+            if settings.livekit_url is not None
+            else None
+        )
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)
@@ -81,7 +91,7 @@ def create_app(
             host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from
         )
         app.state.invitation_store = invitation_store or RedisInvitationStore(_redis())
-        # TODO(vera-2.x): observability — OTel/Langfuse init hooks in here.
+        configure_observability(settings)
         yield
         if redis is not None:
             await redis.aclose()

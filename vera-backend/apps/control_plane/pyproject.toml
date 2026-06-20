@@ -14,6 +14,7 @@ dependencies = [
     "google-cloud-kms>=2.21",
     "pyotp>=2.9",
     "aiosmtplib>=3.0",
+    "livekit-api>=1.0",
     "vera-core",
 ]
 

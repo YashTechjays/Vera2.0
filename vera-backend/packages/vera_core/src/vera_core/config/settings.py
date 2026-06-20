@@ -77,7 +77,14 @@ class Settings(BaseSettings):
     # unset, tracing is a no-op. Langfuse is observability ONLY — the
     # compliance audit trail is the audit_log table, never this.
     langfuse_host: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
     otel_service_name: str = "vera"
+
+    # --- livekit ------------------------------------------------------------
+    # LiveKit server URL (ws:// for local dev, wss:// in prod).
+    # Unset → `build_livekit_gateway` raises ValueError.
+    livekit_url: str | None = None
 
     @property
     def is_local(self) -> bool:

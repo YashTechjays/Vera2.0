@@ -6,8 +6,10 @@ construction keeps the routers thin and gives the auth-audit shape a single home
 so adding a field or changing the metadata contract is one edit, not many.
 """
 
+from __future__ import annotations
+
 from collections.abc import Iterable
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 from fastapi import Depends
@@ -21,6 +23,7 @@ from control_plane.deps import (
     get_auth_audit,
     get_email_sender,
     get_invitation_store,
+    get_livekit,
     get_settings_state,
     self_scoped_session,
     tenant_scoped_session,
@@ -30,6 +33,9 @@ from vera_core.audit import AuthAuditRecord, AuthAuditSink
 from vera_core.config import Settings
 from vera_core.models import Permission, RolePermission
 from vera_core.models.enums import AuthEvent
+
+if TYPE_CHECKING:
+    from control_plane.livekit_gateway import LiveKitGateway
 
 # Platform-tier permissions are namespaced `platform:*` (rbac_defaults). They must
 # never reach the tenant tier — not in a tenant-owned custom role, not in any grant
@@ -51,6 +57,7 @@ AppSettings = Annotated[Settings, Depends(get_settings_state)]
 Invites = Annotated[InvitationStore, Depends(get_invitation_store)]
 Email = Annotated[EmailSender, Depends(get_email_sender)]
 Resolver = Annotated[PermissionResolver, Depends(get_resolver)]
+LiveKit = Annotated["LiveKitGateway", Depends(get_livekit)]
 
 
 async def emit_auth_event(

@@ -7,13 +7,22 @@ from pydantic import BaseModel
 
 
 class CallSummary(BaseModel):
-    """Placeholder shape for the verification-call list.
-
-    TODO(vera-2.x): grows alongside the real calls table (status, payer,
-    outbound SIP dispatch state, recording pointer, extraction results).
-    """
+    """Verification-call list/summary row for Live Monitoring."""
 
     id: UUID
     tenant_id: UUID
     status: str
+    room_name: str
+    patient_name: str | None = None
+    started_at: datetime | None = None
     created_at: datetime
+
+
+class StartCallRequest(BaseModel):
+    form_id: UUID
+
+
+class JoinTokenResponse(BaseModel):
+    token: str
+    url: str
+    room_name: str

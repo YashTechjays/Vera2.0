@@ -17,14 +17,40 @@ from control_plane.auth.invitations import InMemoryInvitationStore
 from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import SESSION_NS, InMemorySessionStore, SessionData
 from control_plane.email import InMemoryEmailSender
+from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
-from vera_core.config import Settings
+from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.models import AppUser, Tenant, UserRole
 
 _LONG_TTL = 3600
+
+
+class FakeLiveKit(LiveKitGateway):
+    """Minimal LiveKitGateway stand-in for integration tests.
+
+    Records every room that was created so tests can assert on it without
+    a real LiveKit server.  `mint_join_token` returns a deterministic string
+    so tests can assert its structure without verifying a real JWT.
+    """
+
+    def __init__(self) -> None:
+        # Skip the parent __init__ — we don't need real LiveKit credentials.
+        self.created: list[str] = []
+        self._url = "ws://fake:7880"
+
+    async def create_call_room(self, room_name: str) -> None:
+        self.created.append(room_name)
+
+    def mint_join_token(self, room_name: str, identity: str) -> str:
+        return f"faketoken:{room_name}:{identity}"
+
+
+@pytest.fixture(scope="session")
+def fake_livekit() -> FakeLiveKit:
+    return FakeLiveKit()
 
 
 class RBACWorld:
@@ -173,11 +199,13 @@ async def authz_app(
     session_store: InMemorySessionStore,
     email_sender: InMemoryEmailSender,
     invitation_store: InMemoryInvitationStore,
+    fake_livekit: FakeLiveKit,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
     the whole request path, including the audit writer. The session store is the
     same instance rbac_world minted tokens into; email + invites are in-memory so
-    the invite flow runs without Redis/SMTP."""
+    the invite flow runs without Redis/SMTP.  FakeLiveKit is injected so call
+    endpoints exercise the LiveKit seam without a real server."""
     settings = Settings(_env_file=None, database_url=rls_database_url)
     app = create_app(
         settings,
@@ -186,6 +214,8 @@ async def authz_app(
         permission_cache=InMemoryPermissionCache(),
         email_sender=email_sender,
         invitation_store=invitation_store,
+        livekit=fake_livekit,
+        secrets=EnvSecretProvider(),
     )
     async with app.router.lifespan_context(app):
         yield app

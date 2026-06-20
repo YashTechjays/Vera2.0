@@ -11,10 +11,16 @@ through tenant_session().
 """
 
 import asyncio
+import json
 import os
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.auth.password import hash_password
@@ -22,16 +28,23 @@ from vera_core.config import get_settings
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.models import (
     AppUser,
+    FormSchema,
     Permission,
     Role,
     RolePermission,
+    SchemaVersion,
     SsoProvider,
     Tenant,
     UserIdentity,
     UserRole,
 )
-from vera_core.models.enums import ProviderKind
+from vera_core.models.enums import ProviderKind, VersionStatus
 from vera_core.models.rbac_defaults import ALL_PERMISSIONS, SYSTEM_ROLES
+
+# Baseline form schemas live as JSON under data/form_schemas/, mapped to their
+# insurance type by manifest.json. form_schema.name comes from each file's
+# top-level "name"; the document itself is stored opaquely in schema_version.schema_json.
+FORM_SCHEMA_DIR = Path(__file__).parent.parent / "data" / "form_schemas"
 
 SAMPLE_TENANT_NAME = "Vera Health (Example)"
 # The URL-facing tenant handle (`/tenants/{slug}/auth/login`). Override with
@@ -199,30 +212,108 @@ async def _seed_admin_user(session: AsyncSession, tenant_id: UUID) -> None:
     await session.flush()
 
 
-async def seed() -> None:
+async def _seed_form_schemas(session: AsyncSession) -> list[str]:
+    """Seed the baseline form schemas from data/form_schemas/. Idempotent and keyed
+    on the unique insurance_type. Re-running with unchanged JSON is a no-op; changed
+    JSON demotes the current published version to DRAFT and publishes a new version
+    (the partial unique index allows only one published row per schema)."""
+    manifest: list[dict[str, str]] = json.loads((FORM_SCHEMA_DIR / "manifest.json").read_text())
+    summary: list[str] = []
+    for entry in manifest:
+        doc: dict[str, Any] = json.loads((FORM_SCHEMA_DIR / entry["file"]).read_text())
+        insurance_type = entry["insurance_type"]
+        name = doc["name"]
+
+        schema = (
+            await session.execute(
+                select(FormSchema).where(FormSchema.insurance_type == insurance_type)
+            )
+        ).scalar_one_or_none()
+        if schema is None:
+            schema = FormSchema(insurance_type=insurance_type, name=name)
+            session.add(schema)
+        else:
+            schema.name = name
+        await session.flush()
+
+        published = (
+            await session.execute(
+                select(SchemaVersion).where(
+                    SchemaVersion.schema_id == schema.id,
+                    SchemaVersion.status == VersionStatus.PUBLISHED,
+                )
+            )
+        ).scalar_one_or_none()
+        if published is not None and published.schema_json == doc:
+            summary.append(f"{insurance_type} '{name}' v{published.version} (unchanged)")
+            continue
+
+        max_version = (
+            await session.execute(
+                select(func.max(SchemaVersion.version)).where(SchemaVersion.schema_id == schema.id)
+            )
+        ).scalar()
+        next_version = (max_version or 0) + 1
+        if published is not None:
+            published.status = VersionStatus.DRAFT
+            await session.flush()  # free the partial unique index before publishing anew
+        session.add(
+            SchemaVersion(
+                schema_id=schema.id,
+                version=next_version,
+                schema_json=doc,
+                status=VersionStatus.PUBLISHED,
+                published_at=func.now(),
+            )
+        )
+        await session.flush()
+        summary.append(f"{insurance_type} '{name}' v{next_version} (published)")
+    return summary
+
+
+@asynccontextmanager
+async def _seeding_session() -> AsyncIterator[AsyncSession]:
+    """A transactional session for a seed run, with the engine disposed on exit.
+    Seeds run as the privileged DB user (bypasses RLS); see module docstring."""
     engine = create_engine(get_settings())
-    sessionmaker = create_sessionmaker(engine)
     try:
-        async with sessionmaker() as session, session.begin():
-            permission_ids = await _seed_permissions(session)
-            await _seed_system_roles(session, permission_ids)
-            tenant_id = await _seed_tenant(session)
-            await _seed_password_provider(session, tenant_id)
-            await _seed_admin_user(session, tenant_id)
-        print(
-            f"seeded: {len(permission_ids)} permissions,"
-            f" global system roles {sorted(SYSTEM_ROLES)},"
-            f" tenant '{SAMPLE_TENANT_NAME}' (slug '{SAMPLE_TENANT_SLUG}', {tenant_id}),"
-            f" password provider enabled, admin user '{SAMPLE_ADMIN_EMAIL}' (TENANT_ADMIN)"
-        )
-        print(
-            "local dev login: "
-            f"POST /api/v1/tenants/{SAMPLE_TENANT_SLUG}/auth/login "
-            f'{{"email": "{SAMPLE_ADMIN_EMAIL}", "password": "{SAMPLE_ADMIN_PASSWORD}"}}'
-        )
+        async with create_sessionmaker(engine)() as session, session.begin():
+            yield session
     finally:
         await engine.dispose()
 
 
+async def seed() -> None:
+    async with _seeding_session() as session:
+        permission_ids = await _seed_permissions(session)
+        await _seed_system_roles(session, permission_ids)
+        tenant_id = await _seed_tenant(session)
+        await _seed_password_provider(session, tenant_id)
+        await _seed_admin_user(session, tenant_id)
+        schema_summary = await _seed_form_schemas(session)
+    print(
+        f"seeded: {len(permission_ids)} permissions,"
+        f" global system roles {sorted(SYSTEM_ROLES)},"
+        f" tenant '{SAMPLE_TENANT_NAME}' (slug '{SAMPLE_TENANT_SLUG}', {tenant_id}),"
+        f" password provider enabled, admin user '{SAMPLE_ADMIN_EMAIL}' (TENANT_ADMIN),"
+        f" form schemas {schema_summary}"
+    )
+    print(
+        "local dev login: "
+        f"POST /api/v1/tenants/{SAMPLE_TENANT_SLUG}/auth/login "
+        f'{{"email": "{SAMPLE_ADMIN_EMAIL}", "password": "{SAMPLE_ADMIN_PASSWORD}"}}'
+    )
+
+
+async def seed_schemas() -> None:
+    """Seed ONLY the baseline form schemas (`just seed-schemas`)."""
+    async with _seeding_session() as session:
+        summary = await _seed_form_schemas(session)
+    print(f"seeded form schemas: {summary}")
+
+
 if __name__ == "__main__":
-    asyncio.run(seed())
+    if "--schemas" in sys.argv:
+        asyncio.run(seed_schemas())
+    else:
+        asyncio.run(seed())

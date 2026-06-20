@@ -4,12 +4,14 @@ import { Sidebar } from "./Sidebar"
 import { Topbar } from "./Topbar"
 import { IbvProvider } from "@/components/ibv/IbvProvider"
 import { IbvFormModal } from "@/components/ibv/IbvFormModal"
+import { IdleManager } from "@/components/auth/IdleManager"
 
 export function AppShell() {
   const [collapsed, setCollapsed] = useState(false)
 
   return (
     <IbvProvider>
+      <IdleManager />
       <div className="flex h-screen w-full overflow-hidden bg-background text-foreground">
         <Sidebar collapsed={collapsed} />
         <div className="flex min-w-0 flex-1 flex-col">

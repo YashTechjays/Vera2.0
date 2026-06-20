@@ -26,3 +26,6 @@ htmlcov/
 # Terraform
 infra/**/.terraform/
 infra/**/*.tfstate*
+
+# SDD controller scratch (briefs/reports/diffs/ledger)
+.superpowers/

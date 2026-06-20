@@ -10,9 +10,11 @@ transaction and applies SET LOCAL app.tenant_id from the VERIFIED identity
 (never from client input) — that's the RLS backstop underneath the chain.
 """
 
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -30,6 +32,9 @@ from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
 from vera_core.models.enums import AccountType
+
+if TYPE_CHECKING:
+    from control_plane.livekit_gateway import LiveKitGateway
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -73,6 +78,13 @@ def get_session_store(request: Request) -> SessionStore:
 def get_kms(request: Request) -> KeyManagementService:
     kms: KeyManagementService = request.app.state.kms
     return kms
+
+
+def get_livekit(request: Request) -> LiveKitGateway:
+    gw: LiveKitGateway | None = request.app.state.livekit
+    if gw is None:
+        raise RuntimeError("LiveKit gateway not configured (set VERA_LIVEKIT_URL)")
+    return gw
 
 
 def get_auth_audit(request: Request) -> AuthAuditSink:

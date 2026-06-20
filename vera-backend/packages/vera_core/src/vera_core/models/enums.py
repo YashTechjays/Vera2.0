@@ -106,6 +106,14 @@ class VersionStatus(enum.StrEnum):
     PUBLISHED = "published"
 
 
+class InsuranceType(enum.StrEnum):
+    """The insurance/form family a `form_schema` belongs to. One value for now;
+    grows to carrier-level types (aetna/cigna/uhc) with a one-line addition plus a
+    CHECK-update migration."""
+
+    INFERTILITY_TREATMENT = "infertility_treatment"
+
+
 class EvalScope(enum.StrEnum):
     COMPONENT = "component"
     E2E = "e2e"
