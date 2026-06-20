@@ -1,64 +1,83 @@
-"""Vera agent worker — LiveKit Agents skeleton.
+"""Vera agent worker — Deepgram->Gemini->Cartesia cascade over LiveKit.
 
-The worker REGISTERS itself with LiveKit under AGENT_NAME and waits. Setting
-agent_name in WorkerOptions disables automatic dispatch: the worker joins a
-room only when something (later: the control plane creating an outbound call)
-requests this agent explicitly via RoomAgentDispatch. The control plane never
-"starts" the worker process.
-
-Identity: LiveKit credentials come from LIVEKIT_URL / LIVEKIT_API_KEY /
-LIVEKIT_API_SECRET. On GKE the worker runs as a GCP service principal
-(workload identity) and pulls these from Secret Manager — it has no GCIP user
-and never passes through the human RBAC chain.
-
-This session's scope is register + join + echo. The voice pipeline attaches
-later:
-  TODO(vera-2.x): Deepgram/Gemini/Cartesia cascade (STT -> LLM -> TTS) wrapped
-      in vera_core.phi.PHIBoundary — redact() before the LLM,
-      SpeechStreamHydrator before TTS, hydrate_raw() before payer connectors.
-  TODO(vera-2.x): Twilio SIP outbound dispatch (control plane creates the SIP
-      participant; this worker is dispatched into the same room).
-  TODO(vera-2.x): STT Registry + Context Bridge.
-  TODO(vera-2.x): supervisor oversight (coaching / whisper / takeover).
-  TODO(vera-2.x): recording-to-GCS, data extraction into form templates.
+Explicit dispatch only (agent_name set): the control plane dispatches this worker
+into a room named by vera_core.observability.correlation.room_name_for_call. The
+room name IS the session id and the Langfuse correlation key.
 """
 
-import asyncio
 import logging
 
-from livekit import rtc
-from livekit.agents import JobContext, WorkerOptions, cli
+from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
+from opentelemetry import trace
 
-logger = logging.getLogger("vera.agent_worker")
+from agent_worker.agent import VeraAgent
+from agent_worker.cascade import _build_vad, build_session
+from vera_core.config.settings import get_settings
+from vera_core.observability.correlation import call_trace_attributes, parse_room_name
+from vera_core.observability.otel import configure_observability
+from vera_core.phi import build_phi_boundary
+
+logger = logging.getLogger("agent_worker")
 
 AGENT_NAME = "vera-agent"
-ECHO_TOPIC = "vera.echo"
+
+
+def session_id_for(room_name: str) -> str:
+    """The room name is the session id (correlation key shared with the control plane)."""
+    return room_name
+
+
+def resolve_session(room_name: str, *, is_local: bool) -> str | None:
+    """Decide the correlation session id for a connected room, or None to reject it.
+
+    A canonical vera call room (`call--<tenant>--<call>`) always runs. A foreign room
+    name only runs in local dev — that's the livekit `console`/`connect` mic test, which
+    gets a synthetic session id so the cascade can be exercised without a real call. In
+    any non-local environment a foreign room is rejected: the agent never attaches to a
+    room it wasn't dispatched to.
+    """
+    if parse_room_name(room_name) is not None:
+        return session_id_for(room_name)
+    if is_local:
+        return room_name or "console"
+    return None
+
+
+def prewarm(proc: JobProcess) -> None:
+    # Initialize OTel once per worker process so span attributes set in entrypoint
+    # are exported to Langfuse.  No-op when settings.langfuse_host is None (local/CI).
+    configure_observability(get_settings())
+    proc.userdata["vad"] = _build_vad()
 
 
 async def entrypoint(ctx: JobContext) -> None:
-    """Dispatched to a room: connect and echo any data packet back."""
     await ctx.connect()
-    logger.info("joined room %s as %s", ctx.room.name, AGENT_NAME)
+    room_name = ctx.room.name
+    settings = get_settings()
+    session_id = resolve_session(room_name, is_local=settings.is_local)
+    if session_id is None:
+        logger.warning("foreign room name %s — not a vera call room", room_name)
+        return
 
-    echo_tasks: set[asyncio.Task[None]] = set()
+    # Attach correlation attributes to the active OTel span so every pipeline
+    # span is grouped under langfuse.session.id = room_name in Langfuse. For a
+    # console/connect mic test (foreign room) this sets only `vera.room`.
+    trace.get_current_span().set_attributes(call_trace_attributes(room_name))
 
-    @ctx.room.on("data_received")
-    def on_data(packet: rtc.DataPacket) -> None:
-        async def echo() -> None:
-            await ctx.room.local_participant.publish_data(packet.data, topic=ECHO_TOPIC)
+    boundary = build_phi_boundary(settings)
+    await boundary.open_session(session_id)
 
-        task = asyncio.create_task(echo())
-        echo_tasks.add(task)
-        task.add_done_callback(echo_tasks.discard)
+    session = build_session(vad=ctx.proc.userdata.get("vad"))
+
+    async def _on_shutdown() -> None:
+        await boundary.close_session(session_id)
+
+    ctx.add_shutdown_callback(_on_shutdown)
+    await session.start(agent=VeraAgent(boundary=boundary, session_id=session_id), room=ctx.room)
 
 
 def build_worker_options() -> WorkerOptions:
-    return WorkerOptions(
-        entrypoint_fnc=entrypoint,
-        # Explicit dispatch: with agent_name set, LiveKit only sends this
-        # worker jobs that name it in a RoomAgentDispatch request.
-        agent_name=AGENT_NAME,
-    )
+    return WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, agent_name=AGENT_NAME)
 
 
 if __name__ == "__main__":

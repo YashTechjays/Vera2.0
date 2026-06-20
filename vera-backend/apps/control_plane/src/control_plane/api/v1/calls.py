@@ -1,18 +1,115 @@
-"""Example protected endpoint proving the full chain:
-bearer token -> verified identity -> tenant context -> require("calls:read")
--> tenant-scoped (RLS) session -> audited allow/deny.
+"""Verification-call endpoints: create, join-token, active-list.
+
+Auth note (acknowledged stopgap): all three endpoints guard with
+`require("calls:read")` for now — the SPA has no real auth yet, and the
+spec flags this.  A later task tightens POST / join-token to a write /
+manage permission once the RBAC catalog is extended.
 """
 
-from fastapi import APIRouter
+from uuid import UUID
 
-from control_plane.api.v1.common import TenantId
+from fastapi import APIRouter
+from sqlalchemy import select
+
+from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
-from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode
+from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode, NotFoundError
 from control_plane.responses import ResponseModel, ok
-from vera_core.schemas import CallSummary
+from vera_core.models import Call, CallEvent, PatientForm
+from vera_core.models.enums import CallEventType, CallStatus, FormStatus
+from vera_core.observability.correlation import room_name_for_call
+from vera_core.schemas import CallSummary, JoinTokenResponse, StartCallRequest
 
 router = APIRouter(tags=["calls"])
+
+_ACTIVE_STATUSES = (
+    CallStatus.INITIATED,
+    CallStatus.RINGING,
+    CallStatus.IVR,
+    CallStatus.ACTIVE,
+    CallStatus.WAITING,
+    CallStatus.CRITICAL,
+)
+
+
+def _summary(call: Call, patient_name: str | None) -> CallSummary:
+    return CallSummary(
+        id=call.id,
+        tenant_id=call.tenant_id,
+        status=call.current_status,
+        room_name=room_name_for_call(call.tenant_id, call.id),
+        patient_name=patient_name,
+        started_at=call.started_at,
+        created_at=call.created_at,
+    )
+
+
+@router.post(
+    "/calls",
+    response_model=ResponseModel[CallSummary],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def start_call(
+    body: StartCallRequest,
+    tenant_id: TenantId,
+    session: TenantSession,
+    livekit: LiveKit,
+    _caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
+) -> ResponseModel[CallSummary]:
+    form = (
+        await session.execute(select(PatientForm).where(PatientForm.id == body.form_id))
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+
+    call = Call(tenant_id=tenant_id, form_id=form.id, current_status=CallStatus.INITIATED)
+    session.add(call)
+    await session.flush()  # populates call.id (UUIDv7)
+
+    room_name = room_name_for_call(tenant_id, call.id)
+    await livekit.create_call_room(room_name)
+    form.status = FormStatus.IN_QUEUE
+    session.add(
+        CallEvent(
+            tenant_id=tenant_id,
+            call_id=call.id,
+            event_type=CallEventType.STATUS,
+            event_value=CallStatus.INITIATED,
+        )
+    )
+    return ok(_summary(call, form.patient_name))
+
+
+@router.get(
+    "/calls/{call_id}/join-token",
+    response_model=ResponseModel[JoinTokenResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def join_token(
+    call_id: UUID,
+    tenant_id: TenantId,
+    session: TenantSession,
+    livekit: LiveKit,
+    caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[JoinTokenResponse]:
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id))
+    ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
+    if call is None:
+        raise NotFoundError(message="call not found")
+    room_name = room_name_for_call(tenant_id, call.id)
+    identity = f"supervisor-{caller.user_id}"
+    token = livekit.mint_join_token(room_name=room_name, identity=identity)
+    return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 
 
 @router.get(
@@ -25,8 +122,15 @@ router = APIRouter(tags=["calls"])
 )
 async def list_calls(
     _tenant_id: TenantId,
+    session: TenantSession,
     _caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[list[CallSummary]]:
-    # TODO(vera-2.x): real calls table + outbound Twilio SIP dispatch state.
-    # Empty list proves the authz chain end-to-end without inventing schema.
-    return ok([])
+    rows = (
+        await session.execute(
+            select(Call, PatientForm.patient_name)
+            .join(PatientForm, PatientForm.id == Call.form_id)
+            .where(Call.current_status.in_(list(_ACTIVE_STATUSES)))
+            .order_by(Call.created_at.desc())
+        )
+    ).all()
+    return ok([_summary(c, name) for c, name in rows])

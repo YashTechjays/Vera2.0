@@ -16,13 +16,13 @@ name = "agent-worker"
 version = "0.1.0"
 source = { editable = "apps/agent_worker" }
 dependencies = [
-    { name = "livekit-agents" },
+    { name = "livekit-agents", extra = ["cartesia", "deepgram", "google", "silero", "turn-detector"] },
     { name = "vera-core" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "livekit-agents", specifier = ">=1.5.17" },
+    { name = "livekit-agents", extras = ["deepgram", "google", "cartesia", "silero", "turn-detector"], specifier = ">=1.5.17" },
     { name = "vera-core", editable = "packages/vera_core" },
 ]
 
@@ -395,6 +395,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "google-auth" },
     { name = "google-cloud-kms" },
+    { name = "livekit-api" },
     { name = "pyotp" },
     { name = "redis" },
     { name = "requests" },
@@ -410,6 +411,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.136" },
     { name = "google-auth", specifier = ">=2.35" },
     { name = "google-cloud-kms", specifier = ">=2.21" },
+    { name = "livekit-api", specifier = ">=1.0" },
     { name = "pyotp", specifier = ">=2.9" },
     { name = "redis", specifier = ">=5.2" },
     { name = "requests", specifier = ">=2.32" },
@@ -711,6 +713,38 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/25/a4/9125701c7120469a4381c3a576cebad191abbfa5bd3a0e1effd5c1ef0f52/google_cloud_kms-3.13.0.tar.gz", hash = "sha256:672fdc594b928b0415c22e41f3d67c854e940a8a5917e8ff16a6566096b12407", size = 440145, upload-time = "2026-05-07T08:04:18.18Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9a/ff/ba421b035eba2d139a58aa5913e6daae4a969a96c555eff6bf02242cd8a5/google_cloud_kms-3.13.0-py3-none-any.whl", hash = "sha256:a58a40d8d37129805db5be1353a397be09614d691433ea246b9eed63efdc5df3", size = 353997, upload-time = "2026-05-07T08:02:49.849Z" },
+]
+
+[[package]]
+name = "google-cloud-speech"
+version = "2.40.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/c1/5dc9795314f4aefea0b01b02e9f5486a198341ecc15fe47f89a61c68df63/google_cloud_speech-2.40.0.tar.gz", hash = "sha256:e89e688e4ce0b926754038bf992d0d0f065c5f1c3503bb20e6c46d08b63658fc", size = 404366, upload-time = "2026-06-03T16:13:59.506Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/78/afeca8d597fab54bdd823f857aad15d6f9c4628ff3cb72aa237d01700721/google_cloud_speech-2.40.0-py3-none-any.whl", hash = "sha256:7cc0302b3b9ca33d2eae9669da94a44316601a240942895362ac70e765b9f39c", size = 345427, upload-time = "2026-06-03T16:12:40.909Z" },
+]
+
+[[package]]
+name = "google-cloud-texttospeech"
+version = "2.36.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/fe/670610dce6852c8fbdd723101a2ffb497d196bc242cb04a1312339f49d67/google_cloud_texttospeech-2.36.0.tar.gz", hash = "sha256:6c605af7e4774c1bac99fcaaf4538f152b10bba7738a23f42184557f444dc6b7", size = 196558, upload-time = "2026-04-02T21:23:42.236Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/76/1a/0317eaa1ccd6e3645d570851574bb7c1a1cfa3504bb114b7211db59b154d/google_cloud_texttospeech-2.36.0-py3-none-any.whl", hash = "sha256:03f76162543e9d77ecbab823c1cc3728c42ef40547353bcfdbd9ac0e71cb8121", size = 200086, upload-time = "2026-04-02T21:23:13.444Z" },
 ]
 
 [[package]]
@@ -1090,6 +1124,26 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/66/39/7d3ece9447cd69c949166ea39ca4636348125a7a29749dc996fac4c20129/livekit_agents-1.5.17-py3-none-any.whl", hash = "sha256:9feaad7a1116431b764135cb0a73b69e444a0a2e5f4b7d164c213af396b716d0", size = 2614817, upload-time = "2026-06-03T01:36:40.453Z" },
 ]
 
+[package.optional-dependencies]
+cartesia = [
+    { name = "livekit-plugins-cartesia" },
+]
+codecs = [
+    { name = "numpy" },
+]
+deepgram = [
+    { name = "livekit-plugins-deepgram" },
+]
+google = [
+    { name = "livekit-plugins-google" },
+]
+silero = [
+    { name = "livekit-plugins-silero" },
+]
+turn-detector = [
+    { name = "livekit-plugins-turn-detector" },
+]
+
 [[package]]
 name = "livekit-api"
 version = "1.1.0"
@@ -1116,6 +1170,77 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/6b/9f/ec51ebce455e17b6f304044e2bda57b15b1b45fd20b2feefa6e242fa33c6/livekit_blingfire-1.1.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:502d7a41fed246ec9cc432646d523c488a05fb2e572187a754735532ba5d69b7", size = 167606, upload-time = "2025-12-16T00:48:13.611Z" },
     { url = "https://files.pythonhosted.org/packages/d1/19/a4b56e54af456f2667287497f7678ff69a82ad21a687fc540213b4f25982/livekit_blingfire-1.1.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:cdec36ea4d8b0dcda2791358ac9965e832539ecf13e651011197bab9960ea156", size = 174972, upload-time = "2025-12-16T00:48:14.811Z" },
     { url = "https://files.pythonhosted.org/packages/32/29/032cbf2c88ca40bee25b8a1b5346b5cb66487e689c4f42dd19f7e745090d/livekit_blingfire-1.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:28d8c822616ca2ce53125040dfe09d06a6cc3e63c9055d39ca767a5c8f67ef84", size = 131026, upload-time = "2025-12-16T00:48:16.047Z" },
+]
+
+[[package]]
+name = "livekit-plugins-cartesia"
+version = "1.5.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "livekit-agents" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/40/f7/e589cc763927d21f2e1b6781a544c91f95a9c5cfe5feb93161f893517a6a/livekit_plugins_cartesia-1.5.17.tar.gz", hash = "sha256:69273154f5bc43a51c207c583016667a633cb52800afdf50f789a3692ddb815d", size = 18195, upload-time = "2026-06-03T01:36:59.11Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/e1/0685ea40ddbc750cb61f5e842ef186db552d48b13663d8b12581f60867c0/livekit_plugins_cartesia-1.5.17-py3-none-any.whl", hash = "sha256:86a1c048a2d7964c4a3223d30a4abadb767370e371eb6a999266dd36405de9a0", size = 25540, upload-time = "2026-06-03T01:36:57.839Z" },
+]
+
+[[package]]
+name = "livekit-plugins-deepgram"
+version = "1.5.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "livekit-agents", extra = ["codecs"] },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d5/a3/de74a74a9befb92e940693712d2d23b26d10b222d090cff69d682ff501f8/livekit_plugins_deepgram-1.5.17.tar.gz", hash = "sha256:678f5efb05fe0f3047c5cda2ab0f30aa0ece50a963450b578566a96691b2989a", size = 18334, upload-time = "2026-06-03T01:37:02.517Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0b/ec/06c5af45c8fdc8fb60988d6946717b430c1460239c6083ca6fe9fbe6179e/livekit_plugins_deepgram-1.5.17-py3-none-any.whl", hash = "sha256:c0226d38a2f7e8adbb8165c4ef1fc737ed5fed7415470b43c8f561a9fc339c3d", size = 23061, upload-time = "2026-06-03T01:37:01.431Z" },
+]
+
+[[package]]
+name = "livekit-plugins-google"
+version = "1.5.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-auth" },
+    { name = "google-cloud-speech" },
+    { name = "google-cloud-texttospeech" },
+    { name = "google-genai" },
+    { name = "livekit-agents" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/59/9a9d1e72a5b82c2ae19d1fbbbd9924303e29af0b118e1644ef3c4a14a60c/livekit_plugins_google-1.5.17.tar.gz", hash = "sha256:b111148c9807b8d5ddc310f6079234cafa7e38e59e1ba6750a032b81b0c3d047", size = 45233, upload-time = "2026-06-03T01:37:19.454Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/82/0bb90df88bf8fe88a28180a83aeacc53bb163602f5a672168f7b782d8f3e/livekit_plugins_google-1.5.17-py3-none-any.whl", hash = "sha256:618dcf1a88b9a9dc545fecdc7a2dae923d11ef9c4655f8954f2d55187d82cab2", size = 52862, upload-time = "2026-06-03T01:37:18.201Z" },
+]
+
+[[package]]
+name = "livekit-plugins-silero"
+version = "1.5.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "livekit-agents" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/07/63/06483c5076b046d153379d6ffa4c68f24c6c751e8442ea90852f581abb3f/livekit_plugins_silero-1.5.17.tar.gz", hash = "sha256:adbb4fd6cdd54d6f01d37b9d006351d9583ba24c5532e327ef2652fd884c900e", size = 1955919, upload-time = "2026-06-03T01:38:20.641Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ac/34/6c0aacfd09994a34e9939cdb4cfd3d5be887b7abce9a9106871f99c5c4c7/livekit_plugins_silero-1.5.17-py3-none-any.whl", hash = "sha256:ed93840ec1e4ef4a2aae8de1388a3362c67eb8e93b37494b89f7961533cf8b04", size = 3903908, upload-time = "2026-06-03T01:38:18.811Z" },
+]
+
+[[package]]
+name = "livekit-plugins-turn-detector"
+version = "1.5.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "livekit-agents" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/af/4d/f176fdb20430e699f4de8f090586753db1b6399d26ba40d85a244cc0d754/livekit_plugins_turn_detector-1.5.17.tar.gz", hash = "sha256:d36cd804d4d7564bdb7f8c8fe1315cfe971fbe70889f139019ef1195a914f8e0", size = 8728, upload-time = "2026-06-03T01:38:50.377Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/e4/33f8d1f7b3893281e7b365e33a9bfa4a4a93087abbf743f8e13c1a3473ff/livekit_plugins_turn_detector-1.5.17-py3-none-any.whl", hash = "sha256:67682f874c8b5327445c1250c1fcff641dfe108d26e931379496c47db5400c00", size = 10361, upload-time = "2026-06-03T01:38:49.397Z" },
 ]
 
 [[package]]
