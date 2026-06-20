@@ -1,11 +1,23 @@
-import { PanelLeft, Search, Bell } from "lucide-react"
+import { PanelLeft, Search, Bell, LogOut } from "lucide-react"
+import { useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
+import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { logoutThunk, selectTenantSlug } from "@/store/authSlice"
 
 type TopbarProps = {
   onToggleSidebar: () => void
 }
 
 export function Topbar({ onToggleSidebar }: TopbarProps) {
+  const dispatch = useAppDispatch()
+  const navigate = useNavigate()
+  const slug = useAppSelector(selectTenantSlug) ?? (import.meta.env.VITE_DEFAULT_TENANT_SLUG ?? "")
+
+  async function onLogout() {
+    await dispatch(logoutThunk())
+    navigate(`/tenants/${slug}/login`, { replace: true })
+  }
+
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b bg-background px-4">
       <Button
@@ -29,6 +41,9 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
       <div className="ml-auto flex items-center gap-1">
         <Button variant="ghost" size="icon" aria-label="Notifications">
           <Bell className="size-5" />
+        </Button>
+        <Button variant="ghost" size="icon" aria-label="Sign out" onClick={onLogout}>
+          <LogOut className="size-5" />
         </Button>
       </div>
     </header>
