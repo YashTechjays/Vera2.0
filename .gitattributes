@@ -1,0 +1,16 @@
+# Normalize line endings: store everything as LF in the repo and
+# check out as LF on every platform. Prevents CRLF churn from
+# zip/unzip or Windows checkouts.
+* text=auto eol=lf
+
+# Explicitly mark common binary types so they are never touched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pdf binary

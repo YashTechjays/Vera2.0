@@ -40,10 +40,10 @@ down:
 
 # Database
 migrate:
-    uv run --package control_plane alembic upgrade head
+    uv run alembic upgrade head
 
 makemigration message:
-    uv run --package control_plane alembic revision --autogenerate -m "{{message}}"
+    uv run alembic revision --autogenerate -m "{{message}}"
 
 # Seed the shared sample admin (admin@veratechsolutions.example / dev-password-change-me)
 seed:
@@ -63,6 +63,10 @@ api:
 
 worker:
     uv run python -m agent_worker.main dev
+
+# Drive the cascade from your terminal mic/speaker (no server/control-plane/DB; needs vendor keys + Vertex ADC + VERA_ENV=local)
+worker-console:
+    uv run python -m agent_worker.main console
 
 # Print a QR code from an otpauth:// URI for local MFA testing (no network, secret stays local)
 mfa-qr uri:

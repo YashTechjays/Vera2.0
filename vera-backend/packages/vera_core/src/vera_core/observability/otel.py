@@ -5,11 +5,16 @@ TracerProvider setup for BOTH processes; when no Langfuse host is configured
 (local dev, CI) tracing stays a no-op and code paths that create spans still
 work against the default no-op tracer.
 
-TODO(vera-2.x): Langfuse public/secret key auth header from SecretProvider,
-sampling config, and the voice-pipeline span instrumentation (STT/LLM/TTS
-stages tagged with call_trace_attributes).
+Authorization: Basic <base64(public_key:secret_key)> is computed from
+VERA_LANGFUSE_PUBLIC_KEY / VERA_LANGFUSE_SECRET_KEY when both are set.
+When either key is absent the exporter is created without an Authorization
+header (Langfuse will return 401; useful for local dev without auth).
+
+TODO(vera-2.x): sampling config and the voice-pipeline span instrumentation
+(STT/LLM/TTS stages tagged with call_trace_attributes).
 """
 
+import base64
 import logging
 
 from opentelemetry import trace
@@ -30,10 +35,20 @@ def configure_observability(settings: Settings) -> TracerProvider | None:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+    headers: dict[str, str] | None = None
+    if settings.langfuse_public_key and settings.langfuse_secret_key:
+        token = base64.b64encode(
+            f"{settings.langfuse_public_key}:{settings.langfuse_secret_key}".encode()
+        ).decode()
+        headers = {"Authorization": f"Basic {token}"}
+
     provider = TracerProvider(
         resource=Resource.create({"service.name": settings.otel_service_name})
     )
-    exporter = OTLPSpanExporter(endpoint=f"{settings.langfuse_host.rstrip('/')}/api/public/otel")
+    exporter = OTLPSpanExporter(
+        endpoint=f"{settings.langfuse_host.rstrip('/')}/api/public/otel",
+        headers=headers,
+    )
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     logger.info("observability: exporting OTLP traces to %s", settings.langfuse_host)

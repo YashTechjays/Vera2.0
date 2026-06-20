@@ -46,8 +46,8 @@ boundary. When you cannot tell whether something is PHI, treat it as PHI.**
 ## Trust boundary
 
 **INSIDE** (BAA-covered — PHI may flow): FastAPI control plane, agent worker, Cloud SQL
-Postgres, Memorystore Redis, Deepgram (STT), Cartesia (TTS), Twilio (SIP), LiveKit,
-Vertex AI Gemini (LLM), self-hosted Langfuse on GKE.
+Postgres, Memorystore Redis, Deepgram (STT), Cartesia (TTS), Twilio (SIP), LiveKit
+(self-hosted OSS — never LiveKit Cloud), Vertex AI Gemini (LLM), self-hosted Langfuse on GKE.
 
 **De-identification point:** between STT output and LLM input. Raw identifiers in the
 transcript are swapped for `[[TYPE_N]]` tokens before any LLM sees them and re-identified
@@ -68,6 +68,9 @@ any analytics / observability / error-tracking SaaS.
 - NEVER store **plaintext** PHI in Redis. The session vault holds raw values **encrypted at
   rest**, keyed per session and wiped at call end; everything else caches tokens / opaque
   reference IDs, never values.
+- NEVER use `livekit.agents.inference.*` (Cloud-only — we self-host LiveKit OSS): it streams
+  call audio off-box to `agent-gateway.livekit.cloud`. Keep audio/turn models local/plugin —
+  e.g. pin `interruption.mode="vad"`, never the auto-selected adaptive detector (`cascade.py`).
 
 ⛔ lines are also enforced by `../.claude/hooks/phi_guardrails.py`. The hook is a
 conservative backstop, not the rule — these lines hold everywhere, including where no hook
