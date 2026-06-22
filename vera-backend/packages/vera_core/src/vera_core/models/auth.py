@@ -21,8 +21,10 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
+    FetchedValue,
     ForeignKey,
     Index,
     LargeBinary,
@@ -167,10 +169,24 @@ class TenantElevation(Base, UUIDv7PKMixin, TimestampMixin):
 class AuthAuditLog(Base, UUIDv7PKMixin, CreatedAtMixin):
     """WORM authN/Z audit trail with a per-row hash chain — separate from the PHI
     `audit_log` but the same immutability discipline. `tenant_id` is nullable for
-    platform-level events; the migration gives it SELECT/INSERT-only policies."""
+    platform-level events; the migration gives it SELECT/INSERT-only policies.
+
+    The `seq` + `prev_hash`/`row_hash` chain is populated entirely in the DB by a
+    BEFORE INSERT trigger (migration 0012), not by any Python insert path — both
+    write paths (tenant ORM insert + the `log_auth_event` SECURITY DEFINER fn) are
+    chained at that single chokepoint."""
 
     __tablename__ = "auth_audit_log"
     __table_args__ = (check_in("event_type", AuthEvent),)
+
+    # Per-chain (per tenant_id) contiguous sequence — the chain's deterministic
+    # ordering key. Assigned by the migration-0012 trigger *inside* the per-chain
+    # advisory lock (as prev.seq + 1), NOT by an insert path: created_at is
+    # txn-start time and the platform path's id is a random UUIDv4, so neither
+    # orders the chain; and a pre-trigger IDENTITY would be assigned before the
+    # lock, letting commit order diverge from seq order and fork the chain.
+    # FetchedValue → the column is DB-populated, omitted from every INSERT.
+    seq: Mapped[int] = mapped_column(BigInteger, FetchedValue(), nullable=False)
 
     tenant_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),

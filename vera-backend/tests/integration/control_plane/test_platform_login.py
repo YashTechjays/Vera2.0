@@ -114,6 +114,22 @@ async def platform_world(
     await admin_engine.dispose()
 
 
+async def _authenticate(client: httpx.AsyncClient, world: PlatformWorld) -> str:
+    """Full platform login: password → mandatory TOTP → session token."""
+    mfa_token = (
+        await client.post(
+            "/api/v1/platform/auth/login", json={"email": world.email, "password": PASSWORD}
+        )
+    ).json()["data"]["mfa_token"]
+    code = pyotp.TOTP(world.totp_secret).now()
+    verified = await client.post(
+        "/api/v1/platform/auth/mfa/verify", json={"mfa_token": mfa_token, "code": code}
+    )
+    token = verified.json()["data"]["session_token"]
+    assert isinstance(token, str)
+    return token
+
+
 async def test_login_requires_mfa_then_succeeds(
     platform_world: tuple[httpx.AsyncClient, PlatformWorld],
 ) -> None:
@@ -184,3 +200,33 @@ async def test_mfa_verify_rejects_wrong_code(
         "/api/v1/platform/auth/mfa/verify", json={"mfa_token": mfa_token, "code": "000000"}
     )
     assert bad.status_code == 401
+
+
+async def test_logout_invalidates_platform_session(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    client, world = platform_world
+    token = await _authenticate(client, world)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    # The token-scoped /auth/logout is reused as-is for a platform operator — no tenant context.
+    assert (await client.get("/api/v1/auth/me", headers=auth)).status_code == 200
+    assert (await client.post("/api/v1/auth/logout", headers=auth)).status_code == 200
+    # Session is gone — the operator's token no longer authenticates.
+    assert (await client.get("/api/v1/auth/me", headers=auth)).status_code == 401
+
+
+async def test_keepalive_extends_platform_session(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    client, world = platform_world
+    token = await _authenticate(client, world)
+
+    resp = await client.post(
+        "/api/v1/auth/session/keepalive", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["Cache-Control"] == "no-store"
+    remaining = resp.json()["data"]["expires_in_seconds"]
+    assert isinstance(remaining, int)
+    assert 0 < remaining <= 3600  # within the default idle window
