@@ -9,7 +9,7 @@ import enum
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Enum, ForeignKey, LargeBinary, String, Text
+from sqlalchemy import BigInteger, Enum, FetchedValue, ForeignKey, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -64,7 +64,10 @@ class AuditLog(Base, TenantScopedMixin):
     detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
-    # WORM per-row hash chain (ADR §7 / ERD). Populated by the audit writer when
-    # chaining is enabled; nullable so existing inserts remain valid.
+    # WORM per-row hash chain (ADR §7 / ERD). All three columns are populated by
+    # the audit_chain() BEFORE INSERT trigger (migration 0013) — never by the
+    # writer. FetchedValue on seq tells SQLAlchemy the column is DB-assigned so
+    # it is omitted from INSERT and refreshed after commit.
     prev_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     row_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    seq: Mapped[int] = mapped_column(BigInteger, FetchedValue(), nullable=False)
