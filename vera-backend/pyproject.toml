@@ -47,8 +47,12 @@ select = [
 ]
 
 [tool.ruff.lint.flake8-bugbear]
-# require() returns a fastapi.Depends — safe in argument defaults by design.
-extend-immutable-calls = ["fastapi.Depends", "control_plane.auth.rbac.require"]
+# require()/require_scope() return a fastapi.Depends — safe in argument defaults by design.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "control_plane.auth.rbac.require",
+    "control_plane.auth.api_key.require_scope",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["vera_core", "control_plane", "agent_worker", "phi_codec"]

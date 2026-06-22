@@ -29,6 +29,9 @@ class AuditEvent(enum.StrEnum):
     PHI_ACCESS = "phi.access"
     PHI_DETOKENIZE = "phi.detokenize"
     PHI_HYDRATE_FAILSAFE = "phi.hydrate_failsafe"
+    # Inbound API-key intake: a machine caller created a patient_form + its
+    # INTAKE-source field_answer rows (a PHI write). Field names/counts only.
+    FORM_INTAKE = "form.intake"
 
 
 class AuditLog(Base, TenantScopedMixin):
