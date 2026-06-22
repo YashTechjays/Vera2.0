@@ -2,12 +2,17 @@ import { NavLink } from "react-router-dom"
 import { Sparkles } from "lucide-react"
 import { navItems } from "@/lib/nav"
 import { cn } from "@/lib/utils"
+import { useAppSelector } from "@/store/hooks"
+import { selectPermissions } from "@/store/authSlice"
 
 type SidebarProps = {
   collapsed: boolean
 }
 
 export function Sidebar({ collapsed }: SidebarProps) {
+  const permissions = useAppSelector(selectPermissions)
+  // RBAC: hide nav items whose required permission the user lacks.
+  const items = navItems.filter((item) => !item.permission || permissions.includes(item.permission))
   return (
     <aside
       className={cn(
@@ -27,7 +32,7 @@ export function Sidebar({ collapsed }: SidebarProps) {
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1 p-2">
-        {navItems.map(({ title, to, icon: Icon }) => (
+        {items.map(({ title, to, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
