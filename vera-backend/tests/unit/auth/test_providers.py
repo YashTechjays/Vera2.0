@@ -1,4 +1,4 @@
-"""Unit tests for per-tenant login provider resolution (sso_provider)."""
+"""Unit tests for login provider resolution (sso_provider + platform_login_provider)."""
 
 from types import SimpleNamespace
 from typing import cast
@@ -6,7 +6,10 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane.auth.providers import resolve_login_provider
+from control_plane.auth.providers import (
+    resolve_login_provider,
+    resolve_platform_login_provider,
+)
 
 TENANT = UUID("00000000-0000-0000-0000-0000000000aa")
 
@@ -41,4 +44,17 @@ async def test_returns_provider_when_enabled() -> None:
 
 async def test_returns_none_when_no_enabled_provider() -> None:
     provider = await resolve_login_provider(_session(None), TENANT, "password")
+    assert provider is None
+
+
+async def test_platform_returns_provider_when_enabled() -> None:
+    row = SimpleNamespace(provider_type="password", enforce_mfa=True)
+    provider = await resolve_platform_login_provider(_session(row), "password")
+    assert provider is not None
+    assert provider.provider_type == "password"
+    assert provider.enforce_mfa is True
+
+
+async def test_platform_returns_none_when_no_enabled_provider() -> None:
+    provider = await resolve_platform_login_provider(_session(None), "password")
     assert provider is None

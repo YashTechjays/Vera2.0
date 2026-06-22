@@ -21,8 +21,10 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
+    FetchedValue,
     ForeignKey,
     Index,
     LargeBinary,
@@ -38,6 +40,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from vera_core.db.base import (
     Base,
     CreatedAtMixin,
+    NullableTenantColumnMixin,
     TenantScopedMixin,
     TimestampMixin,
     UUIDv7PKMixin,
@@ -60,11 +63,36 @@ class SsoProvider(Base, TenantScopedMixin):
     enforce_mfa: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
-class UserIdentity(Base, TenantScopedMixin):
+class PlatformLoginProvider(Base, UUIDv7PKMixin, TimestampMixin, NullableTenantColumnMixin):
+    """The single global platform-operator login provider — the tenant-less
+    analogue of `sso_provider` (ADR-0006 §D). One row, seeded `password`, gates
+    how SUPER_ADMIN / `account_type='platform'` operators authenticate. `enabled`
+    is the platform on/off toggle; `enforce_mfa` encodes the "platform login
+    requires 2FA" rule as data. A GCIP SSO provider can drop in behind the same
+    seam later. `tenant_id IS NULL` (platform-readable RLS); the UNIQUE on
+    `provider_type` keeps it effectively single-row per kind."""
+
+    __tablename__ = "platform_login_provider"
+    __table_args__ = (
+        UniqueConstraint("provider_type", name="uq_platform_login_provider_provider_type"),
+        check_in("provider_type", ProviderKind),
+    )
+
+    provider_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    enforce_mfa: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class UserIdentity(Base, UUIDv7PKMixin, TimestampMixin, NullableTenantColumnMixin):
     """A federated (or local-password) identity linked to one `app_user`.
     `tenant_id` is denormalized from the app_user so RLS stays a plain column
     compare. The local `password` provider stores its bcrypt hash + MFA here, so
-    identity secrets stay off `user_account` and out of the GCIP path."""
+    identity secrets stay off `user_account` and out of the GCIP path.
+
+    `tenant_id` is NULLABLE: a platform operator (`account_type='platform'`) has
+    no tenant, so its password identity row carries `tenant_id IS NULL` and is
+    reached only via the platform-readable RLS policy (ADR-0006 §D)."""
 
     __tablename__ = "user_identity"
     __table_args__ = (
@@ -141,10 +169,24 @@ class TenantElevation(Base, UUIDv7PKMixin, TimestampMixin):
 class AuthAuditLog(Base, UUIDv7PKMixin, CreatedAtMixin):
     """WORM authN/Z audit trail with a per-row hash chain — separate from the PHI
     `audit_log` but the same immutability discipline. `tenant_id` is nullable for
-    platform-level events; the migration gives it SELECT/INSERT-only policies."""
+    platform-level events; the migration gives it SELECT/INSERT-only policies.
+
+    The `seq` + `prev_hash`/`row_hash` chain is populated entirely in the DB by a
+    BEFORE INSERT trigger (migration 0012), not by any Python insert path — both
+    write paths (tenant ORM insert + the `log_auth_event` SECURITY DEFINER fn) are
+    chained at that single chokepoint."""
 
     __tablename__ = "auth_audit_log"
     __table_args__ = (check_in("event_type", AuthEvent),)
+
+    # Per-chain (per tenant_id) contiguous sequence — the chain's deterministic
+    # ordering key. Assigned by the migration-0012 trigger *inside* the per-chain
+    # advisory lock (as prev.seq + 1), NOT by an insert path: created_at is
+    # txn-start time and the platform path's id is a random UUIDv4, so neither
+    # orders the chain; and a pre-trigger IDENTITY would be assigned before the
+    # lock, letting commit order diverge from seq order and fork the chain.
+    # FetchedValue → the column is DB-populated, omitted from every INSERT.
+    seq: Mapped[int] = mapped_column(BigInteger, FetchedValue(), nullable=False)
 
     tenant_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
