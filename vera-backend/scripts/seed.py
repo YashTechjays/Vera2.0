@@ -29,6 +29,7 @@ from vera_core.db import create_engine, create_sessionmaker
 from vera_core.models import (
     AppUser,
     FormSchema,
+    IntegrationType,
     Permission,
     Role,
     RolePermission,
@@ -217,10 +218,14 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
     on the unique insurance_type. Re-running with unchanged JSON is a no-op; changed
     JSON demotes the current published version to DRAFT and publishes a new version
     (the partial unique index allows only one published row per schema)."""
-    manifest: list[dict[str, str]] = json.loads((FORM_SCHEMA_DIR / "manifest.json").read_text())
+    manifest: list[dict[str, str]] = json.loads(
+        (FORM_SCHEMA_DIR / "manifest.json").read_text(encoding="utf-8")
+    )
     summary: list[str] = []
     for entry in manifest:
-        doc: dict[str, Any] = json.loads((FORM_SCHEMA_DIR / entry["file"]).read_text())
+        doc: dict[str, Any] = json.loads(
+            (FORM_SCHEMA_DIR / entry["file"]).read_text(encoding="utf-8")
+        )
         insurance_type = entry["insurance_type"]
         name = doc["name"]
 
@@ -271,6 +276,28 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
     return summary
 
 
+# Global integration catalog. `credentials_schema` declares the credential shape a
+# tenant supplies (validated + sealed by the integrations endpoint). Keyed on the
+# unique `name`; idempotent — re-running refreshes the schema.
+INTEGRATION_TYPES: list[dict[str, Any]] = [
+    {"name": "twilio_sip", "credentials_schema": {"twilio_sip_trunk": "string"}},
+]
+
+
+async def _seed_integration_types(session: AsyncSession) -> list[str]:
+    existing = {it.name: it for it in (await session.execute(select(IntegrationType))).scalars()}
+    for spec in INTEGRATION_TYPES:
+        itype = existing.get(spec["name"])
+        if itype is None:
+            session.add(
+                IntegrationType(name=spec["name"], credentials_schema=spec["credentials_schema"])
+            )
+        else:
+            itype.credentials_schema = spec["credentials_schema"]
+    await session.flush()
+    return [spec["name"] for spec in INTEGRATION_TYPES]
+
+
 @asynccontextmanager
 async def _seeding_session() -> AsyncIterator[AsyncSession]:
     """A transactional session for a seed run, with the engine disposed on exit.
@@ -291,12 +318,14 @@ async def seed() -> None:
         await _seed_password_provider(session, tenant_id)
         await _seed_admin_user(session, tenant_id)
         schema_summary = await _seed_form_schemas(session)
+        integration_types = await _seed_integration_types(session)
     print(
         f"seeded: {len(permission_ids)} permissions,"
         f" global system roles {sorted(SYSTEM_ROLES)},"
         f" tenant '{SAMPLE_TENANT_NAME}' (slug '{SAMPLE_TENANT_SLUG}', {tenant_id}),"
         f" password provider enabled, admin user '{SAMPLE_ADMIN_EMAIL}' (TENANT_ADMIN),"
-        f" form schemas {schema_summary}"
+        f" form schemas {schema_summary},"
+        f" integration types {integration_types}"
     )
     print(
         "local dev login: "

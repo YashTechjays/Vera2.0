@@ -4,9 +4,11 @@ flat `tenant_credential`:
 - `api_key`  — **inbound** keys Vera *issues* and only ever **verifies** ⇒ store a
   salted hash (irreversible) + scope + expiry + revoke. Tenant-scoped.
 - `integration` — **outbound** secrets Vera *presents* to a third party (Twilio,
-  EMR) and must **recover** ⇒ store a `secret_ref` to Google Secret Manager
-  (recoverable, CMEK-encrypted there) + `rotated_at`. The DB holds the reference,
-  never the credential. Tenant-owned, one per type per tenant.
+  EMR) and must **recover** ⇒ the credential is **envelope-encrypted in the DB**
+  (same scheme as the MFA seed, `vera_core.config.kms`): `credential_ct` holds the
+  AES-256-GCM ciphertext of the credential JSON, `dek_ct` the KMS-wrapped DEK, and
+  `secret_ref` the KMS key-version reference (rotation/audit) + `rotated_at`.
+  Tenant-owned, one per type per tenant; RLS keeps it private to its tenant.
 - `integration_type` — the GLOBAL catalog (no tenant_id); `credentials_schema`
   drives validation + the dynamic UI form + test-before-save (kept from v1).
 
@@ -35,8 +37,9 @@ class IntegrationType(Base, UUIDv7PKMixin, TimestampMixin):
 
 
 class Integration(Base, TenantScopedMixin):
-    """A tenant's outbound credential for one integration type. The recoverable
-    secret lives in Secret Manager; we store only `secret_ref`."""
+    """A tenant's outbound credential for one integration type, envelope-encrypted
+    in place (see `vera_core.integrations.credentials`). The plaintext credential
+    never lands in the DB — only the ciphertext + wrapped DEK + key reference."""
 
     __tablename__ = "integration"
     __table_args__ = (UniqueConstraint("tenant_id", "integration_type_id"),)
@@ -47,8 +50,12 @@ class Integration(Base, TenantScopedMixin):
         nullable=False,
         index=True,
     )
-    # Secret Manager resource name, e.g.
-    # projects/{p}/secrets/tnt-{tenant}-int-{integration}/versions/latest
+    # Envelope encryption (mirrors user_identity's MFA columns):
+    #   credential_ct — AES-256-GCM ciphertext of the credential JSON
+    #   dek_ct        — KMS-wrapped Data Encryption Key (per row)
+    #   secret_ref    — KMS key-version reference (rotation/audit)
+    credential_ct: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    dek_ct: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     secret_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
