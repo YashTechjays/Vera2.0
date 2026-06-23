@@ -3,8 +3,11 @@ live RLS-enforcing connection. The `admin` persona holds TENANT_ADMIN (which
 includes `tenant:config:manage`); `norole` holds nothing."""
 
 import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.integration.control_plane.conftest import RBACWorld
+from vera_core.models import AuthAuditLog
 
 PERSONA_PATH = "/api/v1/tenant/config/persona"
 
@@ -44,6 +47,41 @@ async def test_put_rejects_unknown_key(client: httpx.AsyncClient, rbac_world: RB
         PERSONA_PATH, json={"tone": "formal"}, headers=_auth(rbac_world.admin_token)
     )
     assert resp.status_code == 422
+
+
+async def test_put_audits_field_names_not_values(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, admin_session: AsyncSession
+) -> None:
+    # Unique sentinels so the "values never recorded" check can't collide with the
+    # config values other tests in this shared world write.
+    instr = "SENTINEL-instr-9f3a confirm member ID twice"
+    greet = "SENTINEL-greet-9f3a hello there"
+    put = await client.put(
+        PERSONA_PATH,
+        json={"extra_instructions": instr, "greeting": greet},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert put.status_code == 200
+
+    rows = list(
+        (
+            await admin_session.execute(  # superuser read bypasses the WORM SELECT-only RLS
+                select(AuthAuditLog).where(
+                    AuthAuditLog.tenant_id == rbac_world.tenant_id,
+                    AuthAuditLog.event_type == "persona_tweak_updated",
+                )
+            )
+        ).scalars()
+    )
+    # The mutation is recorded with field NAMES only.
+    assert any(
+        r.meta == {"fields": ["extra_instructions", "greeting"]} and r.app_user_id is not None
+        for r in rows
+    )
+    # No audit row ever carries the field VALUES.
+    blob = "".join(str(r.meta) for r in rows)
+    assert "SENTINEL-instr" not in blob
+    assert "SENTINEL-greet" not in blob
 
 
 async def test_requires_permission(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
