@@ -217,10 +217,14 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
     on the unique insurance_type. Re-running with unchanged JSON is a no-op; changed
     JSON demotes the current published version to DRAFT and publishes a new version
     (the partial unique index allows only one published row per schema)."""
-    manifest: list[dict[str, str]] = json.loads((FORM_SCHEMA_DIR / "manifest.json").read_text())
+    manifest: list[dict[str, str]] = json.loads(
+        (FORM_SCHEMA_DIR / "manifest.json").read_text(encoding="utf-8")
+    )
     summary: list[str] = []
     for entry in manifest:
-        doc: dict[str, Any] = json.loads((FORM_SCHEMA_DIR / entry["file"]).read_text())
+        doc: dict[str, Any] = json.loads(
+            (FORM_SCHEMA_DIR / entry["file"]).read_text(encoding="utf-8")
+        )
         insurance_type = entry["insurance_type"]
         name = doc["name"]
 
