@@ -29,6 +29,7 @@ class AuditEvent(enum.StrEnum):
     PHI_ACCESS = "phi.access"
     PHI_DETOKENIZE = "phi.detokenize"
     PHI_HYDRATE_FAILSAFE = "phi.hydrate_failsafe"
+    INTEGRATION_CONFIGURE = "integration.configure"
 
 
 class AuditLog(Base, TenantScopedMixin):

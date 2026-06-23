@@ -22,6 +22,7 @@ DEFAULT_PERMISSIONS: Final[dict[str, str]] = {
     "roles:manage": "Manage roles and role assignments",
     "tenant:auth:configure": "Enable or disable the tenant's login providers",
     "apikeys:manage": "Issue and revoke inbound API keys",
+    "integrations:manage": "Configure outbound integration credentials (e.g. Twilio)",
     "audit:read": "Read the compliance audit log",
     "phi:detokenize": "Reveal raw PHI behind tokens (every use is audited)",
 }
