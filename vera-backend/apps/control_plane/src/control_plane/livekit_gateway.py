@@ -20,14 +20,16 @@ class LiveKitGateway:
     def url(self) -> str:
         return self._url
 
-    async def create_call_room(self, room_name: str) -> None:
+    async def create_call_room(self, room_name: str, metadata: str = "") -> None:
         # LiveKitAPI wraps an aiohttp ClientSession, which requires a running
         # event loop — construct it inside the coroutine, not in __init__.
         lk = api.LiveKitAPI(self.url, self._api_key, self._api_secret)
         try:
             await lk.room.create_room(api.CreateRoomRequest(name=room_name))
             await lk.agent_dispatch.create_dispatch(
-                api.CreateAgentDispatchRequest(agent_name=AGENT_NAME, room=room_name)
+                api.CreateAgentDispatchRequest(
+                    agent_name=AGENT_NAME, room=room_name, metadata=metadata
+                )
             )
         finally:
             await lk.aclose()  # type: ignore[no-untyped-call]  # livekit-api missing return annotation
