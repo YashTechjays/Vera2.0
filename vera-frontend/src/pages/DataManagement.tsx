@@ -39,12 +39,21 @@ const STATUS_OPTIONS: PatientFormStatus[] = [
   "call_failed",
 ]
 
-type SortKey = "appointment_date" | "chart_number" | "patient_name" | "completion_pct" | "status"
+type SortKey =
+  | "appointment_date"
+  | "appointment_type"
+  | "chart_number"
+  | "patient_name"
+  | "member_policy_id"
+  | "insurance_provider"
+  | "status"
 const COLUMNS: { key: SortKey; label: string }[] = [
   { key: "appointment_date", label: "Appointment Date" },
+  { key: "appointment_type", label: "Appointment Type" },
   { key: "chart_number", label: "Chart No" },
   { key: "patient_name", label: "Patient Name" },
-  { key: "completion_pct", label: "Completion" },
+  { key: "member_policy_id", label: "Member/Policy ID" },
+  { key: "insurance_provider", label: "Insurance Provider" },
   { key: "status", label: "Status" },
 ]
 
@@ -216,20 +225,25 @@ export function DataManagement() {
                   </span>
                 </TableHead>
               ))}
-              <TableHead>Disputes</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {items === null && (
               <TableRow>
-                <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                <TableCell
+                  colSpan={COLUMNS.length}
+                  className="py-10 text-center text-muted-foreground"
+                >
                   Loading…
                 </TableCell>
               </TableRow>
             )}
             {items?.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                <TableCell
+                  colSpan={COLUMNS.length}
+                  className="py-10 text-center text-muted-foreground"
+                >
                   No records match your filters.
                 </TableCell>
               </TableRow>
@@ -241,9 +255,17 @@ export function DataManagement() {
                 onClick={() => openFormById(f.id)}
               >
                 <TableCell className="pl-6">{formatDate(f.appointment_date)}</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {f.appointment_type || "—"}
+                </TableCell>
                 <TableCell className="text-muted-foreground">{f.chart_number || "—"}</TableCell>
                 <TableCell className="font-medium capitalize">{f.patient_name || "—"}</TableCell>
-                <TableCell>{f.completion_pct}%</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {f.member_policy_id || "—"}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {f.insurance_provider || "—"}
+                </TableCell>
                 <TableCell>
                   <span
                     className={cn(
@@ -253,15 +275,6 @@ export function DataManagement() {
                   >
                     {statusLabel(f.status)}
                   </span>
-                </TableCell>
-                <TableCell>
-                  {f.dispute_count > 0 ? (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">
-                      {f.dispute_count}
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">0</span>
-                  )}
                 </TableCell>
               </TableRow>
             ))}

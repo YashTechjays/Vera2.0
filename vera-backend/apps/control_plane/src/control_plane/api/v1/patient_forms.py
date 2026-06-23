@@ -204,13 +204,17 @@ async def upload_patient_form(
 
 
 class PatientFormSummary(BaseModel):
-    """Worklist row — promoted identifiers + counts only (no per-field PHI)."""
+    """Worklist row — promoted identifiers + a few intake fields + counts."""
 
     id: UUID
     status: str
     patient_name: str | None
     chart_number: str | None
     appointment_date: date | None
+    # Read from the intake snapshot (intake_payload), not promoted columns.
+    appointment_type: str | None
+    member_policy_id: str | None
+    insurance_provider: str | None
     completion_pct: float
     dispute_count: int
     created_at: datetime
@@ -274,6 +278,16 @@ def _audit_phi_read(
         resource_id=resource_id,
         detail={"fields": fields},
     )
+
+
+def _intake_field(form: PatientForm, section: str, field: str) -> str | None:
+    """One value from a form's intake snapshot (flat `{section: {field: value}}`).
+    Worklist display only — returns None when the section/field is absent."""
+    section_obj = form.intake_payload.get(section)
+    if not isinstance(section_obj, dict):
+        return None
+    value = section_obj.get(field)
+    return None if value is None else str(value)
 
 
 async def _unresolved_dispute_count_by_form(
@@ -442,6 +456,9 @@ async def list_patient_forms(
             patient_name=r.patient_name,
             chart_number=r.chart_number,
             appointment_date=r.appointment_date,
+            appointment_type=_intake_field(r, "appointment_information", "appointment_type"),
+            member_policy_id=_intake_field(r, "insurance_information", "policy_number"),
+            insurance_provider=_intake_field(r, "insurance_reference_information", "insurance"),
             completion_pct=float(r.completion_pct),
             dispute_count=counts.get(r.id, 0),
             created_at=r.created_at,
@@ -451,7 +468,18 @@ async def list_patient_forms(
     ]
     await get_audit(request).emit(
         _audit_phi_read(
-            request, tenant_id, caller, "list", ["patient_name", "chart_number", "appointment_date"]
+            request,
+            tenant_id,
+            caller,
+            "list",
+            [
+                "patient_name",
+                "chart_number",
+                "appointment_date",
+                "appointment_type",
+                "policy_number",
+                "insurance",
+            ],
         )
     )
     return ok(PaginatedForms(items=items, page=page, page_size=page_size, total=total))
