@@ -39,10 +39,22 @@ class FakeLiveKit(LiveKitGateway):
     def __init__(self) -> None:
         # Skip the parent __init__ — we don't need real LiveKit credentials.
         self.created: list[str] = []
+        self.dispatch_metadata: list[dict[str, object] | None] = []
+        self.sip_calls: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
         self._url = "ws://fake:7880"
 
-    async def create_call_room(self, room_name: str) -> None:
+    async def create_call_room(
+        self, room_name: str, metadata: dict[str, object] | None = None
+    ) -> None:
         self.created.append(room_name)
+        self.dispatch_metadata.append(metadata)
+
+    async def create_sip_participant(self, room_name: str, phone_number: str) -> None:
+        self.sip_calls.append((room_name, phone_number))
+
+    async def delete_room(self, room_name: str) -> None:
+        self.deleted.append(room_name)
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
         return f"faketoken:{room_name}:{identity}"

@@ -5,21 +5,101 @@ into a room named by vera_core.observability.correlation.room_name_for_call. The
 room name IS the session id and the Langfuse correlation key.
 """
 
+import asyncio
+import json
 import logging
 
-from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
+from livekit import rtc
+from livekit.agents import (
+    NOT_GIVEN,
+    JobContext,
+    JobProcess,
+    NotGiven,
+    RoomInputOptions,
+    WorkerOptions,
+    cli,
+)
 from opentelemetry import trace
 
 from agent_worker.agent import VeraAgent
 from agent_worker.cascade import _build_vad, build_session
 from vera_core.config.settings import get_settings
-from vera_core.observability.correlation import call_trace_attributes, parse_room_name
+from vera_core.observability.correlation import (
+    call_trace_attributes,
+    is_listen_only_identity,
+    parse_room_name,
+)
 from vera_core.observability.otel import configure_observability
 from vera_core.phi import build_phi_boundary
 
 logger = logging.getLogger("agent_worker")
 
 AGENT_NAME = "vera-agent"
+
+# Bound the wait so a never-answered outbound call doesn't pin a worker forever.
+_SPEAKER_TIMEOUT_S = 60.0
+
+# A SIP participant joins the room while it is still *ringing* (JOINING state) and
+# only sets sip.callStatus="active" once the callee answers. Greeting on mere
+# presence would talk into a ringing phone, so the SIP callee counts as ready only
+# once answered. (LiveKit's AMD uses the same signal.)
+_SIP_CALL_STATUS_ATTR = "sip.callStatus"
+_SIP_CALL_STATUS_ACTIVE = "active"
+
+
+def _is_ready_speaker(participant: rtc.Participant) -> bool:
+    """A participant whose presence means the agent may greet: a browser caller
+    (ready as soon as it joins) or a SIP callee that has answered. The listen-only
+    monitor never qualifies, and a SIP callee that is merely ringing does not yet."""
+    if is_listen_only_identity(participant.identity):
+        return False
+    if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return participant.attributes.get(_SIP_CALL_STATUS_ATTR) == _SIP_CALL_STATUS_ACTIVE
+    return True
+
+
+async def wait_for_speaker(
+    ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_S
+) -> rtc.RemoteParticipant | None:
+    """Block until a ready, non-monitor remote participant is present, or the timeout.
+
+    Returns that participant once the browser caller has joined or the SIP callee has
+    answered, or None on timeout. The caller pins the agent's audio input to the
+    returned participant so it listens to the speaker and not the listen-only monitor.
+    """
+    for p in ctx.room.remote_participants.values():
+        if _is_ready_speaker(p):
+            return p
+
+    loop = asyncio.get_running_loop()
+    arrived: asyncio.Future[rtc.RemoteParticipant] = loop.create_future()
+
+    def _resolve(participant: rtc.Participant) -> None:
+        if arrived.done() or not _is_ready_speaker(participant):
+            return
+        # Look up the RemoteParticipant (filters out the agent's own local participant,
+        # which never appears in remote_participants).
+        remote = ctx.room.remote_participants.get(participant.identity)
+        if remote is not None:
+            arrived.set_result(remote)
+
+    def _on_connected(participant: rtc.RemoteParticipant) -> None:
+        _resolve(participant)
+
+    def _on_attributes_changed(_changed: dict[str, str], participant: rtc.Participant) -> None:
+        # The SIP callee's ring → active transition arrives here, not as a new join.
+        _resolve(participant)
+
+    ctx.room.on("participant_connected", _on_connected)
+    ctx.room.on("participant_attributes_changed", _on_attributes_changed)
+    try:
+        async with asyncio.timeout(timeout_s):
+            return await arrived
+    except TimeoutError:
+        return None
+    finally:
+        ctx.room.off("participant_connected", _on_connected)
+        ctx.room.off("participant_attributes_changed", _on_attributes_changed)
 
 
 def session_id_for(room_name: str) -> str:
@@ -64,6 +144,17 @@ async def entrypoint(ctx: JobContext) -> None:
     # console/connect mic test (foreign room) this sets only `vera.room`.
     trace.get_current_span().set_attributes(call_trace_attributes(room_name))
 
+    # Dispatch metadata gates greeting timing. The /calls path passes none, so it
+    # keeps the immediate behavior; Voice Lab passes {"wait_for_speaker": true} so
+    # the agent holds until the human/phone participant can actually hear it.
+    speaker: rtc.RemoteParticipant | None = None
+    meta = json.loads(ctx.job.metadata or "{}")
+    if meta.get("wait_for_speaker"):
+        speaker = await wait_for_speaker(ctx)
+        if speaker is None:
+            logger.warning("no speaker joined room %s within timeout — not starting", room_name)
+            return
+
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
 
@@ -73,7 +164,20 @@ async def entrypoint(ctx: JobContext) -> None:
         await boundary.close_session(session_id)
 
     ctx.add_shutdown_callback(_on_shutdown)
-    await session.start(agent=VeraAgent(boundary=boundary, session_id=session_id), room=ctx.room)
+    # Pin the agent's audio input to the speaker. Otherwise RoomIO links to the first
+    # eligible participant — in outbound mode that can be the listen-only monitor
+    # (which publishes no audio), leaving the agent deaf to the SIP callee. NOT_GIVEN
+    # keeps the default auto-link for the /calls path (no speaker pinned).
+    room_input_options: RoomInputOptions | NotGiven = (
+        RoomInputOptions(participant_identity=speaker.identity)
+        if speaker is not None
+        else NOT_GIVEN
+    )
+    await session.start(
+        agent=VeraAgent(boundary=boundary, session_id=session_id),
+        room=ctx.room,
+        room_input_options=room_input_options,
+    )
 
 
 def build_worker_options() -> WorkerOptions:
