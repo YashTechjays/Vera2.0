@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Memorystore Redis in prod; docker-compose locally.
     redis_url: str = "redis://localhost:6379/0"
 
+    # Live-transcript Redis stream lifetime (Voice Lab / SSE). The rolling backstop
+    # TTL is refreshed on every publish so an abandoned stream self-clears; the end
+    # grace TTL lets connected readers drain the `ended` sentinel before it clears.
+    transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
+    transcript_end_grace_seconds: int = 60     # VERA_TRANSCRIPT_END_GRACE_SECONDS
+
     gcp_project: str | None = None
 
     # --- KMS ------------------------------------------------------------------
