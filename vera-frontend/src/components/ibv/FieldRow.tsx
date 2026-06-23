@@ -41,7 +41,7 @@ export function FieldRow({ field, path, depth }: Props) {
     : undefined
 
   return (
-    <div className="flex min-h-[26px] border-r border-b border-l border-ibv-row first:border-t">
+    <div className="flex min-h-[26px]">
       <div
         className={cn(
           "flex w-[210px] min-w-[210px] shrink-0 items-center gap-1 border-r border-b border-ibv-label-border bg-white px-1.5 py-1 text-left font-ibv text-[13.3px] font-semibold text-ibv-label-border"
@@ -58,7 +58,7 @@ export function FieldRow({ field, path, depth }: Props) {
         )}
       </div>
 
-      <div className="relative flex flex-1 items-center">
+      <div className="relative flex flex-1 items-stretch">
         <FieldRenderer
           field={field}
           path={path}
@@ -66,6 +66,7 @@ export function FieldRow({ field, path, depth }: Props) {
           onChange={(v) => setValue(path, v)}
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? "150px" : undefined}
+          noRightBorder
         />
         {showDispute && (
           <div className="absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-1">

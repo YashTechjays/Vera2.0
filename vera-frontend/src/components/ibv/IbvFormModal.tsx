@@ -19,6 +19,9 @@ export function IbvFormModal() {
     save,
     resolveAll,
     pendingDisputeCount,
+    loading,
+    error,
+    patientName,
   } = useIbv()
 
   return (
@@ -28,7 +31,7 @@ export function IbvFormModal() {
         className="flex max-h-[92vh] w-[96vw] max-w-[1200px] flex-col gap-0 p-0"
       >
         <DialogHeader className="border-b border-border p-4">
-          <DialogTitle>IBV Data Entry Form</DialogTitle>
+          <DialogTitle>{patientName ? `IBV — ${patientName}` : "IBV Data Entry Form"}</DialogTitle>
           <DialogDescription>
             Insurance Benefit Verification — review captured values and resolve
             disputes.
@@ -36,7 +39,13 @@ export function IbvFormModal() {
         </DialogHeader>
 
         <div className="flex-1 overflow-auto bg-[#f8f9fa] p-4 font-ibv">
-          <SchemaForm />
+          {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          )}
+          {!loading && !error && <SchemaForm />}
         </div>
 
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
