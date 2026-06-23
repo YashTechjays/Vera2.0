@@ -21,6 +21,7 @@ DEFAULT_PERMISSIONS: Final[dict[str, str]] = {
     "users:manage": "Invite, deactivate, and manage users",
     "roles:manage": "Manage roles and role assignments",
     "tenant:auth:configure": "Enable or disable the tenant's login providers",
+    "tenant:config:manage": "View and edit tenant runtime config (persona, knobs)",
     "apikeys:manage": "Issue and revoke inbound API keys",
     "audit:read": "Read the compliance audit log",
     "phi:detokenize": "Reveal raw PHI behind tokens (every use is audited)",

@@ -41,7 +41,7 @@ class FakeLiveKit(LiveKitGateway):
         self.created: list[str] = []
         self._url = "ws://fake:7880"
 
-    async def create_call_room(self, room_name: str) -> None:
+    async def create_call_room(self, room_name: str, metadata: str = "") -> None:
         self.created.append(room_name)
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
