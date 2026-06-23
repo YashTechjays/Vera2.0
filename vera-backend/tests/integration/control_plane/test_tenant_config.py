@@ -32,6 +32,17 @@ async def test_put_then_get_round_trip(
     assert got.json()["data"] == body
 
 
+async def test_put_empty_body_is_noop(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # The empty tweak ({} column default) round-trips to the all-None base persona.
+    put = await client.put(PERSONA_PATH, json={}, headers=_auth(rbac_world.admin_token))
+    assert put.status_code == 200
+    assert put.json()["data"] == {"extra_instructions": None, "greeting": None}
+    got = await client.get(PERSONA_PATH, headers=_auth(rbac_world.admin_token))
+    assert got.json()["data"] == {"extra_instructions": None, "greeting": None}
+
+
 async def test_put_rejects_unknown_key(
     client: httpx.AsyncClient, rbac_world: RBACWorld
 ) -> None:
