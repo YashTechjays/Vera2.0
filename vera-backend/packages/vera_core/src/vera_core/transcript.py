@@ -10,9 +10,10 @@ wall) — never hydrated raw PHI (see repo CLAUDE.md).
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
+from redis.asyncio import Redis
 
 ROLE_USER: Literal["user"] = "user"
 ROLE_AGENT: Literal["agent"] = "agent"
@@ -105,6 +106,60 @@ class InMemoryTranscriptStore:
                     ts=int(fields["ts"]),
                 ),
             )
+
+
+class RedisTranscriptStore:
+    """Redis Streams transport. XADD on publish (refreshing a rolling backstop TTL so an
+    abandoned stream self-clears); `mark_ended` appends the sentinel + a short grace TTL
+    so connected readers drain then the key clears. `read` replays from `0` via XREAD
+    then tails (BLOCK), stopping on the sentinel or when the key disappears."""
+
+    _BLOCK_MS = 1000
+
+    def __init__(self, redis: Redis, *, ttl_seconds: int, end_grace_seconds: int) -> None:
+        self._redis = redis
+        self._ttl_seconds = ttl_seconds
+        self._end_grace_seconds = end_grace_seconds
+
+    async def publish(self, room_name: str, event: TranscriptEvent) -> None:
+        key = transcript_stream_key(room_name)
+        await self._redis.xadd(key, {"role": event.role, "text": event.text, "ts": str(event.ts)})
+        await self._redis.expire(key, self._ttl_seconds)
+
+    async def mark_ended(self, room_name: str) -> None:
+        key = transcript_stream_key(room_name)
+        await self._redis.xadd(key, {_ENDED_FIELD: _ENDED_VALUE})
+        await self._redis.expire(key, self._end_grace_seconds)
+
+    async def delete(self, room_name: str) -> None:
+        await self._redis.delete(transcript_stream_key(room_name))
+
+    async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
+        key = transcript_stream_key(room_name)
+        last_id = "0"
+        while True:
+            result = await self._redis.xread({key: last_id}, block=self._BLOCK_MS)
+            if not result:
+                if not await self._redis.exists(key):
+                    return  # stream cleared (grace TTL elapsed / deleted)
+                continue
+            xread_result = cast(
+                list[tuple[str, list[tuple[str, dict[str, str]]]]],
+                result,
+            )
+            _stream, entries = xread_result[0]
+            for entry_id, fields in entries:
+                last_id = entry_id
+                if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
+                    return
+                yield (
+                    entry_id,
+                    TranscriptEvent(
+                        role=fields["role"],
+                        text=fields["text"],
+                        ts=int(fields["ts"]),
+                    ),
+                )
 
 
 class TranscriptService:
