@@ -1,31 +1,31 @@
 import { useState, type FormEvent } from "react"
-import { Navigate, useNavigate, useParams } from "react-router-dom"
+import { Navigate, useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ApiError } from "@/lib/api/client"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { selectMfa, verifyMfaThunk } from "@/store/authSlice"
+import { selectMfa, selectTenantSlug, verifyMfaThunk } from "@/store/authSlice"
 
 export function MfaVerify() {
-  const { tenantSlug = "" } = useParams()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const mfa = useAppSelector(selectMfa)
+  const slug = useAppSelector(selectTenantSlug) ?? ""
   const [code, setCode] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   // No challenge in state (e.g. refresh) → back to login.
-  if (!mfa || mfa.step !== "verify") return <Navigate to={`/tenants/${tenantSlug}/login`} replace />
+  if (!mfa || mfa.step !== "verify") return <Navigate to="/login" replace />
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
     setBusy(true)
     try {
-      await dispatch(verifyMfaThunk({ slug: tenantSlug, mfaToken: mfa!.token, code })).unwrap()
+      await dispatch(verifyMfaThunk({ slug, mfaToken: mfa!.token, code })).unwrap()
       navigate("/", { replace: true })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Verification failed.")

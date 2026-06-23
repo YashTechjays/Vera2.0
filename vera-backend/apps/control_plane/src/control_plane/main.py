@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
 from control_plane.api.v1 import router as v1_router
@@ -99,6 +100,15 @@ def create_app(
 
     app = FastAPI(title="Vera Control Plane", version="0.1.0", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
+    # Outermost (added last) so it answers the browser preflight OPTIONS and
+    # attaches CORS headers to every response, including error envelopes.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allow_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+    )
     app.include_router(v1_router)
     register_exception_handlers(app)
 
