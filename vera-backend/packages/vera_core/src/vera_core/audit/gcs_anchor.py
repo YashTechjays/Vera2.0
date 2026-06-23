@@ -19,7 +19,9 @@ class GCSAnchorSink:
         await asyncio.to_thread(self._write_sync, key, body)
 
     def _write_sync(self, key: str, body: bytes) -> None:
-        from google.cloud import storage  # type: ignore[import-untyped]
+        # lazy: prod-only dep. google-cloud-storage ships no py.typed (unlike
+        # google-cloud-kms), so mypy can't resolve the namespace submodule.
+        from google.cloud import storage  # type: ignore[attr-defined]
 
         blob = storage.Client().bucket(self._bucket).blob(self._full_key(key))
         blob.upload_from_string(body, content_type="application/json", if_generation_match=0)
@@ -28,12 +30,11 @@ class GCSAnchorSink:
         return await asyncio.to_thread(self._read_latest_sync)
 
     def _read_latest_sync(self) -> bytes | None:
-        from google.cloud import storage
+        from google.cloud import storage  # type: ignore[attr-defined]
 
         client = storage.Client()
         prefix = self._full_key("anchors/")
         blobs = list(client.list_blobs(self._bucket, prefix=prefix))
         if not blobs:
             return None
-        latest: bytes = max(blobs, key=lambda b: b.name).download_as_bytes()
-        return latest
+        return bytes(max(blobs, key=lambda b: b.name).download_as_bytes())

@@ -164,9 +164,9 @@ async def verify_against_anchor(
 
 def build_anchor_sink(settings: "Settings") -> AnchorSink:
     if settings.audit_anchor_bucket:
-        from vera_core.audit.gcs_anchor import (  # type: ignore[import-not-found]
+        from vera_core.audit.gcs_anchor import (
             GCSAnchorSink,  # lazy: prod only
         )
 
-        return GCSAnchorSink(settings.audit_anchor_bucket, settings.audit_anchor_prefix)  # type: ignore[no-any-return]
+        return GCSAnchorSink(settings.audit_anchor_bucket, settings.audit_anchor_prefix)
     return LocalFilesystemAnchorSink(Path(settings.audit_anchor_local_dir))
