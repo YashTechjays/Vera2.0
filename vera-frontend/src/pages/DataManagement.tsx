@@ -42,7 +42,6 @@ const STATUS_OPTIONS: PatientFormStatus[] = [
 type SortKey =
   | "appointment_date"
   | "appointment_type"
-  | "chart_number"
   | "patient_name"
   | "member_policy_id"
   | "insurance_provider"
@@ -50,7 +49,6 @@ type SortKey =
 const COLUMNS: { key: SortKey; label: string }[] = [
   { key: "appointment_date", label: "Appointment Date" },
   { key: "appointment_type", label: "Appointment Type" },
-  { key: "chart_number", label: "Chart No" },
   { key: "patient_name", label: "Patient Name" },
   { key: "member_policy_id", label: "Member/Policy ID" },
   { key: "insurance_provider", label: "Insurance Provider" },
@@ -258,7 +256,6 @@ export function DataManagement() {
                 <TableCell className="text-muted-foreground">
                   {f.appointment_type || "—"}
                 </TableCell>
-                <TableCell className="text-muted-foreground">{f.chart_number || "—"}</TableCell>
                 <TableCell className="font-medium capitalize">{f.patient_name || "—"}</TableCell>
                 <TableCell className="text-muted-foreground">
                   {f.member_policy_id || "—"}
