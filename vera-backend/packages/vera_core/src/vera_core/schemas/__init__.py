@@ -1,5 +1,6 @@
 from .dto import CallSummary, JoinTokenResponse, StartCallRequest
 from .form_template import FieldType, FormField, FormTemplate
+from .persona import PersonaTweak
 
 __all__ = [
     "CallSummary",
@@ -7,5 +8,6 @@ __all__ = [
     "FormField",
     "FormTemplate",
     "JoinTokenResponse",
+    "PersonaTweak",
     "StartCallRequest",
 ]
