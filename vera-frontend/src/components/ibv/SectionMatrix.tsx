@@ -34,8 +34,11 @@ function MatrixCell({ rowPath, colKey, field, rowSpan }: {
     : undefined
 
   return (
-    <td className="border border-ibv-input-border p-0 align-middle" rowSpan={rowSpan}>
-      <div className="relative">
+    // h-px is the table-cell "fill height" trick: the cell collapses to its real
+    // (possibly row-spanned) height, and the h-full child then stretches to it,
+    // so the input covers the whole cell with no top/bottom background strip.
+    <td className="h-px border border-ibv-input-border p-0" rowSpan={rowSpan}>
+      <div className="relative h-full">
         <FieldRenderer
           field={field}
           path={path}
@@ -43,6 +46,7 @@ function MatrixCell({ rowPath, colKey, field, rowSpan }: {
           onChange={(v) => setValue(path, v)}
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? "70px" : undefined}
+          borderless
         />
         {showDispute && (
           <div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5">
