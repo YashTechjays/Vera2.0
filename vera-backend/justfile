@@ -57,6 +57,10 @@ seed-user email password:
 seed-schemas:
     uv run python scripts/seed.py --schemas
 
+# Anchor audit_log chain heads to the WORM bucket (GKE CronJob entrypoint)
+anchor-audit:
+    uv run python scripts/audit_anchor.py
+
 # Bootstrap platform operator #1 (SUPER_ADMIN, password+MFA): just bootstrap-platform you@x.com secret
 bootstrap-platform email password:
     BOOTSTRAP_ADMIN_EMAIL="{{email}}" BOOTSTRAP_ADMIN_PASSWORD="{{password}}" uv run python scripts/bootstrap_platform_admin.py
