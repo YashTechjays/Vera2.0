@@ -8,6 +8,7 @@ the single source of truth. The defaults below are local-dev only.
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -85,6 +86,24 @@ class Settings(BaseSettings):
     # LiveKit server URL (ws:// for local dev, wss:// in prod).
     # Unset → `build_livekit_gateway` raises ValueError.
     livekit_url: str | None = None
+
+    # --- cors ---------------------------------------------------------------
+    # Browser origins allowed to call the API cross-origin (the SPA dev server;
+    # the deployed frontend origin(s) in prod). No "*": credentials + PHI require
+    # an explicit allowlist. Override with VERA_CORS_ALLOW_ORIGINS as a
+    # comma-separated string or a JSON list.
+    cors_allow_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def _split_origins(cls, value: object) -> object:
+        # Accept a comma-separated string (friendlier than JSON in .env).
+        if isinstance(value, str):
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
 
     @property
     def is_local(self) -> bool:

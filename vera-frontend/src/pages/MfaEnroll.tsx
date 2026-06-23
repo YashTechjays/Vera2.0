@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react"
-import { Navigate, useNavigate, useParams } from "react-router-dom"
+import { Navigate, useNavigate } from "react-router-dom"
 import { QRCodeSVG } from "qrcode.react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -8,19 +8,19 @@ import { Label } from "@/components/ui/label"
 import { ApiError } from "@/lib/api/client"
 import { RecoveryCodes } from "@/components/auth/RecoveryCodes"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { selectMfa, enrollActivateThunk } from "@/store/authSlice"
+import { selectMfa, selectTenantSlug, enrollActivateThunk } from "@/store/authSlice"
 
 export function MfaEnroll() {
-  const { tenantSlug = "" } = useParams()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const mfa = useAppSelector(selectMfa)
+  const slug = useAppSelector(selectTenantSlug) ?? ""
   const [code, setCode] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [recovery, setRecovery] = useState<string[] | null>(null)
 
-  if (!mfa || mfa.step !== "enroll") return <Navigate to={`/tenants/${tenantSlug}/login`} replace />
+  if (!mfa || mfa.step !== "enroll") return <Navigate to="/login" replace />
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -28,7 +28,7 @@ export function MfaEnroll() {
     setBusy(true)
     try {
       const codes = await dispatch(
-        enrollActivateThunk({ slug: tenantSlug, mfaToken: mfa!.token, code }),
+        enrollActivateThunk({ slug, mfaToken: mfa!.token, code }),
       ).unwrap()
       setRecovery(codes)
     } catch (err) {
