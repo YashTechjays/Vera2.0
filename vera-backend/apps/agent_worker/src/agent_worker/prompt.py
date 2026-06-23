@@ -1,7 +1,7 @@
 """Agent persona for the Vera infertility-verification voice worker.
 
-Chat-only slice: no tool machinery. The cascade agent (Task 7) imports these
-strings and wires up the LLM pipeline.
+Chat-only slice: no tool machinery. The cascade agent imports these strings
+and wires up the LLM pipeline.
 """
 
 from __future__ import annotations
