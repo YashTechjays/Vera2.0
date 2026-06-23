@@ -215,14 +215,9 @@ Expected: FAIL — `ImportError: cannot import name 'parse_persona_tweak'`.
 
 - [ ] **Step 3: Implement the overlay functions**
 
-Replace `apps/agent_worker/src/agent_worker/prompt.py:88-93` (the `_INSTRUCTIONS` constant and `build_instructions`) with:
+Add `import json` and `from vera_core.schemas import PersonaTweak` to the top of `apps/agent_worker/src/agent_worker/prompt.py` (after the existing `from __future__ import annotations`). Leave the `_INSTRUCTIONS` constant (line 88) in place — `agent.py` still imports it until Task 3. Replace only `build_instructions` (lines 91-93) and add the two new functions:
 
 ```python
-import json
-
-from vera_core.schemas import PersonaTweak
-
-
 def build_instructions(tweak: PersonaTweak | None = None) -> str:
     """Chat-only instructions: base persona (+ optional tenant extra instructions)
     followed by the Cartesia readback guide (we use sonic-3.5)."""
@@ -252,7 +247,7 @@ def parse_persona_tweak(metadata: str | None) -> PersonaTweak:
         return PersonaTweak()
 ```
 
-Note: the old module-level `_INSTRUCTIONS` constant is removed; `agent.py` (Task 3) stops importing it.
+Note: `_INSTRUCTIONS` stays for now (still imported by `agent.py`); Task 3 removes it together with the import change so no commit leaves a broken importer.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -272,6 +267,7 @@ git commit -m "feat(persona): apply tweak in worker prompt builder + fail-safe p
 
 **Files:**
 - Modify: `apps/agent_worker/src/agent_worker/agent.py:13,18-25`
+- Modify: `apps/agent_worker/src/agent_worker/prompt.py` (delete unused `_INSTRUCTIONS`)
 - Test: `apps/agent_worker/tests/unit/test_agent.py`
 
 **Interfaces:**
@@ -327,6 +323,8 @@ to:
 from agent_worker.prompt import build_instructions, resolve_greeting
 ```
 
+Then delete the now-unused `_INSTRUCTIONS` constant from `apps/agent_worker/src/agent_worker/prompt.py` (the `_INSTRUCTIONS = f"{SYSTEM_PROMPT}\n\n{CARTESIA_MARKUP_GUIDE}"` line). `build_instructions()` is now the only assembler. Grep to confirm no other importer: `grep -rn "_INSTRUCTIONS" apps/` should return nothing after this.
+
 Replace the `__init__`/`on_enter` block (lines 18-25) with:
 
 ```python
@@ -359,7 +357,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/agent_worker/src/agent_worker/agent.py apps/agent_worker/tests/unit/test_agent.py
+git add apps/agent_worker/src/agent_worker/agent.py apps/agent_worker/src/agent_worker/prompt.py apps/agent_worker/tests/unit/test_agent.py
 git commit -m "feat(persona): VeraAgent accepts per-call instructions and greeting"
 ```
 
