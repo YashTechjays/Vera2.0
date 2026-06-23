@@ -1,12 +1,23 @@
 """Tests for VeraAgent — chat-only persona agent with PHI-wall node overrides."""
 
 from agent_worker.agent import VeraAgent
+from agent_worker.prompt import build_instructions
 from vera_core.phi import PassthroughPHIBoundary
+from vera_core.schemas import PersonaTweak
 
 
 def test_vera_agent_is_chat_only_with_persona() -> None:
     agent = VeraAgent(boundary=PassthroughPHIBoundary(), session_id="s1")
-    # chat-only: no tools registered
     assert list(agent.tools) == []
-    # persona instructions are attached
     assert "infertility" in agent.instructions.lower()
+
+
+def test_vera_agent_accepts_overlaid_instructions() -> None:
+    instructions = build_instructions(PersonaTweak(extra_instructions="Confirm member ID twice."))
+    agent = VeraAgent(
+        boundary=PassthroughPHIBoundary(),
+        session_id="s1",
+        instructions=instructions,
+        greeting="Hello there.",
+    )
+    assert "Confirm member ID twice." in agent.instructions

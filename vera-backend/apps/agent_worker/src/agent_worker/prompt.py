@@ -89,9 +89,6 @@ Cartesia Sonic 3.5 sounds natural from plain prose, so keep writing plain senten
 Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature and will be read aloud). Never speak a tag name out loud. Never wrap a tool call in a tag."""
 
 
-_INSTRUCTIONS = f"{SYSTEM_PROMPT}\n\n{CARTESIA_MARKUP_GUIDE}"
-
-
 def build_instructions(tweak: PersonaTweak | None = None) -> str:
     """Chat-only instructions: base persona (+ optional tenant extra instructions)
     followed by the Cartesia readback guide (we use sonic-3.5)."""

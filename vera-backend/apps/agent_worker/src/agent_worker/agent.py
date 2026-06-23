@@ -10,19 +10,30 @@ from collections.abc import AsyncIterable
 from livekit import rtc
 from livekit.agents import Agent, ModelSettings, stt
 
-from agent_worker.prompt import _INSTRUCTIONS, GREETING
+from agent_worker.prompt import build_instructions, resolve_greeting
 from agent_worker.seams import hydrate_stream, redact_event
 from vera_core.phi import PHIBoundaryProtocol
 
 
 class VeraAgent(Agent):
-    def __init__(self, boundary: PHIBoundaryProtocol, session_id: str) -> None:
+    def __init__(
+        self,
+        boundary: PHIBoundaryProtocol,
+        session_id: str,
+        *,
+        instructions: str | None = None,
+        greeting: str | None = None,
+    ) -> None:
         self._boundary = boundary
         self._session_id = session_id
-        super().__init__(instructions=_INSTRUCTIONS, tools=[])
+        self._greeting = greeting if greeting is not None else resolve_greeting()
+        super().__init__(
+            instructions=instructions if instructions is not None else build_instructions(),
+            tools=[],
+        )
 
     async def on_enter(self) -> None:
-        self.session.say(GREETING)
+        self.session.say(self._greeting)
 
     async def stt_node(
         self,
