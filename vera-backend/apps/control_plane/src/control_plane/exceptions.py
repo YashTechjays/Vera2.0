@@ -115,6 +115,11 @@ class NotFoundError(CustomAPIException):
         super().__init__(DefaultExceptionCode.NOT_FOUND, message=message, description=description)
 
 
+class ConflictError(CustomAPIException):
+    def __init__(self, *, message: str | None = None, description: str | None = None) -> None:
+        super().__init__(DefaultExceptionCode.CONFLICT, message=message, description=description)
+
+
 class CustomAPIResponse:
     """Builds the FastAPI `responses=` map that documents the error envelopes a
     route may emit, so they flow into OpenAPI alongside `response_model`."""

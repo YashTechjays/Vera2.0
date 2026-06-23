@@ -13,6 +13,7 @@ import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
 import { Settings } from "@/pages/Settings"
+import { VoiceLab } from "@/pages/VoiceLab"
 import { Placeholder } from "@/pages/Placeholder"
 
 function App() {
@@ -35,6 +36,7 @@ function App() {
             <Route index element={<LiveMonitoring />} />
             <Route path="data-management" element={<DataManagement />} />
             <Route path="users" element={<Users />} />
+            <Route path="voice-lab" element={<VoiceLab />} />
             <Route path="call-history" element={<Placeholder title="Call History" />} />
             <Route path="analytics" element={<Placeholder title="Analytics" />} />
             <Route path="settings" element={<Settings />} />

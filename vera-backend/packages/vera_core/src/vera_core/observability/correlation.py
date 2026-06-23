@@ -14,6 +14,20 @@ from uuid import UUID
 _PREFIX = "call"
 _SEP = "--"
 
+# Voice-session participant identities — a cross-process vocabulary the control
+# plane mints and the agent worker reads. The worker greets only once a non-monitor
+# participant (the browser caller or the SIP callee) is present, so the monitor is
+# the one identity it must recognize as listen-only.
+CALLER_IDENTITY_PREFIX = "caller-"  # browser participant that publishes its mic
+MONITOR_IDENTITY_PREFIX = "monitor-"  # listen-only browser observer (outbound mode)
+SIP_CALLEE_IDENTITY = "phone-callee"  # outbound phone callee dialed in via SIP
+
+
+def is_listen_only_identity(identity: str) -> bool:
+    """True for a participant that only listens (the monitor) and so must not, on
+    its own, trigger the agent's greeting."""
+    return identity.startswith(MONITOR_IDENTITY_PREFIX)
+
 
 class RoomRef(NamedTuple):
     tenant_id: UUID
