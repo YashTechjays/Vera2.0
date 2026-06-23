@@ -6,6 +6,10 @@ strings and wires up the LLM pipeline.
 
 from __future__ import annotations
 
+import json
+
+from vera_core.schemas import PersonaTweak
+
 SYSTEM_PROMPT = """You are a voice bot verifying insurance coverage for infertility services over the phone. Your responses will be spoken out loud, so keep them short, casual, and fluid, exactly like a natural human conversation.
 
 Do not output any special characters, symbols, or bullet points in your speech. Speak in plain sentences only.
@@ -88,6 +92,30 @@ Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature 
 _INSTRUCTIONS = f"{SYSTEM_PROMPT}\n\n{CARTESIA_MARKUP_GUIDE}"
 
 
-def build_instructions() -> str:
-    """Chat-only instructions: persona + Cartesia readback guide (we use sonic-3.5)."""
-    return _INSTRUCTIONS
+def build_instructions(tweak: PersonaTweak | None = None) -> str:
+    """Chat-only instructions: base persona (+ optional tenant extra instructions)
+    followed by the Cartesia readback guide (we use sonic-3.5)."""
+    parts = [SYSTEM_PROMPT]
+    if tweak is not None and tweak.extra_instructions:
+        parts.append(tweak.extra_instructions)
+    parts.append(CARTESIA_MARKUP_GUIDE)
+    return "\n\n".join(parts)
+
+
+def resolve_greeting(tweak: PersonaTweak | None = None) -> str:
+    """The outbound opener: the tenant override when set, else the base greeting."""
+    if tweak is not None and tweak.greeting:
+        return tweak.greeting
+    return GREETING
+
+
+def parse_persona_tweak(metadata: str | None) -> PersonaTweak:
+    """Parse LiveKit dispatch metadata into a PersonaTweak. Fail-safe: any missing,
+    empty, or malformed metadata yields the no-op tweak so a bad config never kills
+    a live call (mirrors the cascade's fail-safe posture, not the strict PHI seams)."""
+    if not metadata:
+        return PersonaTweak()
+    try:
+        return PersonaTweak.model_validate(json.loads(metadata))
+    except (json.JSONDecodeError, ValueError):
+        return PersonaTweak()
