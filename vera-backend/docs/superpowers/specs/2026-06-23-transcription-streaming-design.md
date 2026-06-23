@@ -99,29 +99,36 @@ The single source of truth shared by both processes (room-name-is-the-key princi
   not a `TranscriptEvent`.
 - Constants: `ROLE_USER`, `ROLE_AGENT`, and the `ENDED` sentinel marker (a stream entry
   with field `event=ended`).
-- `TranscriptStore` (Protocol) with a `RedisTranscriptStore(redis)` impl and an
-  `InMemoryTranscriptStore` impl for tests:
-  - **publisher side** (worker): `publish(room_name, event)` → `XADD key * role <r>
-    text <t> ts <ts>` then refresh the backstop TTL; `mark_ended(room_name)` → `XADD`
-    the `ended` sentinel then `EXPIRE key <grace>`.
-  - **reader side** (control plane): `read(room_name) -> AsyncIterator[StreamItem]` —
-    `XRANGE key 0 +` (replay), then loop `XREAD BLOCK <ms> STREAMS key <last_id>` (tail),
-    yielding `(entry_id, TranscriptEvent)` and stopping on the `ended` sentinel or when
-    the key disappears. Each yielded item carries its Redis entry id for the SSE `id:`.
+- `TranscriptStore` (Protocol) — the low-level transport — with a
+  `RedisTranscriptStore(redis)` impl and an `InMemoryTranscriptStore` impl for tests:
+  - **publisher side**: `publish(room_name, event)` → `XADD key * role <r> text <t>
+    ts <ts>` then refresh the backstop TTL; `mark_ended(room_name)` → `XADD` the `ended`
+    sentinel then `EXPIRE key <grace>`; `delete(room_name)`.
+  - **reader side**: `read(room_name) -> AsyncIterator[(entry_id, TranscriptEvent)]` —
+    replay (`XREAD` from `0`) then tail (`XREAD BLOCK`), stopping on the `ended` sentinel
+    or when the key disappears. Each item carries its Redis entry id for the SSE `id:`.
+- `TranscriptService(store)` — **the reusable domain API** every consumer/producer goes
+  through (so no caller touches raw Redis): `publish_turn(room_name, role, text, *, ts)`,
+  `consume(room_name)` (the shared replay-then-tail iterator — SSE frames over it, the
+  future finalizer drains it), `collect(room_name)` (drain an ended stream to a list, for
+  the finalizer/tests), `end(room_name)`, `clear(room_name)`. The worker publishes via
+  the service; the control plane consumes via the service; both are injected a
+  `TranscriptService` rather than a bare store.
 
-Keeping the read/write Redis details and the event schema in one module means the worker
-and the control plane cannot drift on key, schema, or sentinel.
+Keeping the schema, key, transport, and service in one module means the worker and the
+control plane cannot drift, and the **consume method is defined once and reused**
+everywhere transcripts are read.
 
 ### 4.2 Worker — publish transcript (`apps/agent_worker/.../main.py`)
 
-- Add `redis` to `apps/agent_worker/pyproject.toml`; build the client with
-  `create_redis(settings.redis_url)` in `entrypoint` (lazy connect, like `LiveKitAPI`);
-  `await redis.aclose()` in the shutdown callback.
+- Add `redis` to `apps/agent_worker/pyproject.toml`; in `entrypoint` build a
+  `TranscriptService(RedisTranscriptStore(create_redis(settings.redis_url), ...))` (lazy
+  connect, like `LiveKitAPI`); `await redis.aclose()` in the shutdown callback.
 - Gate on dispatch metadata: Voice Lab's `create_call_room` passes
   `{"wait_for_speaker": true, "publish_transcript": true}`. If
   `meta.get("publish_transcript")` is falsy → no publishing (so `/calls` is unchanged).
-- After `session.start(...)`, register two `AgentSession` handlers that map to
-  `TranscriptEvent` and `publish(...)`:
+- Register two `AgentSession` handlers that publish via the service
+  (`service.publish_turn(...)`):
   - `session.on("user_input_transcribed")` → only when `ev.is_final` → role `user`,
     `text = ev.transcript`. This text is **post-`stt_node`**, i.e. already redacted.
   - `session.on("conversation_item_added")` → only `item.role == "assistant"` → role
@@ -157,7 +164,7 @@ and the control plane cannot drift on key, schema, or sentinel.
    generator then touches **Redis only**. The exact mechanism (explicit `async with
    sessionmaker()` for the authz/audit step vs. a scoped dependency) is settled at
    implementation; the contract is: no DB connection is held for the stream's lifetime.
-5. **Stream** — iterate `store.read(room_name)`, emitting each item as an SSE frame:
+5. **Stream** — iterate `service.consume(room_name)`, emitting each item as an SSE frame:
    ```
    id: <redis-entry-id>
    data: {"role":"user","text":"...","ts":1750000000000}
@@ -167,8 +174,8 @@ and the control plane cannot drift on key, schema, or sentinel.
    client disconnects (the generator observes `await request.is_disconnected()` /
    the cancelled task and closes its Redis reader).
 
-The transcript store reader is injected like the other infra deps (a `get_transcript_store`
-reading `app.state` over the existing `app.state.redis`).
+The `TranscriptService` is injected like the other infra deps (a `get_transcript_service`
+reading `app.state.transcript_service`, built over the existing `app.state.redis`).
 
 ### 4.4 Settings — `vera_core/config/settings.py`
 
