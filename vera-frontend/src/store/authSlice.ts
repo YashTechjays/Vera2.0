@@ -41,6 +41,9 @@ export const loginThunk = createAsyncThunk(
     arg: { slug: string; email: string; password: string },
     { dispatch },
   ): Promise<authApi.LoginResult["mfa"]> => {
+    // Remember the workspace so the MFA step (which runs before a session exists)
+    // can read it from the store instead of the URL.
+    dispatch(setTenantSlug(arg.slug))
     const res = await authApi.login(arg.slug, arg.email, arg.password)
     if (res.mfa === "none") {
       setSession(res.session_token ?? "", arg.slug)
@@ -108,6 +111,9 @@ const authSlice = createSlice({
     setMfa(state, action: PayloadAction<MfaState | null>) {
       state.mfa = action.payload
     },
+    setTenantSlug(state, action: PayloadAction<string>) {
+      state.tenantSlug = action.payload
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -172,7 +178,7 @@ const authSlice = createSlice({
   },
 })
 
-export const { forceLogout, clearError, setMfa } = authSlice.actions
+export const { forceLogout, clearError, setMfa, setTenantSlug } = authSlice.actions
 
 export default authSlice.reducer
 

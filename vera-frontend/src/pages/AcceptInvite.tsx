@@ -28,7 +28,7 @@ export function AcceptInvite() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const loginHref = `/tenants/${tenantSlug}/login`
+  const loginHref = "/login"
 
   async function onSetPassword(e: FormEvent) {
     e.preventDefault()
