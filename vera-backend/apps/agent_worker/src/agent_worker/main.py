@@ -12,6 +12,7 @@ from opentelemetry import trace
 
 from agent_worker.agent import VeraAgent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from vera_core.config.settings import get_settings
 from vera_core.observability.correlation import call_trace_attributes, parse_room_name
 from vera_core.observability.otel import configure_observability
@@ -67,13 +68,27 @@ async def entrypoint(ctx: JobContext) -> None:
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
 
+    # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
+    # plane). Fail-safe: bad/missing metadata falls back to the base persona.
+    tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
+    instructions = build_instructions(tweak)
+    greeting = resolve_greeting(tweak)
+
     session = build_session(vad=ctx.proc.userdata.get("vad"))
 
     async def _on_shutdown() -> None:
         await boundary.close_session(session_id)
 
     ctx.add_shutdown_callback(_on_shutdown)
-    await session.start(agent=VeraAgent(boundary=boundary, session_id=session_id), room=ctx.room)
+    await session.start(
+        agent=VeraAgent(
+            boundary=boundary,
+            session_id=session_id,
+            instructions=instructions,
+            greeting=greeting,
+        ),
+        room=ctx.room,
+    )
 
 
 def build_worker_options() -> WorkerOptions:
