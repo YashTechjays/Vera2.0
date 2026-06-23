@@ -67,8 +67,11 @@ class InMemoryTranscriptStore:
 
     async def mark_ended(self, room_name: str) -> None:
         key = transcript_stream_key(room_name)
-        await self._append(key, {_ENDED_FIELD: _ENDED_VALUE})
         async with self._cond:
+            self._seq += 1
+            self._entries.setdefault(key, []).append(
+                (f"{self._seq}-0", {_ENDED_FIELD: _ENDED_VALUE})
+            )
             self._ended.add(key)
             self._cond.notify_all()
 
@@ -128,7 +131,11 @@ class TranscriptService:
         return self._store.read(room_name)
 
     async def collect(self, room_name: str) -> list[TranscriptEvent]:
-        """Drain an ended stream into a list (finalizer/tests)."""
+        """Drain an ended stream into a list (finalizer/tests).
+
+        Precondition: end() must have been called for this room, otherwise this
+        coroutine blocks indefinitely (it tails until the ended sentinel).
+        """
         return [event async for _id, event in self._store.read(room_name)]
 
     async def end(self, room_name: str) -> None:
