@@ -29,6 +29,7 @@ from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.observability.otel import configure_observability
 from vera_core.redis import create_redis
+from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 
 def create_app(
@@ -45,6 +46,7 @@ def create_app(
     invitation_store: InvitationStore | None = None,
     livekit: LiveKitGateway | None = None,
     secrets: SecretProvider | None = None,
+    transcript_service: TranscriptService | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -84,6 +86,13 @@ def create_app(
             build_livekit_gateway(settings, app.state.secrets)
             if settings.livekit_url is not None
             else None
+        )
+        app.state.transcript_service = transcript_service or TranscriptService(
+            RedisTranscriptStore(
+                _redis(),
+                ttl_seconds=settings.transcript_stream_ttl_seconds,
+                end_grace_seconds=settings.transcript_end_grace_seconds,
+            )
         )
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)

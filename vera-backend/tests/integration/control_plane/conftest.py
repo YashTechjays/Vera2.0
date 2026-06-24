@@ -24,6 +24,7 @@ from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.models import AppUser, Tenant, UserRole
+from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
 
@@ -63,6 +64,11 @@ class FakeLiveKit(LiveKitGateway):
 @pytest.fixture(scope="session")
 def fake_livekit() -> FakeLiveKit:
     return FakeLiveKit()
+
+
+@pytest.fixture(scope="session")
+def transcript_service() -> TranscriptService:
+    return TranscriptService(InMemoryTranscriptStore())
 
 
 class RBACWorld:
@@ -212,6 +218,7 @@ async def authz_app(
     email_sender: InMemoryEmailSender,
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
+    transcript_service: TranscriptService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
     the whole request path, including the audit writer. The session store is the
@@ -228,6 +235,7 @@ async def authz_app(
         invitation_store=invitation_store,
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
+        transcript_service=transcript_service,
     )
     async with app.router.lifespan_context(app):
         yield app
