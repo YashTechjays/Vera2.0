@@ -138,6 +138,48 @@ async def test_upload_creates_form_and_intake_answers(
         assert all(a.source == "intake" and a.is_current and a.call_id is None for a in answers)
 
 
+async def test_upload_promotes_worklist_columns(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    form_type_id, version_id = ibv_schema
+    token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
+
+    payload = {
+        **INTAKE_PAYLOAD,
+        "appointment_information": {"appointment_type": "New Patient"},
+        "insurance_information": {"policy_number": "POL-550411"},
+        "insurance_reference_information": {
+            "insurance": "Blue Cross",
+            "phone_number": "+1 555 0100",
+        },
+    }
+    resp = await client.post(
+        "/api/v1/patient-forms",
+        json={
+            "form_type_id": str(form_type_id),
+            "schema_version_id": str(version_id),
+            "intake_payload": payload,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    form_id = UUID(resp.json()["data"]["id"])
+
+    async with tenant_session(rls_sessionmaker, rbac_world.tenant_id) as session:
+        form = (
+            await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+        ).scalar_one()
+        assert form.appointment_type == "New Patient"
+        assert form.member_policy_id == "POL-550411"
+        assert form.insurance_provider == "Blue Cross"
+        assert form.insurance_provider_phone_number == "+1 555 0100"
+
+
 async def test_missing_required_returns_422_with_paths_no_phi(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

@@ -46,10 +46,11 @@ export type PatientFormSummary = {
   patient_name: string | null
   chart_number: string | null
   appointment_date: string | null
-  /** Intake-snapshot fields (not promoted columns). */
+  /** Promoted columns lifted from the intake snapshot. */
   appointment_type: string | null
   member_policy_id: string | null
   insurance_provider: string | null
+  insurance_provider_phone_number: string | null
   completion_pct: number
   dispute_count: number
   created_at: string

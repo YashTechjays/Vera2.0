@@ -141,6 +141,10 @@ async def upload_patient_form(
             appointment_date=promoted.appointment_date,
             chart_number=promoted.chart_number,
             member_id=promoted.member_id,
+            appointment_type=promoted.appointment_type,
+            member_policy_id=promoted.member_policy_id,
+            insurance_provider=promoted.insurance_provider,
+            insurance_provider_phone_number=promoted.insurance_provider_phone_number,
             completion_pct=0,
             retry_count=0,
         )
@@ -204,17 +208,18 @@ async def upload_patient_form(
 
 
 class PatientFormSummary(BaseModel):
-    """Worklist row — promoted identifiers + a few intake fields + counts."""
+    """Worklist row — promoted identifiers + display columns + counts."""
 
     id: UUID
     status: str
     patient_name: str | None
     chart_number: str | None
     appointment_date: date | None
-    # Read from the intake snapshot (intake_payload), not promoted columns.
+    # Promoted out of intake_payload into typed columns (see PatientForm).
     appointment_type: str | None
     member_policy_id: str | None
     insurance_provider: str | None
+    insurance_provider_phone_number: str | None
     completion_pct: float
     dispute_count: int
     created_at: datetime
@@ -278,16 +283,6 @@ def _audit_phi_read(
         resource_id=resource_id,
         detail={"fields": fields},
     )
-
-
-def _intake_field(form: PatientForm, section: str, field: str) -> str | None:
-    """One value from a form's intake snapshot (flat `{section: {field: value}}`).
-    Worklist display only — returns None when the section/field is absent."""
-    section_obj = form.intake_payload.get(section)
-    if not isinstance(section_obj, dict):
-        return None
-    value = section_obj.get(field)
-    return None if value is None else str(value)
 
 
 async def _unresolved_dispute_count_by_form(
@@ -456,9 +451,10 @@ async def list_patient_forms(
             patient_name=r.patient_name,
             chart_number=r.chart_number,
             appointment_date=r.appointment_date,
-            appointment_type=_intake_field(r, "appointment_information", "appointment_type"),
-            member_policy_id=_intake_field(r, "insurance_information", "policy_number"),
-            insurance_provider=_intake_field(r, "insurance_reference_information", "insurance"),
+            appointment_type=r.appointment_type,
+            member_policy_id=r.member_policy_id,
+            insurance_provider=r.insurance_provider,
+            insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
             dispute_count=counts.get(r.id, 0),
             created_at=r.created_at,
@@ -477,8 +473,9 @@ async def list_patient_forms(
                 "chart_number",
                 "appointment_date",
                 "appointment_type",
-                "policy_number",
-                "insurance",
+                "member_policy_id",
+                "insurance_provider",
+                "insurance_provider_phone_number",
             ],
         )
     )

@@ -14,11 +14,13 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-# The schema's pre-provided context section (chart/patient identifiers) and the
-# section carrying the appointment date — the only two the intake step reads
-# structurally. Everything else is stored opaquely in `intake_payload`.
+# Intake sections the promotion step reads structurally to lift typed columns out
+# of `intake_payload`. Everything else stays stored opaquely in `intake_payload`.
 _PATIENT_INFO = "patient_information"
 _APPOINTMENT_INFO = "appointment_information"
+_INSURANCE_INFO = "insurance_information"
+# Payer-reference section (carrier name + phone) supplied alongside the form.
+_INSURANCE_REF = "insurance_reference_information"
 
 
 class InvalidIntakeValue(ValueError):
@@ -83,13 +85,20 @@ def iter_leaf_answers(payload: dict[str, Any]) -> Iterator[tuple[str, Any]]:
 
 @dataclass(frozen=True)
 class PromotedIdentifiers:
-    """The searchable identifier columns promoted out of `intake_payload`."""
+    """The typed columns promoted out of `intake_payload` at intake time — both the
+    searchable identifiers and the worklist display fields."""
 
     patient_name: str | None
     patient_dob: date | None
     appointment_date: date | None
     chart_number: str | None
     member_id: str | None  # no schema source at intake — always None here
+    # Worklist display fields (projection-only; lifted so the list query selects
+    # columns instead of parsing `intake_payload` per row).
+    appointment_type: str | None
+    member_policy_id: str | None
+    insurance_provider: str | None
+    insurance_provider_phone_number: str | None
 
 
 def _get(payload: dict[str, Any], section: str, field: str) -> Any:
@@ -133,4 +142,10 @@ def promote_columns(payload: dict[str, Any]) -> PromotedIdentifiers:
         ),
         chart_number=chart,
         member_id=None,
+        # Display fields kept verbatim (trim/empty→None only): they're shown as
+        # captured, not matched against, so no case/format normalization.
+        appointment_type=_clean_str(_get(payload, _APPOINTMENT_INFO, "appointment_type")),
+        member_policy_id=_clean_str(_get(payload, _INSURANCE_INFO, "policy_number")),
+        insurance_provider=_clean_str(_get(payload, _INSURANCE_REF, "insurance")),
+        insurance_provider_phone_number=_clean_str(_get(payload, _INSURANCE_REF, "phone_number")),
     )
