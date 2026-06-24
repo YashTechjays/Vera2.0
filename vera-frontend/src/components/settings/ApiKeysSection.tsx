@@ -2,7 +2,13 @@ import { useCallback, useEffect, useState, type FormEvent } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Select } from "@/components/ui/select"
+import {
+  RichSelect,
+  RichSelectContent,
+  RichSelectItem,
+  RichSelectTrigger,
+  RichSelectValue,
+} from "@/components/ui/rich-select"
 import {
   Table,
   TableBody,
@@ -143,8 +149,8 @@ export function ApiKeysSection() {
             <code className="flex-1 truncate rounded border bg-white px-2 py-1 font-mono text-xs">
               {created.token}
             </code>
-            <Button type="button" size="sm" variant="outline" onClick={copyToken}>
-              {copied ? "Copied" : "Copy"}
+            <Button type="button" size="sm" onClick={copyToken}>
+              {copied ? "Copied" : "Copy token"}
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => setCreated(null)}>
               Done
@@ -166,14 +172,20 @@ export function ApiKeysSection() {
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-xs text-muted-foreground">Scope</label>
-          <Select value={scope} onChange={(e) => setScope(e.target.value)} className="w-56">
-            {scopes.length === 0 && <option value="">No scopes available</option>}
-            {scopes.map((s) => (
-              <option key={s.code} value={s.code}>
-                {s.code} — {s.description}
-              </option>
-            ))}
-          </Select>
+          <RichSelect value={scope} onValueChange={setScope} disabled={scopes.length === 0}>
+            <RichSelectTrigger className="w-72">
+              <RichSelectValue
+                placeholder={scopes.length === 0 ? "No scopes available" : "Select a scope"}
+              />
+            </RichSelectTrigger>
+            <RichSelectContent>
+              {scopes.map((s) => (
+                <RichSelectItem key={s.code} value={s.code} caption={s.description}>
+                  <span className="font-mono">{s.code}</span>
+                </RichSelectItem>
+              ))}
+            </RichSelectContent>
+          </RichSelect>
         </div>
         <Button type="submit" disabled={creating || !name.trim() || !scope}>
           {creating ? "Creating…" : "Create key"}
@@ -195,7 +207,6 @@ export function ApiKeysSection() {
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead>Name</TableHead>
-              <TableHead>Key ID</TableHead>
               <TableHead>Scope</TableHead>
               <TableHead>Expires</TableHead>
               <TableHead>Status</TableHead>
@@ -205,14 +216,14 @@ export function ApiKeysSection() {
           <TableBody>
             {keys === null && (
               <TableRow>
-                <TableCell colSpan={6} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
                   Loading…
                 </TableCell>
               </TableRow>
             )}
             {keys?.length === 0 && !error && (
               <TableRow>
-                <TableCell colSpan={6} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
                   No API keys yet.
                 </TableCell>
               </TableRow>
@@ -220,7 +231,6 @@ export function ApiKeysSection() {
             {keys?.map((k) => (
               <TableRow key={k.id}>
                 <TableCell className="font-medium">{k.name}</TableCell>
-                <TableCell className="font-mono text-xs text-muted-foreground">{k.id}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">{k.scope}</TableCell>
                 <TableCell className="text-muted-foreground">
                   {k.expires_at ? formatDate(k.expires_at) : "Never"}
