@@ -20,9 +20,11 @@ from livekit.agents import (
     cli,
 )
 from opentelemetry import trace
+from redis.asyncio import Redis
 
 from agent_worker.agent import VeraAgent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.transcript_publisher import attach_transcript_publisher
 from vera_core.config.settings import get_settings
 from vera_core.observability.correlation import (
     call_trace_attributes,
@@ -31,6 +33,8 @@ from vera_core.observability.correlation import (
 )
 from vera_core.observability.otel import configure_observability
 from vera_core.phi import build_phi_boundary
+from vera_core.redis import create_redis
+from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("agent_worker")
 
@@ -160,7 +164,28 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session = build_session(vad=ctx.proc.userdata.get("vad"))
 
+    # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
+    transcript_redis: Redis | None = None
+    transcript_service: TranscriptService | None = None
+    if meta.get("publish_transcript"):
+        transcript_redis = create_redis(settings.redis_url)
+        transcript_service = TranscriptService(
+            RedisTranscriptStore(
+                transcript_redis,
+                ttl_seconds=settings.transcript_stream_ttl_seconds,
+                end_grace_seconds=settings.transcript_end_grace_seconds,
+            )
+        )
+        attach_transcript_publisher(session, transcript_service, room_name)
+
     async def _on_shutdown() -> None:
+        if transcript_service is not None:
+            try:
+                await transcript_service.end(room_name)
+            except Exception:  # best-effort; never block shutdown
+                logger.exception("failed to mark transcript ended for %s", room_name)
+        if transcript_redis is not None:
+            await transcript_redis.aclose()
         await boundary.close_session(session_id)
 
     ctx.add_shutdown_callback(_on_shutdown)
