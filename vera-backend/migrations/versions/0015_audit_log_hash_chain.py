@@ -1,7 +1,7 @@
 """audit_log WORM hash chain — seq, trigger, verifier, backfill
 
-Revision ID: 0013
-Revises: 0012
+Revision ID: 0015
+Revises: 0014
 Create Date: 2026-06-22
 
 Per-(tenant_id) SHA-256 hash chain over the PHI-access audit_log, mirroring the
@@ -16,8 +16,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0013"
-down_revision: str | None = "0012"
+revision: str = "0015"
+down_revision: str | None = "0014"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

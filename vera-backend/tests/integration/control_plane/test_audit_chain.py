@@ -2,7 +2,7 @@
 
 Rows are written through the REAL emit path (DatabaseAuditWriter on the
 RLS-enforcing connection → ORM insert under the tenant GUC), so the in-DB
-BEFORE INSERT trigger (migration 0013) populates seq/prev_hash/row_hash. Rows
+BEFORE INSERT trigger (migration 0015) populates seq/prev_hash/row_hash. Rows
 are read back as superuser (bypasses WORM SELECT-only RLS) to assert. Each test
 mints fresh tenant UUIDs so its chain starts at genesis and is isolated.
 """

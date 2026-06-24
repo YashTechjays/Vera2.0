@@ -65,7 +65,7 @@ class AuditLog(Base, TenantScopedMixin):
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
     # WORM per-row hash chain (ADR §7 / ERD). All three columns are populated by
-    # the audit_chain() BEFORE INSERT trigger (migration 0013) — never by the
+    # the audit_chain() BEFORE INSERT trigger (migration 0015) — never by the
     # writer. FetchedValue on seq tells SQLAlchemy the column is DB-assigned so
     # it is omitted from INSERT and refreshed after commit.
     prev_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
