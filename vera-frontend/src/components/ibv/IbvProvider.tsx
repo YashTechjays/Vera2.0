@@ -24,8 +24,12 @@ import {
 } from "@/lib/ibv/disputes"
 import type { FormValues } from "@/lib/ibv/types"
 import { ApiError } from "@/lib/api/client"
-import { getPatientForm, resolveDisputes } from "@/lib/patient-forms/api"
-import type { PatientFormDetail } from "@/lib/patient-forms/types"
+import {
+  getPatientForm,
+  resolveDisputes,
+  updatePatientFormStatus,
+} from "@/lib/patient-forms/api"
+import type { PatientFormDetail, PatientFormStatus } from "@/lib/patient-forms/types"
 import { valueToInput } from "@/lib/patient-forms/display"
 
 type SaveState = "idle" | "saving" | "saved"
@@ -48,6 +52,13 @@ type IbvContextValue = {
   loading: boolean
   error: string | null
   patientName: string | null
+  /** Current lifecycle status of the open form (null for the demo/mock form). */
+  status: PatientFormStatus | null
+  /** Change the form's status via the dedicated endpoint (status-only). */
+  changeStatus: (next: PatientFormStatus) => Promise<void>
+  /** A rejected status change (e.g. open disputes block completion) — shown inline. */
+  statusError: string | null
+  statusChanging: boolean
   /** Increments after each successful save — worklists watch it to refetch. */
   savedTick: number
   modalOpen: boolean
@@ -98,6 +109,9 @@ export function IbvProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [savedTick, setSavedTick] = useState(0)
+  const [status, setStatus] = useState<PatientFormStatus | null>(null)
+  const [statusError, setStatusError] = useState<string | null>(null)
+  const [statusChanging, setStatusChanging] = useState(false)
 
   const errors = useMemo(() => validateAll(values), [values])
 
@@ -120,6 +134,8 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     setFormId(null)
     setError(null)
     setLoading(false)
+    setStatus(null)
+    setStatusError(null)
     seed({ ...mockValues, ...seedValues(mockDisputes) }, mockDisputes, "Demo Patient")
     setModalOpen(true)
   }, [seed])
@@ -139,10 +155,13 @@ export function IbvProvider({ children }: { children: ReactNode }) {
       setFlagsState({})
       setDirty(false)
       setSaveState("idle")
+      setStatus(null)
+      setStatusError(null)
       getPatientForm(id)
         .then((detail) => {
           const { values: v, disputes: d } = adaptDetail(detail)
           seed(v, d, detail.patient_name)
+          setStatus(detail.status)
         })
         .catch((err) => {
           setError(err instanceof ApiError ? err.message : "Could not load this form.")
@@ -204,6 +223,31 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     [disputes, flags],
   )
 
+  const changeStatus = useCallback(
+    async (next: PatientFormStatus) => {
+      setStatusError(null)
+      // Demo/mock form has no backend row — reflect the change locally only.
+      if (mode === "mock" || !formId) {
+        setStatus(next)
+        return
+      }
+      setStatusChanging(true)
+      try {
+        const res = await updatePatientFormStatus(formId, next)
+        setStatus(res.status)
+        setSavedTick((t) => t + 1) // worklist refetches the new status
+      } catch (err) {
+        // e.g. 409 "resolve all disputes before completing this form" — warn inline.
+        setStatusError(
+          err instanceof ApiError ? err.message : "Could not change the status.",
+        )
+      } finally {
+        setStatusChanging(false)
+      }
+    },
+    [mode, formId],
+  )
+
   const save = useCallback(async () => {
     setSaveState("saving")
     if (mode === "mock" || !formId) {
@@ -234,6 +278,8 @@ export function IbvProvider({ children }: { children: ReactNode }) {
       })
       const { values: v, disputes: d } = adaptDetail(refreshed)
       seed(v, d, refreshed.patient_name)
+      setStatus(refreshed.status)
+      setStatusError(null) // resolving disputes clears any "resolve first" warning
       setSaveState("saved")
       setSavedTick((t) => t + 1)
     } catch (err) {
@@ -259,6 +305,10 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     loading,
     error,
     patientName,
+    status,
+    changeStatus,
+    statusError,
+    statusChanging,
     savedTick,
     modalOpen,
     openForm,
