@@ -5,7 +5,7 @@
 
 import { getToken } from "@/lib/auth/storage"
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1"
+export const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1"
 
 // Registered by the store so a 401 can clear auth state without this module
 // importing the store (avoids a circular dependency).

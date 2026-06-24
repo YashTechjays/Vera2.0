@@ -52,7 +52,10 @@ async def test_browser_session_returns_caller_token_with_wait_metadata(
     # browser speaker identity + wait_for_speaker dispatch metadata
     assert body["token"].startswith(f"faketoken:{body['room_name']}:caller-")
     assert fake_livekit.created[before] == body["room_name"]
-    assert fake_livekit.dispatch_metadata[before] == {"wait_for_speaker": True}
+    assert fake_livekit.dispatch_metadata[before] == {
+        "wait_for_speaker": True,
+        "publish_transcript": True,
+    }
 
 
 @pytest.mark.asyncio

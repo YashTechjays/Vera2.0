@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
@@ -19,6 +19,7 @@ import {
   type VoiceSessionMode,
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
+import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
 
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.Disconnected]: "Disconnected",
@@ -66,6 +67,52 @@ function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => vo
             </ul>
           )}
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function TranscriptPanel({ roomName }: { roomName: string }) {
+  const [turns, setTurns] = useState<TranscriptEvent[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    streamTranscription(roomName, {
+      signal: controller.signal,
+      onEvent: (e) => setTurns((prev) => [...prev, e]),
+    }).catch((err) => {
+      if (!controller.signal.aborted) {
+        setError(err instanceof Error ? err.message : "Transcript stream failed.")
+      }
+    })
+    return () => controller.abort()
+  }, [roomName])
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Live transcript</CardTitle>
+      </CardHeader>
+      <CardContent className="max-h-80 space-y-2 overflow-y-auto text-sm">
+        {turns.length === 0 && !error && (
+          <p className="text-muted-foreground">Waiting for the conversation…</p>
+        )}
+        {turns.map((t, i) => (
+          <div key={i}>
+            <span
+              className={
+                t.role === "agent"
+                  ? "font-medium text-emerald-700"
+                  : "font-medium text-foreground"
+              }
+            >
+              {t.role === "agent" ? "Agent" : "Caller"}:
+            </span>{" "}
+            <span className="text-muted-foreground">{t.text}</span>
+          </div>
+        ))}
+        {error && <p className="text-destructive">{error}</p>}
       </CardContent>
     </Card>
   )
@@ -128,6 +175,7 @@ export function VoiceLab() {
           onError={(e) => setError(e.message)}
         >
           <SessionPanel mode={session.mode} onEnd={endSession} />
+          <TranscriptPanel key={session.room_name} roomName={session.room_name} />
           <RoomAudioRenderer />
         </LiveKitRoom>
       ) : (

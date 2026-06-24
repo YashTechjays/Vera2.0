@@ -11,12 +11,17 @@ interim convention in `calls.py`.
 """
 
 import re
+from collections.abc import AsyncIterator
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import AppSettings, LiveKit, TenantId
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import require
+from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.deps import current_identity, get_audit, get_sessionmaker, get_transcript_service
 from control_plane.exceptions import (
     ConflictError,
     CustomAPIException,
@@ -24,8 +29,12 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
+from vera_core.db.rls import tenant_session
+from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.observability.correlation import (
     CALLER_IDENTITY_PREFIX,
     MONITOR_IDENTITY_PREFIX,
@@ -33,6 +42,7 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.schemas import StartVoiceSessionRequest, VoiceSessionResponse
+from vera_core.transcript import TranscriptEvent, TranscriptService
 
 router = APIRouter(tags=["voice-lab"])
 
@@ -77,7 +87,9 @@ async def start_voice_session(
     prefix = MONITOR_IDENTITY_PREFIX if is_outbound else CALLER_IDENTITY_PREFIX
     browser_identity = f"{prefix}{caller.user_id}"
 
-    await livekit.create_call_room(room_name, metadata={"wait_for_speaker": True})
+    await livekit.create_call_room(
+        room_name, metadata={"wait_for_speaker": True, "publish_transcript": True}
+    )
     if is_outbound:
         assert body.phone_number is not None  # validated non-None above when is_outbound
         await livekit.create_sip_participant(room_name, body.phone_number)
@@ -117,3 +129,68 @@ async def end_voice_session(
         raise NotFoundError(message="voice session not found")
     await livekit.delete_room(room_name)
     return ok(None, message="Voice session ended.")
+
+
+def _sse_frame(entry_id: str, event: TranscriptEvent) -> str:
+    return f"id: {entry_id}\ndata: {event.model_dump_json()}\n\n"
+
+
+@router.get("/voice-lab/sessions/{room_name}/transcript")
+async def stream_transcript(
+    room_name: str,
+    request: Request,
+    identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
+    audit: Annotated[AuditSink, Depends(get_audit)],
+    service: Annotated[TranscriptService, Depends(get_transcript_service)],
+) -> StreamingResponse:
+    # Tenant scope without a DB hit: only tenant users; the room name embeds the tenant
+    # uuid and must match the caller's (cross-tenant guard, like end_voice_session).
+    # These structural 404s (non-tenant account, unparseable or cross-tenant room) are
+    # intentionally NOT audited: there is no caller-owned tenant scope to attribute the
+    # probe to, and RLS already hides existence — matching require()/end_voice_session,
+    # which audit the authz allow/deny on a valid tenant-scoped request (done below),
+    # not the not-found/cross-tenant rejections.
+    ref = parse_room_name(room_name)
+    if identity.account_type != "tenant" or identity.tenant_id is None or ref is None:
+        raise NotFoundError(message="voice session not found")
+    tenant_id = identity.tenant_id
+    if ref.tenant_id != tenant_id:
+        raise NotFoundError(message="voice session not found")
+
+    # Authorize in a SHORT-LIVED tenant session, then release it before streaming — an
+    # SSE response is long-lived; we must not hold a DB connection for its duration.
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        user_id, permissions = await resolver.effective_permissions(
+            session, tenant_id, identity.user_id
+        )
+    allowed = "calls:read" in permissions
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=user_id,
+            actor_label=identity.email or identity.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type="transcript",
+            resource_id=room_name,
+            permission_key="calls:read",
+            decision="allow" if allowed else "deny",
+            request_id=current_request_id(request),
+        )
+    )
+    if not allowed:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="missing permission calls:read"
+        )
+
+    async def _events() -> AsyncIterator[str]:
+        async for entry_id, event in service.consume(room_name):
+            yield _sse_frame(entry_id, event)
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
