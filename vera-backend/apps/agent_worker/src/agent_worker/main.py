@@ -24,6 +24,7 @@ from redis.asyncio import Redis
 
 from agent_worker.agent import VeraAgent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import attach_transcript_publisher
 from vera_core.config.settings import get_settings
 from vera_core.observability.correlation import (
@@ -183,6 +184,12 @@ async def entrypoint(ctx: JobContext) -> None:
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
 
+    # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
+    # plane). Fail-safe: bad/missing metadata falls back to the base persona.
+    tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
+    instructions = build_instructions(tweak)
+    greeting = resolve_greeting(tweak)
+
     session = build_session(vad=ctx.proc.userdata.get("vad"))
 
     # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
@@ -221,7 +228,12 @@ async def entrypoint(ctx: JobContext) -> None:
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
     await session.start(
-        agent=VeraAgent(boundary=boundary, session_id=session_id),
+        agent=VeraAgent(
+            boundary=boundary,
+            session_id=session_id,
+            instructions=instructions,
+            greeting=greeting,
+        ),
         room=ctx.room,
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
         record=False,

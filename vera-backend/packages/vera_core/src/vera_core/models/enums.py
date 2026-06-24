@@ -153,6 +153,7 @@ class AuthEvent(enum.StrEnum):
     TENANT_ELEVATION_ENDED = "tenant_elevation_ended"
     PROVIDER_ENABLED = "provider_enabled"
     PROVIDER_DISABLED = "provider_disabled"
+    PERSONA_TWEAK_UPDATED = "persona_tweak_updated"
     # Platform-tier authorization decisions. The PHI audit_log is tenant-scoped and
     # cannot hold a null-tenant row, so a SUPER_ADMIN's authz on a /platform route is
     # recorded here instead (ADR-0006). Tenant-route authz stays in audit_log.

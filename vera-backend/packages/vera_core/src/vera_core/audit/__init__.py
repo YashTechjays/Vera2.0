@@ -1,3 +1,15 @@
+from .anchor import (
+    GENESIS_ANCHOR,
+    AnchorSink,
+    ChainHead,
+    LocalFilesystemAnchorSink,
+    anchor_key,
+    build_anchor_object,
+    build_anchor_sink,
+    read_chain_heads,
+    run_anchor,
+    verify_against_anchor,
+)
 from .writer import (
     AuditRecord,
     AuditSink,
@@ -10,12 +22,22 @@ from .writer import (
 )
 
 __all__ = [
+    "GENESIS_ANCHOR",
+    "AnchorSink",
     "AuditRecord",
     "AuditSink",
     "AuthAuditRecord",
     "AuthAuditSink",
+    "ChainHead",
     "DatabaseAuditWriter",
     "DatabaseAuthAuditWriter",
+    "LocalFilesystemAnchorSink",
     "LoggingAuditSink",
     "LoggingAuthAuditSink",
+    "anchor_key",
+    "build_anchor_object",
+    "build_anchor_sink",
+    "read_chain_heads",
+    "run_anchor",
+    "verify_against_anchor",
 ]

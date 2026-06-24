@@ -37,7 +37,7 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
 
     # Runtime knobs (spec Fig 7). retry_fill_threshold is the fill-% below which
     # a form auto-requeues for a retry call; persona_tweak overlays the prompt.
-    max_agents_per_va: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_agents_per_va: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.95)
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 

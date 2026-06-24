@@ -9,6 +9,7 @@ from control_plane.api.v1.platform import router as platform_router
 from control_plane.api.v1.platform_auth import router as platform_auth_router
 from control_plane.api.v1.providers import router as providers_router
 from control_plane.api.v1.roles import router as roles_router
+from control_plane.api.v1.tenant_config import router as tenant_config_router
 from control_plane.api.v1.users import router as users_router
 from control_plane.api.v1.voice_lab import router as voice_lab_router
 
@@ -22,5 +23,6 @@ router.include_router(users_router)
 router.include_router(roles_router)
 router.include_router(providers_router)
 router.include_router(api_keys_router)
+router.include_router(tenant_config_router)
 router.include_router(integrations_router)
 router.include_router(voice_lab_router)

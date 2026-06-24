@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # Unset → `build_livekit_gateway` raises ValueError.
     livekit_url: str | None = None
 
+    # --- audit anchoring (WORM bucket) -------------------------------------
+    # Periodic anchoring of audit_log chain heads to an object-locked GCS bucket
+    # (tamper-PROOF hardening of the tamper-EVIDENT hash chain; devops-todo #10b).
+    # Set audit_anchor_bucket → GCSAnchorSink (prod); unset → LocalFilesystemAnchorSink (dev).
+    audit_anchor_bucket: str | None = None
+    audit_anchor_prefix: str = "audit-anchors"
+    audit_anchor_local_dir: str = ".audit-anchors"
     # Outbound telephony trunk for Voice Lab / SIP calls. Unset → outbound disabled
     # (fail closed); the LiveKit SIP service + trunk are provisioned out of band.
     livekit_sip_trunk_id: str | None = None  # VERA_LIVEKIT_SIP_TRUNK_ID
