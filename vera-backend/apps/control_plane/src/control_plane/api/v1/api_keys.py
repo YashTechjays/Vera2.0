@@ -14,6 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.api.v1.common import (
     AppSettings,
@@ -28,6 +29,7 @@ from control_plane.auth.rbac import require
 from control_plane.deps import client_ip, get_idempotency_store
 from control_plane.exceptions import (
     BadRequestError,
+    CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
@@ -129,6 +131,15 @@ async def create_api_key(
         revoked=False,
     )
     session.add(row)
+    try:
+        # Flush now so the unique (tenant_id, name) violation surfaces here as a
+        # clean 409 instead of a 500 at commit time, after the audit is written.
+        await session.flush()
+    except IntegrityError as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message=f"an active API key named '{body.name}' already exists",
+        ) from exc
     token = api_key.format_token(tenant_id, key_id, secret)
     await emit_auth_event(
         audit,
