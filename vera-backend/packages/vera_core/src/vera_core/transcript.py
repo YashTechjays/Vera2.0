@@ -14,6 +14,7 @@ from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 ROLE_USER: Literal["user"] = "user"
 ROLE_AGENT: Literal["agent"] = "agent"
@@ -102,14 +103,20 @@ class RedisTranscriptStore:
     so connected readers drain then the key clears. `read` replays from `0` via XREAD
     then tails (BLOCK), stopping on the sentinel or when the key disappears."""
 
-    # Idle poll cadence. XREAD BLOCK returns the moment a new entry (incl. the ended
-    # sentinel) arrives, so this only bounds how often an idle stream re-checks EXISTS.
-    _BLOCK_MS = 5000
-
-    def __init__(self, redis: Redis, *, ttl_seconds: int, end_grace_seconds: int) -> None:
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        ttl_seconds: int,
+        end_grace_seconds: int,
+        block_ms: int = 5000,
+    ) -> None:
         self._redis = redis
         self._ttl_seconds = ttl_seconds
         self._end_grace_seconds = end_grace_seconds
+        # XREAD BLOCK wakes instantly on a new entry (incl. the ended sentinel); this
+        # only bounds how often an idle stream re-checks EXISTS for an abnormal clear.
+        self._block_ms = block_ms
 
     async def publish(self, room_name: str, event: TranscriptEvent) -> None:
         # XADD + the rolling backstop EXPIRE in a single round-trip.
@@ -133,12 +140,23 @@ class RedisTranscriptStore:
     async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
         key = transcript_stream_key(room_name)
         last_id = "0"
+        seen = False  # have we observed the stream actually exist yet?
         while True:
-            result = await self._redis.xread({key: last_id}, block=self._BLOCK_MS)
+            try:
+                result = await self._redis.xread({key: last_id}, block=self._block_ms)
+            except RedisTimeoutError:
+                # redis-py turns BLOCK into a per-command read deadline and RAISES
+                # (not empty) when an idle stream produces nothing in the window.
+                # Treat it as "no new entries this interval".
+                result = None
             if not result:
-                if not await self._redis.exists(key):
-                    return  # stream cleared (grace TTL elapsed / deleted)
+                # Terminate only if the stream was live and is now gone (grace TTL
+                # elapsed / deleted). A not-yet-created stream stays open and waits
+                # for its first entry (the worker may still be spinning up).
+                if seen and not await self._redis.exists(key):
+                    return
                 continue
+            seen = True
             xread_result = cast(
                 list[tuple[str, list[tuple[str, dict[str, str]]]]],
                 result,

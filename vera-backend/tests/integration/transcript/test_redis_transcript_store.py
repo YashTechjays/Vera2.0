@@ -60,3 +60,35 @@ async def test_consume_tails_live(svc: tuple[TranscriptService, Redis]) -> None:
     await service.end("itroom")
     await asyncio.wait_for(task, timeout=2.0)
     assert seen == ["live"]
+
+
+async def test_consume_survives_idle_block_timeout() -> None:
+    # A live stream that goes idle between turns makes XREAD BLOCK raise redis
+    # TimeoutError (redis-py 8 turns BLOCK into a read deadline). read() must tolerate
+    # it and keep tailing rather than crash the SSE. tiny block_ms => fast idle windows.
+    redis = create_redis("redis://localhost:6379/0")
+    await redis.delete(transcript_stream_key("idleroom"))
+    service = TranscriptService(
+        RedisTranscriptStore(redis, ttl_seconds=3600, end_grace_seconds=60, block_ms=100)
+    )
+    seen: list[str] = []
+
+    async def consume() -> None:
+        async for _id, e in service.consume("idleroom"):
+            seen.append(e.text)
+
+    await service.publish_turn("idleroom", ROLE_USER, "first", ts=1)  # stream now exists
+    task = asyncio.create_task(consume())
+    try:
+        # Sit idle across several block windows so XREAD BLOCK times out repeatedly.
+        await asyncio.sleep(0.5)
+        assert not task.done()  # the idle timeouts did not crash / close the reader
+        await service.publish_turn("idleroom", ROLE_USER, "after-idle", ts=2)
+        await service.end("idleroom")
+        await asyncio.wait_for(task, timeout=2.0)
+        assert seen == ["first", "after-idle"]
+    finally:
+        if not task.done():
+            task.cancel()
+        await redis.delete(transcript_stream_key("idleroom"))
+        await redis.aclose()
