@@ -67,6 +67,19 @@ class PatientForm(Base, TenantScopedMixin):
     appointment_date: Mapped[date | None] = mapped_column(Date, nullable=True, info=PHI_INFO)
     chart_number: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
 
+    # Worklist display fields promoted out of `intake_payload` so the list query
+    # selects typed columns instead of parsing JSON per row (no fuzzy/exact search
+    # over them yet, so no index — they're projection-only). Treated as PHI and
+    # carried under CMEK like the identifiers above.
+    appointment_type: Mapped[str | None] = mapped_column(String(64), nullable=True, info=PHI_INFO)
+    member_policy_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
+    insurance_provider: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, info=PHI_INFO
+    )
+    insurance_provider_phone_number: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, info=PHI_INFO
+    )
+
     completion_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
