@@ -24,6 +24,7 @@ from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.models import AppUser, Tenant, UserRole
+from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
 
@@ -39,10 +40,22 @@ class FakeLiveKit(LiveKitGateway):
     def __init__(self) -> None:
         # Skip the parent __init__ — we don't need real LiveKit credentials.
         self.created: list[str] = []
+        self.dispatch_metadata: list[dict[str, object] | None] = []
+        self.sip_calls: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
         self._url = "ws://fake:7880"
 
-    async def create_call_room(self, room_name: str, metadata: str = "") -> None:
+    async def create_call_room(
+        self, room_name: str, metadata: dict[str, object] | None = None
+    ) -> None:
         self.created.append(room_name)
+        self.dispatch_metadata.append(metadata)
+
+    async def create_sip_participant(self, room_name: str, phone_number: str) -> None:
+        self.sip_calls.append((room_name, phone_number))
+
+    async def delete_room(self, room_name: str) -> None:
+        self.deleted.append(room_name)
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
         return f"faketoken:{room_name}:{identity}"
@@ -51,6 +64,11 @@ class FakeLiveKit(LiveKitGateway):
 @pytest.fixture(scope="session")
 def fake_livekit() -> FakeLiveKit:
     return FakeLiveKit()
+
+
+@pytest.fixture(scope="session")
+def transcript_service() -> TranscriptService:
+    return TranscriptService(InMemoryTranscriptStore())
 
 
 class RBACWorld:
@@ -200,6 +218,7 @@ async def authz_app(
     email_sender: InMemoryEmailSender,
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
+    transcript_service: TranscriptService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
     the whole request path, including the audit writer. The session store is the
@@ -216,6 +235,7 @@ async def authz_app(
         invitation_store=invitation_store,
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
+        transcript_service=transcript_service,
     )
     async with app.router.lifespan_context(app):
         yield app

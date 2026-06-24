@@ -1,4 +1,10 @@
-from .dto import CallSummary, JoinTokenResponse, StartCallRequest
+from .dto import (
+    CallSummary,
+    JoinTokenResponse,
+    StartCallRequest,
+    StartVoiceSessionRequest,
+    VoiceSessionResponse,
+)
 from .form_template import FieldType, FormField, FormTemplate
 from .persona import PersonaTweak
 
@@ -10,4 +16,6 @@ __all__ = [
     "JoinTokenResponse",
     "PersonaTweak",
     "StartCallRequest",
+    "StartVoiceSessionRequest",
+    "VoiceSessionResponse",
 ]

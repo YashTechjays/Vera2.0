@@ -5,22 +5,127 @@ into a room named by vera_core.observability.correlation.room_name_for_call. The
 room name IS the session id and the Langfuse correlation key.
 """
 
+import asyncio
+import json
 import logging
 
-from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
+from livekit import rtc
+from livekit.agents import (
+    NOT_GIVEN,
+    JobContext,
+    JobProcess,
+    NotGiven,
+    RoomInputOptions,
+    WorkerOptions,
+    cli,
+)
 from opentelemetry import trace
+from redis.asyncio import Redis
 
 from agent_worker.agent import VeraAgent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
+from agent_worker.transcript_publisher import attach_transcript_publisher
 from vera_core.config.settings import get_settings
-from vera_core.observability.correlation import call_trace_attributes, parse_room_name
+from vera_core.observability.correlation import (
+    call_trace_attributes,
+    is_listen_only_identity,
+    parse_room_name,
+)
 from vera_core.observability.otel import configure_observability
 from vera_core.phi import build_phi_boundary
+from vera_core.redis import create_redis
+from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("agent_worker")
 
 AGENT_NAME = "vera-agent"
+
+# Bound the wait so a never-answered outbound call doesn't pin a worker forever.
+_SPEAKER_TIMEOUT_S = 60.0
+
+# A SIP participant joins the room while it is still *ringing* (JOINING state) and
+# only sets sip.callStatus="active" once the callee answers. Greeting on mere
+# presence would talk into a ringing phone, so the SIP callee counts as ready only
+# once answered. (LiveKit's AMD uses the same signal.)
+_SIP_CALL_STATUS_ATTR = "sip.callStatus"
+_SIP_CALL_STATUS_ACTIVE = "active"
+
+
+def _is_ready_speaker(participant: rtc.Participant) -> bool:
+    """A participant whose presence means the agent may greet: a browser caller
+    (ready as soon as it joins) or a SIP callee that has answered. The listen-only
+    monitor never qualifies, and a SIP callee that is merely ringing does not yet."""
+    if is_listen_only_identity(participant.identity):
+        return False
+    if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return participant.attributes.get(_SIP_CALL_STATUS_ATTR) == _SIP_CALL_STATUS_ACTIVE
+    return True
+
+
+async def wait_for_speaker(
+    ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_S
+) -> rtc.RemoteParticipant | None:
+    """Block until a ready, non-monitor remote participant is present, or the timeout.
+
+    Returns that participant once the browser caller has joined or the SIP callee has
+    answered, or None on timeout. The caller pins the agent's audio input to the
+    returned participant so it listens to the speaker and not the listen-only monitor.
+    """
+    for p in ctx.room.remote_participants.values():
+        if _is_ready_speaker(p):
+            return p
+
+    loop = asyncio.get_running_loop()
+    arrived: asyncio.Future[rtc.RemoteParticipant] = loop.create_future()
+
+    def _resolve(participant: rtc.Participant) -> None:
+        if arrived.done() or not _is_ready_speaker(participant):
+            return
+        # Look up the RemoteParticipant (filters out the agent's own local participant,
+        # which never appears in remote_participants).
+        remote = ctx.room.remote_participants.get(participant.identity)
+        if remote is not None:
+            arrived.set_result(remote)
+
+    def _on_connected(participant: rtc.RemoteParticipant) -> None:
+        _resolve(participant)
+
+    def _on_attributes_changed(_changed: dict[str, str], participant: rtc.Participant) -> None:
+        # The SIP callee's ring → active transition arrives here, not as a new join.
+        _resolve(participant)
+
+    ctx.room.on("participant_connected", _on_connected)
+    ctx.room.on("participant_attributes_changed", _on_attributes_changed)
+    try:
+        async with asyncio.timeout(timeout_s):
+            return await arrived
+    except TimeoutError:
+        return None
+    finally:
+        ctx.room.off("participant_connected", _on_connected)
+        ctx.room.off("participant_attributes_changed", _on_attributes_changed)
+
+
+def build_room_input_options(speaker_identity: str | NotGiven) -> RoomInputOptions:
+    """Audio-input + teardown policy for the AgentSession, shared by every path.
+
+    Pin the agent's audio input to the resolved speaker when there is one. Otherwise RoomIO
+    links to the first eligible participant — in Voice Lab outbound mode that can be the
+    listen-only monitor (which publishes no audio), leaving the agent deaf to the SIP callee.
+    A NOT_GIVEN identity (the /calls path) keeps RoomIO's auto-link to the sole participant.
+
+    close_on_disconnect (the framework default) closes the session when that linked speaker
+    hangs up; delete_room_on_close then deletes the room — dropping any listen-only monitor
+    and hanging up the SIP leg — so a phone or browser hangup ends the whole call. This is the
+    framework's own close→drain→delete path; a hand-rolled participant_disconnected handler
+    that called delete_room directly raced this teardown and tore the engine down mid-drain.
+    """
+    return RoomInputOptions(
+        participant_identity=speaker_identity,
+        close_on_disconnect=True,
+        delete_room_on_close=True,
+    )
 
 
 def session_id_for(room_name: str) -> str:
@@ -65,6 +170,17 @@ async def entrypoint(ctx: JobContext) -> None:
     # console/connect mic test (foreign room) this sets only `vera.room`.
     trace.get_current_span().set_attributes(call_trace_attributes(room_name))
 
+    # Dispatch metadata gates greeting timing. The /calls path passes none, so it
+    # keeps the immediate behavior; Voice Lab passes {"wait_for_speaker": true} so
+    # the agent holds until the human/phone participant can actually hear it.
+    speaker: rtc.RemoteParticipant | None = None
+    meta = json.loads(ctx.job.metadata or "{}")
+    if meta.get("wait_for_speaker"):
+        speaker = await wait_for_speaker(ctx)
+        if speaker is None:
+            logger.warning("no speaker joined room %s within timeout — not starting", room_name)
+            return
+
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
 
@@ -76,7 +192,31 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session = build_session(vad=ctx.proc.userdata.get("vad"))
 
+    # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
+    transcript_redis: Redis | None = None
+    transcript_service: TranscriptService | None = None
+    if meta.get("publish_transcript"):
+        transcript_redis = create_redis(settings.redis_url)
+        transcript_service = TranscriptService(
+            RedisTranscriptStore(
+                transcript_redis,
+                ttl_seconds=settings.transcript_stream_ttl_seconds,
+                end_grace_seconds=settings.transcript_end_grace_seconds,
+            )
+        )
+        attach_transcript_publisher(session, transcript_service, room_name)
+
     async def _on_shutdown() -> None:
+        if transcript_service is not None:
+            try:
+                await transcript_service.end(room_name)
+            except Exception:  # best-effort; never block shutdown
+                logger.exception("failed to mark transcript ended for %s", room_name)
+        if transcript_redis is not None:
+            try:
+                await transcript_redis.aclose()
+            except Exception:
+                logger.exception("failed to close transcript redis for %s", room_name)
         await boundary.close_session(session_id)
 
     ctx.add_shutdown_callback(_on_shutdown)
@@ -88,6 +228,18 @@ async def entrypoint(ctx: JobContext) -> None:
             greeting=greeting,
         ),
         room=ctx.room,
+    # record=False disables livekit-agents session recording. Left unset it defers to the
+    # server's enable_recording flag, which uploads a session report — including call AUDIO
+    # and the transcript (PHI) — to the LiveKit Cloud observability endpoint at call end. That
+    # crosses the trust boundary (audio off-box to LiveKit Cloud); our only sanctioned
+    # observability is the self-hosted Langfuse/OTel pipeline (configure_observability), which
+    # is independent of this. Disabling it also removes the recording byte-stream sends that
+    # error with "engine is closed" as the room is torn down.
+    await session.start(
+        agent=VeraAgent(boundary=boundary, session_id=session_id),
+        room=ctx.room,
+        room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
+        record=False,
     )
 
 

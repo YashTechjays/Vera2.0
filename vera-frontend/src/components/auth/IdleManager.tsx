@@ -3,35 +3,30 @@ import { useNavigate } from "react-router-dom"
 import { IdleWarningDialog } from "@/components/auth/IdleWarningDialog"
 import { computeIdleState, KEEPALIVE_THROTTLE_MS } from "@/lib/auth/idle"
 import { getSessionStart } from "@/lib/auth/storage"
-import { keepaliveThunk, logoutThunk, selectTenantSlug } from "@/store/authSlice"
-import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { keepaliveThunk, logoutThunk } from "@/store/authSlice"
+import { useAppDispatch } from "@/store/hooks"
 
 const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"] as const
-const DEFAULT_SLUG = import.meta.env.VITE_DEFAULT_TENANT_SLUG ?? ""
 
 // Single idle-manager. Mounted only inside AppShell (authenticated), so every
 // listener/timer is torn down on logout via the effect cleanups when it unmounts.
 export function IdleManager() {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
-  const slug = useAppSelector(selectTenantSlug) ?? DEFAULT_SLUG
 
   const lastActivity = useRef(0)
   const lastKeepalive = useRef(0)
   const warningRef = useRef(false) // mirror of `warning` for event handlers
   const loggingOut = useRef(false)
-  const slugRef = useRef(slug)
 
   const [warning, setWarning] = useState(false)
   const [secondsLeft, setSecondsLeft] = useState(0)
-
-  useEffect(() => { slugRef.current = slug }, [slug])
 
   const doLogout = useCallback(() => {
     if (loggingOut.current) return
     loggingOut.current = true
     void dispatch(logoutThunk()).finally(() => {
-      navigate(`/tenants/${slugRef.current}/login`, { replace: true })
+      navigate("/login", { replace: true })
     })
   }, [dispatch, navigate])
 

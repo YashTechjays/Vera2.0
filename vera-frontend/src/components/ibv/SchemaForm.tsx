@@ -10,11 +10,22 @@ const RIGHT_TOP = [
   "benefit_coverage",
 ]
 // Reference sections, shown at the bottom (teal box, green headers).
-const RAIL_ORDER = [
-  "hospital_information",
-  "provider_reference_information",
-  "insurance_representative",
-]
+const RAIL_ORDER = ["hospital_information", "provider_reference_information"]
+// Schema sections intentionally not rendered anywhere in the form.
+const HIDDEN = ["insurance_representative"]
+
+// Payer-reference values (carrier / phone / portal) ride in `intake_payload` but
+// aren't a form-schema section, so they're rendered from this synthetic section —
+// the field paths still resolve against the form values like any other section.
+const INSURANCE_REFERENCE_SECTION: IbvSection = {
+  section_key: "insurance_reference_information",
+  title: "Insurance Reference",
+  properties: {
+    insurance: { type: "string", title: "Insurance", ui: { widget: "text" } },
+    phone_number: { type: "string", title: "Phone Num", ui: { widget: "text" } },
+    portal: { type: "string", title: "Portal", ui: { widget: "text" } },
+  },
+}
 
 /**
  * Layout (matches the reference's wide, horizontally-scrolling form):
@@ -34,7 +45,7 @@ export function SchemaForm() {
   const rightTop = pick(RIGHT_TOP)
   const rail = pick(RAIL_ORDER)
 
-  const placed = new Set([...LEFT_TOP, ...RIGHT_TOP, ...RAIL_ORDER])
+  const placed = new Set([...LEFT_TOP, ...RIGHT_TOP, ...RAIL_ORDER, ...HIDDEN])
   const rest = schema.sections.filter((s) => !placed.has(s.section_key))
   const tables = rest.filter((s) => getSectionMatrix(s) !== null)
   const otherRows = rest.filter((s) => getSectionMatrix(s) === null)
@@ -62,6 +73,7 @@ export function SchemaForm() {
           {rail.map((s) => (
             <Section key={s.section_key} section={s} green />
           ))}
+          <Section section={INSURANCE_REFERENCE_SECTION} green />
         </aside>
       </div>
 

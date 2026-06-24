@@ -8,6 +8,7 @@ the single source of truth. The defaults below are local-dev only.
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +29,12 @@ class Settings(BaseSettings):
 
     # Memorystore Redis in prod; docker-compose locally.
     redis_url: str = "redis://localhost:6379/0"
+
+    # Live-transcript Redis stream lifetime (Voice Lab / SSE). The rolling backstop
+    # TTL is refreshed on every publish so an abandoned stream self-clears; the end
+    # grace TTL lets connected readers drain the `ended` sentinel before it clears.
+    transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
+    transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
     gcp_project: str | None = None
 
@@ -93,6 +100,27 @@ class Settings(BaseSettings):
     audit_anchor_bucket: str | None = None
     audit_anchor_prefix: str = "audit-anchors"
     audit_anchor_local_dir: str = ".audit-anchors"
+    # Outbound telephony trunk for Voice Lab / SIP calls. Unset → outbound disabled
+    # (fail closed); the LiveKit SIP service + trunk are provisioned out of band.
+    livekit_sip_trunk_id: str | None = None  # VERA_LIVEKIT_SIP_TRUNK_ID
+
+    # --- cors ---------------------------------------------------------------
+    # Browser origins allowed to call the API cross-origin (the SPA dev server;
+    # the deployed frontend origin(s) in prod). No "*": credentials + PHI require
+    # an explicit allowlist. Override with VERA_CORS_ALLOW_ORIGINS as a
+    # comma-separated string or a JSON list.
+    cors_allow_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def _split_origins(cls, value: object) -> object:
+        # Accept a comma-separated string (friendlier than JSON in .env).
+        if isinstance(value, str):
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
 
     @property
     def is_local(self) -> bool:

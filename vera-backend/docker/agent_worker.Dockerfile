@@ -18,6 +18,17 @@ WORKDIR /app
 COPY --from=builder --chown=vera:vera /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 USER vera
+
+# Bake the turn-detector ONNX model (+ languages.json/tokenizer) and Silero VAD
+# assets into the image so jobs never download at runtime — LiveKit's recommended
+# pattern for production workers. Routed through our entrypoint so download-files
+# introspects exactly the plugins the worker registers (turn_detector, silero).
+# Lands in the vera user's HF cache (/home/vera/.cache/huggingface); the runtime
+# process is the same user, so the files are found. Needs huggingface.co reachable
+# at build time. HF_HUB_OFFLINE at runtime then forbids any runtime fetch.
+RUN python -m agent_worker.main download-files
+ENV HF_HUB_OFFLINE=1
+
 # LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET from Secret Manager via
 # workload identity (GCP service principal) — never baked into the image.
 CMD ["python", "-m", "agent_worker.main", "start"]

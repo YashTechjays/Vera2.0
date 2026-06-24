@@ -5,6 +5,7 @@ description = "Vera agent worker — LiveKit Agents worker, dispatched to rooms 
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "livekit-agents[deepgram,google,cartesia,silero,turn-detector]>=1.5.17",
+    "redis>=5.2",
     "vera-core",
 ]
 
@@ -17,3 +18,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_worker"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/agent_worker/py.typed" = "agent_worker/py.typed"

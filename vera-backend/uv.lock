@@ -17,12 +17,14 @@ version = "0.1.0"
 source = { editable = "apps/agent_worker" }
 dependencies = [
     { name = "livekit-agents", extra = ["cartesia", "deepgram", "google", "silero", "turn-detector"] },
+    { name = "redis" },
     { name = "vera-core" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "livekit-agents", extras = ["deepgram", "google", "cartesia", "silero", "turn-detector"], specifier = ">=1.5.17" },
+    { name = "redis", specifier = ">=5.2" },
     { name = "vera-core", editable = "packages/vera_core" },
 ]
 

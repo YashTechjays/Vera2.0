@@ -1,6 +1,7 @@
 """Shared DTOs crossing the control-plane API boundary."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -26,3 +27,19 @@ class JoinTokenResponse(BaseModel):
     token: str
     url: str
     room_name: str
+
+
+class StartVoiceSessionRequest(BaseModel):
+    """Voice Lab session request — talk to the bot in-browser or dial out via SIP."""
+
+    mode: Literal["browser", "outbound"]
+    phone_number: str | None = None  # required + E.164 when mode == "outbound"
+
+
+class VoiceSessionResponse(BaseModel):
+    """LiveKit join details for the browser to connect to the Voice Lab room."""
+
+    room_name: str
+    url: str  # settings.livekit_url, for the browser SDK
+    token: str  # browser join JWT
+    mode: str

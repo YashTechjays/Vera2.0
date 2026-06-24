@@ -1,8 +1,8 @@
 import { PanelLeft, Search, Bell, LogOut } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
-import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { logoutThunk, selectTenantSlug } from "@/store/authSlice"
+import { useAppDispatch } from "@/store/hooks"
+import { logoutThunk } from "@/store/authSlice"
 
 type TopbarProps = {
   onToggleSidebar: () => void
@@ -11,11 +11,10 @@ type TopbarProps = {
 export function Topbar({ onToggleSidebar }: TopbarProps) {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
-  const slug = useAppSelector(selectTenantSlug) ?? (import.meta.env.VITE_DEFAULT_TENANT_SLUG ?? "")
 
   async function onLogout() {
     await dispatch(logoutThunk())
-    navigate(`/tenants/${slug}/login`, { replace: true })
+    navigate("/login", { replace: true })
   }
 
   return (

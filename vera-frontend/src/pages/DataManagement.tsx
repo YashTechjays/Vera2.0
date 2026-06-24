@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { ArrowDown, ArrowUp, Search } from "lucide-react"
 
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
+import { Button } from "@/components/ui/button"
 import {
   Table,
   TableBody,
@@ -13,139 +14,143 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
-import { RecordFormModal } from "@/components/data-management/RecordFormModal"
-import {
-  patientForms,
-  patientStatusStyles,
-  type PatientForm,
-  type PatientFormStatus,
-} from "@/lib/mock-data"
+import { ApiError } from "@/lib/api/client"
+import { usePermission } from "@/lib/auth/permissions"
+import { useIbv } from "@/components/ibv/IbvProvider"
+import { listPatientForms } from "@/lib/patient-forms/api"
+import type { PatientFormStatus, PatientFormSummary } from "@/lib/patient-forms/types"
+import { formatDate, statusBadgeClass, statusLabel } from "@/lib/patient-forms/display"
+
+const PAGE_SIZE = 20
 
 type TabKey = "all" | "completed"
-
 const TABS: { key: TabKey; label: string }[] = [
   { key: "all", label: "All Data" },
   { key: "completed", label: "Completed" },
 ]
 
 const STATUS_OPTIONS: PatientFormStatus[] = [
-  "READY FOR PROCESSING",
-  "IN QUEUE",
-  "IN CALL",
-  "AI PROCESSING",
-  "EXCEPTION REVIEW",
-  "COMPLETED",
+  "ready_for_processing",
+  "in_queue",
+  "in_call",
+  "ai_processing",
+  "exception_review",
+  "completed",
+  "call_failed",
 ]
 
-type SortKey = keyof Pick<
-  PatientForm,
-  | "appointmentDate"
-  | "appointmentType"
-  | "chartNo"
-  | "patientName"
-  | "memberPolicyId"
-  | "insuranceProvider"
+type SortKey =
+  | "appointment_date"
+  | "appointment_type"
+  | "patient_name"
+  | "member_policy_id"
+  | "insurance_provider"
   | "status"
->
-
-/** "MM/DD/YYYY" → "YYYYMMDD" so dates sort chronologically as strings. */
-function toSortableDate(mdy: string): string {
-  const parts = mdy.split("/")
-  if (parts.length !== 3) return mdy
-  const [m, d, y] = parts
-  return `${y}${m}${d}`
-}
-
 const COLUMNS: { key: SortKey; label: string }[] = [
-  { key: "appointmentDate", label: "Appointment Date" },
-  { key: "appointmentType", label: "Appointment Type" },
-  { key: "chartNo", label: "Chart No" },
-  { key: "patientName", label: "Patient Name" },
-  { key: "memberPolicyId", label: "Member/Policy ID" },
-  { key: "insuranceProvider", label: "Insurance Provider" },
+  { key: "appointment_date", label: "Appointment Date" },
+  { key: "appointment_type", label: "Appointment Type" },
+  { key: "patient_name", label: "Patient Name" },
+  { key: "member_policy_id", label: "Member/Policy ID" },
+  { key: "insurance_provider", label: "Insurance Provider" },
   { key: "status", label: "Status" },
 ]
 
 export function DataManagement() {
-  const [forms, setForms] = useState<PatientForm[]>(patientForms)
+  const canRead = usePermission("forms:read")
+  const { openFormById, savedTick } = useIbv()
+
+  const [items, setItems] = useState<PatientFormSummary[] | null>(null)
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
   const [tab, setTab] = useState<TabKey>("all")
+  const [status, setStatus] = useState<"" | PatientFormStatus>("")
   const [query, setQuery] = useState("")
-  const [statusFilter, setStatusFilter] = useState<"" | PatientFormStatus>("")
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
-    key: "appointmentDate",
+    key: "appointment_date",
     dir: "asc",
   })
-  const [selected, setSelected] = useState<PatientForm | null>(null)
-  const [modalOpen, setModalOpen] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const rows = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    const filtered = forms.filter((f) => {
-      if (tab === "completed" && f.status !== "COMPLETED") return false
-      if (statusFilter && f.status !== statusFilter) return false
-      if (
-        q &&
-        ![
-          f.patientName,
-          f.chartNo,
-          f.memberPolicyId,
-          f.insuranceProvider,
-          f.appointmentType,
-        ]
-          .join(" ")
-          .toLowerCase()
-          .includes(q)
-      )
-        return false
-      return true
-    })
-    const sorted = [...filtered].sort((a, b) => {
-      const cmp =
-        sort.key === "appointmentDate"
-          ? toSortableDate(a.appointmentDate).localeCompare(
-              toSortableDate(b.appointmentDate)
-            )
-          : a[sort.key].localeCompare(b[sort.key])
-      return sort.dir === "asc" ? cmp : -cmp
-    })
-    return sorted
-  }, [forms, tab, query, statusFilter, sort])
+  // Tab "Completed" forces a status filter; otherwise the Select drives it.
+  const effectiveStatus = tab === "completed" ? "completed" : status || undefined
 
-  const toggleSort = (key: SortKey) =>
-    setSort((prev) =>
-      prev.key === key
-        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: "asc" }
+  useEffect(() => {
+    if (!canRead) return
+    let cancelled = false
+    listPatientForms({
+      page,
+      page_size: PAGE_SIZE,
+      status: effectiveStatus,
+      q: query.trim() || undefined,
+    })
+      .then((res) => {
+        if (cancelled) return
+        setItems(res.items)
+        setTotal(res.total)
+        setError(null)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof ApiError ? err.message : "Could not load patient forms.")
+          setItems([])
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [canRead, page, effectiveStatus, query, savedTick])
+
+  const toggleSort = useCallback(
+    (key: SortKey) =>
+      setSort((prev) =>
+        prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" },
+      ),
+    [],
+  )
+
+  if (!canRead) {
+    return (
+      <div className="p-6">
+        <h1 className="text-xl font-semibold">Data Management</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          You don't have permission to view patient forms.
+        </p>
+      </div>
     )
-
-  const openRecord = (record: PatientForm) => {
-    setSelected(record)
-    setModalOpen(true)
   }
 
-  const handleStatusChange = (id: string, status: PatientFormStatus) => {
-    setForms((prev) => prev.map((f) => (f.id === id ? { ...f, status } : f)))
-    setSelected((prev) => (prev && prev.id === id ? { ...prev, status } : prev))
-  }
+  // Client-side sort of the current page.
+  const rows = [...(items ?? [])].sort((a, b) => {
+    const av = a[sort.key] ?? ""
+    const bv = b[sort.key] ?? ""
+    const cmp =
+      typeof av === "number" && typeof bv === "number"
+        ? av - bv
+        : String(av).localeCompare(String(bv))
+    return sort.dir === "asc" ? cmp : -cmp
+  })
+  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold tracking-tight">Data Management</h1>
 
       <Card>
-        {/* Controls */}
         <div className="flex flex-wrap items-center justify-between gap-4 px-4">
           <div className="flex items-center gap-1 rounded-lg bg-muted p-1">
             {TABS.map((t) => (
               <button
                 key={t.key}
                 type="button"
-                onClick={() => setTab(t.key)}
+                onClick={() => {
+                  setTab(t.key)
+                  setPage(1)
+                }}
                 className={cn(
                   "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                   tab === t.key
                     ? "bg-foreground text-background"
-                    : "text-muted-foreground hover:text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
               >
                 {t.label}
@@ -154,26 +159,34 @@ export function DataManagement() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="relative w-56">
+            <form
+              className="relative w-56"
+              onSubmit={(e) => {
+                e.preventDefault()
+                setPage(1)
+              }}
+            >
               <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search data"
+                placeholder="Search patient name"
                 className="pl-8"
               />
-            </div>
+            </form>
             <div className="w-44">
               <Select
-                value={statusFilter}
-                onChange={(e) =>
-                  setStatusFilter(e.target.value as "" | PatientFormStatus)
-                }
+                value={status}
+                disabled={tab === "completed"}
+                onChange={(e) => {
+                  setStatus(e.target.value as "" | PatientFormStatus)
+                  setPage(1)
+                }}
               >
                 <option value="">All Status</option>
                 {STATUS_OPTIONS.map((s) => (
                   <option key={s} value={s}>
-                    {s}
+                    {statusLabel(s)}
                   </option>
                 ))}
               </Select>
@@ -189,7 +202,7 @@ export function DataManagement() {
                   key={col.key}
                   className={cn(
                     "cursor-pointer select-none",
-                    col.key === "appointmentDate" && "pl-6"
+                    col.key === "appointment_date" && "pl-6",
                   )}
                   onClick={() => toggleSort(col.key)}
                 >
@@ -203,7 +216,7 @@ export function DataManagement() {
                           "size-3.5",
                           sort.key === col.key
                             ? "text-foreground"
-                            : "text-muted-foreground/50"
+                            : "text-muted-foreground/50",
                         )}
                       />
                     )}
@@ -213,35 +226,17 @@ export function DataManagement() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((f) => (
-              <TableRow
-                key={f.id}
-                className="cursor-pointer"
-                onClick={() => openRecord(f)}
-              >
-                <TableCell className="pl-6">{f.appointmentDate}</TableCell>
-                <TableCell className="text-muted-foreground">
-                  {f.appointmentType}
-                </TableCell>
-                <TableCell>{f.chartNo}</TableCell>
-                <TableCell className="font-medium">{f.patientName}</TableCell>
-                <TableCell className="text-muted-foreground">
-                  {f.memberPolicyId}
-                </TableCell>
-                <TableCell>{f.insuranceProvider}</TableCell>
-                <TableCell>
-                  <span
-                    className={cn(
-                      "inline-block rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide",
-                      patientStatusStyles[f.status]
-                    )}
-                  >
-                    {f.status}
-                  </span>
+            {items === null && (
+              <TableRow>
+                <TableCell
+                  colSpan={COLUMNS.length}
+                  className="py-10 text-center text-muted-foreground"
+                >
+                  Loading…
                 </TableCell>
               </TableRow>
-            ))}
-            {rows.length === 0 && (
+            )}
+            {items?.length === 0 && (
               <TableRow>
                 <TableCell
                   colSpan={COLUMNS.length}
@@ -251,16 +246,70 @@ export function DataManagement() {
                 </TableCell>
               </TableRow>
             )}
+            {rows.map((f) => (
+              <TableRow
+                key={f.id}
+                className="cursor-pointer"
+                onClick={() => openFormById(f.id)}
+              >
+                <TableCell className="pl-6">{formatDate(f.appointment_date)}</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {f.appointment_type || "—"}
+                </TableCell>
+                <TableCell className="font-medium capitalize">{f.patient_name || "—"}</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {f.member_policy_id || "—"}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {f.insurance_provider || "—"}
+                </TableCell>
+                <TableCell>
+                  <span
+                    className={cn(
+                      "inline-block rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide",
+                      statusBadgeClass(f.status),
+                    )}
+                  >
+                    {statusLabel(f.status)}
+                  </span>
+                </TableCell>
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
-      </Card>
 
-      <RecordFormModal
-        record={selected}
-        open={modalOpen}
-        onOpenChange={setModalOpen}
-        onStatusChange={handleStatusChange}
-      />
+        {error && (
+          <p className="px-4 py-3 text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        )}
+
+        <div className="flex items-center justify-between gap-4 px-4 py-3">
+          <span className="text-sm text-muted-foreground">
+            {items
+              ? `${total} form${total === 1 ? "" : "s"} · page ${page} of ${lastPage}`
+              : "Loading…"}
+          </span>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= lastPage}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
+      </Card>
     </div>
   )
 }
