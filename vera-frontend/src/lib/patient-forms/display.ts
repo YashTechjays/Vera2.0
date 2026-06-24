@@ -31,6 +31,27 @@ export function statusBadgeClass(status: PatientFormStatus | string): string {
   }
 }
 
+// Manual status transitions a reviewer/operator may trigger from the form UI —
+// mirrors the backend state machine in patient_forms.py. The call pipeline owns
+// every other edge, so only these targets are offered.
+const MANUAL_STATUS_TRANSITIONS: Partial<Record<PatientFormStatus, PatientFormStatus[]>> = {
+  ready_for_processing: ["in_queue"],
+  call_failed: ["in_queue"],
+  exception_review: ["in_queue", "completed"],
+}
+
+/** Status targets a human may move `status` to (empty for pipeline/terminal states). */
+export function allowedStatusTransitions(status: PatientFormStatus): PatientFormStatus[] {
+  return MANUAL_STATUS_TRANSITIONS[status] ?? []
+}
+
+/** Button label for moving a form to `target`. */
+export function statusActionLabel(target: PatientFormStatus): string {
+  if (target === "completed") return "Mark complete"
+  if (target === "in_queue") return "Send to queue"
+  return statusLabel(target)
+}
+
 /** Dotted path → its section key (first segment). */
 export function sectionOf(fieldPath: string): string {
   return fieldPath.split(".")[0] ?? ""

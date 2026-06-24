@@ -36,6 +36,9 @@ class AuditEvent(enum.StrEnum):
     # A reviewer adjudicated disputed fields on a patient_form (accept/override/
     # correct + re-ask). Field names/counts only — never the values.
     DISPUTE_RESOLVE = "dispute.resolve"
+    # A human changed a patient_form's lifecycle status by hand (the dedicated
+    # status endpoint). Records from/to status only — statuses are not PHI.
+    FORM_STATUS_CHANGE = "form.status_change"
 
 
 class AuditLog(Base, TenantScopedMixin):

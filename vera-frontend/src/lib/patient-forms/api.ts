@@ -7,6 +7,8 @@ import type {
   ListPatientFormsParams,
   PaginatedPatientForms,
   PatientFormDetail,
+  PatientFormStatus,
+  PatientFormStatusResult,
   ResolveDisputesPayload,
 } from "./types"
 
@@ -39,5 +41,17 @@ export function resolveDisputes(
   return apiRequest<PatientFormDetail>(
     `/patient-forms/${encodeURIComponent(formId)}/disputes:resolve`,
     { method: "POST", body: payload },
+  )
+}
+
+/** PUT /patient-forms/{id}/status — change lifecycle status (status only).
+ *  Rejects illegal transitions (422) and completing with open disputes (409). */
+export function updatePatientFormStatus(
+  formId: string,
+  status: PatientFormStatus,
+): Promise<PatientFormStatusResult> {
+  return apiRequest<PatientFormStatusResult>(
+    `/patient-forms/${encodeURIComponent(formId)}/status`,
+    { method: "PUT", body: { status } },
   )
 }

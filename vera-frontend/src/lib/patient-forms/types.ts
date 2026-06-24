@@ -13,6 +13,12 @@ export type PatientFormStatus =
   | "completed"
   | "call_failed"
 
+/** Non-PHI ack returned by PUT /patient-forms/{id}/status. */
+export type PatientFormStatusResult = {
+  id: string
+  status: PatientFormStatus
+}
+
 /** Where a field's current value came from (vera_core AnswerSource enum). */
 export type FieldSource = "intake" | "ivr" | "ai_call" | "human"
 

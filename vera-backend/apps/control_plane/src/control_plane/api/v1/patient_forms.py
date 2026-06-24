@@ -4,10 +4,12 @@ Two caller classes share this router:
 - **Intake** (`POST /patient-forms`) — machine-to-machine, authenticated by an
   `intake:write` API key (tenant from the key, no user session): creates a
   `PatientForm` + `INTAKE`-source `field_answer` rows from a published schema version.
-- **Display + dispute resolution** (`GET /patient-forms`, `GET /patient-forms/{id}`,
-  `POST /patient-forms/{id}/disputes:resolve`) — the logged-in frontend user, on the
-  session display-path chain (`require(...)` → tenant-scoped RLS session → PHI-access
-  audit → `Cache-Control: no-store`).
+- **Display + dispute resolution + status** (`GET /patient-forms`, `GET /patient-forms/{id}`,
+  `POST /patient-forms/{id}/disputes:resolve`, `PUT /patient-forms/{id}/status`) — the
+  logged-in frontend user, on the session display-path chain (`require(...)` → tenant-scoped
+  RLS session → PHI-access audit → `Cache-Control: no-store`). The status endpoint is the
+  only manual mutator of `patient_form.status`; the worker drives the automatic lifecycle and
+  `disputes:resolve` records adjudications without changing status.
 
 Every PHI response audits field **names** only (never values).
 """
@@ -624,15 +626,11 @@ async def resolve_disputes(
                 )
             )
 
-    if body.reasked_fields:
-        form.status = FormStatus.IN_QUEUE.value
-        form.retry_count = form.retry_count + 1
-    elif form.status == FormStatus.EXCEPTION_REVIEW.value:
-        await session.flush()
-        remaining = (await _unresolved_dispute_count_by_form(session, [form_id])).get(form_id, 0)
-        if remaining == 0:
-            form.status = FormStatus.COMPLETED.value
-
+    # Status is NOT changed here. The lifecycle is driven only by the worker
+    # (automatic path) and the dedicated PUT .../status endpoint (manual edges,
+    # incl. EXCEPTION_REVIEW → COMPLETED once disputes are resolved). Adjudicating
+    # disputes only records the human answers/actions; re-asked fields are surfaced
+    # in the audit for the worker, and re-queueing is a manual status change.
     await session.flush()
     current_paths = set(
         (
@@ -678,3 +676,115 @@ async def resolve_disputes(
         )
     )
     return ok(detail, message="Disputes resolved.")
+
+
+# ---------------------------------------------------------------------------
+# Manual status change (the single endpoint that mutates status by hand)
+# ---------------------------------------------------------------------------
+
+# Human-driven transitions the UI may request. The call pipeline owns the
+# automatic core path (IN_QUEUE → IN_CALL → AI_PROCESSING → EXCEPTION_REVIEW) and
+# the → CALL_FAILED edges; a reviewer/operator may only (re)queue work or complete
+# a reviewed form. Any (current → target) pair absent here is rejected (422), so
+# the worker-driven states can't be set by hand.
+_ALLOWED_STATUS_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
+    FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE}),
+    FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
+    FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
+}
+
+
+class UpdateStatusRequest(BaseModel):
+    status: FormStatus  # validated against the lifecycle enum (unknown value → 422)
+
+
+class PatientFormStatusResponse(BaseModel):
+    """Non-PHI acknowledgement of a status change."""
+
+    id: UUID
+    status: str
+
+
+@router.put(
+    "/patient-forms/{form_id}/status",
+    response_model=ResponseModel[PatientFormStatusResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def update_patient_form_status(
+    form_id: UUID,
+    body: UpdateStatusRequest,
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    caller: VerifiedIdentity = require("forms:write"),
+) -> ResponseModel[PatientFormStatusResponse]:
+    """Change a patient form's lifecycle status — the only endpoint that mutates
+    `status` by hand. Status-only: no other field is touched. Enforces the manual
+    transition state machine, and blocks → COMPLETED while disputes are unresolved."""
+    response.headers["Cache-Control"] = "no-store"
+    # Lock the row: `status` is driven by both this endpoint and the worker, so the
+    # read → validate → write must serialize against a concurrent transition,
+    # otherwise two changes (e.g. two reviewers, or reviewer vs. worker) race to a
+    # lost update and the loser's edge is never re-validated.
+    form = (
+        await session.execute(
+            select(PatientForm).where(PatientForm.id == form_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+
+    current = FormStatus(form.status)
+    target = body.status
+
+    # Idempotent no-op: nothing to change, validate, or audit.
+    if target == current:
+        return ok(
+            PatientFormStatusResponse(id=form.id, status=form.status),
+            message="Status unchanged.",
+        )
+
+    if target not in _ALLOWED_STATUS_TRANSITIONS.get(current, frozenset()):
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message=f"cannot change status from '{current.value}' to '{target.value}'",
+            data={"from": current.value, "to": target.value},
+        )
+
+    # A form may only complete once every judge-flagged dispute is adjudicated.
+    if target == FormStatus.COMPLETED:
+        remaining = (await _unresolved_dispute_count_by_form(session, [form_id])).get(form_id, 0)
+        if remaining:
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT,
+                message="resolve all disputes before completing this form",
+                data={"unresolved_disputes": remaining},
+            )
+
+    form.status = target.value
+    await session.flush()
+
+    # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
+    await get_audit(request).emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.FORM_STATUS_CHANGE.value,
+            resource_type="patient_form",
+            resource_id=str(form_id),
+            detail={"from": current.value, "to": target.value},
+        )
+    )
+    return ok(
+        PatientFormStatusResponse(id=form.id, status=form.status),
+        message="Status updated.",
+    )

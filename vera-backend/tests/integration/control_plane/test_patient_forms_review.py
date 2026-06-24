@@ -3,7 +3,7 @@
 `POST /api/v1/patient-forms/{id}/disputes:resolve`. Skips without Postgres."""
 
 from collections.abc import AsyncGenerator
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -271,28 +271,31 @@ async def test_resolve_accept_records_action_and_clears_dispute(
     )
     fields = {f["field_path"]: f for f in detail.json()["data"]["fields"]}
     assert fields[HEALTH_PLAN]["dispute"] is None
-    assert detail.json()["data"]["status"] == "completed"  # all disputes resolved
+    # Resolving disputes never changes status — completion is a separate manual
+    # step via PUT .../status (which now passes the no-open-disputes gate).
+    assert detail.json()["data"]["status"] == "exception_review"
 
 
-async def test_resolve_reask_requeues_form(
+async def test_resolve_reask_does_not_change_status(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     dispute_form: UUID,
 ) -> None:
+    # Re-ask is recorded for the worker, but resolve never drives the lifecycle:
+    # status stays put and retry_count is untouched (re-queue is a manual status PUT).
     resp = await client.post(
         f"/api/v1/patient-forms/{dispute_form}/disputes:resolve",
         headers=_auth(rbac_world.admin_token),
         json={"form_data": {}, "reasked_fields": [HEALTH_PLAN]},
     )
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    assert data["status"] == "in_queue"
+    assert resp.json()["data"]["status"] == "exception_review"
     async with admin_sessionmaker() as s:
         form = (
             await s.execute(select(PatientForm).where(PatientForm.id == dispute_form))
         ).scalar_one()
-        assert form.retry_count == 1
+        assert form.retry_count == 0
 
 
 async def test_resolve_requires_forms_write(
@@ -304,3 +307,198 @@ async def test_resolve_requires_forms_write(
         json={"form_data": {}},
     )
     assert resp.status_code == 403, resp.text
+
+
+# ---- status (PUT /patient-forms/{id}/status) --------------------------------
+
+
+async def _make_plain_form(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    schema_version_id: UUID,
+    status: FormStatus,
+) -> UUID:
+    """A bare form in `status` with no field answers (so no disputes)."""
+    async with sm() as s, s.begin():
+        form = PatientForm(
+            tenant_id=tenant_id,
+            schema_version_id=schema_version_id,
+            status=status.value,
+            intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
+            patient_name="jane doe",
+            completion_pct=0,
+            retry_count=0,
+        )
+        s.add(form)
+        await s.flush()
+        return form.id
+
+
+async def _status(s: async_sessionmaker[AsyncSession], form_id: UUID) -> str:
+    async with s() as sess:
+        return (
+            await sess.execute(select(PatientForm.status).where(PatientForm.id == form_id))
+        ).scalar_one()
+
+
+async def test_status_queues_a_ready_form(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["status"] == "in_queue"
+    assert await _status(admin_sessionmaker, form_id) == "in_queue"
+
+
+async def test_status_rejects_illegal_transition(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    # ready_for_processing → completed is not a permitted manual edge.
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert await _status(admin_sessionmaker, form_id) == "ready_for_processing"
+
+
+async def test_status_rejects_unknown_value(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "not_a_status"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_complete_blocked_while_disputes_unresolved(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    dispute_form: UUID,
+) -> None:
+    # dispute_form is EXCEPTION_REVIEW with one unresolved dispute.
+    resp = await client.put(
+        f"/api/v1/patient-forms/{dispute_form}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["data"] == {"unresolved_disputes": 1}
+    assert await _status(admin_sessionmaker, dispute_form) == "exception_review"
+
+
+async def test_complete_succeeds_with_no_open_disputes(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert await _status(admin_sessionmaker, form_id) == "completed"
+
+
+async def test_status_requires_forms_write(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.norole_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_status_unknown_form_returns_404(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.put(
+        f"/api/v1/patient-forms/{uuid4()}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_status_same_status_is_idempotent_noop(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    # Setting the current status is a no-op success — even for a worker-owned state
+    # (no real transition happens), so a double-click can't error.
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.IN_CALL,
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_call"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert await _status(admin_sessionmaker, form_id) == "in_call"
