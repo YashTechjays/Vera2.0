@@ -1,5 +1,6 @@
 import { MfaSetupDialog } from "@/components/auth/MfaSetupDialog"
 import { ApiKeysSection } from "@/components/settings/ApiKeysSection"
+import { IntegrationsSection } from "@/components/settings/IntegrationsSection"
 import { usePermission } from "@/lib/auth/permissions"
 import { useAppSelector } from "@/store/hooks"
 import { selectUser } from "@/store/authSlice"
@@ -7,6 +8,7 @@ import { selectUser } from "@/store/authSlice"
 export function Settings() {
   const user = useAppSelector(selectUser)
   const canManageApiKeys = usePermission("apikeys:manage")
+  const canManageIntegrations = usePermission("integrations:manage")
   return (
     <div className="space-y-6 p-6">
       <div>
@@ -23,6 +25,8 @@ export function Settings() {
       </section>
 
       {canManageApiKeys && <ApiKeysSection />}
+
+      {canManageIntegrations && <IntegrationsSection />}
     </div>
   )
 }
