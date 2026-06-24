@@ -106,6 +106,27 @@ async def wait_for_speaker(
         ctx.room.off("participant_attributes_changed", _on_attributes_changed)
 
 
+def build_room_input_options(speaker_identity: str | NotGiven) -> RoomInputOptions:
+    """Audio-input + teardown policy for the AgentSession, shared by every path.
+
+    Pin the agent's audio input to the resolved speaker when there is one. Otherwise RoomIO
+    links to the first eligible participant — in Voice Lab outbound mode that can be the
+    listen-only monitor (which publishes no audio), leaving the agent deaf to the SIP callee.
+    A NOT_GIVEN identity (the /calls path) keeps RoomIO's auto-link to the sole participant.
+
+    close_on_disconnect (the framework default) closes the session when that linked speaker
+    hangs up; delete_room_on_close then deletes the room — dropping any listen-only monitor
+    and hanging up the SIP leg — so a phone or browser hangup ends the whole call. This is the
+    framework's own close→drain→delete path; a hand-rolled participant_disconnected handler
+    that called delete_room directly raced this teardown and tore the engine down mid-drain.
+    """
+    return RoomInputOptions(
+        participant_identity=speaker_identity,
+        close_on_disconnect=True,
+        delete_room_on_close=True,
+    )
+
+
 def session_id_for(room_name: str) -> str:
     """The room name is the session id (correlation key shared with the control plane)."""
     return room_name
@@ -192,19 +213,18 @@ async def entrypoint(ctx: JobContext) -> None:
         await boundary.close_session(session_id)
 
     ctx.add_shutdown_callback(_on_shutdown)
-    # Pin the agent's audio input to the speaker. Otherwise RoomIO links to the first
-    # eligible participant — in outbound mode that can be the listen-only monitor
-    # (which publishes no audio), leaving the agent deaf to the SIP callee. NOT_GIVEN
-    # keeps the default auto-link for the /calls path (no speaker pinned).
-    room_input_options: RoomInputOptions | NotGiven = (
-        RoomInputOptions(participant_identity=speaker.identity)
-        if speaker is not None
-        else NOT_GIVEN
-    )
+    # record=False disables livekit-agents session recording. Left unset it defers to the
+    # server's enable_recording flag, which uploads a session report — including call AUDIO
+    # and the transcript (PHI) — to the LiveKit Cloud observability endpoint at call end. That
+    # crosses the trust boundary (audio off-box to LiveKit Cloud); our only sanctioned
+    # observability is the self-hosted Langfuse/OTel pipeline (configure_observability), which
+    # is independent of this. Disabling it also removes the recording byte-stream sends that
+    # error with "engine is closed" as the room is torn down.
     await session.start(
         agent=VeraAgent(boundary=boundary, session_id=session_id),
         room=ctx.room,
-        room_input_options=room_input_options,
+        room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
+        record=False,
     )
 
 
