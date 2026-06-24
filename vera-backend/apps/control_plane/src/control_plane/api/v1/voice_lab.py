@@ -147,6 +147,11 @@ async def stream_transcript(
 ) -> StreamingResponse:
     # Tenant scope without a DB hit: only tenant users; the room name embeds the tenant
     # uuid and must match the caller's (cross-tenant guard, like end_voice_session).
+    # These structural 404s (non-tenant account, unparseable or cross-tenant room) are
+    # intentionally NOT audited: there is no caller-owned tenant scope to attribute the
+    # probe to, and RLS already hides existence — matching require()/end_voice_session,
+    # which audit the authz allow/deny on a valid tenant-scoped request (done below), not
+    # not-found/cross-tenant rejections.
     ref = parse_room_name(room_name)
     if identity.account_type != "tenant" or identity.tenant_id is None or ref is None:
         raise NotFoundError(message="voice session not found")

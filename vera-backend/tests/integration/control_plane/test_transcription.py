@@ -29,7 +29,7 @@ async def test_stream_replays_then_ends(
     assert resp.headers["content-type"].startswith("text/event-stream")
     body = resp.text
     assert '"text":"hi"' in body and '"text":"hello"' in body
-    assert body.index("hi") < body.index("hello")
+    assert body.index('"text":"hi"') < body.index('"text":"hello"')
 
 
 @pytest.mark.asyncio
