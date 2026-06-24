@@ -185,7 +185,10 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:  # best-effort; never block shutdown
                 logger.exception("failed to mark transcript ended for %s", room_name)
         if transcript_redis is not None:
-            await transcript_redis.aclose()
+            try:
+                await transcript_redis.aclose()
+            except Exception:
+                logger.exception("failed to close transcript redis for %s", room_name)
         await boundary.close_session(session_id)
 
     ctx.add_shutdown_callback(_on_shutdown)
