@@ -15,6 +15,8 @@ from vera_core.transcript import ROLE_AGENT, ROLE_USER, TranscriptService
 
 logger = logging.getLogger("agent_worker")
 
+_PENDING: set[asyncio.Task[None]] = set()
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -39,14 +41,16 @@ async def _publish_agent(service: TranscriptService, room_name: str, ev: Any) ->
     await service.publish_turn(room_name, ROLE_AGENT, text, ts=_now_ms())
 
 
+def _log_exc(t: "asyncio.Task[None]") -> None:
+    exc = t.exception()
+    if exc is not None:
+        logger.warning("transcript publish failed: %r", exc)
+
+
 def _spawn(coro: Any) -> None:
     task = asyncio.create_task(coro)
-
-    def _log_exc(t: "asyncio.Task[None]") -> None:
-        exc = t.exception()
-        if exc is not None:
-            logger.warning("transcript publish failed: %r", exc)
-
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)
     task.add_done_callback(_log_exc)
 
 
