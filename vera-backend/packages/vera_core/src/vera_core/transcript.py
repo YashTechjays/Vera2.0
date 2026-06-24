@@ -50,7 +50,6 @@ class InMemoryTranscriptStore:
 
     def __init__(self) -> None:
         self._entries: dict[str, list[tuple[str, dict[str, str]]]] = {}
-        self._ended: set[str] = set()
         self._seq = 0
         self._cond = asyncio.Condition()
 
@@ -67,20 +66,13 @@ class InMemoryTranscriptStore:
         )
 
     async def mark_ended(self, room_name: str) -> None:
-        key = transcript_stream_key(room_name)
-        async with self._cond:
-            self._seq += 1
-            self._entries.setdefault(key, []).append(
-                (f"{self._seq}-0", {_ENDED_FIELD: _ENDED_VALUE})
-            )
-            self._ended.add(key)
-            self._cond.notify_all()
+        # The sentinel entry is what terminates read(); no separate ended-flag needed.
+        await self._append(transcript_stream_key(room_name), {_ENDED_FIELD: _ENDED_VALUE})
 
     async def delete(self, room_name: str) -> None:
         key = transcript_stream_key(room_name)
         async with self._cond:
             self._entries.pop(key, None)
-            self._ended.discard(key)
             self._cond.notify_all()
 
     async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
@@ -88,13 +80,9 @@ class InMemoryTranscriptStore:
         idx = 0
         while True:
             async with self._cond:
-                entries = self._entries.get(key, [])
-                while idx >= len(entries):
-                    if key in self._ended:
-                        return
+                while idx >= len(self._entries.get(key, [])):
                     await self._cond.wait()
-                    entries = self._entries.get(key, [])
-                entry_id, fields = entries[idx]
+                entry_id, fields = self._entries[key][idx]
                 idx += 1
             if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
                 return
@@ -114,7 +102,9 @@ class RedisTranscriptStore:
     so connected readers drain then the key clears. `read` replays from `0` via XREAD
     then tails (BLOCK), stopping on the sentinel or when the key disappears."""
 
-    _BLOCK_MS = 1000
+    # Idle poll cadence. XREAD BLOCK returns the moment a new entry (incl. the ended
+    # sentinel) arrives, so this only bounds how often an idle stream re-checks EXISTS.
+    _BLOCK_MS = 5000
 
     def __init__(self, redis: Redis, *, ttl_seconds: int, end_grace_seconds: int) -> None:
         self._redis = redis
@@ -122,14 +112,20 @@ class RedisTranscriptStore:
         self._end_grace_seconds = end_grace_seconds
 
     async def publish(self, room_name: str, event: TranscriptEvent) -> None:
+        # XADD + the rolling backstop EXPIRE in a single round-trip.
         key = transcript_stream_key(room_name)
-        await self._redis.xadd(key, {"role": event.role, "text": event.text, "ts": str(event.ts)})
-        await self._redis.expire(key, self._ttl_seconds)
+        pipe = self._redis.pipeline(transaction=False)
+        pipe.xadd(key, {"role": event.role, "text": event.text, "ts": str(event.ts)})
+        pipe.expire(key, self._ttl_seconds)
+        await pipe.execute()
 
     async def mark_ended(self, room_name: str) -> None:
+        # Append the sentinel + set the short grace TTL in a single round-trip.
         key = transcript_stream_key(room_name)
-        await self._redis.xadd(key, {_ENDED_FIELD: _ENDED_VALUE})
-        await self._redis.expire(key, self._end_grace_seconds)
+        pipe = self._redis.pipeline(transaction=False)
+        pipe.xadd(key, {_ENDED_FIELD: _ENDED_VALUE})
+        pipe.expire(key, self._end_grace_seconds)
+        await pipe.execute()
 
     async def delete(self, room_name: str) -> None:
         await self._redis.delete(transcript_stream_key(room_name))
