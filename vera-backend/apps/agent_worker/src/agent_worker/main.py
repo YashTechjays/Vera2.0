@@ -220,14 +220,6 @@ async def entrypoint(ctx: JobContext) -> None:
         await boundary.close_session(session_id)
 
     ctx.add_shutdown_callback(_on_shutdown)
-    await session.start(
-        agent=VeraAgent(
-            boundary=boundary,
-            session_id=session_id,
-            instructions=instructions,
-            greeting=greeting,
-        ),
-        room=ctx.room,
     # record=False disables livekit-agents session recording. Left unset it defers to the
     # server's enable_recording flag, which uploads a session report — including call AUDIO
     # and the transcript (PHI) — to the LiveKit Cloud observability endpoint at call end. That
@@ -236,7 +228,12 @@ async def entrypoint(ctx: JobContext) -> None:
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
     await session.start(
-        agent=VeraAgent(boundary=boundary, session_id=session_id),
+        agent=VeraAgent(
+            boundary=boundary,
+            session_id=session_id,
+            instructions=instructions,
+            greeting=greeting,
+        ),
         room=ctx.room,
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
         record=False,

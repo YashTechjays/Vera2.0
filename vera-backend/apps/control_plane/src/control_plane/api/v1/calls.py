@@ -77,7 +77,7 @@ async def start_call(
     ).scalar_one_or_none()  # RLS on `tenant` keys on id → only the caller's own row
     # persona_tweak is admin-authored, non-PHI config; safe to serialize into metadata.
     tweak = PersonaTweak.model_validate(persona) if persona is not None else PersonaTweak()
-    metadata = tweak.model_dump_json(exclude_none=True)
+    metadata = tweak.model_dump(exclude_none=True)
     await livekit.create_call_room(room_name, metadata=metadata)
     form.status = FormStatus.IN_QUEUE
     session.add(
