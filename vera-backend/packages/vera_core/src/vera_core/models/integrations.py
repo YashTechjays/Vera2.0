@@ -19,7 +19,16 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, LargeBinary, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    LargeBinary,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -71,6 +80,18 @@ class ApiKey(Base, TenantScopedMixin):
     raw secret is shown once at issuance and never persisted (auth/api_key.py)."""
 
     __tablename__ = "api_key"
+    __table_args__ = (
+        # At most one ACTIVE key per name within a tenant. Partial (revoked = false)
+        # so revoking a key frees its name for reuse / rotation; different tenants
+        # may each have a key of the same name (tenant_id is part of the key).
+        Index(
+            "uq_api_key_tenant_name_active",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("revoked = false"),
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     salt: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
