@@ -11,6 +11,7 @@ import { ConnectionState } from "livekit-client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ApiError } from "@/lib/api/client"
 import {
@@ -133,6 +134,7 @@ function TranscriptPanel({ roomName }: { roomName: string }) {
 
 export function VoiceLab() {
   const [phone, setPhone] = useState("")
+  const [ivrNavigation, setIvrNavigation] = useState(false)
   const [session, setSession] = useState<VoiceSessionResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<VoiceSessionMode | null>(null)
@@ -141,9 +143,11 @@ export function VoiceLab() {
     setError(null)
     setPending(mode)
     try {
-      const result = await startVoiceSession(
-        mode === "outbound" ? { mode, phone_number: phone.trim() } : { mode },
-      )
+      const result = await startVoiceSession({
+        mode,
+        ivr_navigation: ivrNavigation,
+        ...(mode === "outbound" ? { phone_number: phone.trim() } : {}),
+      })
       setSession(result)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not start the session.")
@@ -203,6 +207,20 @@ export function VoiceLab() {
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
                 className="max-w-xs"
+              />
+            </div>
+
+            <div className="flex flex-row items-center justify-between rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <Label htmlFor="ivr-navigation">IVR navigation</Label>
+                <p className="text-sm text-muted-foreground">
+                  Navigate the payer's phone menu automatically before reaching a rep.
+                </p>
+              </div>
+              <Switch
+                id="ivr-navigation"
+                checked={ivrNavigation}
+                onCheckedChange={setIvrNavigation}
               />
             </div>
 

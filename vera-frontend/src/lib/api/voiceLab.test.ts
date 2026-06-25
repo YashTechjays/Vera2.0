@@ -39,6 +39,15 @@ describe("startVoiceSession", () => {
     })
   })
 
+  it("includes the ivr_navigation flag in the body when set", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(response)
+    await startVoiceSession({ mode: "browser", ivr_navigation: true })
+    expect(apiRequest).toHaveBeenCalledWith("/voice-lab/sessions", {
+      method: "POST",
+      body: { mode: "browser", ivr_navigation: true },
+    })
+  })
+
   it("posts an outbound session with the phone number", async () => {
     vi.mocked(apiRequest).mockResolvedValue({ ...response, mode: "outbound" })
     await startVoiceSession({ mode: "outbound", phone_number: "+15551234567" })
