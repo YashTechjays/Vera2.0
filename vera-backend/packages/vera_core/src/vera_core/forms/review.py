@@ -1,13 +1,17 @@
 """Pure, DB-free helpers for the IBV review + dispute-resolution endpoints.
 
 Kept free of SQLAlchemy/FastAPI so they unit-test without a database: the endpoint
-queries the ORM, maps rows into the small `AnswerRow`/`EvalRow` value objects here,
-and this module assembles the field views, dispute flags, completion %, and the
+queries the ORM, maps rows into the small `AnswerRow` value objects here, and this
+module assembles the field views, dispute flags, completion %, and the
 adjudication-action choice.
 
-A field is "disputed" when its current `field_answer` has a `field_evaluation` with
-`supported=false` (ADR §4) and the human hasn't already adjudicated it
-(`resolved_answer_ids`). PHI lives in the values — callers never log them.
+A field is "disputed" when its current `field_answer` came from the AI call
+(`source='ai_call'`) and its value diverges from the **baseline** — the most recent
+`intake`/`human` answer for that path (`IS DISTINCT FROM` semantics: an absent baseline
+counts as `NULL`, so a divergent AI value is disputed even with no prior). The signal is
+derived purely from `field_answer` history — `field_evaluation` plays no part, and
+`dispute_action` is a pure audit record that does not gate the dispute. PHI lives in the
+values — callers never log them.
 """
 
 from collections.abc import Collection, Iterable, Mapping
@@ -15,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from vera_core.models.enums import DisputeActionType
+from vera_core.models.enums import AnswerSource, DisputeActionType
 
 
 @dataclass(frozen=True)
@@ -30,15 +34,6 @@ class AnswerRow:
     evidence: str | None
 
 
-@dataclass(frozen=True)
-class EvalRow:
-    """The bits of a `field_evaluation` (LLM-judge verdict) the assembly needs."""
-
-    supported: bool
-    confidence: int | None
-    evidence: str | None
-
-
 def unwrap_value(stored: Any) -> Any:
     """Field answers persist as `{"value": <raw>}`; return the raw value (pass other
     shapes through unchanged)."""
@@ -47,18 +42,13 @@ def unwrap_value(stored: Any) -> Any:
     return stored
 
 
-def is_disputed(evaluation: EvalRow | None, *, min_confidence: int | None = None) -> bool:
-    """True when the judge disagrees (`supported=false`) or — when a threshold is
-    given — the judge's confidence is below it."""
-    if evaluation is None:
+def is_disputed(current: AnswerRow, baseline_value: Any) -> bool:
+    """True when the current value came from the AI call and diverges from the
+    human/intake baseline. `baseline_value` is the stored baseline (`{"value": ...}`) or
+    `None` if absent; `!=` matches `IS DISTINCT FROM` semantics for `None`."""
+    if current.source != AnswerSource.AI_CALL.value:
         return False
-    if not evaluation.supported:
-        return True
-    return (
-        min_confidence is not None
-        and evaluation.confidence is not None
-        and evaluation.confidence < min_confidence
-    )
+    return bool(unwrap_value(current.value) != unwrap_value(baseline_value))
 
 
 def all_required_paths(schema_json: Mapping[str, Any]) -> list[str]:
@@ -93,30 +83,25 @@ def adjudication_action(new_value: Any, current_value: Any, prior_values: Collec
 
 def build_field_views(
     current_answers: Iterable[AnswerRow],
-    evaluations_by_answer_id: Mapping[UUID, EvalRow],
-    prior_value_by_path: Mapping[str, Any],
-    *,
-    resolved_answer_ids: Collection[UUID],
-    min_confidence: int | None = None,
+    baseline_value_by_path: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     """Assemble the flat, dotted-path field views the detail endpoint returns. Each
     item is `{field_path, value, source, confidence, dispute}`; `dispute` is non-null
-    only for an unresolved, judge-flagged field."""
+    only when the current AI value diverges from the human/intake baseline.
+
+    `baseline_value_by_path` maps a field path to its most recent intake/human stored
+    value (`{"value": ...}`); a missing entry means no baseline (treated as `None`)."""
     views: list[dict[str, Any]] = []
     for answer in sorted(current_answers, key=lambda a: a.field_path):
-        evaluation = evaluations_by_answer_id.get(answer.id)
+        baseline = baseline_value_by_path.get(answer.field_path)
         dispute: dict[str, Any] | None = None
-        if answer.id not in resolved_answer_ids and is_disputed(
-            evaluation, min_confidence=min_confidence
-        ):
-            assert evaluation is not None  # is_disputed(None) is False
-            prior = prior_value_by_path.get(answer.field_path)
+        if is_disputed(answer, baseline):
             dispute = {
-                "previous_value": unwrap_value(prior) if prior is not None else None,
+                "previous_value": unwrap_value(baseline),
                 "current_value": unwrap_value(answer.value),
-                "confidence": evaluation.confidence,
-                "evidence": answer.evidence,  # what was captured
-                "reasoning": evaluation.evidence,  # why the judge disputes it
+                "confidence": answer.confidence,  # the AI answer's own confidence
+                "evidence": answer.evidence,  # what the AI captured
+                "reasoning": None,  # field_evaluation is not part of disputes
             }
         views.append(
             {
