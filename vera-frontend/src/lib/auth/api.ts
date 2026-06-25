@@ -3,7 +3,7 @@
 // Token-scoped self endpoints (/auth/me, /auth/logout, /auth/session/keepalive,
 // /auth/mfa/enroll, /auth/mfa/activate) carry NO slug.
 
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, randomId } from "@/lib/api/client"
 
 export type LoginResult = {
   mfa: "none" | "verify" | "enroll"
@@ -107,7 +107,7 @@ export function inviteUser(input: {
       role_ids: input.roleIds,
       send_email: input.sendEmail,
     },
-    headers: { "Idempotency-Key": crypto.randomUUID() },
+    headers: { "Idempotency-Key": randomId() },
   })
 }
 

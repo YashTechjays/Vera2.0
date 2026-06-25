@@ -160,7 +160,9 @@ async def invite_user(
         InviteData(tenant_id=tenant_id, app_user_id=user.id, email=email),
         settings.invite_ttl_seconds,
     )
-    invite_url = f"{settings.app_base_url}/tenants/{caller.tenant_slug}/accept-invite?token={token}"
+    invite_url = (
+        f"{settings.frontend_base_url}/tenants/{caller.tenant_slug}/accept-invite?token={token}"
+    )
 
     if body.send_email:
         await email_sender.send(

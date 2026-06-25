@@ -2,7 +2,7 @@
 // (snake_case). The list endpoint returns metadata only — the plaintext token is
 // returned just once, by create.
 
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, randomId } from "@/lib/api/client"
 
 /** One inbound API key's metadata (GET /api-keys). No token is ever returned here. */
 export type ApiKey = {
@@ -44,7 +44,7 @@ export function createApiKey(name: string, scope: string): Promise<CreatedApiKey
     method: "POST",
     body: { name, scope },
     // Mutating ingress requires an idempotency key (one per attempt).
-    headers: { "Idempotency-Key": crypto.randomUUID() },
+    headers: { "Idempotency-Key": randomId() },
   })
 }
 

@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     # User onboarding by invite. The invite token is a single-use, time-boxed bearer
     # credential held only as a hash in Redis (auth/invitations.py); the link delivers
     # the raw token (emailed and/or copied out-of-band by an admin). Carries no PHI —
-    # invitees are workforce members. `app_base_url` builds the accept link.
+    # invitees are workforce members. `frontend_base_url` builds the accept link.
     invite_ttl_seconds: int = 72 * 3600
 
     # --- email (invites) ---------------------------------------------------
@@ -71,7 +71,12 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "no-reply@vera.local"
-    app_base_url: str = "http://localhost:8000"
+
+    # Public origin of the **frontend** SPA — the invite accept link points the
+    # browser at the React app (route /tenants/{slug}/accept-invite), NOT at this
+    # API. Default is the Vite dev server; override per environment via
+    # VERA_FRONTEND_BASE_URL (e.g. the deployed frontend host). No trailing slash.
+    frontend_base_url: str = "http://localhost:5173"
 
     # In-flight lock TTL for an Idempotency-Key (Redis). The first mutating request
     # with a given key claims the lock; a concurrent retry within this short window
