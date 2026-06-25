@@ -88,7 +88,12 @@ async def start_voice_session(
     browser_identity = f"{prefix}{caller.user_id}"
 
     await livekit.create_call_room(
-        room_name, metadata={"wait_for_speaker": True, "publish_transcript": True}
+        room_name,
+        metadata={
+            "wait_for_speaker": True,
+            "publish_transcript": True,
+            "ivr_navigation": body.ivr_navigation,
+        },
     )
     if is_outbound:
         assert body.phone_number is not None  # validated non-None above when is_outbound

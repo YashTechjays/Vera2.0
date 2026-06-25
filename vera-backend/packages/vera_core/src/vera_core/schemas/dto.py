@@ -34,6 +34,7 @@ class StartVoiceSessionRequest(BaseModel):
 
     mode: Literal["browser", "outbound"]
     phone_number: str | None = None  # required + E.164 when mode == "outbound"
+    ivr_navigation: bool = False  # ON → worker boots the generic IVR navigator agent
 
 
 class VoiceSessionResponse(BaseModel):
