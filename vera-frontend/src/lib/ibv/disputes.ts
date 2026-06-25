@@ -11,12 +11,10 @@ export type Dispute = {
   previousValue: string
   /** the assistant-captured value (pre-seeded into the field) */
   currentValue: string
-  /** 0–100 confidence in the captured value */
+  /** 0–100 confidence the AI answer carried for the captured value */
   confidence?: number
   /** short supporting evidence */
   evidence?: string
-  /** model reasoning */
-  reasoning?: string
 }
 
 /** Disputes keyed by dotted field path. */
@@ -160,40 +158,34 @@ export const mockDisputes: DisputeMap = {
     currentValue: "Noah Davis",
     confidence: 100,
     evidence: "Full legal name confirmed against the member record.",
-    reasoning: "Captured the complete name from the eligibility record.",
   },
   "insurance_information.health_plan": {
     previousValue: "BCBS TX",
     currentValue: "Blue Cross",
     confidence: 95,
     evidence: "Carrier portal listed the plan name.",
-    reasoning: "Plan name updated from the carrier portal during the call.",
   },
   "general_coverage.office_visits.cpt_1.covered": {
     previousValue: "No",
     currentValue: "Yes",
     confidence: 92,
     evidence: "Confirmed covered for CPT 99211.",
-    reasoning: "Office visit is a covered benefit.",
   },
   "insurance_information.policy_number": {
     previousValue: "POL-550410",
     currentValue: "POL-550411",
     confidence: 85,
     evidence: "Rep read the number back.",
-    reasoning: "Final digit corrected when the rep read it back.",
   },
   "benefit_coverage.coverage_type": {
     previousValue: "Individual",
     currentValue: "Family",
     confidence: 72,
     evidence: "Rep confirmed dependents on the plan.",
-    reasoning: "Rep confirmed the plan is family coverage.",
   },
   "insurance_information.group_name": {
     previousValue: "Umbrella Hlth",
     currentValue: "Umbrella Health",
     evidence: "Spelled out by the representative.",
-    reasoning: "Expanded the abbreviated group name.",
   },
 }

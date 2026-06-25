@@ -83,7 +83,7 @@ export function DisputeBadge({
   )
 }
 
-/** Tooltip body: confidence chip + evidence + reasoning. */
+/** Tooltip body: confidence chip + evidence. */
 export function DisputeTooltipBody({ dispute }: { dispute: Dispute }) {
   return (
     <div className="space-y-1">
@@ -106,11 +106,6 @@ export function DisputeTooltipBody({ dispute }: { dispute: Dispute }) {
       {dispute.evidence && (
         <div>
           <span className="font-medium">Evidence:</span> {dispute.evidence}
-        </div>
-      )}
-      {dispute.reasoning && (
-        <div>
-          <span className="font-medium">Reasoning:</span> {dispute.reasoning}
         </div>
       )}
     </div>

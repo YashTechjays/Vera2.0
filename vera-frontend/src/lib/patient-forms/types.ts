@@ -20,20 +20,20 @@ export type PatientFormStatusResult = {
 }
 
 /** Where a field's current value came from (vera_core AnswerSource enum). */
-export type FieldSource = "intake" | "ivr" | "ai_call" | "human"
+export type FieldSource = "intake" | "ai_call" | "human"
 
 /** JSONB field value — the backend stores/returns `Any`. */
 export type FieldValue = string | number | boolean | null
 
-/** A field flagged by the LLM judge: the captured value disagrees with a prior.
- *  `previous_value`/`current_value` are JSONB (`Any`); `evidence` is what was
- *  captured, `reasoning` is why the judge disputes it (both nullable). */
+/** A disputed field: the current AI-captured value diverges from the most recent
+ *  intake/human baseline. `previous_value` is that baseline, `current_value` the
+ *  AI value; `confidence` is the AI answer's own confidence, `evidence` what it
+ *  captured (both nullable). */
 export type FieldDispute = {
   previous_value: FieldValue
   current_value: FieldValue
   confidence: number | null
   evidence: string | null
-  reasoning: string | null
 }
 
 /** One extracted data point. `dispute` is null unless the judge flagged it. */
