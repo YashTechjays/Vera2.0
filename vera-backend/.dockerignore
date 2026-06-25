@@ -1,0 +1,20 @@
+# Docs & local dev
+adr/
+docs/
+README.md
+CLAUDE.md
+.github/
+.pre-commit-config.yaml
+justfile
+docker-compose.yml
+env.example
+
+# Tests
+tests/
+
+# Infrastructure
+infra/
+
+# Git
+.git/
+.gitignore

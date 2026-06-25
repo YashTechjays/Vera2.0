@@ -1,0 +1,6 @@
+#!include:.gitignore
+
+# Not needed by any Cloud Build step
+infra/
+deployment/
+.git/
