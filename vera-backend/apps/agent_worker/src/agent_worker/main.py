@@ -71,11 +71,11 @@ async def wait_for_speaker(
     Returns that participant once the browser caller has joined or the SIP callee has
     answered, or None on timeout. The caller pins the agent's audio input to the
     returned participant so it listens to the speaker and not the listen-only monitor.
-    """
-    for p in ctx.room.remote_participants.values():
-        if _is_ready_speaker(p):
-            return p
 
+    Subscribe to events BEFORE checking existing participants so that a participant
+    who joins in the gap between the two steps is never missed (the event fires into
+    an already-listening handler and resolves the future immediately).
+    """
     loop = asyncio.get_running_loop()
     arrived: asyncio.Future[rtc.RemoteParticipant] = loop.create_future()
 
@@ -95,9 +95,17 @@ async def wait_for_speaker(
         # The SIP callee's ring → active transition arrives here, not as a new join.
         _resolve(participant)
 
+    # Subscribe FIRST — closing the race window where a join event could fire
+    # between the existing-participant scan and the event registration.
     ctx.room.on("participant_connected", _on_connected)
     ctx.room.on("participant_attributes_changed", _on_attributes_changed)
     try:
+        # Now check participants who arrived before we subscribed.
+        for p in ctx.room.remote_participants.values():
+            _resolve(p)
+        if arrived.done():
+            return arrived.result()
+
         async with asyncio.timeout(timeout_s):
             return await arrived
     except TimeoutError:
