@@ -8,6 +8,7 @@ room name IS the session id and the Langfuse correlation key.
 import asyncio
 import json
 import logging
+import time
 
 from livekit import rtc
 from livekit.agents import (
@@ -141,6 +142,18 @@ def session_id_for(room_name: str) -> str:
     return room_name
 
 
+async def publish_unanswered_notice(service: TranscriptService, room_name: str) -> None:
+    """Publish a user-facing transcript event when the outbound call is not answered,
+    then end the stream so the browser's TranscriptPanel shows feedback."""
+    await service.publish_turn(
+        room_name,
+        role="agent",
+        text="The outbound call was not answered or the line is unavailable. Please try again.",
+        ts=int(time.time() * 1000),
+    )
+    await service.end(room_name)
+
+
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
     """Decide the correlation session id for a connected room, or None to reject it.
 
@@ -187,6 +200,20 @@ async def entrypoint(ctx: JobContext) -> None:
         speaker = await wait_for_speaker(ctx)
         if speaker is None:
             logger.warning("no speaker joined room %s within timeout — not starting", room_name)
+            # Publish feedback to the browser's transcript panel before exiting.
+            if meta.get("publish_transcript"):
+                timeout_redis = create_redis(settings.redis_url)
+                timeout_service = TranscriptService(
+                    RedisTranscriptStore(
+                        timeout_redis,
+                        ttl_seconds=settings.transcript_stream_ttl_seconds,
+                        end_grace_seconds=settings.transcript_end_grace_seconds,
+                    )
+                )
+                try:
+                    await publish_unanswered_notice(timeout_service, room_name)
+                finally:
+                    await timeout_redis.aclose()
             return
 
     boundary = build_phi_boundary(settings)
