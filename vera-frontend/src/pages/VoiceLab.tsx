@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
@@ -47,6 +47,18 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
 function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => void }) {
   const state = useConnectionState()
   const participants = useParticipants()
+  const wasConnected = useRef(false)
+
+  useEffect(() => {
+    if (state === ConnectionState.Connected) {
+      wasConnected.current = true
+    }
+    // Auto-cleanup: if we were connected and the room disconnected (agent deleted it,
+    // network drop, etc.), clear the session so the UI resets to the start form.
+    if (wasConnected.current && state === ConnectionState.Disconnected) {
+      onEnd()
+    }
+  }, [state, onEnd])
 
   return (
     <Card>
@@ -152,7 +164,7 @@ export function VoiceLab() {
     }
   }
 
-  async function endSession() {
+  const endSession = useCallback(async () => {
     const roomName = session?.room_name
     // Drop the browser out of the room immediately, then tell the backend to delete
     // the room so the agent worker and any outbound SIP call are torn down too —
@@ -166,7 +178,7 @@ export function VoiceLab() {
         setError(err instanceof ApiError ? err.message : "Could not end the session cleanly.")
       }
     }
-  }
+  }, [session?.room_name])
 
   return (
     <div className="space-y-6">
