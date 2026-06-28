@@ -8,7 +8,7 @@ Both route through PHIBoundaryProtocol — today PassthroughPHIBoundary (no-op).
 from collections.abc import AsyncIterable
 
 from livekit import rtc
-from livekit.agents import Agent, ModelSettings, stt
+from livekit.agents import Agent, ModelSettings, llm, stt
 
 from agent_worker.prompt import build_instructions, resolve_greeting
 from agent_worker.seams import hydrate_stream, redact_event
@@ -29,8 +29,20 @@ class VeraAgent(Agent):
         self._greeting = greeting if greeting is not None else resolve_greeting()
         super().__init__(
             instructions=instructions if instructions is not None else build_instructions(),
-            tools=[],
         )
+
+    @llm.function_tool(
+        name="end_call",
+        description=(
+            "End the phone call. Call this tool IMMEDIATELY after you say your "
+            "closing line (e.g. 'thanks so much for your help, have a good one'). "
+            "This hangs up the call for all participants."
+        ),
+    )
+    async def _end_call(self) -> str:
+        """Drain pending TTS audio then shut down the session."""
+        self.session.shutdown(drain=True)
+        return "Call ended."
 
     async def on_enter(self) -> None:
         self.session.say(self._greeting)
