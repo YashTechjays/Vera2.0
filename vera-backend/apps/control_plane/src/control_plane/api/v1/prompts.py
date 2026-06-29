@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.auth.identity import VerifiedIdentity
@@ -226,7 +227,12 @@ async def create_draft(
         status=VersionStatus.DRAFT,
     )
     session.add(draft)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        # A concurrent create raced the (prompt_id, version) unique constraint —
+        # both computed the same next version. Surface a retryable 409, not a 500.
+        raise ConflictError(message="version changed concurrently, please retry") from exc
     return ok(_detail(draft))
 
 
@@ -237,6 +243,7 @@ async def create_draft(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
     ),
 )
 async def publish_version(
@@ -269,5 +276,12 @@ async def publish_version(
         current.status = VersionStatus.DRAFT
         await session.flush()
     target.status = VersionStatus.PUBLISHED
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        # A concurrent publish raced uq_prompt_version_published_per_prompt. The
+        # transaction rolls back (no demote persists); ask the caller to retry.
+        raise ConflictError(
+            message="another version was published concurrently, please retry"
+        ) from exc
     return ok(_detail(target))
