@@ -1,10 +1,11 @@
 """Platform (SUPER_ADMIN) prompt-authoring catalog routes.
 
 The prompt / prompt_version catalog is GLOBAL (no tenant_id, no RLS) and curated by
-a platform operator. Authorization is platform_require (account_type='platform' + the
-reused platform:elevations:read grant); no tenant context. Versions are immutable —
-each save is a new draft; publishing promotes one and demotes the prior published
-(uq_prompt_version_published_per_prompt enforces one published per prompt).
+a platform operator. Authorization is platform_require (account_type='platform' +
+dedicated platform:prompts:read / platform:prompts:write grants); no tenant context.
+Versions are immutable — each save is a new draft; publishing promotes one and demotes
+the prior published (uq_prompt_version_published_per_prompt enforces one published per
+prompt).
 """
 
 from datetime import datetime
@@ -32,7 +33,8 @@ from vera_core.models.enums import VersionStatus
 router = APIRouter(prefix="/prompts", tags=["prompts"])
 
 PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
-_READ = platform_require("platform:elevations:read")
+_READ = platform_require("platform:prompts:read")
+_WRITE = platform_require("platform:prompts:write")
 
 
 class CreateDraftRequest(BaseModel):
@@ -198,7 +200,7 @@ async def create_draft(
     prompt_id: UUID,
     body: CreateDraftRequest,
     session: PlatformSession,
-    _caller: Annotated[VerifiedIdentity, _READ],
+    _caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
     prompt = await _require_prompt(session, prompt_id)
     published_schema_id = (
@@ -241,7 +243,7 @@ async def publish_version(
     prompt_id: UUID,
     version_id: UUID,
     session: PlatformSession,
-    _caller: Annotated[VerifiedIdentity, _READ],
+    _caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
     target = (
         await session.execute(
