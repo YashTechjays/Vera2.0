@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { AlertTriangle, Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
@@ -7,12 +7,15 @@ import {
   useParticipants,
 } from "@livekit/components-react"
 import { ConnectionState } from "livekit-client"
+// `/max` metadata so isValidPhoneNumber does real per-country validation (length +
+// national pattern), not just E.164 shape. The component yields an E.164 string,
+// handling leading-zero / trunk-prefix stripping the old hand-rolled helper got wrong.
+import PhoneInput, { isValidPhoneNumber } from "react-phone-number-input/max"
+import "react-phone-number-input/style.css"
 
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Select } from "@/components/ui/select"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ApiError } from "@/lib/api/client"
 import {
@@ -22,13 +25,6 @@ import {
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
-import {
-  COUNTRIES,
-  DEFAULT_COUNTRY,
-  composeE164,
-  dialFor,
-  isE164,
-} from "@/lib/phone/countries"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -153,8 +149,8 @@ function ErrorAlert({ error }: { error: string | null }) {
 }
 
 export function VoiceLab() {
-  const [country, setCountry] = useState(DEFAULT_COUNTRY)
-  const [national, setNational] = useState("")
+  // The PhoneInput yields an E.164 string (e.g. "+15551234567") or undefined.
+  const [phone, setPhone] = useState<string | undefined>(undefined)
   // Only flag the number field once the operator has interacted with it, so an
   // untouched empty form doesn't show a red error.
   const [touched, setTouched] = useState(false)
@@ -162,11 +158,9 @@ export function VoiceLab() {
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<VoiceSessionMode | null>(null)
 
-  const dial = dialFor(country)
-  // Compose once and reuse for validation and the live preview. Mirrors the
-  // backend E.164 contract so an invalid number never round-trips.
-  const e164 = useMemo(() => composeE164(dial, national), [dial, national])
-  const phoneValid = isE164(e164)
+  // Real per-country validation client-side; the backend E.164 regex remains the
+  // source-of-truth gate, this just fails fast so an invalid number never round-trips.
+  const phoneValid = !!phone && isValidPhoneNumber(phone)
   const showPhoneError = touched && !phoneValid
 
   async function start(mode: VoiceSessionMode) {
@@ -174,7 +168,7 @@ export function VoiceLab() {
     setPending(mode)
     try {
       const result = await startVoiceSession(
-        mode === "outbound" ? { mode, phone_number: e164 } : { mode },
+        mode === "outbound" ? { mode, phone_number: phone! } : { mode },
       )
       setSession(result)
     } catch (err) {
@@ -230,41 +224,25 @@ export function VoiceLab() {
           <CardContent className="space-y-5 py-6">
             <div className="space-y-2">
               <Label htmlFor="phone">Phone number (outbound only)</Label>
-              <div className="flex max-w-md gap-2">
-                <Select
-                  aria-label="Country code"
-                  value={country}
-                  onChange={(e) => setCountry(e.target.value)}
-                  className="h-9 w-44 shrink-0"
-                >
-                  {COUNTRIES.map((c) => (
-                    <option key={c.code} value={c.code}>
-                      {c.flag} {c.name} ({c.dial})
-                    </option>
-                  ))}
-                </Select>
-                <Input
-                  id="phone"
-                  type="tel"
-                  inputMode="tel"
-                  placeholder="5551234567"
-                  value={national}
-                  aria-invalid={showPhoneError}
-                  onChange={(e) => {
-                    setNational(e.target.value)
-                    setTouched(true)
-                  }}
-                  onBlur={() => setTouched(true)}
-                />
-              </div>
+              <PhoneInput
+                id="phone"
+                international
+                defaultCountry="US"
+                placeholder="Enter phone number"
+                value={phone}
+                onChange={setPhone}
+                onBlur={() => setTouched(true)}
+                aria-invalid={showPhoneError}
+                className="max-w-md"
+              />
               {showPhoneError ? (
                 <p className="text-sm text-destructive">
-                  Enter a valid phone number for {dial} (digits only, up to 15 total).
+                  Enter a valid phone number for the selected country.
                 </p>
               ) : (
                 <p className="text-sm text-muted-foreground">
                   Pick the country, then enter the local number — we'll dial{" "}
-                  <span className="font-medium">{e164 || dial}</span>.
+                  <span className="font-medium">{phone || "…"}</span>.
                 </p>
               )}
             </div>
