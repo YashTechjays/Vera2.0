@@ -1,5 +1,4 @@
-import { lazy, Suspense, useEffect } from "react"
-import { Loader2 } from "lucide-react"
+import { lazy, useEffect } from "react"
 import { BrowserRouter, Routes, Route } from "react-router-dom"
 import { AppShell } from "@/components/layout/AppShell"
 import { RequireAuth } from "@/components/auth/RequireAuth"
@@ -32,33 +31,28 @@ function App() {
 
   return (
     <BrowserRouter>
-      <Suspense
-        fallback={
-          <div className="flex h-screen items-center justify-center">
-            <Loader2 className="size-5 animate-spin text-muted-foreground" />
-          </div>
-        }
-      >
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/mfa" element={<MfaVerify />} />
-          <Route path="/mfa-enroll" element={<MfaEnroll />} />
-          {/* Invite links are tenant-scoped (generated in the backend email). */}
-          <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
-          <Route element={<RequireAuth />}>
-            <Route element={<AppShell />}>
-              <Route index element={<LiveMonitoring />} />
-              <Route path="data-management" element={<DataManagement />} />
-              <Route path="users" element={<Users />} />
-              <Route path="voice-lab" element={<VoiceLab />} />
-              <Route path="call-history" element={<Placeholder title="Call History" />} />
-              <Route path="analytics" element={<Placeholder title="Analytics" />} />
-              <Route path="settings" element={<Settings />} />
-              <Route path="*" element={<Placeholder title="Not Found" />} />
-            </Route>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/mfa" element={<MfaVerify />} />
+        <Route path="/mfa-enroll" element={<MfaEnroll />} />
+        {/* Invite links are tenant-scoped (generated in the backend email). */}
+        <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
+        <Route element={<RequireAuth />}>
+          {/* AppShell owns the Suspense boundary around its <Outlet>, so a lazy
+              page (e.g. Voice Lab) shows a spinner in the content area while the
+              sidebar/topbar stay mounted. */}
+          <Route element={<AppShell />}>
+            <Route index element={<LiveMonitoring />} />
+            <Route path="data-management" element={<DataManagement />} />
+            <Route path="users" element={<Users />} />
+            <Route path="voice-lab" element={<VoiceLab />} />
+            <Route path="call-history" element={<Placeholder title="Call History" />} />
+            <Route path="analytics" element={<Placeholder title="Analytics" />} />
+            <Route path="settings" element={<Settings />} />
+            <Route path="*" element={<Placeholder title="Not Found" />} />
           </Route>
-        </Routes>
-      </Suspense>
+        </Route>
+      </Routes>
     </BrowserRouter>
   )
 }

@@ -23,15 +23,21 @@ The live session and transcript panels (`SessionPanel`, `TranscriptPanel`) are
 
 ## Changes
 
-### 1. Unified phone field (scoped CSS)
+### 1. Unified phone field (Tailwind arbitrary variants)
 
-Wrap the existing `<PhoneInput>` in a container with class `vera-phone-input`
-and add scoped CSS overrides (new file
-`vera-frontend/src/components/phone-input.css`, imported where the existing
-`react-phone-number-input/style.css` is imported). The component's props/API are
-unchanged — only presentation.
+> **Implementation note (shipped):** an earlier draft of this spec used a scoped
+> stylesheet `vera-frontend/src/components/phone-input.css`. The shipped code
+> instead keeps the library's stock `react-phone-number-input/style.css` import
+> and does every override inline in `VoiceLab.tsx` via Tailwind arbitrary
+> variants on the wrapper (`[&_.PhoneInput]:…`, `[&_.PhoneInputInput::placeholder]:…`).
+> No `phone-input.css` is created. The target styles below are unchanged — only
+> the delivery mechanism differs (Tailwind utilities, not a `.css` file).
 
-Target the library's emitted classes, scoped under `.vera-phone-input`:
+Wrap the existing `<PhoneInput>` in a container and style the library's emitted
+classes with Tailwind arbitrary variants on that wrapper's `className`. The
+component's props/API are unchanged — only presentation.
+
+Target the library's emitted classes (selectors scoped under the wrapper):
 
 - `.PhoneInput` → the bordered field: `border border-input`, `rounded-md`,
   `h-9`, `bg-background`, `shadow-xs`, `transition-[color,box-shadow]`.
@@ -42,15 +48,16 @@ Target the library's emitted classes, scoped under `.vera-phone-input`:
   (`border-r border-input`), flag + caret aligned.
 - `.PhoneInputInput` → borderless, transparent, no outline/shadow, fills
   remaining width, `text-sm`, placeholder uses `text-muted-foreground`.
-- Invalid state: when the wrapper carries `aria-invalid` / a `data-invalid`
-  hook, border + ring switch to `border-destructive` / `ring-destructive/20`,
-  mirroring `Input`'s `aria-invalid` styles.
-- Disabled state: `opacity-50`, `pointer-events-none` (used while a session is
-  pending — see below).
+- Invalid state: read off the inner input's own `aria-invalid` via
+  `:has(input[aria-invalid=true])`, switching border + ring to
+  `border-destructive` / `ring-destructive/20` (mirrors `Input`'s `aria-invalid`
+  styles; no duplicated wrapper state).
+- Disabled state: `opacity-50`, `pointer-events-none` via `:has(input:disabled)`
+  (the inner input is disabled while a session is pending — see below).
 
-CSS uses the same design tokens/variables the shadcn components use (e.g.
-`var(--input)`, `var(--ring)`, `var(--background)`, `var(--radius-md)`), so it
-tracks light/dark theme automatically. No hard-coded colors.
+The utilities use the same design tokens the shadcn components use (`border-input`,
+`ring-ring/50`, `bg-background`, `rounded-md`, etc.), so the field tracks
+light/dark theme automatically. No hard-coded colors.
 
 The wrapper carries the invalid hook so the field border reacts to
 `showPhoneError`, consistent with how `Input` reacts to `aria-invalid`.
