@@ -9,6 +9,11 @@ import { ApiError } from "@/lib/api/client"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { platformLoginThunk, selectStatus } from "@/store/authSlice"
 
+// Local-dev prefill (set in .env.local; empty in any real build). Mirrors the
+// tenant login's VITE_DEV_* convenience for the platform operator credentials.
+const DEV_EMAIL = import.meta.env.VITE_DEV_PLATFORM_EMAIL ?? ""
+const DEV_PASSWORD = import.meta.env.VITE_DEV_PLATFORM_PASSWORD ?? ""
+
 // Pragmatic email shape check; the server is the source of truth.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -31,8 +36,8 @@ export function PlatformLogin() {
   const navigate = useNavigate()
   const status = useAppSelector(selectStatus)
 
-  const [email, setEmail] = useState("")
-  const [password, setPassword] = useState("")
+  const [email, setEmail] = useState(DEV_EMAIL)
+  const [password, setPassword] = useState(DEV_PASSWORD)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [touched, setTouched] = useState({ email: false, password: false })
