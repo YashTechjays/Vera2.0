@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { lazy, useEffect } from "react"
 import { BrowserRouter, Routes, Route } from "react-router-dom"
 import { AppShell } from "@/components/layout/AppShell"
 import { RequireAuth } from "@/components/auth/RequireAuth"
@@ -13,8 +13,14 @@ import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
 import { Settings } from "@/pages/Settings"
-import { VoiceLab } from "@/pages/VoiceLab"
 import { Placeholder } from "@/pages/Placeholder"
+
+// Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
+// "max" libphonenumber metadata (the largest set), so code-split it out of the
+// initial bundle — only operators who open the page pay for it.
+const VoiceLab = lazy(() =>
+  import("@/pages/VoiceLab").then((m) => ({ default: m.VoiceLab })),
+)
 
 function App() {
   const dispatch = useAppDispatch()
@@ -32,6 +38,9 @@ function App() {
         {/* Invite links are tenant-scoped (generated in the backend email). */}
         <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
         <Route element={<RequireAuth />}>
+          {/* AppShell owns the Suspense boundary around its <Outlet>, so a lazy
+              page (e.g. Voice Lab) shows a spinner in the content area while the
+              sidebar/topbar stay mounted. */}
           <Route element={<AppShell />}>
             <Route index element={<LiveMonitoring />} />
             <Route path="data-management" element={<DataManagement />} />
