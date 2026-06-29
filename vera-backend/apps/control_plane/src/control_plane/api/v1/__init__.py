@@ -7,6 +7,7 @@ from control_plane.api.v1.integrations import router as integrations_router
 from control_plane.api.v1.patient_forms import router as patient_forms_router
 from control_plane.api.v1.platform import router as platform_router
 from control_plane.api.v1.platform_auth import router as platform_auth_router
+from control_plane.api.v1.prompts import router as prompts_router
 from control_plane.api.v1.providers import router as providers_router
 from control_plane.api.v1.roles import router as roles_router
 from control_plane.api.v1.tenant_config import router as tenant_config_router
@@ -18,6 +19,7 @@ router.include_router(auth_router)
 router.include_router(calls_router)
 router.include_router(patient_forms_router)
 router.include_router(platform_router)
+router.include_router(prompts_router)
 router.include_router(platform_auth_router)
 router.include_router(users_router)
 router.include_router(roles_router)
