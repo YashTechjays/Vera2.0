@@ -7,20 +7,22 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api/client"
 import {
   createElevation,
   endElevation,
   listElevations,
+  listTenants,
   MAX_ELEVATION_MINUTES,
   MAX_ELEVATION_REASON,
   type Elevation,
+  type TenantSummary,
 } from "@/lib/api/platform"
 import { useAppSelector } from "@/store/hooks"
 import { selectIsSuperAdmin } from "@/store/authSlice"
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DEFAULT_DURATION = 60
 
 /** Human "expires in …" for a grant, recomputed on each render. */
@@ -36,6 +38,7 @@ export function TenantAccess() {
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
 
   const [elevations, setElevations] = useState<Elevation[]>([])
+  const [tenants, setTenants] = useState<TenantSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -63,13 +66,16 @@ export function TenantAccess() {
   useEffect(() => {
     if (!isSuperAdmin) return
     let cancelled = false
-    listElevations()
-      .then((rows) => {
-        if (!cancelled) setElevations(rows)
+    Promise.all([listElevations(), listTenants()])
+      .then(([grants, ts]) => {
+        if (!cancelled) {
+          setElevations(grants)
+          setTenants(ts)
+        }
       })
       .catch((err) => {
         if (!cancelled)
-          setLoadError(err instanceof ApiError ? err.message : "Could not load elevations.")
+          setLoadError(err instanceof ApiError ? err.message : "Could not load data.")
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -88,8 +94,8 @@ export function TenantAccess() {
     e.preventDefault()
     setFormError(null)
     const id = tenantId.trim()
-    if (!UUID_RE.test(id)) {
-      setFormError("Enter a valid tenant ID (UUID).")
+    if (id === "") {
+      setFormError("Select a tenant.")
       return
     }
     if (reason.trim().length === 0) {
@@ -208,18 +214,19 @@ export function TenantAccess() {
         <CardContent>
           <form onSubmit={onCreate} className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="tenant-id">Tenant ID</Label>
-              <Input
+              <Label htmlFor="tenant-id">Tenant</Label>
+              <Select
                 id="tenant-id"
-                placeholder="00000000-0000-0000-0000-000000000000"
                 value={tenantId}
                 onChange={(ev) => setTenantId(ev.target.value)}
-                className="font-mono"
-              />
-              <p className="text-xs text-muted-foreground">
-                The tenant's UUID. (A tenant picker arrives once the backend exposes a list
-                endpoint.)
-              </p>
+              >
+                <option value="">Select a tenant…</option>
+                {tenants.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name} ({t.slug})
+                  </option>
+                ))}
+              </Select>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="reason">Reason</Label>

@@ -291,3 +291,19 @@ async def test_platform_user_without_grant_is_denied_on_tenant_route(
     resp = await client.get("/api/v1/calls", headers=_auth(w.super_token))
     assert resp.status_code == 403
     assert resp.json()["message"] == "no active elevation for tenant"
+
+
+async def test_super_admin_lists_tenants(world: tuple[httpx.AsyncClient, World]) -> None:
+    # The platform session reads the tenant catalog (tenant_platform_read policy)
+    # without any elevation — it's the picker for choosing where to elevate.
+    client, w = world
+    resp = await client.get("/api/v1/platform/tenants", headers=_auth(w.super_token))
+    assert resp.status_code == 200, resp.text
+    ids = {t["id"] for t in resp.json()["data"]}
+    assert {str(w.tenant_id), str(w.other_tenant_id)} <= ids
+
+
+async def test_tenant_user_cannot_list_tenants(world: tuple[httpx.AsyncClient, World]) -> None:
+    client, w = world
+    resp = await client.get("/api/v1/platform/tenants", headers=_auth(w.tenant_admin_token))
+    assert resp.status_code == 403

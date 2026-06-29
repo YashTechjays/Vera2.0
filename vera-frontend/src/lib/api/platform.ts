@@ -25,6 +25,17 @@ export type CreateElevationInput = {
   duration_minutes: number
 }
 
+export type TenantSummary = {
+  id: string
+  name: string
+  slug: string
+}
+
+/** Active tenants the operator can elevate into (the tenant picker source). */
+export function listTenants() {
+  return apiRequest<TenantSummary[]>("/platform/tenants")
+}
+
 /** All active (un-ended, un-expired) grants. */
 export function listElevations() {
   return apiRequest<Elevation[]>("/platform/elevations")
