@@ -15,6 +15,7 @@ import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
 import { Settings } from "@/pages/Settings"
 import { VoiceLab } from "@/pages/VoiceLab"
+import { TenantAccess } from "@/pages/TenantAccess"
 import { Placeholder } from "@/pages/Placeholder"
 
 function App() {
@@ -41,6 +42,7 @@ function App() {
             <Route path="voice-lab" element={<VoiceLab />} />
             <Route path="call-history" element={<Placeholder title="Call History" />} />
             <Route path="analytics" element={<Placeholder title="Analytics" />} />
+            <Route path="tenant-access" element={<TenantAccess />} />
             {/* Super-admin-only stub; the persona/prompt editor lands here later. */}
             <Route path="agent-prompt" element={<Placeholder title="Agent Prompt" />} />
             <Route path="settings" element={<Settings />} />
