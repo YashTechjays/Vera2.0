@@ -1,0 +1,98 @@
+"""Unit tests for FormStateMachine — transition validation and side effects.
+
+These are pure-logic tests: they check the transition map, guard conditions,
+and side-effect assignments without hitting a database. The state machine
+operates on in-memory PatientForm objects; only the `enqueued_at` DB-default
+needs special handling (tested via integration tests).
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from vera_core.models.enums import FormStatus
+from vera_core.services.form_state_machine import (
+    ALLOWED_TRANSITIONS,
+    FormStateMachine,
+    InvalidTransitionError,
+)
+
+
+class TestTransitionMap:
+    """Every allowed and disallowed (from, to) pair."""
+
+    @pytest.mark.parametrize(
+        "from_status,to_status",
+        [
+            (FormStatus.READY_FOR_PROCESSING, FormStatus.IN_QUEUE),
+            (FormStatus.READY_FOR_PROCESSING, FormStatus.EXCEPTION_REVIEW),
+            (FormStatus.IN_QUEUE, FormStatus.IN_CALL),
+            (FormStatus.IN_QUEUE, FormStatus.EXPIRED),
+            (FormStatus.IN_CALL, FormStatus.AI_PROCESSING),
+            (FormStatus.IN_CALL, FormStatus.CALL_FAILED),
+            (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
+            (FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED),
+            (FormStatus.CALL_FAILED, FormStatus.IN_QUEUE),
+            (FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE),
+        ],
+    )
+    def test_allowed_transitions(self, from_status: FormStatus, to_status: FormStatus) -> None:
+        assert to_status in ALLOWED_TRANSITIONS[from_status]
+
+    @pytest.mark.parametrize(
+        "from_status,to_status",
+        [
+            (FormStatus.COMPLETED, FormStatus.IN_QUEUE),
+            (FormStatus.EXPIRED, FormStatus.IN_QUEUE),
+            (FormStatus.IN_QUEUE, FormStatus.COMPLETED),
+            (FormStatus.IN_CALL, FormStatus.IN_QUEUE),
+            (FormStatus.READY_FOR_PROCESSING, FormStatus.COMPLETED),
+            (FormStatus.READY_FOR_PROCESSING, FormStatus.CALL_FAILED),
+        ],
+    )
+    def test_disallowed_transitions(self, from_status: FormStatus, to_status: FormStatus) -> None:
+        assert to_status not in ALLOWED_TRANSITIONS.get(from_status, frozenset())
+
+
+class TestFormStateMachine:
+    """Side-effect and guard tests on a mock PatientForm."""
+
+    def _make_form(self, status: FormStatus, retry_count: int = 0) -> MagicMock:
+        """Minimal in-memory PatientForm-like object for testing."""
+        form = MagicMock()
+        form.status = status.value
+        form.retry_count = retry_count
+        form.enqueued_at = None
+        return form
+
+    def test_transition_to_in_queue_sets_enqueued_at(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.READY_FOR_PROCESSING)
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+        assert form.enqueued_at is not None
+
+    def test_transition_call_failed_to_in_queue_increments_retry(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.CALL_FAILED, retry_count=1)
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+        assert form.retry_count == 2
+        assert form.enqueued_at is not None
+
+    def test_transition_call_failed_to_in_queue_blocked_at_max_retries(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.CALL_FAILED, retry_count=5)
+        with pytest.raises(InvalidTransitionError, match="retries exhausted"):
+            sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+
+    def test_invalid_transition_raises(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.COMPLETED)
+        with pytest.raises(InvalidTransitionError):
+            sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+
+    def test_idempotent_same_status_is_noop(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.IN_QUEUE)
+        # Same status → no-op, no error
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+        assert form.status == FormStatus.IN_QUEUE.value
