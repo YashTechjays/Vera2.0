@@ -14,11 +14,15 @@ export function Sidebar({ collapsed }: SidebarProps) {
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
   // RBAC: hide nav items whose required permission the user lacks, and platform-only
   // items (e.g. Agent Prompt) for anyone who isn't a super admin.
-  const items = navItems.filter(
+  const visible = navItems.filter(
     (item) =>
       (!item.permission || permissions.includes(item.permission)) &&
       (!item.superAdminOnly || isSuperAdmin)
   )
+  // For a super admin, surface the platform-only items first.
+  const items = isSuperAdmin
+    ? [...visible.filter((i) => i.superAdminOnly), ...visible.filter((i) => !i.superAdminOnly)]
+    : visible
   return (
     <aside
       className={cn(
