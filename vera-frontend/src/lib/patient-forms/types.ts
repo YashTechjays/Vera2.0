@@ -59,7 +59,6 @@ export type PatientFormSummary = {
   insurance_provider: string | null
   insurance_provider_phone_number: string | null
   completion_pct: number
-  dispute_count: number
   created_at: string
   updated_at: string
 }
