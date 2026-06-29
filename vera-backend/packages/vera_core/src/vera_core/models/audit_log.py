@@ -39,6 +39,12 @@ class AuditEvent(enum.StrEnum):
     # A human changed a patient_form's lifecycle status by hand (the dedicated
     # status endpoint). Records from/to status only — statuses are not PHI.
     FORM_STATUS_CHANGE = "form.status_change"
+    # Queue dispatch: the dispatcher picked a form off the queue and initiated a
+    # call. Records form id + tenant — no PHI field values.
+    QUEUE_DISPATCH = "queue.dispatch"
+    # Queue expiry: the dispatcher marked a form expired because it exceeded the
+    # tenant's queue_expiry_hours window. Records form id + tenant only.
+    QUEUE_EXPIRED = "queue.expired"
 
 
 class AuditLog(Base, TenantScopedMixin):
