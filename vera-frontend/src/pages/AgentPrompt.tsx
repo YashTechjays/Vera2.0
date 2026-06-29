@@ -20,6 +20,7 @@ import {
 } from "@/lib/api/prompts"
 import { useAppSelector } from "@/store/hooks"
 import { selectIsSuperAdmin } from "@/store/authSlice"
+import { pickInitialVersion } from "@/pages/agentPrompt.helpers"
 
 export function AgentPrompt(): JSX.Element {
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
@@ -40,7 +41,7 @@ export function AgentPrompt(): JSX.Element {
   const refresh = useCallback(async (promptId: string) => {
     const vs = await listPromptVersions(promptId)
     setVersions(vs)
-    const current = vs.find((v) => v.status === "published") ?? vs[0]
+    const current = pickInitialVersion(vs)
     if (current) await loadVersionInto(promptId, current.id)
   }, [loadVersionInto])
 
@@ -159,7 +160,7 @@ export function AgentPrompt(): JSX.Element {
                     <Badge variant={v.status === "published" ? "default" : "secondary"}>{v.status}</Badge>
                   </div>
                   <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => loadVersionInto(prompt.id, v.id)}>
+                    <Button variant="outline" size="sm" onClick={() => loadVersionInto(prompt.id, v.id)} disabled={busy !== null}>
                       View
                     </Button>
                     {v.status !== "published" && (
