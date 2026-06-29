@@ -317,6 +317,30 @@ async def test_resolve_accept_records_action_and_clears_dispute(
     assert detail.json()["data"]["status"] == "exception_review"
 
 
+async def test_resolve_accept_via_case_whitespace_variant_is_an_accept(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    dispute_form: UUID,
+) -> None:
+    # The AI value is "Blue Cross". Posting a case/whitespace variant of it must be treated
+    # as an ACCEPT (consistent with the dispute rule), not a CORRECT — and the written human
+    # checkpoint is the canonical AI value, not the posted variant.
+    resp = await client.post(
+        f"/api/v1/patient-forms/{dispute_form}/disputes:resolve",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_data": {HEALTH_PLAN: " blue cross "}, "dispute_fields": [HEALTH_PLAN]},
+    )
+    assert resp.status_code == 200, resp.text
+    await _assert_human_current_and_actions(
+        admin_sessionmaker,
+        form_id=dispute_form,
+        field_path=HEALTH_PLAN,
+        value="Blue Cross",  # the AI value, not the posted " blue cross "
+        actions=["accept"],  # accept, not correct
+    )
+
+
 async def test_resolve_reask_does_not_change_status(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

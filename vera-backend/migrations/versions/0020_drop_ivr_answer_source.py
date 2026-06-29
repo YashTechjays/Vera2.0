@@ -12,10 +12,12 @@ value diverging from the most recent `intake`/`human` baseline — so a new inde
 Migration 0001 materializes table DDL from `Base.metadata` at runtime, so a DB built
 fresh AFTER the model change already has the narrowed CHECK and the index. The CHECK is
 dropped + recreated (Postgres has no `ALTER … ADD CONSTRAINT IF NOT EXISTS`); `ADD`
-re-validates existing rows, which is fine as no `ivr`-source rows are expected. The index
-uses `CREATE INDEX IF NOT EXISTS` — a no-op on fresh DBs (matches the model `Index`),
-created on already-provisioned ones. The CHECK name matches the model's NAMING_CONVENTION
-(`ck_%(table_name)s_%(constraint_name)s` over `check_in`'s default `source_valid`).
+re-validates existing rows, so we first delete any `ivr`-source rows (none expected — no
+code ever wrote them — so a no-op in practice; the delete just keeps the re-validation
+from aborting). The index uses `CREATE INDEX IF NOT EXISTS` — a no-op on fresh DBs
+(matches the model `Index`), created on already-provisioned ones. The CHECK name matches
+the model's NAMING_CONVENTION (`ck_%(table_name)s_%(constraint_name)s` over `check_in`'s
+default `source_valid`).
 """
 
 from collections.abc import Sequence
@@ -30,6 +32,10 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.execute("ALTER TABLE field_answer DROP CONSTRAINT IF EXISTS ck_field_answer_source_valid")
+    # Remove any now-invalid 'ivr'-source rows before re-validating the CHECK. No code ever
+    # wrote them, so this is a no-op in practice; it keeps ADD CONSTRAINT from aborting on an
+    # already-provisioned DB that somehow has one.
+    op.execute("DELETE FROM field_answer WHERE source = 'ivr'")
     op.execute(
         """
         ALTER TABLE field_answer ADD CONSTRAINT ck_field_answer_source_valid

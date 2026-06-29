@@ -47,6 +47,7 @@ from vera_core.forms.review import (
     adjudication_action,
     build_field_views,
     completion_pct,
+    normalize_value,
     unwrap_value,
 )
 from vera_core.models import (
@@ -511,9 +512,10 @@ async def resolve_disputes(
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormDetail]:
     response.headers["Cache-Control"] = "no-store"
-    # Lock the form row: resolve demotes the current answer and inserts a new one, so a
-    # concurrent resolve (or the worker writing a fresh ai_call) would otherwise race to
-    # two current rows and collide on the `fa_current_uq` partial unique index.
+    # Lock the form row to serialize concurrent resolves: resolve demotes the current answer
+    # and inserts a new one, so two overlapping resolves would otherwise race to two current
+    # rows. (This lock does NOT cover a worker writing a fresh ai_call — the worker doesn't
+    # take it; that case relies on the `fa_current_uq` partial unique index.)
     form = (
         await session.execute(
             select(PatientForm).where(PatientForm.id == form_id).with_for_update()
@@ -586,9 +588,9 @@ async def resolve_disputes(
             changed.append(path)
             continue
         cur_value = unwrap_value(cur.value)
-        if new_value != cur_value:
-            # Value changed → advance the baseline with a human answer. Only record a
-            # `dispute_action` when this path was actually disputed.
+        if normalize_value(new_value) != normalize_value(cur_value):
+            # Real change (differs under the dispute rule) → advance the baseline with a
+            # human answer. Only record a `dispute_action` when this path was disputed.
             cur.is_current = False
             await session.flush()  # clear the old current before inserting the new one
             session.add(_human_answer(path, new_value))
