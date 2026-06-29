@@ -226,3 +226,46 @@ async def create_draft(
     session.add(draft)
     await session.flush()
     return ok(_detail(draft))
+
+
+@router.post(
+    "/{prompt_id}/versions/{version_id}/publish",
+    response_model=ResponseModel[PromptVersionDetail],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def publish_version(
+    prompt_id: UUID,
+    version_id: UUID,
+    session: PlatformSession,
+    _caller: Annotated[VerifiedIdentity, _READ],
+) -> ResponseModel[PromptVersionDetail]:
+    target = (
+        await session.execute(
+            select(PromptVersion).where(
+                PromptVersion.id == version_id, PromptVersion.prompt_id == prompt_id
+            )
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise NotFoundError(message="unknown prompt version")
+    if target.status == VersionStatus.PUBLISHED:
+        return ok(_detail(target))  # idempotent no-op
+    current = (
+        await session.execute(
+            select(PromptVersion).where(
+                PromptVersion.prompt_id == prompt_id,
+                PromptVersion.status == VersionStatus.PUBLISHED,
+            )
+        )
+    ).scalar_one_or_none()
+    if current is not None:
+        # Demote first to free uq_prompt_version_published_per_prompt before publishing.
+        current.status = VersionStatus.DRAFT
+        await session.flush()
+    target.status = VersionStatus.PUBLISHED
+    await session.flush()
+    return ok(_detail(target))

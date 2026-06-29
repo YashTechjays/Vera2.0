@@ -297,6 +297,31 @@ async def test_create_draft_increments_version(prompts_world) -> None:
     assert d["composite_json"]["prompt"] == "edited"
 
 
+async def test_publish_promotes_and_demotes(prompts_world) -> None:
+    client, w, ids = prompts_world
+    draft = (
+        await client.post(
+            f"/api/v1/prompts/{ids.prompt_id}/versions",
+            headers=_auth(w.super_token),
+            json={"composite_json": {"prompt": "v2"}},
+        )
+    ).json()["data"]
+    pub = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/versions/{draft['id']}/publish",
+        headers=_auth(w.super_token),
+    )
+    assert pub.status_code == 200, pub.text
+    assert pub.json()["data"]["status"] == "published"
+
+    versions = (
+        await client.get(
+            f"/api/v1/prompts/{ids.prompt_id}/versions", headers=_auth(w.super_token)
+        )
+    ).json()["data"]
+    published = [v for v in versions if v["status"] == "published"]
+    assert len(published) == 1 and published[0]["version"] == 2
+
+
 async def test_create_draft_without_published_schema_conflicts(
     prompts_world, admin_sessionmaker
 ) -> None:
