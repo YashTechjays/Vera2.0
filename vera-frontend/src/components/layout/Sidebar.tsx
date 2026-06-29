@@ -1,9 +1,9 @@
 import { NavLink } from "react-router-dom"
 import { Sparkles } from "lucide-react"
-import { navItems } from "@/lib/nav"
+import { visibleNavFor } from "@/lib/nav"
 import { cn } from "@/lib/utils"
 import { useAppSelector } from "@/store/hooks"
-import { selectPermissions } from "@/store/authSlice"
+import { selectIsElevated, selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
 
 type SidebarProps = {
   collapsed: boolean
@@ -11,8 +11,9 @@ type SidebarProps = {
 
 export function Sidebar({ collapsed }: SidebarProps) {
   const permissions = useAppSelector(selectPermissions)
-  // RBAC: hide nav items whose required permission the user lacks.
-  const items = navItems.filter((item) => !item.permission || permissions.includes(item.permission))
+  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
+  const isElevated = useAppSelector(selectIsElevated)
+  const items = visibleNavFor({ permissions, isSuperAdmin, isElevated })
   return (
     <aside
       className={cn(

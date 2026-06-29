@@ -89,6 +89,16 @@ class PromptVersion(Base, UUIDv7PKMixin, CreatedAtMixin):
     __table_args__ = (
         UniqueConstraint("prompt_id", "version"),
         check_in("status", VersionStatus),
+        # At most one published version per prompt family — the mirror of
+        # uq_schema_version_published_per_schema. "The published prompt for this
+        # family" is a single indexed lookup, and promoting a new version requires
+        # demoting the old one first.
+        Index(
+            "uq_prompt_version_published_per_prompt",
+            "prompt_id",
+            unique=True,
+            postgresql_where=text("status = 'published'"),
+        ),
     )
 
     prompt_id: Mapped[UUID] = mapped_column(

@@ -11,7 +11,7 @@ export type Dispute = {
   previousValue: string
   /** the assistant-captured value (pre-seeded into the field) */
   currentValue: string
-  /** 0–100 confidence in the captured value */
+  /** 0–100 confidence the AI answer carried for the captured value */
   confidence?: number
   /** short supporting evidence */
   evidence?: string

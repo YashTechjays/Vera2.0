@@ -390,3 +390,43 @@ async def test_api_key_scopes_catalog(client: httpx.AsyncClient, rbac_world: RBA
     codes = {entry["code"] for entry in catalog}
     assert "intake:write" in codes
     assert all(entry["description"] for entry in catalog)  # every scope is labelled
+
+
+async def test_api_key_duplicate_active_name_rejected(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    first = await client.post(
+        "/api/v1/api-keys",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "dupe", "scope": "intake:write"},
+    )
+    assert first.status_code == 200, first.text
+    second = await client.post(
+        "/api/v1/api-keys",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "dupe", "scope": "intake:write"},
+    )
+    assert second.status_code == 409, second.text
+
+
+async def test_api_key_name_reusable_after_revoke(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    first = await client.post(
+        "/api/v1/api-keys",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "rotate", "scope": "intake:write"},
+    )
+    assert first.status_code == 200, first.text
+    revoke = await client.post(
+        f"/api/v1/api-keys/{first.json()['data']['id']}/revoke",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert revoke.status_code == 200, revoke.text
+    # Revoking the prior key frees the name for a fresh one.
+    again = await client.post(
+        "/api/v1/api-keys",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "rotate", "scope": "intake:write"},
+    )
+    assert again.status_code == 200, again.text

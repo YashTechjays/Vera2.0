@@ -53,7 +53,6 @@ class CallEventType(enum.StrEnum):
 
 class AnswerSource(enum.StrEnum):
     INTAKE = "intake"
-    IVR = "ivr"
     AI_CALL = "ai_call"
     HUMAN = "human"
 

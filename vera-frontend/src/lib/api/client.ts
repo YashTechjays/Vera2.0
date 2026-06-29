@@ -7,6 +7,22 @@ import { getToken } from "@/lib/auth/storage"
 
 export const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1"
 
+// A unique token for headers like `Idempotency-Key`. `crypto.randomUUID()` only
+// exists in a *secure context* (HTTPS, or http on localhost/127.0.0.1) — on a
+// plain-HTTP origin such as `http://<ip>/` it is `undefined` and throws, killing
+// the request before it leaves the browser. This degrades to a UUIDv4 built from
+// `Math.random()`. That is NOT cryptographically strong, which is fine here: the
+// value only needs to be unique-per-attempt for de-dup, never a secret.
+export function randomId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID()
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16)
+  })
+}
+
 // Registered by the store so a 401 can clear auth state without this module
 // importing the store (avoids a circular dependency).
 let authFailureHandler: (() => void) | null = null
