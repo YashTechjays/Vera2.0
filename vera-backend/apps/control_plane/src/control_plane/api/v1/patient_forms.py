@@ -44,16 +44,15 @@ from vera_core.forms.intake import (
 )
 from vera_core.forms.review import (
     AnswerRow,
-    EvalRow,
     adjudication_action,
     build_field_views,
     completion_pct,
+    normalize_value,
     unwrap_value,
 )
 from vera_core.models import (
     DisputeAction,
     FieldAnswer,
-    FieldEvaluation,
     FormSchema,
     PatientForm,
     SchemaVersion,
@@ -210,7 +209,7 @@ async def upload_patient_form(
 
 
 class PatientFormSummary(BaseModel):
-    """Worklist row — promoted identifiers + display columns + counts."""
+    """Worklist row — promoted identifiers + display columns."""
 
     id: UUID
     status: str
@@ -223,7 +222,6 @@ class PatientFormSummary(BaseModel):
     insurance_provider: str | None
     insurance_provider_phone_number: str | None
     completion_pct: float
-    dispute_count: int
     created_at: datetime
     updated_at: datetime
 
@@ -287,92 +285,45 @@ def _audit_phi_read(
     )
 
 
-async def _unresolved_dispute_count_by_form(
-    session: TenantSession, form_ids: list[UUID]
-) -> dict[UUID, int]:
-    """For each form, the number of current answers the judge flagged
-    (`supported=false`) that no human has adjudicated yet."""
-    if not form_ids:
-        return {}
-    rows = (
-        (
-            await session.execute(
-                select(FieldAnswer.form_id, func.count())
-                .join(FieldEvaluation, FieldEvaluation.answer_id == FieldAnswer.id)
-                .outerjoin(DisputeAction, DisputeAction.answer_id == FieldAnswer.id)
-                .where(
-                    FieldAnswer.form_id.in_(form_ids),
-                    FieldAnswer.is_current.is_(True),
-                    FieldEvaluation.supported.is_(False),
-                    DisputeAction.id.is_(None),
-                )
-                .group_by(FieldAnswer.form_id)
-            )
+def _baseline_query(form_id: UUID) -> Any:
+    """`(field_path, value)` of the most recent `intake`/`human` answer per `field_path`
+    for one form — the dispute baseline `B`. `created_at` is the transaction time, so
+    same-transaction rows tie; `id DESC` (UUIDv7) breaks the tie deterministically."""
+    return (
+        select(FieldAnswer.field_path, FieldAnswer.value)
+        .where(
+            FieldAnswer.form_id == form_id,
+            FieldAnswer.source.in_([AnswerSource.INTAKE.value, AnswerSource.HUMAN.value]),
         )
-        .tuples()
-        .all()
+        .order_by(
+            FieldAnswer.field_path,
+            FieldAnswer.created_at.desc(),
+            FieldAnswer.id.desc(),
+        )
+        .distinct(FieldAnswer.field_path)
     )
-    return dict(rows)
 
 
-async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
-    """Assemble the full review detail for one form (current answers + disputes)."""
+async def _field_views(session: TenantSession, form_id: UUID) -> list[dict[str, Any]]:
+    """The dispute-annotated field views for one form — the single source of truth for
+    "is this a dispute". Both the detail view and the dispute gate go through here, so the
+    count and the detail can never disagree. The dispute decision (incl. value
+    normalization and null handling) lives once, in `build_field_views`/`is_disputed`."""
     current = (
         (
             await session.execute(
                 select(FieldAnswer).where(
-                    FieldAnswer.form_id == form.id, FieldAnswer.is_current.is_(True)
+                    FieldAnswer.form_id == form_id, FieldAnswer.is_current.is_(True)
                 )
             )
         )
         .scalars()
         .all()
     )
-    answer_ids = [a.id for a in current]
-
-    evals_by_answer: dict[UUID, EvalRow] = {}
-    resolved_ids: set[UUID] = set()
-    if answer_ids:
-        # Latest evaluation per answer (newest wins).
-        for ev in (
-            await session.execute(
-                select(FieldEvaluation)
-                .where(FieldEvaluation.answer_id.in_(answer_ids))
-                .order_by(FieldEvaluation.created_at.desc())
-            )
-        ).scalars():
-            evals_by_answer.setdefault(
-                ev.answer_id,
-                EvalRow(supported=ev.supported, confidence=ev.confidence, evidence=ev.evidence),
-            )
-        resolved_ids = set(
-            (
-                await session.execute(
-                    select(DisputeAction.answer_id).where(DisputeAction.answer_id.in_(answer_ids))
-                )
-            ).scalars()
-        )
-
-    # Most recent superseded value per path → the dispute's `previous_value`.
-    prior_by_path: dict[str, Any] = {}
-    for pa in (
-        await session.execute(
-            select(FieldAnswer)
-            .where(FieldAnswer.form_id == form.id, FieldAnswer.is_current.is_(False))
-            .order_by(FieldAnswer.created_at.desc())
-        )
-    ).scalars():
-        prior_by_path.setdefault(pa.field_path, pa.value)
-
-    form_schema = (
-        await session.execute(
-            select(FormSchema)
-            .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
-            .where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one()
-
-    views = build_field_views(
+    baseline_by_path: dict[str, Any] = dict(
+        (await session.execute(_baseline_query(form_id))).tuples().all()
+    )
+    return build_field_views(
         [
             AnswerRow(
                 id=a.id,
@@ -384,10 +335,36 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
             )
             for a in current
         ],
-        evals_by_answer,
-        prior_by_path,
-        resolved_answer_ids=resolved_ids,
+        baseline_by_path,
     )
+
+
+async def _open_dispute_paths(session: TenantSession, form_id: UUID) -> set[str]:
+    """The set of field paths with an open dispute on this form — used to gate which
+    resolutions emit a `dispute_action` (audit record)."""
+    return {
+        v["field_path"] for v in await _field_views(session, form_id) if v["dispute"] is not None
+    }
+
+
+async def _unresolved_dispute_count(session: TenantSession, form_id: UUID) -> int:
+    """The number of fields on this form with an open dispute (derived from the same
+    Python rule the detail view uses)."""
+    return len(await _open_dispute_paths(session, form_id))
+
+
+async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
+    """Assemble the full review detail for one form (current answers + disputes)."""
+    views = await _field_views(session, form.id)
+
+    form_schema = (
+        await session.execute(
+            select(FormSchema)
+            .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
+            .where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+
     return PatientFormDetail(
         id=form.id,
         status=form.status,
@@ -445,7 +422,6 @@ async def list_patient_forms(
         .scalars()
         .all()
     )
-    counts = await _unresolved_dispute_count_by_form(session, [r.id for r in rows])
     items = [
         PatientFormSummary(
             id=r.id,
@@ -458,7 +434,6 @@ async def list_patient_forms(
             insurance_provider=r.insurance_provider,
             insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
-            dispute_count=counts.get(r.id, 0),
             created_at=r.created_at,
             updated_at=r.updated_at,
         )
@@ -535,11 +510,21 @@ async def resolve_disputes(
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormDetail]:
     response.headers["Cache-Control"] = "no-store"
+    # Lock the form row to serialize concurrent resolves: resolve demotes the current answer
+    # and inserts a new one, so two overlapping resolves would otherwise race to two current
+    # rows. (This lock does NOT cover a worker writing a fresh ai_call — the worker doesn't
+    # take it; that case relies on the `fa_current_uq` partial unique index.)
     form = (
-        await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+        await session.execute(
+            select(PatientForm).where(PatientForm.id == form_id).with_for_update()
+        )
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
+
+    # Open disputes BEFORE any writes: only an actually-disputed path may emit a
+    # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
+    open_paths = await _open_dispute_paths(session, form_id)
 
     current_by_path = {
         a.field_path: a
@@ -567,6 +552,7 @@ async def resolve_disputes(
 
     dispute_fields = set(body.dispute_fields)
     changed: list[str] = []
+    accepted: list[str] = []
 
     def _human_answer(path: str, raw: Any) -> FieldAnswer:
         return FieldAnswer(
@@ -578,53 +564,52 @@ async def resolve_disputes(
             is_current=True,
         )
 
+    def _record_action(answer_id: UUID, action: str, old: Any, new: Any) -> None:
+        session.add(
+            DisputeAction(
+                tenant_id=tenant_id,
+                answer_id=answer_id,
+                actor_user_id=caller.user_id,
+                action=action,
+                old_value=old,
+                new_value=new,
+            )
+        )
+
+    async def _supersede(cur: FieldAnswer, raw: Any) -> None:
+        # Demote the current answer and write a HUMAN checkpoint (advances the baseline).
+        cur.is_current = False
+        await session.flush()  # clear the old current before inserting the new one
+        session.add(_human_answer(cur.field_path, raw))
+
     for path, new_value in body.form_data.items():
         cur = current_by_path.get(path)
         if cur is None:
+            # No current answer to dispute — just record the human value (baseline edit).
             if new_value in (None, ""):
                 continue
-            answer = _human_answer(path, new_value)
-            session.add(answer)
-            await session.flush()
-            session.add(
-                DisputeAction(
-                    tenant_id=tenant_id,
-                    answer_id=answer.id,
-                    actor_user_id=caller.user_id,
-                    action=DisputeActionType.CORRECT.value,
-                    old_value=None,
-                    new_value={"value": new_value},
-                )
-            )
+            session.add(_human_answer(path, new_value))
             changed.append(path)
             continue
         cur_value = unwrap_value(cur.value)
-        if new_value != cur_value:
-            cur.is_current = False
-            await session.flush()  # clear the old current before inserting the new one
-            session.add(_human_answer(path, new_value))
-            session.add(
-                DisputeAction(
-                    tenant_id=tenant_id,
-                    answer_id=cur.id,
-                    actor_user_id=caller.user_id,
-                    action=adjudication_action(new_value, cur_value, priors_by_path.get(path, [])),
-                    old_value=cur.value,
-                    new_value={"value": new_value},
+        if normalize_value(new_value) != normalize_value(cur_value):
+            # Real change (differs under the dispute rule) → advance the baseline with a
+            # human answer. Only record a `dispute_action` when this path was disputed.
+            await _supersede(cur, new_value)
+            if path in open_paths:
+                _record_action(
+                    cur.id,
+                    adjudication_action(new_value, cur_value, priors_by_path.get(path, [])),
+                    cur.value,
+                    {"value": new_value},
                 )
-            )
             changed.append(path)
-        elif path in dispute_fields:
-            session.add(
-                DisputeAction(
-                    tenant_id=tenant_id,
-                    answer_id=cur.id,
-                    actor_user_id=caller.user_id,
-                    action=DisputeActionType.ACCEPT.value,
-                    old_value=cur.value,
-                    new_value=cur.value,
-                )
-            )
+        elif path in dispute_fields and path in open_paths:
+            # Accept the AI value as-is: write a HUMAN checkpoint equal to it so the
+            # baseline advances and the dispute clears, then record the adjudication.
+            await _supersede(cur, cur_value)
+            _record_action(cur.id, DisputeActionType.ACCEPT.value, cur.value, cur.value)
+            accepted.append(path)
 
     # Status is NOT changed here. The lifecycle is driven only by the worker
     # (automatic path) and the dedicated PUT .../status endpoint (manual edges,
@@ -670,7 +655,7 @@ async def resolve_disputes(
             resource_id=str(form_id),
             detail={
                 "changed": changed,
-                "accepted": sorted(dispute_fields - set(changed)),
+                "accepted": sorted(accepted),
                 "reasked": body.reasked_fields,
             },
         )
@@ -760,7 +745,7 @@ async def update_patient_form_status(
 
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
-        remaining = (await _unresolved_dispute_count_by_form(session, [form_id])).get(form_id, 0)
+        remaining = await _unresolved_dispute_count(session, form_id)
         if remaining:
             raise CustomAPIException(
                 DefaultExceptionCode.CONFLICT,
