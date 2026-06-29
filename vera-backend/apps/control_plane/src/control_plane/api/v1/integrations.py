@@ -44,7 +44,7 @@ class IntegrationSummary(BaseModel):
 
 class ConfigureIntegrationRequest(BaseModel):
     # Credential payload matching the type's `credentials_schema`, e.g.
-    # {"twilio_sip_trunk": "TK…"}.
+    # {"trunk_id": "TK…"}.
     credentials: dict[str, Any]
 
 
