@@ -4,7 +4,7 @@ wiring. Sessions stand in for a completed login so these tests exercise the
 verify path (SessionVerifier -> tenant_guard -> require) without re-running the
 password/MFA dance, which has its own tests."""
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from uuid import UUID
 
 import httpx
@@ -17,7 +17,7 @@ from control_plane.auth.invitations import InMemoryInvitationStore
 from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import SESSION_NS, InMemorySessionStore, SessionData
 from control_plane.email import InMemoryEmailSender
-from control_plane.livekit_gateway import LiveKitGateway
+from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import EnvSecretProvider, Settings
@@ -44,6 +44,10 @@ class FakeLiveKit(LiveKitGateway):
         self.sip_calls: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
         self._url = "ws://fake:7880"
+        # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
+        self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
+        self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
+        self.dial_error = False  # create_sip_participant raises OutboundDialError
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -51,9 +55,16 @@ class FakeLiveKit(LiveKitGateway):
         self.created.append(room_name)
         self.dispatch_metadata.append(metadata)
 
+    async def outbound_trunk_exists(self, trunk_id: str) -> bool:
+        if self.lookup_unavailable:
+            raise LiveKitUnavailable("fake LiveKit is unreachable")
+        return trunk_id in self.known_trunks
+
     async def create_sip_participant(
         self, room_name: str, phone_number: str, trunk_id: str
     ) -> None:
+        if self.dial_error:
+            raise OutboundDialError("fake provider rejected the call")
         self.sip_calls.append((room_name, phone_number, trunk_id))
 
     async def delete_room(self, room_name: str) -> None:
@@ -66,6 +77,16 @@ class FakeLiveKit(LiveKitGateway):
 @pytest.fixture(scope="session")
 def fake_livekit() -> FakeLiveKit:
     return FakeLiveKit()
+
+
+@pytest.fixture(autouse=True)
+def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
+    """The fake is session-scoped; reset its per-test validation/dial knobs before each
+    test so state set by one test never leaks into the next."""
+    fake_livekit.known_trunks = set()
+    fake_livekit.lookup_unavailable = False
+    fake_livekit.dial_error = False
+    yield
 
 
 @pytest.fixture(scope="session")

@@ -144,6 +144,27 @@ async def test_outbound_with_trunk_and_valid_phone_places_sip_call(
 
 
 @pytest.mark.asyncio
+async def test_outbound_dial_failure_returns_502_and_tears_down_room(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    fake_livekit: FakeLiveKit,
+    trunk_configured: None,
+) -> None:
+    # The trunk is stored (passed save-time validation) but the dial fails at the
+    # provider seam — e.g. the trunk was deleted afterwards. Expect a clean 502, not a
+    # 500, and the room we created must be torn down so no agent is left orphaned.
+    fake_livekit.dial_error = True
+    before_deleted = len(fake_livekit.deleted)
+    resp = await client.post(
+        "/api/v1/voice-lab/sessions",
+        headers=_auth(rbac_world.admin_token),
+        json={"mode": "outbound", "phone_number": "+15551234567"},
+    )
+    assert resp.status_code == 502, resp.text
+    assert len(fake_livekit.deleted) == before_deleted + 1
+
+
+@pytest.mark.asyncio
 async def test_end_session_deletes_the_room(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

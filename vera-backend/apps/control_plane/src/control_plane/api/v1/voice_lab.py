@@ -29,6 +29,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.livekit_gateway import OutboundDialError
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord, AuditSink
@@ -59,6 +60,7 @@ _E164 = re.compile(r"^\+[1-9]\d{1,14}$")
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.CONFLICT,
         DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.BAD_GATEWAY,
     ),
 )
 async def start_voice_session(
@@ -100,7 +102,18 @@ async def start_voice_session(
     if is_outbound:
         assert body.phone_number is not None  # validated non-None above when is_outbound
         assert trunk_id is not None  # set above when is_outbound
-        await livekit.create_sip_participant(room_name, body.phone_number, trunk_id)
+        try:
+            await livekit.create_sip_participant(room_name, body.phone_number, trunk_id)
+        except OutboundDialError as e:
+            # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
+            # after it was stored, or the carrier refused the call). Tear down the room
+            # + dispatched agent we just created so nothing is left orphaned, and return
+            # a clean upstream error instead of letting it surface as a raw 500.
+            await livekit.delete_room(room_name)
+            raise CustomAPIException(
+                DefaultExceptionCode.BAD_GATEWAY,
+                message="could not place the outbound call — the telephony provider rejected it",
+            ) from e
 
     token = livekit.mint_join_token(room_name=room_name, identity=browser_identity)
     return ok(
