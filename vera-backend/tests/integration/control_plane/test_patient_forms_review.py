@@ -442,8 +442,8 @@ async def test_no_baseline_ai_value_is_disputed(
     assert d is not None
     assert d["previous_value"] is None
     assert d["current_value"] == "Blue Cross"
-    # Completion is blocked while the (baseline-derived) dispute is open — this is the
-    # complete-gate exercising the SQL dispute path.
+    # Completion is blocked while the (baseline-derived) dispute is open — the complete-gate
+    # derives the dispute from the same Python rule as the detail.
     block = await client.put(
         f"/api/v1/patient-forms/{form_id}/status",
         headers=_auth(rbac_world.admin_token),
@@ -777,8 +777,8 @@ async def test_case_whitespace_variant_agrees_across_count_and_detail(
     cleanup_forms: None,
 ) -> None:
     # An AI value differing from the baseline only by case + whitespace is not a dispute.
-    # Asserts the SQL path (_unresolved_dispute_count, which backs the complete-gate)
-    # and the Python path (detail) agree — the lock-step check that both normalizations match.
+    # Asserts the gate count (_unresolved_dispute_count, which backs the complete-gate) and
+    # the detail agree — both derive the dispute from the one Python rule.
     form_id = await _make_plain_form(
         admin_sessionmaker,
         tenant_id=rbac_world.tenant_id,
@@ -818,9 +818,8 @@ async def test_non_ascii_whitespace_variant_agrees_across_count_and_detail(
     schema_version_id: UUID,
     cleanup_forms: None,
 ) -> None:
-    # A non-breaking space (U+00A0) is NOT ASCII whitespace, so neither path strips it:
-    # both the SQL count and the Python detail must treat it as a dispute. This is the
-    # lock-step proof for the Unicode case (the two normalizations stay byte-aligned).
+    # A non-breaking space (U+00A0) is NOT ASCII whitespace, so it is not stripped: both the
+    # gate count and the detail must treat it as a dispute — they share the one Python rule.
     form_id = await _make_plain_form(
         admin_sessionmaker,
         tenant_id=rbac_world.tenant_id,
@@ -846,7 +845,7 @@ async def test_non_ascii_whitespace_variant_agrees_across_count_and_detail(
     )
     async with admin_sessionmaker() as s:
         count = await _unresolved_dispute_count(s, form_id)
-    assert count == 1  # gate count (Python) keeps the NBSP → dispute
+    assert count == 1  # gate count keeps the NBSP → dispute
     detail = await client.get(
         f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
     )

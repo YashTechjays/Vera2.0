@@ -285,10 +285,10 @@ def _audit_phi_read(
     )
 
 
-def _baseline_subquery(form_id: UUID) -> Any:
-    """Most recent `intake`/`human` answer per `field_path` for one form — the dispute
-    baseline `B`. `created_at` is the transaction time, so same-transaction rows tie;
-    `id DESC` (UUIDv7) breaks the tie deterministically."""
+def _baseline_query(form_id: UUID) -> Any:
+    """`(field_path, value)` of the most recent `intake`/`human` answer per `field_path`
+    for one form — the dispute baseline `B`. `created_at` is the transaction time, so
+    same-transaction rows tie; `id DESC` (UUIDv7) breaks the tie deterministically."""
     return (
         select(FieldAnswer.field_path, FieldAnswer.value)
         .where(
@@ -301,7 +301,6 @@ def _baseline_subquery(form_id: UUID) -> Any:
             FieldAnswer.id.desc(),
         )
         .distinct(FieldAnswer.field_path)
-        .subquery()
     )
 
 
@@ -321,9 +320,8 @@ async def _field_views(session: TenantSession, form_id: UUID) -> list[dict[str, 
         .scalars()
         .all()
     )
-    baseline = _baseline_subquery(form_id)
     baseline_by_path: dict[str, Any] = dict(
-        (await session.execute(select(baseline.c.field_path, baseline.c.value))).tuples().all()
+        (await session.execute(_baseline_query(form_id))).tuples().all()
     )
     return build_field_views(
         [
@@ -578,6 +576,12 @@ async def resolve_disputes(
             )
         )
 
+    async def _supersede(cur: FieldAnswer, raw: Any) -> None:
+        # Demote the current answer and write a HUMAN checkpoint (advances the baseline).
+        cur.is_current = False
+        await session.flush()  # clear the old current before inserting the new one
+        session.add(_human_answer(cur.field_path, raw))
+
     for path, new_value in body.form_data.items():
         cur = current_by_path.get(path)
         if cur is None:
@@ -591,9 +595,7 @@ async def resolve_disputes(
         if normalize_value(new_value) != normalize_value(cur_value):
             # Real change (differs under the dispute rule) → advance the baseline with a
             # human answer. Only record a `dispute_action` when this path was disputed.
-            cur.is_current = False
-            await session.flush()  # clear the old current before inserting the new one
-            session.add(_human_answer(path, new_value))
+            await _supersede(cur, new_value)
             if path in open_paths:
                 _record_action(
                     cur.id,
@@ -605,9 +607,7 @@ async def resolve_disputes(
         elif path in dispute_fields and path in open_paths:
             # Accept the AI value as-is: write a HUMAN checkpoint equal to it so the
             # baseline advances and the dispute clears, then record the adjudication.
-            cur.is_current = False
-            await session.flush()
-            session.add(_human_answer(path, cur_value))
+            await _supersede(cur, cur_value)
             _record_action(cur.id, DisputeActionType.ACCEPT.value, cur.value, cur.value)
             accepted.append(path)
 
