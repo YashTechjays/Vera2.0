@@ -309,16 +309,16 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
             )
         ).scalar_one_or_none()
         if schema is None:
-            published_schema = None
-        else:
-            published_schema = (
-                await session.execute(
-                    select(SchemaVersion).where(
-                        SchemaVersion.schema_id == schema.id,
-                        SchemaVersion.status == VersionStatus.PUBLISHED,
-                    )
+            summary.append(f"{insurance_type} '{name}' (skipped — no published schema)")
+            continue
+        published_schema = (
+            await session.execute(
+                select(SchemaVersion).where(
+                    SchemaVersion.schema_id == schema.id,
+                    SchemaVersion.status == VersionStatus.PUBLISHED,
                 )
-            ).scalar_one_or_none()
+            )
+        ).scalar_one_or_none()
         if published_schema is None:
             summary.append(f"{insurance_type} '{name}' (skipped — no published schema)")
             continue
@@ -352,8 +352,8 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
         ).scalar()
         next_version = (max_version or 0) + 1
         if published is not None:
-            # prompt_version has no DB-level single-published index (unlike
-            # schema_version); keep "one published per prompt" in code for parity.
+            # uq_prompt_version_published_per_prompt allows only one published row
+            # per prompt; free it by demoting the old version before publishing anew.
             published.status = VersionStatus.DRAFT
             await session.flush()
         session.add(
