@@ -4,13 +4,13 @@ wiring. Sessions stand in for a completed login so these tests exercise the
 verify path (SessionVerifier -> tenant_guard -> require) without re-running the
 password/MFA dance, which has its own tests."""
 
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from uuid import UUID
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth.invitations import InMemoryInvitationStore
@@ -23,7 +23,7 @@ from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
-from vera_core.models import AppUser, Tenant, UserRole
+from vera_core.models import AppUser, Integration, IntegrationType, Tenant, UserRole
 from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
@@ -87,6 +87,48 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
     yield
+
+
+TRUNK_INTEGRATION_TYPE = "livekit_outbound_trunk_id"
+
+
+@pytest.fixture
+async def trunk_integration_type(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[None]:
+    """Ensure the `livekit_outbound_trunk_id` catalog type exists (it is seeded in real
+    deployments, but the integration tests run against a migrated, unseeded DB). Find-or-
+    create so it is safe whether or not the row is already present; on teardown remove any
+    integrations referencing it (FK is RESTRICT), then the type row itself if we made it."""
+    async with admin_sessionmaker() as session, session.begin():
+        created = (
+            await session.execute(
+                select(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+            )
+        ).scalar_one_or_none() is None
+        if created:
+            session.add(
+                IntegrationType(
+                    name=TRUNK_INTEGRATION_TYPE, credentials_schema={"trunk_id": "string"}
+                )
+            )
+    try:
+        yield
+    finally:
+        async with admin_sessionmaker() as session, session.begin():
+            await session.execute(
+                delete(Integration).where(
+                    Integration.integration_type_id.in_(
+                        select(IntegrationType.id).where(
+                            IntegrationType.name == TRUNK_INTEGRATION_TYPE
+                        )
+                    )
+                )
+            )
+            if created:
+                await session.execute(
+                    delete(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+                )
 
 
 @pytest.fixture(scope="session")

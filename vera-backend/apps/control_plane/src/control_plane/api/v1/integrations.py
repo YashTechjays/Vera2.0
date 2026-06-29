@@ -66,7 +66,7 @@ def _validate_credentials(schema: dict[str, Any], credentials: dict[str, Any]) -
 
 
 async def _validate_livekit_outbound_trunk(
-    credentials: dict[str, Any], *, livekit: LiveKitGateway
+    credentials: dict[str, Any], livekit: LiveKitGateway
 ) -> None:
     """Probe LiveKit so we never store a trunk id LiveKit doesn't recognise. This is
     an existence check only — LiveKit confirms it holds an outbound trunk with this id,
@@ -95,9 +95,7 @@ async def _validate_livekit_outbound_trunk(
 # Each takes the submitted credentials plus the request-scoped LiveKit gateway (the
 # only upstream a validator needs today).
 INTEGRATION_VALIDATORS: dict[str, Callable[[dict[str, Any], LiveKitGateway], Awaitable[None]]] = {
-    "livekit_outbound_trunk_id": lambda creds, livekit: _validate_livekit_outbound_trunk(
-        creds, livekit=livekit
-    ),
+    "livekit_outbound_trunk_id": _validate_livekit_outbound_trunk,
 }
 
 

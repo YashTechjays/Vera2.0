@@ -17,6 +17,11 @@ from vera_core.observability.correlation import SIP_CALLEE_IDENTITY
 
 AGENT_NAME = "vera-agent"
 
+# Transport-level failures the LiveKit SDK raises: a Twirp API error or an aiohttp
+# connection failure. Caught at this gateway boundary and re-raised as domain errors so
+# SDK exception types never leak to the routers.
+_LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError)
+
 
 class LiveKitUnavailable(Exception):
     """The LiveKit SIP service could not be reached (or errored) while we probed it —
@@ -84,7 +89,7 @@ class LiveKitGateway:
                 resp = await lk.sip.list_outbound_trunk(
                     api.ListSIPOutboundTrunkRequest(trunk_ids=[trunk_id])
                 )
-        except (TwirpError, aiohttp.ClientError) as e:
+        except _LIVEKIT_TRANSPORT_ERRORS as e:
             raise LiveKitUnavailable(str(e)) from e
         return len(resp.items) > 0
 
@@ -102,7 +107,10 @@ class LiveKitGateway:
         router returns a clean upstream error instead of an uncaught 500.
         """
         if not trunk_id:
-            raise ValueError("outbound SIP trunk is not configured")
+            # Unreachable from the router (it resolves + checks the trunk first), but if
+            # a future caller slips through, keep the OutboundDialError contract rather
+            # than surfacing a raw ValueError → 500.
+            raise OutboundDialError("outbound SIP trunk is not configured")
         try:
             async with self._client() as lk:
                 await lk.sip.create_sip_participant(
@@ -115,7 +123,7 @@ class LiveKitGateway:
                         wait_until_answered=False,
                     )
                 )
-        except (TwirpError, aiohttp.ClientError) as e:
+        except _LIVEKIT_TRANSPORT_ERRORS as e:
             raise OutboundDialError(str(e)) from e
 
     async def delete_room(self, room_name: str) -> None:

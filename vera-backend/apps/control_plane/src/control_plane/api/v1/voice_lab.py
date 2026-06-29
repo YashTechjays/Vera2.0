@@ -79,19 +79,23 @@ async def start_voice_session(
     # publishes the mic (caller-); in outbound mode it is listen-only (monitor-),
     # which the worker's wait_for_speaker skips when deciding the room is ready.
     is_outbound = body.mode == "outbound"
-    trunk_id: str | None = None
+    # Resolved (phone_number, trunk_id) for an outbound call; None in browser mode.
+    # Check the cheap E.164 precondition before the DB + KMS credential lookup, and carry
+    # both values as a typed pair so the dial site needs no None-narrowing asserts.
+    outbound: tuple[str, str] | None = None
     if is_outbound:
+        if body.phone_number is None or not _E164.match(body.phone_number):
+            raise CustomAPIException(
+                DefaultExceptionCode.VALIDATION_ERROR,
+                message="phone_number must be E.164 for an outbound call",
+            )
         creds = await get_integration_credentials(
             session, kms, integration_type_name="livekit_outbound_trunk_id"
         )
         trunk_id = creds.get("trunk_id") if creds else None
         if not trunk_id:
             raise ConflictError(message="outbound SIP is not configured")
-        if body.phone_number is None or not _E164.match(body.phone_number):
-            raise CustomAPIException(
-                DefaultExceptionCode.VALIDATION_ERROR,
-                message="phone_number must be E.164 for an outbound call",
-            )
+        outbound = (body.phone_number, trunk_id)
 
     prefix = MONITOR_IDENTITY_PREFIX if is_outbound else CALLER_IDENTITY_PREFIX
     browser_identity = f"{prefix}{caller.user_id}"
@@ -99,11 +103,10 @@ async def start_voice_session(
     await livekit.create_call_room(
         room_name, metadata={"wait_for_speaker": True, "publish_transcript": True}
     )
-    if is_outbound:
-        assert body.phone_number is not None  # validated non-None above when is_outbound
-        assert trunk_id is not None  # set above when is_outbound
+    if outbound is not None:
+        phone_number, trunk_id = outbound
         try:
-            await livekit.create_sip_participant(room_name, body.phone_number, trunk_id)
+            await livekit.create_sip_participant(room_name, phone_number, trunk_id)
         except OutboundDialError as e:
             # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
             # after it was stored, or the carrier refused the call). Tear down the room

@@ -5,11 +5,9 @@ injected by the authz_app fixture records room/dispatch/SIP calls so we assert o
 the seam without a real LiveKit server.
 """
 
-from collections.abc import AsyncIterator
-
 import httpx
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
@@ -29,45 +27,28 @@ def _auth(token: str) -> dict[str, str]:
 
 @pytest.fixture
 async def trunk_configured(
-    admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
-) -> AsyncIterator[None]:
-    """Seal a trunk credential for the test tenant so the outbound dial resolves it
-    from the DB. Uses the same LocalDevKMS master key as the app under test, so the
-    app's get_integration_credentials can open what we seal here."""
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_integration_type: None,
+) -> None:
+    """Seal a trunk credential for the test tenant so the outbound dial resolves it from
+    the DB. Uses the same LocalDevKMS master key as the app under test, so the app's
+    get_integration_credentials can open what we seal here. The `trunk_integration_type`
+    fixture owns the catalog-type row and tears down the Integration we add below."""
     kms = LocalDevKMS(master_key=b"a" * 32)
-    created_itype = False
     async with admin_sessionmaker() as session, session.begin():
-        # The type may already be seeded (scripts/seed.py); look it up before inserting
-        # to avoid a unique-name violation on repeated test runs.
-        itype = (
+        type_id = (
             await session.execute(
-                select(IntegrationType).where(IntegrationType.name == _TRUNK_TYPE)
+                select(IntegrationType.id).where(IntegrationType.name == _TRUNK_TYPE)
             )
-        ).scalar_one_or_none()
-        if itype is None:
-            itype = IntegrationType(name=_TRUNK_TYPE, credentials_schema={"trunk_id": "string"})
-            session.add(itype)
-            await session.flush()
-            created_itype = True
+        ).scalar_one()
         integration = Integration(
             tenant_id=rbac_world.tenant_id,
-            integration_type_id=itype.id,
+            integration_type_id=type_id,
             status="active",
         )
         await seal_credentials(kms, integration=integration, credentials={"trunk_id": _TRUNK_VALUE})
         session.add(integration)
-    try:
-        yield
-    finally:
-        async with admin_sessionmaker() as session, session.begin():
-            await session.execute(
-                delete(Integration).where(Integration.tenant_id == rbac_world.tenant_id)
-            )
-            # Only remove the type row if this fixture created it — leave seeded rows alone.
-            if created_itype:
-                await session.execute(
-                    delete(IntegrationType).where(IntegrationType.name == _TRUNK_TYPE)
-                )
 
 
 @pytest.mark.asyncio
