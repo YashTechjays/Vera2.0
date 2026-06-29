@@ -1,4 +1,5 @@
-import { useEffect } from "react"
+import { lazy, Suspense, useEffect } from "react"
+import { Loader2 } from "lucide-react"
 import { BrowserRouter, Routes, Route } from "react-router-dom"
 import { AppShell } from "@/components/layout/AppShell"
 import { RequireAuth } from "@/components/auth/RequireAuth"
@@ -13,8 +14,14 @@ import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
 import { Settings } from "@/pages/Settings"
-import { VoiceLab } from "@/pages/VoiceLab"
 import { Placeholder } from "@/pages/Placeholder"
+
+// Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
+// "max" libphonenumber metadata (the largest set), so code-split it out of the
+// initial bundle — only operators who open the page pay for it.
+const VoiceLab = lazy(() =>
+  import("@/pages/VoiceLab").then((m) => ({ default: m.VoiceLab })),
+)
 
 function App() {
   const dispatch = useAppDispatch()
@@ -25,25 +32,33 @@ function App() {
 
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/mfa" element={<MfaVerify />} />
-        <Route path="/mfa-enroll" element={<MfaEnroll />} />
-        {/* Invite links are tenant-scoped (generated in the backend email). */}
-        <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
-        <Route element={<RequireAuth />}>
-          <Route element={<AppShell />}>
-            <Route index element={<LiveMonitoring />} />
-            <Route path="data-management" element={<DataManagement />} />
-            <Route path="users" element={<Users />} />
-            <Route path="voice-lab" element={<VoiceLab />} />
-            <Route path="call-history" element={<Placeholder title="Call History" />} />
-            <Route path="analytics" element={<Placeholder title="Analytics" />} />
-            <Route path="settings" element={<Settings />} />
-            <Route path="*" element={<Placeholder title="Not Found" />} />
+      <Suspense
+        fallback={
+          <div className="flex h-screen items-center justify-center">
+            <Loader2 className="size-5 animate-spin text-muted-foreground" />
+          </div>
+        }
+      >
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/mfa" element={<MfaVerify />} />
+          <Route path="/mfa-enroll" element={<MfaEnroll />} />
+          {/* Invite links are tenant-scoped (generated in the backend email). */}
+          <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
+          <Route element={<RequireAuth />}>
+            <Route element={<AppShell />}>
+              <Route index element={<LiveMonitoring />} />
+              <Route path="data-management" element={<DataManagement />} />
+              <Route path="users" element={<Users />} />
+              <Route path="voice-lab" element={<VoiceLab />} />
+              <Route path="call-history" element={<Placeholder title="Call History" />} />
+              <Route path="analytics" element={<Placeholder title="Analytics" />} />
+              <Route path="settings" element={<Settings />} />
+              <Route path="*" element={<Placeholder title="Not Found" />} />
+            </Route>
           </Route>
-        </Route>
-      </Routes>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   )
 }

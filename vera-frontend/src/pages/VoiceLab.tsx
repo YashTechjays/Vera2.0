@@ -245,8 +245,6 @@ export function VoiceLab() {
                   focus-within ring. Colors use the design tokens so it tracks
                   light/dark automatically. */}
               <div
-                data-invalid={showPhoneError}
-                data-disabled={pending !== null}
                 className={cn(
                   // the field box
                   "[&_.PhoneInput]:flex [&_.PhoneInput]:h-9 [&_.PhoneInput]:items-stretch [&_.PhoneInput]:overflow-hidden",
@@ -262,9 +260,11 @@ export function VoiceLab() {
                   "[&_.PhoneInputInput]:h-full [&_.PhoneInputInput]:min-w-0 [&_.PhoneInputInput]:flex-1 [&_.PhoneInputInput]:border-0",
                   "[&_.PhoneInputInput]:bg-transparent [&_.PhoneInputInput]:px-2.5 [&_.PhoneInputInput]:text-sm [&_.PhoneInputInput]:text-foreground [&_.PhoneInputInput]:outline-none",
                   "[&_.PhoneInputInput::placeholder]:text-muted-foreground",
-                  // invalid + disabled states (mirror the shadcn Input)
-                  "data-[invalid=true]:[&_.PhoneInput]:border-destructive data-[invalid=true]:[&_.PhoneInput:focus-within]:ring-destructive/20",
-                  "data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50",
+                  // invalid + disabled read straight off the inner input's own
+                  // aria-invalid / disabled via :has() — no duplicated wrapper state.
+                  "[&_.PhoneInput:has(input[aria-invalid=true])]:border-destructive",
+                  "[&_.PhoneInput:has(input[aria-invalid=true]):focus-within]:ring-destructive/20",
+                  "[&_.PhoneInput:has(input:disabled)]:pointer-events-none [&_.PhoneInput:has(input:disabled)]:opacity-50",
                 )}
               >
                 <PhoneInput
@@ -276,15 +276,16 @@ export function VoiceLab() {
                   onChange={setPhone}
                   onBlur={() => setTouched(true)}
                   aria-invalid={showPhoneError}
+                  aria-describedby="phone-hint"
                   disabled={pending !== null}
                 />
               </div>
               {showPhoneError ? (
-                <p className="text-sm text-destructive">
+                <p id="phone-hint" role="alert" className="text-sm text-destructive">
                   Enter a valid phone number for the selected country.
                 </p>
               ) : (
-                <p className="text-sm text-muted-foreground">
+                <p id="phone-hint" className="text-sm text-muted-foreground">
                   Pick the country, then enter the local number — we'll dial{" "}
                   <span className="font-medium text-foreground">{phone || "…"}</span>.
                 </p>
