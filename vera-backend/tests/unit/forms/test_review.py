@@ -9,6 +9,7 @@ from vera_core.forms.review import (
     build_field_views,
     completion_pct,
     is_disputed,
+    normalize_value,
     unwrap_value,
 )
 from vera_core.models.enums import DisputeActionType
@@ -41,6 +42,18 @@ class TestUnwrapValue:
         assert unwrap_value(None) is None
 
 
+class TestNormalizeValue:
+    def test_strings_are_trimmed_and_lowercased(self) -> None:
+        assert normalize_value("  Primary ") == "primary"
+        assert normalize_value("SECONDARY") == "secondary"
+
+    def test_non_strings_pass_through(self) -> None:
+        assert normalize_value(None) is None
+        assert normalize_value(5) == 5
+        assert normalize_value(True) is True
+        assert normalize_value({"a": 1}) == {"a": 1}
+
+
 class TestIsDisputed:
     def _answer(self, value: object, source: str = "ai_call") -> AnswerRow:
         return AnswerRow(
@@ -71,6 +84,26 @@ class TestIsDisputed:
 
     def test_null_value_and_no_baseline_not_disputed(self) -> None:
         assert is_disputed(self._answer(None), None) is False
+
+    def test_ai_value_diverging_from_explicit_null_baseline_is_disputed(self) -> None:
+        # Intake explicitly set null ({"value": None}) → AI value diverges → disputed.
+        assert is_disputed(self._answer("Tertiary"), {"value": None}) is True
+
+    def test_ai_null_diverging_from_value_baseline_is_disputed(self) -> None:
+        # AI cleared a field the baseline had set → null IS DISTINCT FROM value → disputed.
+        assert is_disputed(self._answer(None), {"value": "Primary"}) is True
+
+    def test_case_only_difference_is_not_disputed(self) -> None:
+        assert is_disputed(self._answer("primary"), {"value": "Primary"}) is False
+
+    def test_whitespace_only_difference_is_not_disputed(self) -> None:
+        assert is_disputed(self._answer(" Primary "), {"value": "Primary"}) is False
+
+    def test_case_and_whitespace_difference_is_not_disputed(self) -> None:
+        assert is_disputed(self._answer("  PRIMARY  "), {"value": "primary"}) is False
+
+    def test_genuinely_different_value_still_disputed(self) -> None:
+        assert is_disputed(self._answer("Secondary"), {"value": "Primary"}) is True
 
 
 class TestRequiredPathsAndCompletion:

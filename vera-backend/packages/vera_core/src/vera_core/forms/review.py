@@ -42,13 +42,27 @@ def unwrap_value(stored: Any) -> Any:
     return stored
 
 
+def normalize_value(value: Any) -> Any:
+    """Canonicalize a value for dispute comparison: strings are stripped + lowercased so
+    case- and whitespace-only differences are not disputes; non-strings (numbers, bools,
+    null, objects) pass through unchanged. Mirrors `patient_forms._normalized_jsonb` so the
+    Python (detail) and SQL (count/gate) dispute paths agree — keep the two in lock-step."""
+    if isinstance(value, str):
+        return value.strip().lower()
+    return value
+
+
 def is_disputed(current: AnswerRow, baseline_value: Any) -> bool:
     """True when the current value came from the AI call and diverges from the
     human/intake baseline. `baseline_value` is the stored baseline (`{"value": ...}`) or
-    `None` if absent; `!=` matches `IS DISTINCT FROM` semantics for `None`."""
+    `None` if absent; `!=` matches `IS DISTINCT FROM` semantics for `None`. Values are
+    normalized first, so case/whitespace-only differences are not disputes."""
     if current.source != AnswerSource.AI_CALL.value:
         return False
-    return bool(unwrap_value(current.value) != unwrap_value(baseline_value))
+    return bool(
+        normalize_value(unwrap_value(current.value))
+        != normalize_value(unwrap_value(baseline_value))
+    )
 
 
 def all_required_paths(schema_json: Mapping[str, Any]) -> list[str]:

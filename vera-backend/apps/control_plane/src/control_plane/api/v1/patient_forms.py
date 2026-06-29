@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import aliased
 
 from control_plane.api.v1.common import TenantId, TenantSession
@@ -307,15 +307,33 @@ def _baseline_subquery(form_ids: list[UUID]) -> Any:
     )
 
 
+def _normalized_jsonb(expr: Any) -> Any:
+    """A JSONB value canonicalized for dispute comparison: a JSON string is trimmed +
+    lowercased (back into a jsonb string) so case/whitespace-only differences are not
+    disputes; non-strings (numbers, bools, null, objects) are unchanged. Mirrors
+    `vera_core.forms.review.normalize_value` — keep the two in lock-step, else the
+    worklist count and the detail view disagree. (`btrim` with the explicit ASCII
+    whitespace set matches Python `str.strip()` for ASCII; Unicode whitespace is a
+    non-goal.)"""
+    return case(
+        (
+            func.jsonb_typeof(expr) == "string",
+            func.to_jsonb(func.lower(func.btrim(expr.astext, " \t\n\r\f\v"))),
+        ),
+        else_=expr,
+    )
+
+
 def _open_dispute_parts(form_ids: list[UUID]) -> tuple[Any, Any, Any, list[Any]]:
     """The single source of truth for "is this an open dispute": a current AI-call
     answer whose unwrapped value diverges from the baseline. Returns the pieces
     `(cur_alias, baseline_subquery, join_onclause, where_clauses)` so callers select
     whatever columns they need over the same FROM/JOIN/WHERE.
 
-    Compares `value['value']` (the unwrapped raw) so it matches `is_disputed`'s
-    `unwrap_value(...)` comparison exactly; an absent baseline is `NULL`, so a divergent
-    AI value with no prior counts as a dispute (per the confirmed rule)."""
+    Compares `value['value']` (the unwrapped raw) after normalization, so it matches
+    `is_disputed`'s `normalize_value(unwrap_value(...))` comparison exactly; an absent
+    baseline is `NULL`, so a divergent AI value with no prior counts as a dispute (per
+    the confirmed rule)."""
     baseline = _baseline_subquery(form_ids)
     cur = aliased(FieldAnswer)
     onclause = and_(baseline.c.form_id == cur.form_id, baseline.c.field_path == cur.field_path)
@@ -323,7 +341,9 @@ def _open_dispute_parts(form_ids: list[UUID]) -> tuple[Any, Any, Any, list[Any]]
         cur.form_id.in_(form_ids),
         cur.is_current.is_(True),
         cur.source == AnswerSource.AI_CALL.value,
-        cur.value["value"].is_distinct_from(baseline.c.value["value"]),
+        _normalized_jsonb(cur.value["value"]).is_distinct_from(
+            _normalized_jsonb(baseline.c.value["value"])
+        ),
     ]
     return cur, baseline, onclause, where
 

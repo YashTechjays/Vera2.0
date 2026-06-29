@@ -494,15 +494,10 @@ async def test_redivergence_reopens_after_resolution(
     )
     assert resp.status_code == 200, resp.text
 
-    def _dispute(detail: httpx.Response) -> dict[str, object] | None:
-        fields = {f["field_path"]: f for f in detail.json()["data"]["fields"]}
-        dispute: dict[str, object] | None = fields[HEALTH_PLAN]["dispute"]
-        return dispute
-
     cleared = await client.get(
         f"/api/v1/patient-forms/{dispute_form}", headers=_auth(rbac_world.admin_token)
     )
-    assert _dispute(cleared) is None
+    assert _dispute_for(cleared) is None
 
     # A later AI capture that diverges from the new baseline reopens the dispute.
     await _add_answer(
@@ -517,7 +512,7 @@ async def test_redivergence_reopens_after_resolution(
     reopened = await client.get(
         f"/api/v1/patient-forms/{dispute_form}", headers=_auth(rbac_world.admin_token)
     )
-    d = _dispute(reopened)
+    d = _dispute_for(reopened)
     assert d is not None
     assert d["previous_value"] == "Aetna"
     assert d["current_value"] == "Cigna"
@@ -535,7 +530,274 @@ async def test_redivergence_reopens_after_resolution(
     reconfirmed = await client.get(
         f"/api/v1/patient-forms/{dispute_form}", headers=_auth(rbac_world.admin_token)
     )
-    assert _dispute(reconfirmed) is None
+    assert _dispute_for(reconfirmed) is None
+
+
+# ---- dispute scenario matrix (team-enumerated cases) ------------------------
+# HEALTH_PLAN stands in for any single field (e.g. coordination-of-benefit) — the
+# dispute rule is field-agnostic. Histories are applied in order; `_add_answer`
+# supersedes the prior current row, so the baseline is the most recent intake/human
+# answer and AI answers never become a baseline.
+
+
+def _dispute_for(detail: httpx.Response, field_path: str = HEALTH_PLAN) -> dict[str, object] | None:
+    fields = {f["field_path"]: f for f in detail.json()["data"]["fields"]}
+    dispute: dict[str, object] | None = fields[field_path]["dispute"]
+    return dispute
+
+
+# Each case: an ordered (source, value) history → expected dispute. `None` means no
+# dispute; a (previous_value, current_value) tuple means disputed with those values
+# (either may itself be None for a JSON-null value).
+_DISPUTE_SCENARIOS = [
+    pytest.param(
+        [("intake", None), ("ai_call", "Tertiary")],
+        (None, "Tertiary"),
+        id="1-1_intake_null_then_ai_value",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", None)],
+        ("Primary", None),
+        id="2-1_intake_value_then_ai_null",
+    ),
+    pytest.param(
+        [("human", "Primary"), ("ai_call", "Tertiary")],
+        ("Primary", "Tertiary"),
+        id="3-1_human_baseline_then_ai_diverge",
+    ),
+    pytest.param(
+        [("human", "Primary"), ("ai_call", "Primary")],
+        None,
+        id="3-2_human_baseline_then_ai_match",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("human", "Secondary"), ("ai_call", "Tertiary")],
+        ("Secondary", "Tertiary"),
+        id="4-1_human_edit_then_ai_diverge",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("human", "Secondary"), ("ai_call", "Primary")],
+        ("Secondary", "Primary"),
+        id="4-2_ai_matches_old_intake_not_human_edit",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("human", "Secondary"), ("ai_call", "Secondary")],
+        None,
+        id="4-3_ai_matches_human_edit",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", "Tertiary")],
+        ("Primary", "Tertiary"),
+        id="5-1_intake_then_ai_diverge",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", "Primary")],
+        None,
+        id="5-2_intake_then_ai_match",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", "Secondary"), ("ai_call", "Secondary")],
+        ("Primary", "Secondary"),
+        id="6-1_two_calls_both_diverge",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", "Primary"), ("ai_call", "Secondary")],
+        ("Primary", "Secondary"),
+        id="6-2_first_call_matches_second_diverges",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", "Secondary"), ("ai_call", "Primary")],
+        None,
+        id="6-3_second_call_back_to_intake",
+    ),
+    # Normalization: case/whitespace-only differences are not disputes.
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", " primary ")],
+        None,
+        id="norm-1_case_and_whitespace_only",
+    ),
+    pytest.param(
+        [("intake", "Primary"), ("ai_call", "PRIMARY")],
+        None,
+        id="norm-2_case_only",
+    ),
+]
+
+
+@pytest.mark.parametrize("history, expected", _DISPUTE_SCENARIOS)
+async def test_dispute_scenarios(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    history: list[tuple[str, object]],
+    expected: tuple[object, object] | None,
+) -> None:
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    for source, value in history:
+        await _add_answer(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            form_id=form_id,
+            field_path=HEALTH_PLAN,
+            value=value,
+            source=source,
+        )
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    d = _dispute_for(detail)
+    if expected is None:
+        assert d is None
+    else:
+        previous_value, current_value = expected
+        assert d is not None
+        assert d["previous_value"] == previous_value
+        assert d["current_value"] == current_value
+
+
+# Group 7: a human resolves call 1's dispute via the :resolve endpoint (advancing
+# the baseline), then a second AI call lands. Resolution payloads mirror the
+# correct/override and accept patterns above.
+_RESOLUTION_SCENARIOS = [
+    pytest.param(
+        {"form_data": {HEALTH_PLAN: "Primary"}},
+        "Secondary",
+        ("Primary", "Secondary"),
+        id="7-1_resolved_to_primary_then_ai_secondary",
+    ),
+    pytest.param(
+        {"form_data": {HEALTH_PLAN: "Secondary"}, "dispute_fields": [HEALTH_PLAN]},
+        "Secondary",
+        None,
+        id="7-2_accepted_secondary_then_ai_secondary",
+    ),
+    pytest.param(
+        {"form_data": {HEALTH_PLAN: "Secondary"}, "dispute_fields": [HEALTH_PLAN]},
+        "Primary",
+        ("Secondary", "Primary"),
+        id="7-3_accepted_secondary_then_ai_primary",
+    ),
+    pytest.param(
+        {"form_data": {HEALTH_PLAN: "Secondary"}, "dispute_fields": [HEALTH_PLAN]},
+        "Tertiary",
+        ("Secondary", "Tertiary"),
+        id="7-4_accepted_secondary_then_ai_tertiary",
+    ),
+]
+
+
+@pytest.mark.parametrize("resolution, call2, expected", _RESOLUTION_SCENARIOS)
+async def test_dispute_after_human_resolution(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    resolution: dict[str, object],
+    call2: object,
+    expected: tuple[object, object] | None,
+) -> None:
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    # Intake baseline + call 1 (diverging AI capture) → an open dispute.
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value="Primary",
+        source=AnswerSource.INTAKE.value,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value="Secondary",
+        source=AnswerSource.AI_CALL.value,
+        confidence=80,
+    )
+    # Human resolves the dispute (advances the baseline).
+    resolved = await client.post(
+        f"/api/v1/patient-forms/{form_id}/disputes:resolve",
+        headers=_auth(rbac_world.admin_token),
+        json=resolution,
+    )
+    assert resolved.status_code == 200, resolved.text
+    # Call 2 lands a new AI capture.
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value=call2,
+        source=AnswerSource.AI_CALL.value,
+        confidence=80,
+    )
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    d = _dispute_for(detail)
+    if expected is None:
+        assert d is None
+    else:
+        previous_value, current_value = expected
+        assert d is not None
+        assert d["previous_value"] == previous_value
+        assert d["current_value"] == current_value
+
+
+async def test_case_whitespace_variant_agrees_across_count_and_detail(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    # An AI value differing from the baseline only by case + whitespace is not a dispute.
+    # Asserts the SQL path (worklist dispute_count) and the Python path (detail) agree —
+    # the lock-step check that both normalizations match.
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value="Primary",
+        source=AnswerSource.INTAKE.value,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value=" primary ",
+        source=AnswerSource.AI_CALL.value,
+        confidence=80,
+    )
+    lst = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.admin_token))
+    row = next(r for r in lst.json()["data"]["items"] if r["id"] == str(form_id))
+    assert row["dispute_count"] == 0  # SQL path
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert _dispute_for(detail) is None  # Python path
 
 
 # ---- status (PUT /patient-forms/{id}/status) --------------------------------
