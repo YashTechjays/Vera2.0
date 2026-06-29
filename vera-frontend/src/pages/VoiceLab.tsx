@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { AlertTriangle, Mic, PhoneOutgoing, Radio } from "lucide-react"
+import { AlertTriangle, Loader2, Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -17,6 +17,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
 import {
   endVoiceSession,
@@ -221,20 +222,63 @@ export function VoiceLab() {
         </LiveKitRoom>
       ) : (
         <Card>
-          <CardContent className="space-y-5 py-6">
+          <CardContent className="max-w-lg space-y-5 py-6">
+            <div className="flex items-start gap-3">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                <PhoneOutgoing className="size-4 text-muted-foreground" />
+              </div>
+              <div>
+                <h2 className="text-sm font-medium leading-none">Outbound call</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Dial a phone number and listen to the Vera agent live over SIP.
+                </p>
+              </div>
+            </div>
+
             <div className="space-y-2">
-              <Label htmlFor="phone">Phone number (outbound only)</Label>
-              <PhoneInput
-                id="phone"
-                international
-                defaultCountry="US"
-                placeholder="Enter phone number"
-                value={phone}
-                onChange={setPhone}
-                onBlur={() => setTouched(true)}
-                aria-invalid={showPhoneError}
-                className="max-w-md"
-              />
+              <Label htmlFor="phone">Phone number</Label>
+              {/* react-phone-number-input renders its own DOM (.PhoneInput /
+                  .PhoneInputCountry / .PhoneInputInput), so we reach into those
+                  internals with Tailwind arbitrary variants to make the widget
+                  read as a single shadcn-style field: one bordered box, a flag
+                  segment with a divider, a borderless number input, and a shared
+                  focus-within ring. Colors use the design tokens so it tracks
+                  light/dark automatically. */}
+              <div
+                data-invalid={showPhoneError}
+                data-disabled={pending !== null}
+                className={cn(
+                  // the field box
+                  "[&_.PhoneInput]:flex [&_.PhoneInput]:h-9 [&_.PhoneInput]:items-stretch [&_.PhoneInput]:overflow-hidden",
+                  "[&_.PhoneInput]:rounded-md [&_.PhoneInput]:border [&_.PhoneInput]:border-input [&_.PhoneInput]:bg-background",
+                  "[&_.PhoneInput]:shadow-xs [&_.PhoneInput]:transition-[color,box-shadow]",
+                  // shared focus ring (focus lands on the inner input)
+                  "[&_.PhoneInput:focus-within]:border-ring [&_.PhoneInput:focus-within]:ring-[3px] [&_.PhoneInput:focus-within]:ring-ring/50",
+                  // country segment: flag + dial code + caret, with a divider
+                  "[&_.PhoneInputCountry]:m-0 [&_.PhoneInputCountry]:flex [&_.PhoneInputCountry]:items-center [&_.PhoneInputCountry]:gap-1.5",
+                  "[&_.PhoneInputCountry]:border-r [&_.PhoneInputCountry]:border-input [&_.PhoneInputCountry]:px-2.5",
+                  "[&_.PhoneInputCountrySelectArrow]:text-muted-foreground [&_.PhoneInputCountrySelectArrow]:opacity-80",
+                  // borderless national-number input
+                  "[&_.PhoneInputInput]:h-full [&_.PhoneInputInput]:min-w-0 [&_.PhoneInputInput]:flex-1 [&_.PhoneInputInput]:border-0",
+                  "[&_.PhoneInputInput]:bg-transparent [&_.PhoneInputInput]:px-2.5 [&_.PhoneInputInput]:text-sm [&_.PhoneInputInput]:text-foreground [&_.PhoneInputInput]:outline-none",
+                  "[&_.PhoneInputInput::placeholder]:text-muted-foreground",
+                  // invalid + disabled states (mirror the shadcn Input)
+                  "data-[invalid=true]:[&_.PhoneInput]:border-destructive data-[invalid=true]:[&_.PhoneInput:focus-within]:ring-destructive/20",
+                  "data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50",
+                )}
+              >
+                <PhoneInput
+                  id="phone"
+                  international
+                  defaultCountry="US"
+                  placeholder="Enter phone number"
+                  value={phone}
+                  onChange={setPhone}
+                  onBlur={() => setTouched(true)}
+                  aria-invalid={showPhoneError}
+                  disabled={pending !== null}
+                />
+              </div>
               {showPhoneError ? (
                 <p className="text-sm text-destructive">
                   Enter a valid phone number for the selected country.
@@ -242,24 +286,43 @@ export function VoiceLab() {
               ) : (
                 <p className="text-sm text-muted-foreground">
                   Pick the country, then enter the local number — we'll dial{" "}
-                  <span className="font-medium">{phone || "…"}</span>.
+                  <span className="font-medium text-foreground">{phone || "…"}</span>.
                 </p>
               )}
             </div>
 
             <div className="flex flex-wrap gap-3">
-              {SHOW_IN_BROWSER_SESSION && (
-                <Button onClick={() => start("browser")} disabled={pending !== null}>
-                  <Mic /> Start in-browser session
-                </Button>
-              )}
               <Button
-                variant="outline"
                 onClick={() => start("outbound")}
                 disabled={pending !== null || !phoneValid}
               >
-                <PhoneOutgoing /> Start outbound call
+                {pending === "outbound" ? (
+                  <>
+                    <Loader2 className="animate-spin" /> Starting call…
+                  </>
+                ) : (
+                  <>
+                    <PhoneOutgoing /> Start outbound call
+                  </>
+                )}
               </Button>
+              {SHOW_IN_BROWSER_SESSION && (
+                <Button
+                  variant="outline"
+                  onClick={() => start("browser")}
+                  disabled={pending !== null}
+                >
+                  {pending === "browser" ? (
+                    <>
+                      <Loader2 className="animate-spin" /> Starting…
+                    </>
+                  ) : (
+                    <>
+                      <Mic /> Start in-browser session
+                    </>
+                  )}
+                </Button>
+              )}
             </div>
 
             <ErrorAlert error={error} />
