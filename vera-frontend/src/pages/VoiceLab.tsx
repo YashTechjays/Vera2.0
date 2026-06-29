@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react"
-import { Mic, PhoneOutgoing, Radio } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
+import { AlertTriangle, Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -8,9 +8,11 @@ import {
 } from "@livekit/components-react"
 import { ConnectionState } from "livekit-client"
 
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ApiError } from "@/lib/api/client"
 import {
@@ -20,6 +22,13 @@ import {
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
+import {
+  COUNTRIES,
+  DEFAULT_COUNTRY,
+  composeE164,
+  dialFor,
+  isE164,
+} from "@/lib/phone/countries"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -131,18 +140,41 @@ function TranscriptPanel({ roomName }: { roomName: string }) {
   )
 }
 
+/** Inline destructive banner for a request/session error. Renders nothing when
+ *  there's no error, so call sites stay a one-liner. */
+function ErrorAlert({ error }: { error: string | null }) {
+  if (!error) return null
+  return (
+    <Alert variant="destructive">
+      <AlertTriangle />
+      <AlertDescription>{error}</AlertDescription>
+    </Alert>
+  )
+}
+
 export function VoiceLab() {
-  const [phone, setPhone] = useState("")
+  const [country, setCountry] = useState(DEFAULT_COUNTRY)
+  const [national, setNational] = useState("")
+  // Only flag the number field once the operator has interacted with it, so an
+  // untouched empty form doesn't show a red error.
+  const [touched, setTouched] = useState(false)
   const [session, setSession] = useState<VoiceSessionResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<VoiceSessionMode | null>(null)
+
+  const dial = dialFor(country)
+  // Compose once and reuse for validation and the live preview. Mirrors the
+  // backend E.164 contract so an invalid number never round-trips.
+  const e164 = useMemo(() => composeE164(dial, national), [dial, national])
+  const phoneValid = isE164(e164)
+  const showPhoneError = touched && !phoneValid
 
   async function start(mode: VoiceSessionMode) {
     setError(null)
     setPending(mode)
     try {
       const result = await startVoiceSession(
-        mode === "outbound" ? { mode, phone_number: phone.trim() } : { mode },
+        mode === "outbound" ? { mode, phone_number: e164 } : { mode },
       )
       setSession(result)
     } catch (err) {
@@ -178,6 +210,8 @@ export function VoiceLab() {
         </p>
       </div>
 
+      {session && <ErrorAlert error={error} />}
+
       {session ? (
         <LiveKitRoom
           serverUrl={session.url}
@@ -195,15 +229,44 @@ export function VoiceLab() {
         <Card>
           <CardContent className="space-y-5 py-6">
             <div className="space-y-2">
-              <Label htmlFor="phone">Phone number (E.164, outbound only)</Label>
-              <Input
-                id="phone"
-                type="tel"
-                placeholder="+15551234567"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                className="max-w-xs"
-              />
+              <Label htmlFor="phone">Phone number (outbound only)</Label>
+              <div className="flex max-w-md gap-2">
+                <Select
+                  aria-label="Country code"
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value)}
+                  className="h-9 w-44 shrink-0"
+                >
+                  {COUNTRIES.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.flag} {c.name} ({c.dial})
+                    </option>
+                  ))}
+                </Select>
+                <Input
+                  id="phone"
+                  type="tel"
+                  inputMode="tel"
+                  placeholder="5551234567"
+                  value={national}
+                  aria-invalid={showPhoneError}
+                  onChange={(e) => {
+                    setNational(e.target.value)
+                    setTouched(true)
+                  }}
+                  onBlur={() => setTouched(true)}
+                />
+              </div>
+              {showPhoneError ? (
+                <p className="text-sm text-destructive">
+                  Enter a valid phone number for {dial} (digits only, up to 15 total).
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Pick the country, then enter the local number — we'll dial{" "}
+                  <span className="font-medium">{e164 || dial}</span>.
+                </p>
+              )}
             </div>
 
             <div className="flex flex-wrap gap-3">
@@ -215,13 +278,13 @@ export function VoiceLab() {
               <Button
                 variant="outline"
                 onClick={() => start("outbound")}
-                disabled={pending !== null || phone.trim() === ""}
+                disabled={pending !== null || !phoneValid}
               >
                 <PhoneOutgoing /> Start outbound call
               </Button>
             </div>
 
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            <ErrorAlert error={error} />
           </CardContent>
         </Card>
       )}
