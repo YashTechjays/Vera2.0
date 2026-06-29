@@ -24,7 +24,7 @@ function makeStore() {
 const me: api.MeResponse = {
   user_id: "u1", email: "a@b.co", name: "A", account_type: "tenant",
   tenant_id: "t1", tenant_slug: "acme", roles: ["TENANT_ADMIN"],
-  permissions: ["users:manage"],
+  permissions: ["users:manage"], active_elevation: null,
 }
 
 describe("authSlice", () => {

@@ -30,6 +30,9 @@ export type MeResponse = {
   tenant_slug: string | null
   roles: string[]
   permissions: string[]
+  /** A platform operator's current elevation grant; null for tenant users and
+   *  for un-elevated operators. Drives elevation-aware UI (e.g. the sidebar). */
+  active_elevation: { target_tenant_id: string; expires_at: string } | null
 }
 
 export type InviteUserResult = {

@@ -3,7 +3,7 @@ import { Sparkles } from "lucide-react"
 import { navItems } from "@/lib/nav"
 import { cn } from "@/lib/utils"
 import { useAppSelector } from "@/store/hooks"
-import { selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
+import { selectIsElevated, selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
 
 type SidebarProps = {
   collapsed: boolean
@@ -12,13 +12,17 @@ type SidebarProps = {
 export function Sidebar({ collapsed }: SidebarProps) {
   const permissions = useAppSelector(selectPermissions)
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
-  // RBAC: hide nav items whose required permission the user lacks, and platform-only
-  // items (e.g. Agent Prompt) for anyone who isn't a super admin.
-  const visible = navItems.filter(
-    (item) =>
-      (!item.permission || permissions.includes(item.permission)) &&
-      (!item.superAdminOnly || isSuperAdmin)
-  )
+  const isElevated = useAppSelector(selectIsElevated)
+  const visible = navItems.filter((item) => {
+    // RBAC: hide items whose required permission the user lacks.
+    if (item.permission && !permissions.includes(item.permission)) return false
+    // Platform-only items (Tenant Access, Agent Prompt): super admins only.
+    if (item.superAdminOnly) return isSuperAdmin
+    // Tenant-scoped items: a super admin only sees them once elevated into a tenant
+    // (un-elevated they'd 403 anyway); tenant users always see them.
+    if (isSuperAdmin) return isElevated
+    return true
+  })
   // For a super admin, surface the platform-only items first.
   const items = isSuperAdmin
     ? [...visible.filter((i) => i.superAdminOnly), ...visible.filter((i) => !i.superAdminOnly)]

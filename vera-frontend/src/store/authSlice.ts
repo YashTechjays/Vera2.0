@@ -244,3 +244,7 @@ export const selectPermissions = (s: { auth: AuthState }) => s.auth.user?.permis
 // to no tenant and elevate into one. Used to gate platform-only UI.
 export const selectIsSuperAdmin = (s: { auth: AuthState }) =>
   s.auth.user?.account_type === "platform"
+// True while a platform operator holds an active elevation grant — gates the
+// tenant-scoped nav so those menus appear only once elevated.
+export const selectIsElevated = (s: { auth: AuthState }) =>
+  s.auth.user?.active_elevation != null

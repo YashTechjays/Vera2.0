@@ -20,8 +20,8 @@ import {
   type Elevation,
   type TenantSummary,
 } from "@/lib/api/platform"
-import { useAppSelector } from "@/store/hooks"
-import { selectIsSuperAdmin } from "@/store/authSlice"
+import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { fetchMe, selectIsSuperAdmin } from "@/store/authSlice"
 
 const DEFAULT_DURATION = 60
 
@@ -35,6 +35,7 @@ function expiresLabel(expiresAt: string): string {
 }
 
 export function TenantAccess() {
+  const dispatch = useAppDispatch()
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
 
   const [elevations, setElevations] = useState<Elevation[]>([])
@@ -117,6 +118,8 @@ export function TenantAccess() {
       setReason("")
       setDuration(DEFAULT_DURATION)
       await refresh()
+      // Refresh /auth/me so the sidebar reveals the now-accessible tenant menus.
+      await dispatch(fetchMe())
     } catch (err) {
       // 409 = operator already holds an active grant.
       setFormError(
@@ -137,6 +140,8 @@ export function TenantAccess() {
     try {
       await endElevation(id)
       await refresh()
+      // Refresh /auth/me so the sidebar hides the tenant menus again.
+      await dispatch(fetchMe())
     } catch (err) {
       setLoadError(err instanceof ApiError ? err.message : "Could not end the elevation.")
     } finally {
