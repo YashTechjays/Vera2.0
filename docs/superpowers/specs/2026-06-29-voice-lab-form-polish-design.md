@@ -99,5 +99,10 @@ No copy/PHI changes; the dialed number is session-scoped component state only
   (red border/ring), and when disabled; country dropdown still opens and the
   selected dial code shows; spinner appears while dialing; layout holds at
   `max-w-lg` and in dark mode.
-- Existing `vera-frontend/src/lib/phone/countries.test.ts` continues to pass
-  (no logic touched).
+
+> Note: the phone logic already moved to `react-phone-number-input`
+> (libphonenumber-js) in commit `70ed4e4`, which deleted the hand-rolled
+> `src/lib/phone/countries.ts` + `countries.test.ts` and the
+> `composeE164`/`dialFor`/`isE164` helpers. This spec is presentation-only and
+> adds no validation logic of its own, so there is no phone unit test to re-run;
+> a typecheck/build plus the manual checks above are the verification.
