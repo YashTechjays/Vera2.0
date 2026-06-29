@@ -86,6 +86,7 @@ function adaptDetail(detail: PatientFormDetail): {
         currentValue: valueToInput(f.dispute.current_value),
         confidence: f.dispute.confidence ?? undefined,
         evidence: f.dispute.evidence ?? undefined,
+        reasoning: f.dispute.reasoning ?? undefined,
       }
     }
   }

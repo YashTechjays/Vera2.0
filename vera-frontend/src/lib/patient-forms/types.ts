@@ -28,12 +28,13 @@ export type FieldValue = string | number | boolean | null
 /** A disputed field: the current AI-captured value diverges from the most recent
  *  intake/human baseline. `previous_value` is that baseline, `current_value` the
  *  AI value; `confidence` is the AI answer's own confidence, `evidence` what it
- *  captured (both nullable). */
+ *  captured, `reasoning` the optional judge explanation (all nullable). */
 export type FieldDispute = {
   previous_value: FieldValue
   current_value: FieldValue
   confidence: number | null
   evidence: string | null
+  reasoning: string | null
 }
 
 /** One extracted data point. `dispute` is null unless the judge flagged it. */
