@@ -3,7 +3,7 @@ import { Sparkles } from "lucide-react"
 import { navItems } from "@/lib/nav"
 import { cn } from "@/lib/utils"
 import { useAppSelector } from "@/store/hooks"
-import { selectPermissions } from "@/store/authSlice"
+import { selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
 
 type SidebarProps = {
   collapsed: boolean
@@ -11,8 +11,14 @@ type SidebarProps = {
 
 export function Sidebar({ collapsed }: SidebarProps) {
   const permissions = useAppSelector(selectPermissions)
-  // RBAC: hide nav items whose required permission the user lacks.
-  const items = navItems.filter((item) => !item.permission || permissions.includes(item.permission))
+  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
+  // RBAC: hide nav items whose required permission the user lacks, and platform-only
+  // items (e.g. Agent Prompt) for anyone who isn't a super admin.
+  const items = navItems.filter(
+    (item) =>
+      (!item.permission || permissions.includes(item.permission)) &&
+      (!item.superAdminOnly || isSuperAdmin)
+  )
   return (
     <aside
       className={cn(
