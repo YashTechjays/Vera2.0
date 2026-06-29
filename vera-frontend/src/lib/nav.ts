@@ -32,3 +32,27 @@ export const navItems: NavItem[] = [
   { title: "Users", to: "/users", icon: Users, permission: "users:read" },
   { title: "Settings", to: "/settings", icon: Settings },
 ]
+
+export type NavContext = {
+  permissions: string[]
+  isSuperAdmin: boolean
+  isElevated: boolean
+}
+
+/** The nav items visible to the current user, in display order.
+ *  - permission-gated items need the permission;
+ *  - platform-only items (superAdminOnly) show for super admins only;
+ *  - tenant-scoped items are hidden from a super admin until they elevate
+ *    (un-elevated they'd 403 anyway); tenant users always see them;
+ *  - for a super admin, platform-only items are surfaced first. */
+export function visibleNavFor({ permissions, isSuperAdmin, isElevated }: NavContext): NavItem[] {
+  const visible = navItems.filter((item) => {
+    if (item.permission && !permissions.includes(item.permission)) return false
+    if (item.superAdminOnly) return isSuperAdmin
+    if (isSuperAdmin) return isElevated
+    return true
+  })
+  return isSuperAdmin
+    ? [...visible.filter((i) => i.superAdminOnly), ...visible.filter((i) => !i.superAdminOnly)]
+    : visible
+}

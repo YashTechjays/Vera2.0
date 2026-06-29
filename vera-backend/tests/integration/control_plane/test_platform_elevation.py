@@ -307,3 +307,17 @@ async def test_tenant_user_cannot_list_tenants(world: tuple[httpx.AsyncClient, W
     client, w = world
     resp = await client.get("/api/v1/platform/tenants", headers=_auth(w.tenant_admin_token))
     assert resp.status_code == 403
+
+
+async def test_auth_me_reflects_active_elevation(world: tuple[httpx.AsyncClient, World]) -> None:
+    # The frontend gates the tenant-scoped sidebar on this field, so /auth/me must
+    # report the operator's active grant (and nothing before they elevate).
+    client, w = world
+    before = await client.get("/api/v1/auth/me", headers=_auth(w.super_token))
+    assert before.json()["data"]["active_elevation"] is None
+
+    await _create(client, w, tenant=w.tenant_id)
+    after = await client.get("/api/v1/auth/me", headers=_auth(w.super_token))
+    elevation = after.json()["data"]["active_elevation"]
+    assert elevation is not None
+    assert elevation["target_tenant_id"] == str(w.tenant_id)

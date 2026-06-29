@@ -244,7 +244,13 @@ export const selectPermissions = (s: { auth: AuthState }) => s.auth.user?.permis
 // to no tenant and elevate into one. Used to gate platform-only UI.
 export const selectIsSuperAdmin = (s: { auth: AuthState }) =>
   s.auth.user?.account_type === "platform"
-// True while a platform operator holds an active elevation grant — gates the
-// tenant-scoped nav so those menus appear only once elevated.
-export const selectIsElevated = (s: { auth: AuthState }) =>
-  s.auth.user?.active_elevation != null
+export const selectActiveElevation = (s: { auth: AuthState }) =>
+  s.auth.user?.active_elevation ?? null
+// True while a platform operator holds an active elevation grant that hasn't
+// expired — gates the tenant-scoped nav. The /auth/me snapshot can go stale
+// between refreshes, so the expiry is checked here and AppShell re-fetches at
+// expiry to re-sync the UI.
+export const selectIsElevated = (s: { auth: AuthState }) => {
+  const e = s.auth.user?.active_elevation
+  return e != null && Date.parse(e.expires_at) > Date.now()
+}

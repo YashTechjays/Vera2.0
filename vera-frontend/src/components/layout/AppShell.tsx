@@ -1,13 +1,30 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Outlet } from "react-router-dom"
 import { Sidebar } from "./Sidebar"
 import { Topbar } from "./Topbar"
 import { IbvProvider } from "@/components/ibv/IbvProvider"
 import { IbvFormModal } from "@/components/ibv/IbvFormModal"
 import { IdleManager } from "@/components/auth/IdleManager"
+import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { fetchMe, selectActiveElevation } from "@/store/authSlice"
 
 export function AppShell() {
   const [collapsed, setCollapsed] = useState(false)
+  const dispatch = useAppDispatch()
+  const elevation = useAppSelector(selectActiveElevation)
+
+  // When a platform operator's elevation lapses, re-fetch /auth/me so the sidebar
+  // hides the tenant menus again (the grant is server-side; this just re-syncs).
+  useEffect(() => {
+    if (!elevation) return
+    const ms = Date.parse(elevation.expires_at) - Date.now()
+    if (ms <= 0) {
+      void dispatch(fetchMe())
+      return
+    }
+    const timer = setTimeout(() => void dispatch(fetchMe()), ms)
+    return () => clearTimeout(timer)
+  }, [elevation, dispatch])
 
   return (
     <IbvProvider>

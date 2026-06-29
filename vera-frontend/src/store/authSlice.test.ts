@@ -15,6 +15,7 @@ import authReducer, {
   fetchMe,
   selectStatus,
   selectMfa,
+  selectIsElevated,
 } from "@/store/authSlice"
 
 function makeStore() {
@@ -27,8 +28,23 @@ const me: api.MeResponse = {
   permissions: ["users:manage"], active_elevation: null,
 }
 
+const elevatedState = (expiresAt: string | null) =>
+  ({
+    auth: {
+      user: expiresAt
+        ? { ...me, active_elevation: { target_tenant_id: "t1", expires_at: expiresAt } }
+        : me,
+    },
+  }) as Parameters<typeof selectIsElevated>[0]
+
 describe("authSlice", () => {
   beforeEach(() => vi.resetAllMocks())
+
+  it("selectIsElevated honors grant presence and expiry", () => {
+    expect(selectIsElevated(elevatedState(null))).toBe(false)
+    expect(selectIsElevated(elevatedState(new Date(Date.now() + 60_000).toISOString()))).toBe(true)
+    expect(selectIsElevated(elevatedState(new Date(Date.now() - 60_000).toISOString()))).toBe(false)
+  })
 
   it("logs in without MFA → authenticated", async () => {
     vi.mocked(api.login).mockResolvedValue({

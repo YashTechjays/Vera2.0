@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom"
 import { Sparkles } from "lucide-react"
-import { navItems } from "@/lib/nav"
+import { visibleNavFor } from "@/lib/nav"
 import { cn } from "@/lib/utils"
 import { useAppSelector } from "@/store/hooks"
 import { selectIsElevated, selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
@@ -13,20 +13,7 @@ export function Sidebar({ collapsed }: SidebarProps) {
   const permissions = useAppSelector(selectPermissions)
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
   const isElevated = useAppSelector(selectIsElevated)
-  const visible = navItems.filter((item) => {
-    // RBAC: hide items whose required permission the user lacks.
-    if (item.permission && !permissions.includes(item.permission)) return false
-    // Platform-only items (Tenant Access, Agent Prompt): super admins only.
-    if (item.superAdminOnly) return isSuperAdmin
-    // Tenant-scoped items: a super admin only sees them once elevated into a tenant
-    // (un-elevated they'd 403 anyway); tenant users always see them.
-    if (isSuperAdmin) return isElevated
-    return true
-  })
-  // For a super admin, surface the platform-only items first.
-  const items = isSuperAdmin
-    ? [...visible.filter((i) => i.superAdminOnly), ...visible.filter((i) => !i.superAdminOnly)]
-    : visible
+  const items = visibleNavFor({ permissions, isSuperAdmin, isElevated })
   return (
     <aside
       className={cn(
