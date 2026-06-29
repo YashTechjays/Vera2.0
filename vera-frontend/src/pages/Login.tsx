@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react"
-import { Navigate, useNavigate, useLocation } from "react-router-dom"
+import { Link, Navigate, useNavigate, useLocation } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -123,6 +123,12 @@ export function Login() {
             <Button type="submit" size="lg" className="w-full" disabled={busy}>
               {busy ? "Signing in…" : "Sign in"}
             </Button>
+            <p className="text-center text-sm text-muted-foreground">
+              Platform operator?{" "}
+              <Link to="/platform/login" className="underline underline-offset-4">
+                Sign in here
+              </Link>
+            </p>
           </form>
         </CardContent>
       </Card>
