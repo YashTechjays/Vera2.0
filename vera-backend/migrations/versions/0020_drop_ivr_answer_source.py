@@ -1,7 +1,7 @@
 """Drop IVR from field_answer.source CHECK; add baseline lookup index
 
-Revision ID: 0018
-Revises: 0017
+Revision ID: 0020
+Revises: 0019
 Create Date: 2026-06-25
 
 Form-fill sources are now only `intake`, `ai_call`, `human` (IVR is dropped as a fill
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0018"
-down_revision: str | None = "0017"
+revision: str = "0020"
+down_revision: str | None = "0019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -42,19 +42,19 @@ def unwrap_value(stored: Any) -> Any:
     return stored
 
 
-# Exactly the characters SQL `_normalized_jsonb`'s `btrim(..., ' \t\n\r\f\v')` trims.
-# We strip this explicit ASCII set (not the default `str.strip()`, which also removes
-# Unicode whitespace like U+00A0) so the Python and SQL normalizations are byte-for-byte
-# aligned on whitespace. (Case-folding parity for non-ASCII is a separate non-goal.)
+# Strip only ASCII whitespace (not the default `str.strip()`, which also folds Unicode
+# whitespace like U+00A0). A deliberately conservative, stable rule: a non-ASCII space is
+# retained, so it still counts as a real value difference.
 _ASCII_WHITESPACE = " \t\n\r\f\v"
 
 
 def normalize_value(value: Any) -> Any:
-    """Canonicalize a value for dispute comparison: strings are stripped (of ASCII
-    whitespace only) + lowercased so case- and whitespace-only differences are not
-    disputes; non-strings (numbers, bools, null, objects) pass through unchanged. Mirrors
-    `patient_forms._normalized_jsonb` so the Python (detail) and SQL (count/gate) dispute
-    paths agree — keep the two in lock-step (same ASCII whitespace set)."""
+    """Canonicalize a value for dispute comparison: strings are stripped (ASCII whitespace
+    only) + lowercased so case- and whitespace-only differences are not disputes;
+    non-strings (numbers, bools, null, objects) pass through unchanged. This is the sole
+    dispute-normalization rule — both the detail view and the complete-gate/resolve count
+    go through `is_disputed` / `build_field_views`, so there is no second (SQL)
+    implementation to keep in sync."""
     if isinstance(value, str):
         return value.strip(_ASCII_WHITESPACE).lower()
     return value

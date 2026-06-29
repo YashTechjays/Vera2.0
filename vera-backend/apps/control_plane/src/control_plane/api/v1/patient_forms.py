@@ -20,8 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import case, func, select
-from sqlalchemy.orm import aliased
+from sqlalchemy import func, select
 
 from control_plane.api.v1.common import TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
@@ -305,100 +304,27 @@ def _baseline_subquery(form_id: UUID) -> Any:
     )
 
 
-def _normalized_jsonb(expr: Any) -> Any:
-    """A JSONB value canonicalized for dispute comparison: a JSON string is trimmed +
-    lowercased (back into a jsonb string) so case/whitespace-only differences are not
-    disputes; non-strings (numbers, bools, null, objects) are unchanged. Mirrors
-    `vera_core.forms.review.normalize_value` — keep the two in lock-step, else the
-    complete-gate count and the detail view disagree. (`btrim` with the explicit ASCII
-    whitespace set matches Python `str.strip()` for ASCII; Unicode whitespace is a
-    non-goal.)"""
-    return case(
-        (
-            func.jsonb_typeof(expr) == "string",
-            func.to_jsonb(func.lower(func.btrim(expr.astext, " \t\n\r\f\v"))),
-        ),
-        else_=expr,
-    )
-
-
-def _open_dispute_parts(form_id: UUID) -> tuple[Any, Any, Any, list[Any]]:
-    """The single source of truth for "is this an open dispute": a current AI-call
-    answer whose unwrapped value diverges from the baseline. Returns the pieces
-    `(cur_alias, baseline_subquery, join_onclause, where_clauses)` so callers select
-    whatever columns they need over the same FROM/JOIN/WHERE.
-
-    Compares `value['value']` (the unwrapped raw) after normalization, so it matches
-    `is_disputed`'s `normalize_value(unwrap_value(...))` comparison exactly; an absent
-    baseline is `NULL`, so a divergent AI value with no prior counts as a dispute (per
-    the confirmed rule)."""
-    baseline = _baseline_subquery(form_id)
-    cur = aliased(FieldAnswer)
-    onclause = baseline.c.field_path == cur.field_path
-    where = [
-        cur.form_id == form_id,
-        cur.is_current.is_(True),
-        cur.source == AnswerSource.AI_CALL.value,
-        _normalized_jsonb(cur.value["value"]).is_distinct_from(
-            _normalized_jsonb(baseline.c.value["value"])
-        ),
-    ]
-    return cur, baseline, onclause, where
-
-
-async def _unresolved_dispute_count(session: TenantSession, form_id: UUID) -> int:
-    """The number of current AI-call answers on this form whose value diverges from the
-    intake/human baseline (the derived open-dispute count)."""
-    cur, baseline, onclause, where = _open_dispute_parts(form_id)
-    return (
-        await session.execute(
-            select(func.count()).select_from(cur).outerjoin(baseline, onclause).where(*where)
-        )
-    ).scalar_one()
-
-
-async def _open_dispute_paths(session: TenantSession, form_id: UUID) -> set[str]:
-    """The set of field paths with an open dispute on this form — used to gate which
-    resolutions emit a `dispute_action` (audit record)."""
-    cur, baseline, onclause, where = _open_dispute_parts(form_id)
-    return set(
-        (
-            await session.execute(
-                select(cur.field_path).select_from(cur).outerjoin(baseline, onclause).where(*where)
-            )
-        ).scalars()
-    )
-
-
-async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
-    """Assemble the full review detail for one form (current answers + disputes)."""
+async def _field_views(session: TenantSession, form_id: UUID) -> list[dict[str, Any]]:
+    """The dispute-annotated field views for one form — the single source of truth for
+    "is this a dispute". Both the detail view and the dispute gate go through here, so the
+    count and the detail can never disagree. The dispute decision (incl. value
+    normalization and null handling) lives once, in `build_field_views`/`is_disputed`."""
     current = (
         (
             await session.execute(
                 select(FieldAnswer).where(
-                    FieldAnswer.form_id == form.id, FieldAnswer.is_current.is_(True)
+                    FieldAnswer.form_id == form_id, FieldAnswer.is_current.is_(True)
                 )
             )
         )
         .scalars()
         .all()
     )
-
-    # Baseline (most recent intake/human) per path → the dispute's `previous_value`.
-    baseline = _baseline_subquery(form.id)
+    baseline = _baseline_subquery(form_id)
     baseline_by_path: dict[str, Any] = dict(
         (await session.execute(select(baseline.c.field_path, baseline.c.value))).tuples().all()
     )
-
-    form_schema = (
-        await session.execute(
-            select(FormSchema)
-            .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
-            .where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one()
-
-    views = build_field_views(
+    return build_field_views(
         [
             AnswerRow(
                 id=a.id,
@@ -412,6 +338,34 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         ],
         baseline_by_path,
     )
+
+
+async def _open_dispute_paths(session: TenantSession, form_id: UUID) -> set[str]:
+    """The set of field paths with an open dispute on this form — used to gate which
+    resolutions emit a `dispute_action` (audit record)."""
+    return {
+        v["field_path"] for v in await _field_views(session, form_id) if v["dispute"] is not None
+    }
+
+
+async def _unresolved_dispute_count(session: TenantSession, form_id: UUID) -> int:
+    """The number of fields on this form with an open dispute (derived from the same
+    Python rule the detail view uses)."""
+    return len(await _open_dispute_paths(session, form_id))
+
+
+async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
+    """Assemble the full review detail for one form (current answers + disputes)."""
+    views = await _field_views(session, form.id)
+
+    form_schema = (
+        await session.execute(
+            select(FormSchema)
+            .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
+            .where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+
     return PatientFormDetail(
         id=form.id,
         status=form.status,

@@ -780,11 +780,11 @@ async def test_case_whitespace_variant_agrees_across_count_and_detail(
     )
     async with admin_sessionmaker() as s:
         count = await _unresolved_dispute_count(s, form_id)
-    assert count == 0  # SQL path
+    assert count == 0  # gate count
     detail = await client.get(
         f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
     )
-    assert _dispute_for(detail) is None  # Python path
+    assert _dispute_for(detail) is None  # detail agrees
 
 
 async def test_non_ascii_whitespace_variant_agrees_across_count_and_detail(
@@ -822,11 +822,98 @@ async def test_non_ascii_whitespace_variant_agrees_across_count_and_detail(
     )
     async with admin_sessionmaker() as s:
         count = await _unresolved_dispute_count(s, form_id)
-    assert count == 1  # SQL path keeps the NBSP → dispute
+    assert count == 1  # gate count (Python) keeps the NBSP → dispute
     detail = await client.get(
         f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
     )
-    assert _dispute_for(detail) is not None  # Python path agrees → dispute
+    assert _dispute_for(detail) is not None  # detail agrees → dispute
+
+
+async def test_json_null_ai_value_with_no_baseline_is_not_a_dispute(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    # A current ai_call answer of {"value": null} with NO intake/human baseline must NOT be
+    # a dispute (None != None → False). The gate count and the detail share the Python rule,
+    # so they agree — and completion is not blocked by a phantom dispute.
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value=None,
+        source=AnswerSource.AI_CALL.value,
+        confidence=80,
+    )
+    async with admin_sessionmaker() as s:
+        count = await _unresolved_dispute_count(s, form_id)
+    assert count == 0  # gate count
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert _dispute_for(detail) is None  # detail agrees
+    done = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert done.status_code == 200, done.text  # not blocked by a phantom dispute
+
+
+async def test_json_null_ai_value_with_baseline_is_a_dispute(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    # ai_call cleared a field the baseline had set → null IS DISTINCT FROM value → dispute,
+    # on both the gate count and the detail.
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value="Primary",
+        source=AnswerSource.INTAKE.value,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value=None,
+        source=AnswerSource.AI_CALL.value,
+        confidence=80,
+    )
+    async with admin_sessionmaker() as s:
+        count = await _unresolved_dispute_count(s, form_id)
+    assert count == 1  # gate count
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert _dispute_for(detail) is not None  # detail agrees
+    block = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert block.status_code == 409, block.text
 
 
 # ---- status (PUT /patient-forms/{id}/status) --------------------------------
