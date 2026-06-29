@@ -338,3 +338,55 @@ async def test_create_draft_without_published_schema_conflicts(
         json={"composite_json": {"prompt": "x"}},
     )
     assert resp.status_code == 409
+
+
+async def test_write_endpoints_forbidden_for_tenant(prompts_world: tuple) -> None:
+    client, w, ids = prompts_world
+    create_resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/versions",
+        headers=_auth(w.tenant_admin_token),
+        json={"composite_json": {"prompt": "x"}},
+    )
+    assert create_resp.status_code == 403
+
+    publish_resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/versions/{ids.version_id}/publish",
+        headers=_auth(w.tenant_admin_token),
+    )
+    assert publish_resp.status_code == 403
+
+
+async def test_unknown_prompt_and_version_404(prompts_world: tuple) -> None:
+    client, w, ids = prompts_world
+    unknown_prompt_id = uuid7()
+    versions_resp = await client.get(
+        f"/api/v1/prompts/{unknown_prompt_id}/versions",
+        headers=_auth(w.super_token),
+    )
+    assert versions_resp.status_code == 404
+
+    unknown_version_id = uuid7()
+    detail_resp = await client.get(
+        f"/api/v1/prompts/{ids.prompt_id}/versions/{unknown_version_id}",
+        headers=_auth(w.super_token),
+    )
+    assert detail_resp.status_code == 404
+
+
+async def test_publish_already_published_is_noop(prompts_world: tuple) -> None:
+    client, w, ids = prompts_world
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/versions/{ids.version_id}/publish",
+        headers=_auth(w.super_token),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["status"] == "published"
+
+    versions = (
+        await client.get(
+            f"/api/v1/prompts/{ids.prompt_id}/versions",
+            headers=_auth(w.super_token),
+        )
+    ).json()["data"]
+    published = [v for v in versions if v["status"] == "published"]
+    assert len(published) == 1
