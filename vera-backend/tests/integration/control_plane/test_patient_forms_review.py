@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from control_plane.api.v1.patient_forms import _unresolved_dispute_count
 from scripts.seed import _seed_form_schemas
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.models import (
@@ -170,7 +171,7 @@ async def dispute_form(
 # ---- list -------------------------------------------------------------------
 
 
-async def test_list_returns_paginated_summaries_with_dispute_count(
+async def test_list_returns_paginated_summaries(
     client: httpx.AsyncClient, rbac_world: RBACWorld, dispute_form: UUID
 ) -> None:
     resp = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.admin_token))
@@ -180,7 +181,8 @@ async def test_list_returns_paginated_summaries_with_dispute_count(
     row = next(r for r in body["items"] if r["id"] == str(dispute_form))
     assert row["status"] == "exception_review"
     assert row["patient_name"] == "jane doe"
-    assert row["dispute_count"] == 1
+    # The worklist no longer carries a dispute count.
+    assert "dispute_count" not in row
 
 
 async def test_list_requires_forms_read(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
@@ -409,9 +411,6 @@ async def test_no_baseline_ai_value_is_disputed(
         source=AnswerSource.AI_CALL.value,
         confidence=80,
     )
-    lst = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.admin_token))
-    row = next(r for r in lst.json()["data"]["items"] if r["id"] == str(form_id))
-    assert row["dispute_count"] == 1
     detail = await client.get(
         f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
     )
@@ -419,26 +418,14 @@ async def test_no_baseline_ai_value_is_disputed(
     assert d is not None
     assert d["previous_value"] is None
     assert d["current_value"] == "Blue Cross"
-    # Completion is blocked while the (baseline-derived) dispute is open.
+    # Completion is blocked while the (baseline-derived) dispute is open — this is the
+    # complete-gate exercising the SQL dispute path.
     block = await client.put(
         f"/api/v1/patient-forms/{form_id}/status",
         headers=_auth(rbac_world.admin_token),
         json={"status": "completed"},
     )
     assert block.status_code == 409, block.text
-
-
-async def test_dispute_count_matches_detail(
-    client: httpx.AsyncClient, rbac_world: RBACWorld, dispute_form: UUID
-) -> None:
-    # The worklist count and the detail dispute objects derive from one rule — they agree.
-    lst = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.admin_token))
-    row = next(r for r in lst.json()["data"]["items"] if r["id"] == str(dispute_form))
-    detail = await client.get(
-        f"/api/v1/patient-forms/{dispute_form}", headers=_auth(rbac_world.admin_token)
-    )
-    n_disputes = sum(1 for f in detail.json()["data"]["fields"] if f["dispute"] is not None)
-    assert row["dispute_count"] == n_disputes == 1
 
 
 async def test_resolve_baseline_edit_writes_no_dispute_action(
@@ -766,8 +753,8 @@ async def test_case_whitespace_variant_agrees_across_count_and_detail(
     cleanup_forms: None,
 ) -> None:
     # An AI value differing from the baseline only by case + whitespace is not a dispute.
-    # Asserts the SQL path (worklist dispute_count) and the Python path (detail) agree —
-    # the lock-step check that both normalizations match.
+    # Asserts the SQL path (_unresolved_dispute_count, which backs the complete-gate)
+    # and the Python path (detail) agree — the lock-step check that both normalizations match.
     form_id = await _make_plain_form(
         admin_sessionmaker,
         tenant_id=rbac_world.tenant_id,
@@ -791,9 +778,9 @@ async def test_case_whitespace_variant_agrees_across_count_and_detail(
         source=AnswerSource.AI_CALL.value,
         confidence=80,
     )
-    lst = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.admin_token))
-    row = next(r for r in lst.json()["data"]["items"] if r["id"] == str(form_id))
-    assert row["dispute_count"] == 0  # SQL path
+    async with admin_sessionmaker() as s:
+        count = await _unresolved_dispute_count(s, form_id)
+    assert count == 0  # SQL path
     detail = await client.get(
         f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
     )
@@ -833,9 +820,9 @@ async def test_non_ascii_whitespace_variant_agrees_across_count_and_detail(
         source=AnswerSource.AI_CALL.value,
         confidence=80,
     )
-    lst = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.admin_token))
-    row = next(r for r in lst.json()["data"]["items"] if r["id"] == str(form_id))
-    assert row["dispute_count"] == 1  # SQL path keeps the NBSP → dispute
+    async with admin_sessionmaker() as s:
+        count = await _unresolved_dispute_count(s, form_id)
+    assert count == 1  # SQL path keeps the NBSP → dispute
     detail = await client.get(
         f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
     )

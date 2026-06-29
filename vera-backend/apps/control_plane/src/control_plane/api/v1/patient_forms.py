@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import aliased
 
 from control_plane.api.v1.common import TenantId, TenantSession
@@ -209,7 +209,7 @@ async def upload_patient_form(
 
 
 class PatientFormSummary(BaseModel):
-    """Worklist row — promoted identifiers + display columns + counts."""
+    """Worklist row — promoted identifiers + display columns."""
 
     id: UUID
     status: str
@@ -222,7 +222,6 @@ class PatientFormSummary(BaseModel):
     insurance_provider: str | None
     insurance_provider_phone_number: str | None
     completion_pct: float
-    dispute_count: int
     created_at: datetime
     updated_at: datetime
 
@@ -286,23 +285,22 @@ def _audit_phi_read(
     )
 
 
-def _baseline_subquery(form_ids: list[UUID]) -> Any:
-    """Most recent `intake`/`human` answer per `(form_id, field_path)` — the dispute
+def _baseline_subquery(form_id: UUID) -> Any:
+    """Most recent `intake`/`human` answer per `field_path` for one form — the dispute
     baseline `B`. `created_at` is the transaction time, so same-transaction rows tie;
     `id DESC` (UUIDv7) breaks the tie deterministically."""
     return (
-        select(FieldAnswer.form_id, FieldAnswer.field_path, FieldAnswer.value)
+        select(FieldAnswer.field_path, FieldAnswer.value)
         .where(
-            FieldAnswer.form_id.in_(form_ids),
+            FieldAnswer.form_id == form_id,
             FieldAnswer.source.in_([AnswerSource.INTAKE.value, AnswerSource.HUMAN.value]),
         )
         .order_by(
-            FieldAnswer.form_id,
             FieldAnswer.field_path,
             FieldAnswer.created_at.desc(),
             FieldAnswer.id.desc(),
         )
-        .distinct(FieldAnswer.form_id, FieldAnswer.field_path)
+        .distinct(FieldAnswer.field_path)
         .subquery()
     )
 
@@ -312,7 +310,7 @@ def _normalized_jsonb(expr: Any) -> Any:
     lowercased (back into a jsonb string) so case/whitespace-only differences are not
     disputes; non-strings (numbers, bools, null, objects) are unchanged. Mirrors
     `vera_core.forms.review.normalize_value` — keep the two in lock-step, else the
-    worklist count and the detail view disagree. (`btrim` with the explicit ASCII
+    complete-gate count and the detail view disagree. (`btrim` with the explicit ASCII
     whitespace set matches Python `str.strip()` for ASCII; Unicode whitespace is a
     non-goal.)"""
     return case(
@@ -324,7 +322,7 @@ def _normalized_jsonb(expr: Any) -> Any:
     )
 
 
-def _open_dispute_parts(form_ids: list[UUID]) -> tuple[Any, Any, Any, list[Any]]:
+def _open_dispute_parts(form_id: UUID) -> tuple[Any, Any, Any, list[Any]]:
     """The single source of truth for "is this an open dispute": a current AI-call
     answer whose unwrapped value diverges from the baseline. Returns the pieces
     `(cur_alias, baseline_subquery, join_onclause, where_clauses)` so callers select
@@ -334,11 +332,11 @@ def _open_dispute_parts(form_ids: list[UUID]) -> tuple[Any, Any, Any, list[Any]]
     `is_disputed`'s `normalize_value(unwrap_value(...))` comparison exactly; an absent
     baseline is `NULL`, so a divergent AI value with no prior counts as a dispute (per
     the confirmed rule)."""
-    baseline = _baseline_subquery(form_ids)
+    baseline = _baseline_subquery(form_id)
     cur = aliased(FieldAnswer)
-    onclause = and_(baseline.c.form_id == cur.form_id, baseline.c.field_path == cur.field_path)
+    onclause = baseline.c.field_path == cur.field_path
     where = [
-        cur.form_id.in_(form_ids),
+        cur.form_id == form_id,
         cur.is_current.is_(True),
         cur.source == AnswerSource.AI_CALL.value,
         _normalized_jsonb(cur.value["value"]).is_distinct_from(
@@ -348,34 +346,21 @@ def _open_dispute_parts(form_ids: list[UUID]) -> tuple[Any, Any, Any, list[Any]]
     return cur, baseline, onclause, where
 
 
-async def _unresolved_dispute_count_by_form(
-    session: TenantSession, form_ids: list[UUID]
-) -> dict[UUID, int]:
-    """For each form, the number of current AI-call answers whose value diverges from
-    the intake/human baseline (the derived open-dispute count)."""
-    if not form_ids:
-        return {}
-    cur, baseline, onclause, where = _open_dispute_parts(form_ids)
-    rows = (
-        (
-            await session.execute(
-                select(cur.form_id, func.count())
-                .select_from(cur)
-                .outerjoin(baseline, onclause)
-                .where(*where)
-                .group_by(cur.form_id)
-            )
+async def _unresolved_dispute_count(session: TenantSession, form_id: UUID) -> int:
+    """The number of current AI-call answers on this form whose value diverges from the
+    intake/human baseline (the derived open-dispute count)."""
+    cur, baseline, onclause, where = _open_dispute_parts(form_id)
+    return (
+        await session.execute(
+            select(func.count()).select_from(cur).outerjoin(baseline, onclause).where(*where)
         )
-        .tuples()
-        .all()
-    )
-    return dict(rows)
+    ).scalar_one()
 
 
 async def _open_dispute_paths(session: TenantSession, form_id: UUID) -> set[str]:
     """The set of field paths with an open dispute on this form — used to gate which
     resolutions emit a `dispute_action` (audit record)."""
-    cur, baseline, onclause, where = _open_dispute_parts([form_id])
+    cur, baseline, onclause, where = _open_dispute_parts(form_id)
     return set(
         (
             await session.execute(
@@ -400,7 +385,7 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
     )
 
     # Baseline (most recent intake/human) per path → the dispute's `previous_value`.
-    baseline = _baseline_subquery([form.id])
+    baseline = _baseline_subquery(form.id)
     baseline_by_path: dict[str, Any] = dict(
         (await session.execute(select(baseline.c.field_path, baseline.c.value))).tuples().all()
     )
@@ -484,7 +469,6 @@ async def list_patient_forms(
         .scalars()
         .all()
     )
-    counts = await _unresolved_dispute_count_by_form(session, [r.id for r in rows])
     items = [
         PatientFormSummary(
             id=r.id,
@@ -497,7 +481,6 @@ async def list_patient_forms(
             insurance_provider=r.insurance_provider,
             insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
-            dispute_count=counts.get(r.id, 0),
             created_at=r.created_at,
             updated_at=r.updated_at,
         )
@@ -806,7 +789,7 @@ async def update_patient_form_status(
 
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
-        remaining = (await _unresolved_dispute_count_by_form(session, [form_id])).get(form_id, 0)
+        remaining = await _unresolved_dispute_count(session, form_id)
         if remaining:
             raise CustomAPIException(
                 DefaultExceptionCode.CONFLICT,
