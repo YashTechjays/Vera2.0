@@ -30,7 +30,8 @@ export function AgentPrompt(): JSX.Element {
   const [text, setText] = useState("")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState<"save" | "publish" | null>(null)
+  const [busy, setBusy] = useState<"save" | null>(null)
+  const [publishingId, setPublishingId] = useState<string | null>(null)
 
   const loadVersionInto = useCallback(async (promptId: string, versionId: string) => {
     const detail = await getPromptVersion(promptId, versionId)
@@ -38,11 +39,11 @@ export function AgentPrompt(): JSX.Element {
     setText(detail.composite_json.prompt ?? "")
   }, [])
 
-  const refresh = useCallback(async (promptId: string) => {
+  const refresh = useCallback(async (promptId: string, preferVersionId?: string) => {
     const vs = await listPromptVersions(promptId)
     setVersions(vs)
-    const current = pickInitialVersion(vs)
-    if (current) await loadVersionInto(promptId, current.id)
+    const target = (preferVersionId ? vs.find((v) => v.id === preferVersionId) : undefined) ?? pickInitialVersion(vs)
+    if (target) await loadVersionInto(promptId, target.id)
   }, [loadVersionInto])
 
   useEffect(() => {
@@ -76,8 +77,8 @@ export function AgentPrompt(): JSX.Element {
     setBusy("save")
     setError(null)
     try {
-      await createPromptDraft(prompt.id, { ...composite, prompt: text })
-      await refresh(prompt.id)
+      const created = await createPromptDraft(prompt.id, { ...composite, prompt: text })
+      await refresh(prompt.id, created.id)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save the draft.")
     } finally {
@@ -87,7 +88,7 @@ export function AgentPrompt(): JSX.Element {
 
   async function onPublish(versionId: string): Promise<void> {
     if (!prompt) return
-    setBusy("publish")
+    setPublishingId(versionId)
     setError(null)
     try {
       await publishPromptVersion(prompt.id, versionId)
@@ -95,7 +96,7 @@ export function AgentPrompt(): JSX.Element {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not publish.")
     } finally {
-      setBusy(null)
+      setPublishingId(null)
     }
   }
 
@@ -141,7 +142,7 @@ export function AgentPrompt(): JSX.Element {
                     onChange={(ev) => setText(ev.target.value)}
                   />
                 </div>
-                <Button type="submit" disabled={busy !== null}>
+                <Button type="submit" disabled={busy !== null || publishingId !== null}>
                   {busy === "save" ? <Loader2 className="animate-spin" /> : null} Save as draft
                 </Button>
               </form>
@@ -160,12 +161,12 @@ export function AgentPrompt(): JSX.Element {
                     <Badge variant={v.status === "published" ? "default" : "secondary"}>{v.status}</Badge>
                   </div>
                   <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => loadVersionInto(prompt.id, v.id)} disabled={busy !== null}>
+                    <Button variant="outline" size="sm" onClick={() => loadVersionInto(prompt.id, v.id)} disabled={busy !== null || publishingId !== null}>
                       View
                     </Button>
                     {v.status !== "published" && (
-                      <Button size="sm" onClick={() => onPublish(v.id)} disabled={busy !== null}>
-                        {busy === "publish" ? <Loader2 className="animate-spin" /> : null} Publish
+                      <Button size="sm" onClick={() => onPublish(v.id)} disabled={busy !== null || publishingId !== null}>
+                        {publishingId === v.id ? <Loader2 className="animate-spin" /> : null} Publish
                       </Button>
                     )}
                   </div>
