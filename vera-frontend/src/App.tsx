@@ -6,6 +6,7 @@ import { useAppDispatch } from "@/store/hooks"
 import { fetchMe } from "@/store/authSlice"
 import { getToken } from "@/lib/auth/storage"
 import { Login } from "@/pages/Login"
+import { PlatformLogin } from "@/pages/PlatformLogin"
 import { MfaVerify } from "@/pages/MfaVerify"
 import { MfaEnroll } from "@/pages/MfaEnroll"
 import { AcceptInvite } from "@/pages/AcceptInvite"
@@ -13,6 +14,7 @@ import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
 import { Settings } from "@/pages/Settings"
+import { TenantAccess } from "@/pages/TenantAccess"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -33,6 +35,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/platform/login" element={<PlatformLogin />} />
         <Route path="/mfa" element={<MfaVerify />} />
         <Route path="/mfa-enroll" element={<MfaEnroll />} />
         {/* Invite links are tenant-scoped (generated in the backend email). */}
@@ -48,6 +51,9 @@ function App() {
             <Route path="voice-lab" element={<VoiceLab />} />
             <Route path="call-history" element={<Placeholder title="Call History" />} />
             <Route path="analytics" element={<Placeholder title="Analytics" />} />
+            <Route path="tenant-access" element={<TenantAccess />} />
+            {/* Super-admin-only stub; the persona/prompt editor lands here later. */}
+            <Route path="agent-prompt" element={<Placeholder title="Agent Prompt" />} />
             <Route path="settings" element={<Settings />} />
             <Route path="*" element={<Placeholder title="Not Found" />} />
           </Route>
