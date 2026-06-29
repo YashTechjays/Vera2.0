@@ -277,17 +277,7 @@ async def login(
 
     async with tenant_session(sessionmaker, tenant_id) as session:
         provider = await resolve_login_provider(session, tenant_id, ProviderKind.PASSWORD.value)
-        # Pin the tenant plane: a platform operator (account_type='platform') must
-        # use /platform/auth/login, never this tenant route. In prod RLS already
-        # hides the NULL-tenant platform row from this tenant session, but a local
-        # superuser DB bypasses RLS — without this pin the platform row would
-        # authenticate here and mint a malformed platform+tenant session that every
-        # tenant route then rejects with 401. Defense in depth, correct everywhere.
-        creds = (
-            await _load_password_creds(session, body.email, account_type="tenant")
-            if provider is not None
-            else None
-        )
+        creds = await _load_password_creds(session, body.email) if provider is not None else None
 
     if provider is None:
         # No enabled provider resolved — which also covers an unknown tenant. We
