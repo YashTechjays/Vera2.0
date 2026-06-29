@@ -280,7 +280,7 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
 # tenant supplies (validated + sealed by the integrations endpoint). Keyed on the
 # unique `name`; idempotent — re-running refreshes the schema.
 INTEGRATION_TYPES: list[dict[str, Any]] = [
-    {"name": "twilio_sip", "credentials_schema": {"twilio_sip_trunk": "string"}},
+    {"name": "livekit_outbound_trunk_id", "credentials_schema": {"trunk_id": "string"}},
 ]
 
 
