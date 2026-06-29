@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.api.v1.common import AppSettings, LiveKit, TenantId
+from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import current_identity, get_audit, get_sessionmaker, get_transcript_service
@@ -34,6 +34,7 @@ from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
+from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.observability.correlation import (
     CALLER_IDENTITY_PREFIX,
@@ -64,7 +65,8 @@ async def start_voice_session(
     body: StartVoiceSessionRequest,
     tenant_id: TenantId,
     livekit: LiveKit,
-    settings: AppSettings,
+    session: TenantSession,
+    kms: Kms,
     caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[VoiceSessionResponse]:
     # Synthetic call id — no DB row; the room name is still the canonical
@@ -75,8 +77,13 @@ async def start_voice_session(
     # publishes the mic (caller-); in outbound mode it is listen-only (monitor-),
     # which the worker's wait_for_speaker skips when deciding the room is ready.
     is_outbound = body.mode == "outbound"
+    trunk_id: str | None = None
     if is_outbound:
-        if settings.livekit_sip_trunk_id is None:
+        creds = await get_integration_credentials(
+            session, kms, integration_type_name="livekit_outbound_trunk_id"
+        )
+        trunk_id = creds.get("trunk_id") if creds else None
+        if not trunk_id:
             raise ConflictError(message="outbound SIP is not configured")
         if body.phone_number is None or not _E164.match(body.phone_number):
             raise CustomAPIException(
@@ -92,7 +99,8 @@ async def start_voice_session(
     )
     if is_outbound:
         assert body.phone_number is not None  # validated non-None above when is_outbound
-        await livekit.create_sip_participant(room_name, body.phone_number)
+        assert trunk_id is not None  # set above when is_outbound
+        await livekit.create_sip_participant(room_name, body.phone_number, trunk_id)
 
     token = livekit.mint_join_token(room_name=room_name, identity=browser_identity)
     return ok(

@@ -105,10 +105,6 @@ class Settings(BaseSettings):
     audit_anchor_bucket: str | None = None
     audit_anchor_prefix: str = "audit-anchors"
     audit_anchor_local_dir: str = ".audit-anchors"
-    # Outbound telephony trunk for Voice Lab / SIP calls. Unset → outbound disabled
-    # (fail closed); the LiveKit SIP service + trunk are provisioned out of band.
-    livekit_sip_trunk_id: str | None = None  # VERA_LIVEKIT_SIP_TRUNK_ID
-
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require

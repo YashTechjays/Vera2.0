@@ -22,14 +22,10 @@ class LiveKitGateway:
         url: str,
         api_key: str,
         api_secret: str,
-        sip_trunk_id: str | None = None,
     ) -> None:
         self._url = url
         self._api_key = api_key
         self._api_secret = api_secret
-        # May be None when outbound SIP is not configured — outbound calls then
-        # fail closed at the router before ever reaching create_sip_participant.
-        self._sip_trunk_id = sip_trunk_id
 
     @property
     def url(self) -> str:
@@ -60,19 +56,21 @@ class LiveKitGateway:
                 )
             )
 
-    async def create_sip_participant(self, room_name: str, phone_number: str) -> None:
-        """Dial an outbound phone number into the room via the configured SIP trunk.
+    async def create_sip_participant(
+        self, room_name: str, phone_number: str, trunk_id: str
+    ) -> None:
+        """Dial an outbound phone number into the room via the tenant's SIP trunk.
 
         The callee's audio joins the room as the SIP-callee participant; the agent and
-        any listening monitor hear them once they answer. Requires a trunk id — the
-        router enforces that precondition (fail-closed) before calling this.
+        any listening monitor hear them once they answer. `trunk_id` is resolved per
+        tenant from the integrations table by the caller (fail-closed before this).
         """
-        if self._sip_trunk_id is None:
+        if not trunk_id:
             raise ValueError("outbound SIP trunk is not configured")
         async with self._client() as lk:
             await lk.sip.create_sip_participant(
                 api.CreateSIPParticipantRequest(
-                    sip_trunk_id=self._sip_trunk_id,
+                    sip_trunk_id=trunk_id,
                     sip_call_to=phone_number,
                     room_name=room_name,
                     participant_identity=SIP_CALLEE_IDENTITY,
@@ -106,5 +104,4 @@ def build_livekit_gateway(settings: Settings, secrets: SecretProvider) -> LiveKi
         url=settings.livekit_url,
         api_key=secrets.get("LIVEKIT_API_KEY"),
         api_secret=secrets.get("LIVEKIT_API_SECRET"),
-        sip_trunk_id=settings.livekit_sip_trunk_id,
     )

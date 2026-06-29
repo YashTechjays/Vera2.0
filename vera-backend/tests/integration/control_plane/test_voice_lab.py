@@ -5,17 +5,22 @@ injected by the authz_app fixture records room/dispatch/SIP calls so we assert o
 the seam without a real LiveKit server.
 """
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.deps import get_settings_state
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
-from vera_core.config import Settings
+from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
+from vera_core.integrations.credentials import seal_credentials
+from vera_core.models import Integration, IntegrationType
 from vera_core.observability.correlation import parse_room_name, room_name_for_call
+
+_TRUNK_TYPE = "livekit_outbound_trunk_id"
+_TRUNK_VALUE = "ST_test_trunk"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -23,14 +28,46 @@ def _auth(token: str) -> dict[str, str]:
 
 
 @pytest.fixture
-def trunk_configured(authz_app: FastAPI) -> Iterator[None]:
-    """Override the app settings so the outbound SIP trunk reads as configured."""
-    configured = Settings(_env_file=None, livekit_sip_trunk_id="ST_test_trunk")
-    authz_app.dependency_overrides[get_settings_state] = lambda: configured
+async def trunk_configured(
+    admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
+) -> AsyncIterator[None]:
+    """Seal a trunk credential for the test tenant so the outbound dial resolves it
+    from the DB. Uses the same LocalDevKMS master key as the app under test, so the
+    app's get_integration_credentials can open what we seal here."""
+    kms = LocalDevKMS(master_key=b"a" * 32)
+    created_itype = False
+    async with admin_sessionmaker() as session, session.begin():
+        # The type may already be seeded (scripts/seed.py); look it up before inserting
+        # to avoid a unique-name violation on repeated test runs.
+        itype = (
+            await session.execute(
+                select(IntegrationType).where(IntegrationType.name == _TRUNK_TYPE)
+            )
+        ).scalar_one_or_none()
+        if itype is None:
+            itype = IntegrationType(name=_TRUNK_TYPE, credentials_schema={"trunk_id": "string"})
+            session.add(itype)
+            await session.flush()
+            created_itype = True
+        integration = Integration(
+            tenant_id=rbac_world.tenant_id,
+            integration_type_id=itype.id,
+            status="active",
+        )
+        await seal_credentials(kms, integration=integration, credentials={"trunk_id": _TRUNK_VALUE})
+        session.add(integration)
     try:
         yield
     finally:
-        authz_app.dependency_overrides.pop(get_settings_state, None)
+        async with admin_sessionmaker() as session, session.begin():
+            await session.execute(
+                delete(Integration).where(Integration.tenant_id == rbac_world.tenant_id)
+            )
+            # Only remove the type row if this fixture created it — leave seeded rows alone.
+            if created_itype:
+                await session.execute(
+                    delete(IntegrationType).where(IntegrationType.name == _TRUNK_TYPE)
+                )
 
 
 @pytest.mark.asyncio
@@ -103,7 +140,7 @@ async def test_outbound_with_trunk_and_valid_phone_places_sip_call(
     assert body["mode"] == "outbound"
     # listen-only monitor identity for the browser
     assert body["token"].startswith(f"faketoken:{body['room_name']}:monitor-")
-    assert fake_livekit.sip_calls[before] == (body["room_name"], "+15551234567")
+    assert fake_livekit.sip_calls[before] == (body["room_name"], "+15551234567", _TRUNK_VALUE)
 
 
 @pytest.mark.asyncio
