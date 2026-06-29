@@ -800,6 +800,48 @@ async def test_case_whitespace_variant_agrees_across_count_and_detail(
     assert _dispute_for(detail) is None  # Python path
 
 
+async def test_non_ascii_whitespace_variant_agrees_across_count_and_detail(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    # A non-breaking space (U+00A0) is NOT ASCII whitespace, so neither path strips it:
+    # both the SQL count and the Python detail must treat it as a dispute. This is the
+    # lock-step proof for the Unicode case (the two normalizations stay byte-aligned).
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value="Primary",
+        source=AnswerSource.INTAKE.value,
+    )
+    await _add_answer(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=form_id,
+        field_path=HEALTH_PLAN,
+        value="\u00a0Primary",
+        source=AnswerSource.AI_CALL.value,
+        confidence=80,
+    )
+    lst = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.admin_token))
+    row = next(r for r in lst.json()["data"]["items"] if r["id"] == str(form_id))
+    assert row["dispute_count"] == 1  # SQL path keeps the NBSP → dispute
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert _dispute_for(detail) is not None  # Python path agrees → dispute
+
+
 # ---- status (PUT /patient-forms/{id}/status) --------------------------------
 
 

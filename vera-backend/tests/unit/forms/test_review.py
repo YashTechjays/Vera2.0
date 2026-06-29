@@ -53,6 +53,13 @@ class TestNormalizeValue:
         assert normalize_value(True) is True
         assert normalize_value({"a": 1}) == {"a": 1}
 
+    def test_only_ascii_whitespace_is_trimmed(self) -> None:
+        # Trims exactly the chars SQL btrim() does, so the Python (detail) and SQL
+        # (count) dispute paths agree. A non-breaking space (U+00A0) is NOT ASCII
+        # whitespace, so it is retained — matching the SQL side, which also keeps it.
+        assert normalize_value("\tPrimary\n") == "primary"
+        assert normalize_value("\u00a0Primary") == "\u00a0primary"
+
 
 class TestIsDisputed:
     def _answer(self, value: object, source: str = "ai_call") -> AnswerRow:
@@ -104,6 +111,12 @@ class TestIsDisputed:
 
     def test_genuinely_different_value_still_disputed(self) -> None:
         assert is_disputed(self._answer("Secondary"), {"value": "Primary"}) is True
+
+    def test_non_ascii_whitespace_difference_is_disputed(self) -> None:
+        # A non-breaking space (U+00A0) is not ASCII whitespace, so it is NOT stripped —
+        # this stays a dispute, matching the SQL path which also keeps it. Lock-step
+        # between the Python (detail) and SQL (count) paths is the point.
+        assert is_disputed(self._answer("\u00a0Primary"), {"value": "Primary"}) is True
 
 
 class TestRequiredPathsAndCompletion:

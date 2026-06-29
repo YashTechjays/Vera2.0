@@ -42,13 +42,21 @@ def unwrap_value(stored: Any) -> Any:
     return stored
 
 
+# Exactly the characters SQL `_normalized_jsonb`'s `btrim(..., ' \t\n\r\f\v')` trims.
+# We strip this explicit ASCII set (not the default `str.strip()`, which also removes
+# Unicode whitespace like U+00A0) so the Python and SQL normalizations are byte-for-byte
+# aligned on whitespace. (Case-folding parity for non-ASCII is a separate non-goal.)
+_ASCII_WHITESPACE = " \t\n\r\f\v"
+
+
 def normalize_value(value: Any) -> Any:
-    """Canonicalize a value for dispute comparison: strings are stripped + lowercased so
-    case- and whitespace-only differences are not disputes; non-strings (numbers, bools,
-    null, objects) pass through unchanged. Mirrors `patient_forms._normalized_jsonb` so the
-    Python (detail) and SQL (count/gate) dispute paths agree — keep the two in lock-step."""
+    """Canonicalize a value for dispute comparison: strings are stripped (of ASCII
+    whitespace only) + lowercased so case- and whitespace-only differences are not
+    disputes; non-strings (numbers, bools, null, objects) pass through unchanged. Mirrors
+    `patient_forms._normalized_jsonb` so the Python (detail) and SQL (count/gate) dispute
+    paths agree — keep the two in lock-step (same ASCII whitespace set)."""
     if isinstance(value, str):
-        return value.strip().lower()
+        return value.strip(_ASCII_WHITESPACE).lower()
     return value
 
 
