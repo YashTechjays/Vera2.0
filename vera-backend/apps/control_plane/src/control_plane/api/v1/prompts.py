@@ -11,28 +11,32 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status  # noqa: F401  -- status used in Task 2 POST routes
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import platform_require
 from control_plane.deps import platform_scoped_session
 from control_plane.exceptions import (
-    ConflictError,  # noqa: F401  -- used in Task 2 (create-draft / conflict handling)
+    ConflictError,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
 )
 from control_plane.responses import ResponseModel, ok
-from vera_core.models import FormSchema, Prompt, PromptVersion
+from vera_core.models import FormSchema, Prompt, PromptVersion, SchemaVersion
 from vera_core.models.enums import VersionStatus
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
 
 PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
 _READ = platform_require("platform:elevations:read")
+
+
+class CreateDraftRequest(BaseModel):
+    composite_json: dict[str, Any]
 
 
 class PromptSummary(BaseModel):
@@ -177,3 +181,48 @@ async def get_version(
     if version is None:
         raise NotFoundError(message="unknown prompt version")
     return ok(_detail(version))
+
+
+@router.post(
+    "/{prompt_id}/versions",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ResponseModel[PromptVersionDetail],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+    ),
+)
+async def create_draft(
+    prompt_id: UUID,
+    body: CreateDraftRequest,
+    session: PlatformSession,
+    _caller: Annotated[VerifiedIdentity, _READ],
+) -> ResponseModel[PromptVersionDetail]:
+    prompt = await _require_prompt(session, prompt_id)
+    published_schema_id = (
+        await session.execute(
+            select(SchemaVersion.id).where(
+                SchemaVersion.schema_id == prompt.schema_id,
+                SchemaVersion.status == VersionStatus.PUBLISHED,
+            )
+        )
+    ).scalar_one_or_none()
+    if published_schema_id is None:
+        raise ConflictError(message="no published schema to bind the prompt to")
+    max_version = (
+        await session.execute(
+            select(func.max(PromptVersion.version)).where(PromptVersion.prompt_id == prompt.id)
+        )
+    ).scalar()
+    draft = PromptVersion(
+        prompt_id=prompt.id,
+        schema_version_id=published_schema_id,
+        version=(max_version or 0) + 1,
+        composite_json=body.composite_json,
+        status=VersionStatus.DRAFT,
+    )
+    session.add(draft)
+    await session.flush()
+    return ok(_detail(draft))
