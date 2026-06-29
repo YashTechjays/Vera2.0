@@ -14,8 +14,9 @@ build_agent() picks between them from the dispatch metadata.
 from collections.abc import AsyncIterable
 
 from livekit import rtc
-from livekit.agents import Agent, ModelSettings, stt
+from livekit.agents import Agent, ModelSettings, function_tool, get_job_context, stt
 
+from agent_worker.dtmf import InvalidDtmfError, send_dtmf
 from agent_worker.prompt import (
     _IVR_NAVIGATOR_INSTRUCTIONS,
     build_instructions,
@@ -74,11 +75,23 @@ class VeraAgent(Agent):
 
 class IvrNavigatorAgent(Agent):
     """Generic IVR navigator: the payer's IVR talks first, so the navigator stays silent
-    on enter (default no-op on_enter) and responds prompt-by-prompt. Runs as a plain
-    agent — no PHI-wall node overrides."""
+    on enter (default no-op on_enter) and responds prompt-by-prompt, speaking menu choices
+    and pressing keypad digits (DTMF) via the `press_keypad` tool. Runs as a plain agent —
+    no PHI-wall node overrides."""
 
     def __init__(self) -> None:
         super().__init__(instructions=_IVR_NAVIGATOR_INSTRUCTIONS, tools=[])
+
+    @function_tool
+    async def press_keypad(self, digits: str) -> str:
+        """Press keypad digits on the phone menu (sends DTMF tones). Use ONLY for digits
+        the IVR actually offered (e.g. "press 1 for eligibility"); never invent an account,
+        member, or ID number. `digits` may contain 0-9, * or #."""
+        try:
+            await send_dtmf(get_job_context().room.local_participant, digits)
+        except InvalidDtmfError as exc:
+            return f"Could not send those keys: {exc}"
+        return f"Pressed {digits}."
 
 
 def build_agent(

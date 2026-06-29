@@ -58,8 +58,8 @@ def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
     # cascade-compatible: plain spoken words, NOT the structured-action contract
     assert "responseschema" not in lower
     assert '"action"' not in prompt  # no JSON action object defined
-    # STT-only this iteration: no DTMF / keypad instructions leaked in
-    assert "dtmf" not in lower
+    # the navigator presses keypad digits via the press_keypad tool (DTMF)
+    assert "press_keypad" in lower
     # assembly appends the Cartesia guide, like the chat persona
     combined = build_ivr_instructions()
     assert combined.startswith(IVR_NAVIGATOR_SYSTEM_PROMPT)

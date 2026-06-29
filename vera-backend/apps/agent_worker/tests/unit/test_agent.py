@@ -33,8 +33,7 @@ def test_vera_agent_accepts_overlaid_instructions() -> None:
 
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     agent = IvrNavigatorAgent()
-    # navigator carries the generic eligibility/benefits instructions, no tools
-    assert list(agent.tools) == []
+    # navigator carries the generic eligibility/benefits instructions
     assert "eligibility" in agent.instructions.lower()
     assert "infertility" not in agent.instructions.lower()
     # the navigator listens first: it does NOT greet, so on_enter stays the base no-op
@@ -42,6 +41,9 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     # it is a plain agent — NO PHI-wall node overrides
     assert type(agent).stt_node is Agent.stt_node
     assert type(agent).tts_node is Agent.tts_node
+    # ...but it CAN press keypad digits (DTMF) for IVR menus
+    tool_names = {getattr(getattr(t, "info", None), "name", None) for t in agent.tools}
+    assert "press_keypad" in tool_names
 
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
