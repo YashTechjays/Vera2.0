@@ -9,16 +9,24 @@ manage permission once the RBAC catalog is extended.
 import contextlib
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
-from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode, NotFoundError
+from control_plane.deps import get_audit
+from control_plane.exceptions import (
+    CustomAPIException,
+    CustomAPIResponse,
+    DefaultExceptionCode,
+    NotFoundError,
+)
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import AuditRecord
 from vera_core.models import Call, CallEvent, PatientForm, Tenant
+from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
@@ -152,6 +160,10 @@ class UpdateCallStatusRequest(BaseModel):
 
 _TERMINAL_FAILURE_STATUSES = frozenset({CallStatus.FAILED, CallStatus.NO_ANSWER, CallStatus.BUSY})
 
+_ALLOWED_CALLBACK_STATUSES = frozenset(
+    {CallStatus.COMPLETED, CallStatus.FAILED, CallStatus.NO_ANSWER, CallStatus.BUSY}
+)
+
 
 @router.post(
     "/calls/{call_id}/status",
@@ -164,6 +176,7 @@ _TERMINAL_FAILURE_STATUSES = frozenset({CallStatus.FAILED, CallStatus.NO_ANSWER,
     ),
 )
 async def update_call_status(
+    request: Request,
     call_id: UUID,
     body: UpdateCallStatusRequest,
     tenant_id: TenantId,
@@ -181,6 +194,13 @@ async def update_call_status(
     ).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
+
+    if body.status not in _ALLOWED_CALLBACK_STATUSES:
+        allowed = ", ".join(s.value for s in _ALLOWED_CALLBACK_STATUSES)
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message=f"only terminal statuses are accepted: {allowed}",
+        )
 
     form = (
         await session.execute(
@@ -204,6 +224,7 @@ async def update_call_status(
     )
 
     sm = FormStateMachine()
+    previous_form_status = form.status
 
     if body.status == CallStatus.COMPLETED:
         sm.transition(form, FormStatus.COMPLETED, tenant_max_retries=tenant.max_retries)
@@ -217,6 +238,25 @@ async def update_call_status(
             sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
 
     await session.flush()
+
+    # Audit the worker-driven form status change (HIPAA evidence trail).
+    await get_audit(request).emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.SERVICE,
+            actor_user_id=None,
+            actor_label="agent-worker",
+            event_type=AuditEvent.FORM_STATUS_CHANGE.value,
+            resource_type="patient_form",
+            resource_id=str(form.id),
+            detail={
+                "from": previous_form_status,
+                "to": form.status,
+                "call_id": str(call_id),
+                "trigger": "call_callback",
+            },
+        )
+    )
 
     # Fire the dispatcher — a concurrency slot just freed up.
     await try_dispatch(session, tenant_id, livekit)
