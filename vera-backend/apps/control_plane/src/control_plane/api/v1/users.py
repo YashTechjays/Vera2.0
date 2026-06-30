@@ -9,6 +9,7 @@ credential held only as a hash in Redis (auth/invitations.py) and is never logge
 Gated by `users:manage` (write) / `users:read` (list).
 """
 
+import logging
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -44,6 +45,8 @@ from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import AppUser, Role, UserRole
 from vera_core.models.enums import AccountType, AuthEvent
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["users"])
 
@@ -164,20 +167,25 @@ async def invite_user(
         f"{settings.frontend_base_url}/tenants/{caller.tenant_slug}/accept-invite?token={token}"
     )
 
+    email_sent = False
     if body.send_email:
-        await email_sender.send(
-            EmailMessage(
-                to=email,
-                subject="You're invited to Vera",
-                body=(
-                    f"Hello{(' ' + body.name) if body.name else ''},\n\n"
-                    "You've been invited to Vera. Set your password using the link below "
-                    f"(valid for {settings.invite_ttl_seconds // 3600} hours):\n\n"
-                    f"{invite_url}\n\n"
-                    "If you didn't expect this, you can ignore this email."
-                ),
+        try:
+            await email_sender.send(
+                EmailMessage(
+                    to=email,
+                    subject="You're invited to Vera",
+                    body=(
+                        f"Hello{(' ' + body.name) if body.name else ''},\n\n"
+                        "You've been invited to Vera. Set your password using the link below "
+                        f"(valid for {settings.invite_ttl_seconds // 3600} hours):\n\n"
+                        f"{invite_url}\n\n"
+                        "If you didn't expect this, you can ignore this email."
+                    ),
+                )
             )
-        )
+            email_sent = True
+        except Exception:
+            logger.warning("invitation email to %s could not be sent", email, exc_info=True)
 
     await emit_auth_event(
         audit,
@@ -186,11 +194,11 @@ async def invite_user(
         ip=client_ip(request),
         user_id=caller.user_id,
         # Never the token — only who/how, for the trail.
-        meta={"target_user": str(user.id), "delivery": "email" if body.send_email else "link"},
+        meta={"target_user": str(user.id), "delivery": "email" if email_sent else "link"},
     )
     return ok(
         InviteUserResponse(
-            user_id=user.id, email=body.email, invite_url=invite_url, email_sent=body.send_email
+            user_id=user.id, email=body.email, invite_url=invite_url, email_sent=email_sent
         )
     )
 

@@ -11,7 +11,7 @@ from vera_core.schemas import PersonaTweak
 
 def test_prompt_is_chat_only_and_includes_cartesia_guide() -> None:
     assert "record_service_coverage" not in SYSTEM_PROMPT
-    assert "end_call" not in SYSTEM_PROMPT
+    assert "end_call" in SYSTEM_PROMPT
     assert "infertility" in SYSTEM_PROMPT.lower()
     assert "diagnostic testing" in SYSTEM_PROMPT.lower()
     assert GREETING.startswith("Hi, I'm calling on behalf of a patient")

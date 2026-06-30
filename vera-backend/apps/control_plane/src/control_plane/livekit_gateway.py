@@ -129,10 +129,16 @@ class LiveKitGateway:
     async def delete_room(self, room_name: str) -> None:
         """Tear the room down server-side: removes every participant — the agent
         worker (→ its session shuts down) and any SIP callee (→ the outbound call is
-        hung up) — and closes the room. Idempotent: deleting an absent room is a no-op.
+        hung up) — and closes the room. Idempotent: deleting an already-gone room
+        (e.g. agent's delete_room_on_close already removed it) is a no-op.
         """
         async with self._client() as lk:
-            await lk.room.delete_room(api.DeleteRoomRequest(room=room_name))
+            try:
+                await lk.room.delete_room(api.DeleteRoomRequest(room=room_name))
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return  # room already gone — agent's close path deleted it first
+                raise
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
         grants = api.VideoGrants(room_join=True, room=room_name)
