@@ -89,48 +89,6 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     yield
 
 
-TRUNK_INTEGRATION_TYPE = "livekit_outbound_trunk_id"
-
-
-@pytest.fixture
-async def trunk_integration_type(
-    admin_sessionmaker: async_sessionmaker[AsyncSession],
-) -> AsyncIterator[None]:
-    """Ensure the `livekit_outbound_trunk_id` catalog type exists (it is seeded in real
-    deployments, but the integration tests run against a migrated, unseeded DB). Find-or-
-    create so it is safe whether or not the row is already present; on teardown remove any
-    integrations referencing it (FK is RESTRICT), then the type row itself if we made it."""
-    async with admin_sessionmaker() as session, session.begin():
-        created = (
-            await session.execute(
-                select(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
-            )
-        ).scalar_one_or_none() is None
-        if created:
-            session.add(
-                IntegrationType(
-                    name=TRUNK_INTEGRATION_TYPE, credentials_schema={"trunk_id": "string"}
-                )
-            )
-    try:
-        yield
-    finally:
-        async with admin_sessionmaker() as session, session.begin():
-            await session.execute(
-                delete(Integration).where(
-                    Integration.integration_type_id.in_(
-                        select(IntegrationType.id).where(
-                            IntegrationType.name == TRUNK_INTEGRATION_TYPE
-                        )
-                    )
-                )
-            )
-            if created:
-                await session.execute(
-                    delete(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
-                )
-
-
 @pytest.fixture(scope="session")
 def transcript_service() -> TranscriptService:
     return TranscriptService(InMemoryTranscriptStore())
@@ -319,3 +277,45 @@ async def admin_session(
 ) -> AsyncGenerator[AsyncSession]:
     async with admin_sessionmaker() as session:
         yield session
+
+
+TRUNK_INTEGRATION_TYPE = "livekit_outbound_trunk_id"
+
+
+@pytest.fixture
+async def trunk_integration_type(
+    admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
+) -> AsyncIterator[None]:
+    """Ensure the `livekit_outbound_trunk_id` catalog type exists (it is seeded in real
+    deployments, but the integration tests run against a migrated, unseeded DB). Find-or-
+    create so it is safe whether or not the row is already present.
+
+    Teardown is deliberately scoped to the **test tenant only** (rbac_world). The suite
+    shares the local dev database, so a blanket "delete every integration of this type"
+    would wipe a developer's real tenant credential — NEVER widen this delete beyond the
+    test tenant. The catalog type row is removed only if this fixture created it (so a
+    seeded/real DB keeps its row, and the per-tenant delete leaves other tenants' rows
+    untouched, satisfying the FK on the conditional type delete)."""
+    async with admin_sessionmaker() as session, session.begin():
+        created = (
+            await session.execute(
+                select(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+            )
+        ).scalar_one_or_none() is None
+        if created:
+            session.add(
+                IntegrationType(
+                    name=TRUNK_INTEGRATION_TYPE, credentials_schema={"trunk_id": "string"}
+                )
+            )
+    try:
+        yield
+    finally:
+        async with admin_sessionmaker() as session, session.begin():
+            await session.execute(
+                delete(Integration).where(Integration.tenant_id == rbac_world.tenant_id)
+            )
+            if created:
+                await session.execute(
+                    delete(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+                )
