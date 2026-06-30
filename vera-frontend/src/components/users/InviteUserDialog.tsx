@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react"
+import { Check, Copy } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
@@ -15,6 +16,12 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<InviteUserResult | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  function copyLink() {
+    if (!result) return
+    void navigator.clipboard.writeText(result.invite_url).then(() => setCopied(true))
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -33,7 +40,7 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
 
   function reset() {
     setOpen(false)
-    setEmail(""); setName(""); setError(null); setResult(null); setBusy(false)
+    setEmail(""); setName(""); setError(null); setResult(null); setBusy(false); setCopied(false)
   }
 
   return (
@@ -58,13 +65,25 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
               </p>
               <div className="space-y-1.5">
                 <Label htmlFor="invite-url">Invite link</Label>
-                <Input
-                  id="invite-url"
-                  readOnly
-                  value={result.invite_url}
-                  onFocus={(e) => e.target.select()}
-                  className="font-mono text-xs"
-                />
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="invite-url"
+                    readOnly
+                    value={result.invite_url}
+                    onFocus={(e) => e.target.select()}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={copyLink}
+                    aria-label={copied ? "Link copied" : "Copy invite link"}
+                    title={copied ? "Copied" : "Copy"}
+                  >
+                    {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                  </Button>
+                </div>
               </div>
             </div>
             <div className="flex justify-end border-t border-border p-4">
