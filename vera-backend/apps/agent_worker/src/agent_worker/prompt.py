@@ -158,9 +158,6 @@ As soon as a human is on the line (for example "please hold for the next represe
 Keep every reply short and clear so it is easy to recognize over the phone."""
 
 
-_IVR_NAVIGATOR_INSTRUCTIONS = f"{IVR_NAVIGATOR_SYSTEM_PROMPT}\n\n{CARTESIA_MARKUP_GUIDE}"
-
-
 def build_ivr_instructions() -> str:
     """Generic IVR-navigator instructions: navigator persona + Cartesia readback guide."""
-    return _IVR_NAVIGATOR_INSTRUCTIONS
+    return f"{IVR_NAVIGATOR_SYSTEM_PROMPT}\n\n{CARTESIA_MARKUP_GUIDE}"

@@ -18,8 +18,8 @@ from livekit.agents import Agent, ModelSettings, function_tool, get_job_context,
 
 from agent_worker.dtmf import InvalidDtmfError, send_dtmf
 from agent_worker.prompt import (
-    _IVR_NAVIGATOR_INSTRUCTIONS,
     build_instructions,
+    build_ivr_instructions,
     resolve_greeting,
 )
 from agent_worker.seams import hydrate_stream, redact_event
@@ -80,7 +80,7 @@ class IvrNavigatorAgent(Agent):
     no PHI-wall node overrides."""
 
     def __init__(self) -> None:
-        super().__init__(instructions=_IVR_NAVIGATOR_INSTRUCTIONS, tools=[])
+        super().__init__(instructions=build_ivr_instructions(), tools=[])
 
     @function_tool
     async def press_keypad(self, digits: str) -> str:

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react"
-import { AlertTriangle, Loader2, Mic, PhoneOutgoing, Radio } from "lucide-react"
+import { useEffect, useState, type ReactNode } from "react"
+import { AlertTriangle, ListTree, Loader2, Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -27,6 +27,7 @@ import {
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
+import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -51,13 +52,21 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
 
 /** Renders live connection + participant state. Must live inside <LiveKitRoom>
  *  so the LiveKit room context is available to its hooks. */
-function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => void }) {
+function SessionPanel({
+  mode,
+  onEnd,
+  actions,
+}: {
+  mode: VoiceSessionMode
+  onEnd: () => void
+  actions?: ReactNode
+}) {
   const state = useConnectionState()
   const participants = useParticipants()
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
         <CardTitle className="flex items-center gap-2">
           <Radio className="size-4 text-emerald-600" />
           Live session
@@ -65,9 +74,12 @@ function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => vo
             ({mode === "browser" ? "in-browser — mic on" : "outbound — listen-only"})
           </span>
         </CardTitle>
-        <Button variant="destructive" onClick={onEnd}>
-          End session
-        </Button>
+        <div className="flex items-center gap-2">
+          {actions}
+          <Button variant="destructive" size="sm" onClick={onEnd}>
+            End session
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="text-sm">
@@ -220,8 +232,16 @@ export function VoiceLab() {
           video={false}
           onError={(e) => setError(e.message)}
         >
-          <SessionPanel mode={session.mode} onEnd={endSession} />
-          <TranscriptPanel key={session.room_name} roomName={session.room_name} />
+          <div className="space-y-6">
+            <SessionPanel
+              mode={session.mode}
+              onEnd={endSession}
+              actions={
+                session.mode === "outbound" ? <VoiceLabDialpad onError={setError} /> : undefined
+              }
+            />
+            <TranscriptPanel key={session.room_name} roomName={session.room_name} />
+          </div>
           <RoomAudioRenderer />
         </LiveKitRoom>
       ) : (
@@ -296,12 +316,25 @@ export function VoiceLab() {
               )}
             </div>
 
-            <div className="flex flex-row items-center justify-between rounded-lg border p-3">
-              <div className="space-y-0.5">
-                <Label htmlFor="ivr-navigation">IVR navigation</Label>
-                <p className="text-sm text-muted-foreground">
-                  Navigate the payer's phone menu automatically before reaching a rep.
-                </p>
+            <div
+              className={cn(
+                "flex items-center justify-between gap-4 rounded-lg border p-3 transition-colors",
+                ivrNavigation && "border-primary/40 bg-primary/5",
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                  <ListTree className="size-4 text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ivr-navigation" className="leading-none">
+                    IVR navigation
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    Let the agent navigate the payer's phone menu automatically before reaching
+                    a rep.
+                  </p>
+                </div>
               </div>
               <Switch
                 id="ivr-navigation"
