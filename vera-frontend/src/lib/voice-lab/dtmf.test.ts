@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { DtmfPublisher, InvalidDtmfError, sendDtmf } from "./dtmf"
+import { InvalidDtmfError, sendDtmf, type DtmfPublisher } from "./dtmf"
 
 class FakePublisher implements DtmfPublisher {
   sent: Array<[number, string]> = []

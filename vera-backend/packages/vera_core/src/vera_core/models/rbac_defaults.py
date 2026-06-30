@@ -35,6 +35,8 @@ PLATFORM_PERMISSIONS: Final[dict[str, str]] = {
     "platform:elevations:create": "Open a scoped, time-boxed tenant elevation (break-glass)",
     "platform:elevations:end": "End an active tenant elevation early",
     "platform:elevations:read": "List active tenant elevations (platform oversight)",
+    "platform:prompts:read": "View the prompt authoring catalog and its versions",
+    "platform:prompts:write": "Create and publish prompt versions",
 }
 
 # The full catalog seeded into `permission` (tenant + platform).

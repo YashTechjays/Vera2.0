@@ -24,7 +24,7 @@ from vera_core.models import Integration, IntegrationType
 async def seal_credentials(
     kms: KeyManagementService, *, integration: Integration, credentials: dict[str, Any]
 ) -> None:
-    """Envelope-encrypt `credentials` (e.g. {"twilio_sip_trunk": "ST.."}) onto the row.
+    """Envelope-encrypt `credentials` (e.g. {"trunk_id": "ST.."}) onto the row.
 
     Validate the shape against `integration_type.credentials_schema` before calling.
     """
@@ -60,7 +60,7 @@ async def get_integration_credentials(
     integration_type_name: str,
 ) -> dict[str, Any] | None:
     """Load + decrypt the calling tenant's credential for an integration type by name
-    (e.g. "twilio_sip"). Returns None if the tenant hasn't configured it. The session
+    (e.g. "livekit_outbound_trunk_id"). Returns None if the tenant hasn't configured it. The session
     must be tenant-scoped (RLS) so only the caller's own row is visible."""
     integration = (
         await session.execute(

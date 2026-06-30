@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from livekit.agents import Agent
+from livekit.agents.llm import FunctionTool
 
 from agent_worker.agent import IvrNavigatorAgent, VeraAgent, build_agent
 from agent_worker.prompt import build_instructions
@@ -48,9 +49,10 @@ def _navigator() -> IvrNavigatorAgent:
     return IvrNavigatorAgent(PassthroughPHIBoundary(), "s1")
 
 
-def test_vera_agent_is_chat_only_with_persona() -> None:
+def test_vera_agent_has_end_call_tool_and_persona() -> None:
     agent = VeraAgent(boundary=PassthroughPHIBoundary(), session_id="s1")
-    assert list(agent.tools) == []
+    tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
+    assert tool_names == ["end_call"]
     assert "infertility" in agent.instructions.lower()
     # the chat persona greets on enter (overrides the base no-op)
     assert type(agent).on_enter is not Agent.on_enter

@@ -23,6 +23,7 @@ from control_plane.deps import (
     get_auth_audit,
     get_email_sender,
     get_invitation_store,
+    get_kms,
     get_livekit,
     get_settings_state,
     self_scoped_session,
@@ -31,6 +32,7 @@ from control_plane.deps import (
 from control_plane.email import EmailSender
 from vera_core.audit import AuthAuditRecord, AuthAuditSink
 from vera_core.config import Settings
+from vera_core.config.kms import KeyManagementService
 from vera_core.models import Permission, RolePermission
 from vera_core.models.enums import AuthEvent
 
@@ -58,6 +60,7 @@ Invites = Annotated[InvitationStore, Depends(get_invitation_store)]
 Email = Annotated[EmailSender, Depends(get_email_sender)]
 Resolver = Annotated[PermissionResolver, Depends(get_resolver)]
 LiveKit = Annotated["LiveKitGateway", Depends(get_livekit)]
+Kms = Annotated[KeyManagementService, Depends(get_kms)]
 
 
 async def emit_auth_event(

@@ -8,6 +8,7 @@ room name IS the session id and the Langfuse correlation key.
 import asyncio
 import json
 import logging
+import time
 
 from livekit import rtc
 from livekit.agents import (
@@ -71,11 +72,11 @@ async def wait_for_speaker(
     Returns that participant once the browser caller has joined or the SIP callee has
     answered, or None on timeout. The caller pins the agent's audio input to the
     returned participant so it listens to the speaker and not the listen-only monitor.
-    """
-    for p in ctx.room.remote_participants.values():
-        if _is_ready_speaker(p):
-            return p
 
+    Subscribe to events BEFORE checking existing participants so that a participant
+    who joins in the gap between the two steps is never missed (the event fires into
+    an already-listening handler and resolves the future immediately).
+    """
     loop = asyncio.get_running_loop()
     arrived: asyncio.Future[rtc.RemoteParticipant] = loop.create_future()
 
@@ -95,9 +96,17 @@ async def wait_for_speaker(
         # The SIP callee's ring → active transition arrives here, not as a new join.
         _resolve(participant)
 
+    # Subscribe FIRST — closing the race window where a join event could fire
+    # between the existing-participant scan and the event registration.
     ctx.room.on("participant_connected", _on_connected)
     ctx.room.on("participant_attributes_changed", _on_attributes_changed)
     try:
+        # Now check participants who arrived before we subscribed.
+        for p in ctx.room.remote_participants.values():
+            _resolve(p)
+        if arrived.done():
+            return arrived.result()
+
         async with asyncio.timeout(timeout_s):
             return await arrived
     except TimeoutError:
@@ -131,6 +140,18 @@ def build_room_input_options(speaker_identity: str | NotGiven) -> RoomInputOptio
 def session_id_for(room_name: str) -> str:
     """The room name is the session id (correlation key shared with the control plane)."""
     return room_name
+
+
+async def publish_unanswered_notice(service: TranscriptService, room_name: str) -> None:
+    """Publish a user-facing transcript event when the outbound call is not answered,
+    then end the stream so the browser's TranscriptPanel shows feedback."""
+    await service.publish_turn(
+        room_name,
+        role="agent",
+        text="The outbound call was not answered or the line is unavailable. Please try again.",
+        ts=int(time.time() * 1000),
+    )
+    await service.end(room_name)
 
 
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
@@ -179,6 +200,20 @@ async def entrypoint(ctx: JobContext) -> None:
         speaker = await wait_for_speaker(ctx)
         if speaker is None:
             logger.warning("no speaker joined room %s within timeout — not starting", room_name)
+            # Publish feedback to the browser's transcript panel before exiting.
+            if meta.get("publish_transcript"):
+                timeout_redis = create_redis(settings.redis_url)
+                timeout_service = TranscriptService(
+                    RedisTranscriptStore(
+                        timeout_redis,
+                        ttl_seconds=settings.transcript_stream_ttl_seconds,
+                        end_grace_seconds=settings.transcript_end_grace_seconds,
+                    )
+                )
+                try:
+                    await publish_unanswered_notice(timeout_service, room_name)
+                finally:
+                    await timeout_redis.aclose()
             return
 
     boundary = build_phi_boundary(settings)
