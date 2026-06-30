@@ -6,9 +6,11 @@ spec flags this.  A later task tightens POST / join-token to a write /
 manage permission once the RBAC catalog is extended.
 """
 
+import contextlib
 from uuid import UUID
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
@@ -20,6 +22,8 @@ from vera_core.models import Call, CallEvent, PatientForm, Tenant
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
+from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.queue_dispatcher import try_dispatch
 
 router = APIRouter(tags=["calls"])
 
@@ -140,3 +144,81 @@ async def list_calls(
         )
     ).all()
     return ok([_summary(c, name) for c, name in rows])
+
+
+class UpdateCallStatusRequest(BaseModel):
+    status: CallStatus
+
+
+_TERMINAL_FAILURE_STATUSES = frozenset({CallStatus.FAILED, CallStatus.NO_ANSWER, CallStatus.BUSY})
+
+
+@router.post(
+    "/calls/{call_id}/status",
+    response_model=ResponseModel[CallSummary],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.VALIDATION_ERROR,
+    ),
+)
+async def update_call_status(
+    call_id: UUID,
+    body: UpdateCallStatusRequest,
+    tenant_id: TenantId,
+    session: TenantSession,
+    livekit: LiveKit,
+    _caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[CallSummary]:
+    """Callback endpoint for the agent worker to report call terminal status.
+
+    On terminal failure with retries remaining, auto-retries the form.
+    Always fires the dispatcher afterward to fill freed concurrency slots.
+    """
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
+    ).scalar_one_or_none()
+    if call is None:
+        raise NotFoundError(message="call not found")
+
+    form = (
+        await session.execute(
+            select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
+    # Update the call's status.
+    call.current_status = body.status.value
+    session.add(
+        CallEvent(
+            tenant_id=tenant_id,
+            call_id=call.id,
+            event_type=CallEventType.STATUS,
+            event_value=body.status.value,
+        )
+    )
+
+    sm = FormStateMachine()
+
+    if body.status == CallStatus.COMPLETED:
+        sm.transition(form, FormStatus.COMPLETED, tenant_max_retries=tenant.max_retries)
+    elif body.status in _TERMINAL_FAILURE_STATUSES:
+        sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
+        # Auto-retry if retries remain; silently stay CALL_FAILED if exhausted.
+        # Record retry lineage — the next call (created by dispatcher) will
+        # link back to this one. For now we just mark the form as re-queued;
+        # the dispatcher creates the Call + CallLineage on its next pass.
+        with contextlib.suppress(InvalidTransitionError):
+            sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
+
+    await session.flush()
+
+    # Fire the dispatcher — a concurrency slot just freed up.
+    await try_dispatch(session, tenant_id, livekit)
+
+    return ok(_summary(call, form.patient_name))
