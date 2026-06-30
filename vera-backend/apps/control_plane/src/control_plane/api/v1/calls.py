@@ -195,6 +195,13 @@ async def update_call_status(
     if call is None:
         raise NotFoundError(message="call not found")
 
+    # Idempotent: if the call is already terminal, no-op.
+    if call.current_status in {s.value for s in _ALLOWED_CALLBACK_STATUSES}:
+        form = (
+            await session.execute(select(PatientForm).where(PatientForm.id == call.form_id))
+        ).scalar_one_or_none()
+        return ok(_summary(call, form.patient_name if form else None))
+
     if body.status not in _ALLOWED_CALLBACK_STATUSES:
         allowed = ", ".join(s.value for s in _ALLOWED_CALLBACK_STATUSES)
         raise CustomAPIException(

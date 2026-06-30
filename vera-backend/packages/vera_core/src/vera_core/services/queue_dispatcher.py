@@ -16,7 +16,7 @@ from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
@@ -115,7 +115,7 @@ async def try_dispatch(
     # 3. Fetch FIFO candidates — FOR UPDATE SKIP LOCKED prevents double-dispatch.
     # The expiry filter is pushed into the DB WHERE clause to use the DB clock,
     # avoiding Python/DB clock skew (HIPAA timestamp-of-record requirement).
-    expiry_interval = text(f"'{tenant.queue_expiry_hours} hours'::interval")
+    expiry_interval = func.make_interval(hours=tenant.queue_expiry_hours)
     candidates = (
         (
             await session.execute(
