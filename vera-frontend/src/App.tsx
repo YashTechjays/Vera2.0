@@ -15,6 +15,7 @@ import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
 import { Settings } from "@/pages/Settings"
 import { TenantAccess } from "@/pages/TenantAccess"
+import { AgentPrompt } from "@/pages/AgentPrompt"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -52,8 +53,8 @@ function App() {
             <Route path="call-history" element={<Placeholder title="Call History" />} />
             <Route path="analytics" element={<Placeholder title="Analytics" />} />
             <Route path="tenant-access" element={<TenantAccess />} />
-            {/* Super-admin-only stub; the persona/prompt editor lands here later. */}
-            <Route path="agent-prompt" element={<Placeholder title="Agent Prompt" />} />
+            {/* Super-admin-only prompt editor. */}
+            <Route path="agent-prompt" element={<AgentPrompt />} />
             <Route path="settings" element={<Settings />} />
             <Route path="*" element={<Placeholder title="Not Found" />} />
           </Route>
