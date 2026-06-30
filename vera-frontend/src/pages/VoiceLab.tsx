@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Mic, PhoneOutgoing, Radio } from "lucide-react"
-import { useEffect, useState } from "react"
 import { AlertTriangle, Loader2, Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
