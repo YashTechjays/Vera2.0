@@ -11,12 +11,13 @@ on enter and responds prompt-by-prompt. It runs as a plain agent — no PHI-wall
 build_agent() picks between them from the dispatch metadata.
 """
 
+import logging
 from collections.abc import AsyncIterable
 
 from livekit import rtc
 from livekit.agents import Agent, ModelSettings, function_tool, get_job_context, stt
 
-from agent_worker.dtmf import InvalidDtmfError, send_dtmf
+from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.prompt import (
     build_instructions,
     build_ivr_instructions,
@@ -24,6 +25,8 @@ from agent_worker.prompt import (
 )
 from agent_worker.seams import hydrate_stream, redact_event
 from vera_core.phi import PHIBoundaryProtocol
+
+logger = logging.getLogger("agent_worker")
 
 
 class VeraAgent(Agent):
@@ -87,11 +90,21 @@ class IvrNavigatorAgent(Agent):
         """Press keypad digits on the phone menu (sends DTMF tones). Use ONLY for digits
         the IVR actually offered (e.g. "press 1 for eligibility"); never invent an account,
         member, or ID number. `digits` may contain 0-9, * or #."""
+        # Log the count only — a DTMF sequence can be a member ID/NPI (PHI), and the
+        # return string feeds the LLM/traces, so neither echoes the raw digits.
+        count = len(digits.strip())
         try:
             await send_dtmf(get_job_context().room.local_participant, digits)
         except InvalidDtmfError as exc:
             return f"Could not send those keys: {exc}"
-        return f"Pressed {digits}."
+        except DtmfTransportError:
+            # Surface the failure (the logged exception carries the real cause) instead of
+            # letting the tool runner swallow it — the historical reason a failed press
+            # looked like "nothing happened" on the line.
+            logger.exception("press_keypad: DTMF publish failed (%d tone(s))", count)
+            return "Could not send the keypad tones over the call; continue without pressing."
+        logger.info("press_keypad: sent %d DTMF tone(s)", count)
+        return "Sent the keypad tones."
 
 
 def build_agent(

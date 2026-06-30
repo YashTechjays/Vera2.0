@@ -58,7 +58,13 @@ def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
     # cascade-compatible: plain spoken words, NOT the structured-action contract
     assert "responseschema" not in lower
     assert '"action"' not in prompt  # no JSON action object defined
-    # the navigator presses keypad digits via the press_keypad tool (DTMF)
+    # XML-structured, reactive navigator: two-mode state machine + per-provider response rules
+    assert "<ivr_navigation_prompt>" in prompt
+    assert "<response_rules>" in prompt
+    assert "announcement mode" in lower
+    assert "<prompt_mode>" in prompt
+    assert "silent" in lower  # the core reactive discipline
+    # the model is told to send DTMF by calling the press_keypad tool (not by speaking digits)
     assert "press_keypad" in lower
     # assembly appends the Cartesia guide, like the chat persona
     combined = build_ivr_instructions()

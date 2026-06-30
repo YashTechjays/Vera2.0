@@ -1,12 +1,45 @@
 """Tests for the cascade agents — the chat persona (with PHI-wall node overrides) and
 the IVR navigator (a plain agent, no phiwall), plus the metadata-driven selector."""
 
+from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
+
+import pytest
 from livekit.agents import Agent
 
 from agent_worker.agent import IvrNavigatorAgent, VeraAgent, build_agent
 from agent_worker.prompt import build_instructions
 from vera_core.phi import PassthroughPHIBoundary
 from vera_core.schemas import PersonaTweak
+
+
+async def _press(agent: IvrNavigatorAgent, digits: str) -> str:
+    """Call the press_keypad tool. The @function_tool descriptor binds the method at
+    runtime, but its type stub doesn't model that, so cast to the real call signature."""
+    call = cast("Callable[[str], Awaitable[str]]", agent.press_keypad)
+    return await call(digits)
+
+
+class _FakeParticipant:
+    """Records publish_dtmf calls; raise_on_publish makes each call fail like a real
+    transport error (e.g. missing canPublishData grant)."""
+
+    def __init__(self, *, raise_on_publish: bool = False) -> None:
+        self.sent: list[str] = []
+        self._raise = raise_on_publish
+
+    async def publish_dtmf(self, *, code: int, digit: str) -> None:
+        if self._raise:
+            # send_dtmf wraps any publish failure as DtmfTransportError.
+            raise RuntimeError("publish failed")
+        self.sent.append(digit)
+
+
+def _job_ctx(participant: _FakeParticipant) -> object:
+    """A stand-in JobContext whose room.local_participant is the fake participant."""
+    return SimpleNamespace(room=SimpleNamespace(local_participant=participant))
 
 
 def test_vera_agent_is_chat_only_with_persona() -> None:
@@ -44,6 +77,29 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     # ...but it CAN press keypad digits (DTMF) for IVR menus
     tool_names = {getattr(getattr(t, "info", None), "name", None) for t in agent.tools}
     assert "press_keypad" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_press_keypad_sends_dtmf_without_echoing_digits() -> None:
+    agent = IvrNavigatorAgent()
+    participant = _FakeParticipant()
+    with patch("agent_worker.agent.get_job_context", return_value=_job_ctx(participant)):
+        result = await _press(agent, "1")
+    # the tone actually went to the participant...
+    assert participant.sent == ["1"]
+    # ...but the LLM-/trace-facing return never echoes the raw digit (PHI hygiene)
+    assert "1" not in result
+
+
+@pytest.mark.asyncio
+async def test_press_keypad_surfaces_publish_failure_instead_of_swallowing() -> None:
+    # Regression: a transport failure used to propagate and be silently swallowed by the
+    # tool runner, looking exactly like "no DTMF". press_keypad must catch it and return.
+    agent = IvrNavigatorAgent()
+    participant = _FakeParticipant(raise_on_publish=True)
+    with patch("agent_worker.agent.get_job_context", return_value=_job_ctx(participant)):
+        result = await _press(agent, "1")
+    assert "could not send" in result.lower()
 
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
