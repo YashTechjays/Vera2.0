@@ -66,6 +66,8 @@ def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
     assert "silent" in lower  # the core reactive discipline
     # the model is told to send DTMF by calling the press_keypad tool (not by speaking digits)
     assert "press_keypad" in lower
+    # and to hand off to the verification agent (not speak an opener) once a human answers
+    assert "transfer_to_verification" in lower
     # assembly appends the Cartesia guide, like the chat persona
     combined = build_ivr_instructions()
     assert combined.startswith(IVR_NAVIGATOR_SYSTEM_PROMPT)

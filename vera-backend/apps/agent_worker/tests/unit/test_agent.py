@@ -42,6 +42,12 @@ def _job_ctx(participant: _FakeParticipant) -> object:
     return SimpleNamespace(room=SimpleNamespace(local_participant=participant))
 
 
+def _navigator() -> IvrNavigatorAgent:
+    """An IVR navigator with a (no-op) boundary + session_id so it can build its
+    VeraAgent handoff target."""
+    return IvrNavigatorAgent(PassthroughPHIBoundary(), "s1")
+
+
 def test_vera_agent_is_chat_only_with_persona() -> None:
     agent = VeraAgent(boundary=PassthroughPHIBoundary(), session_id="s1")
     assert list(agent.tools) == []
@@ -65,7 +71,7 @@ def test_vera_agent_accepts_overlaid_instructions() -> None:
 
 
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
-    agent = IvrNavigatorAgent()
+    agent = _navigator()
     # navigator carries the generic eligibility/benefits instructions
     assert "eligibility" in agent.instructions.lower()
     assert "infertility" not in agent.instructions.lower()
@@ -74,14 +80,29 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     # it is a plain agent — NO PHI-wall node overrides
     assert type(agent).stt_node is Agent.stt_node
     assert type(agent).tts_node is Agent.tts_node
-    # ...but it CAN press keypad digits (DTMF) for IVR menus
+    # ...but it CAN press keypad digits (DTMF) and hand off to the verifier
     tool_names = {getattr(getattr(t, "info", None), "name", None) for t in agent.tools}
     assert "press_keypad" in tool_names
+    assert "transfer_to_verification" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_transfer_to_verification_hands_off_to_vera_agent() -> None:
+    # When the navigator reaches a human, the handoff target is the VeraAgent verification
+    # persona — and it carries the PHI-wall overrides the navigator lacks, so the wall turns
+    # on for the rest of the call.
+    agent = _navigator()
+    call = cast("Callable[[], Awaitable[Agent]]", agent.transfer_to_verification)
+    handoff = await call()
+    assert isinstance(handoff, VeraAgent)
+    assert type(handoff).on_enter is not Agent.on_enter  # greets the rep on enter
+    assert type(handoff).stt_node is not Agent.stt_node
+    assert type(handoff).tts_node is not Agent.tts_node
 
 
 @pytest.mark.asyncio
 async def test_press_keypad_sends_dtmf_without_echoing_digits() -> None:
-    agent = IvrNavigatorAgent()
+    agent = _navigator()
     participant = _FakeParticipant()
     with patch("agent_worker.agent.get_job_context", return_value=_job_ctx(participant)):
         result = await _press(agent, "1")
@@ -95,7 +116,7 @@ async def test_press_keypad_sends_dtmf_without_echoing_digits() -> None:
 async def test_press_keypad_surfaces_publish_failure_instead_of_swallowing() -> None:
     # Regression: a transport failure used to propagate and be silently swallowed by the
     # tool runner, looking exactly like "no DTMF". press_keypad must catch it and return.
-    agent = IvrNavigatorAgent()
+    agent = _navigator()
     participant = _FakeParticipant(raise_on_publish=True)
     with patch("agent_worker.agent.get_job_context", return_value=_job_ctx(participant)):
         result = await _press(agent, "1")

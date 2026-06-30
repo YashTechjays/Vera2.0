@@ -7,10 +7,13 @@ PassthroughPHIBoundary/no-op).
 
 IvrNavigatorAgent: the generic IVR navigator. The payer's IVR talks first, so it listens
 on enter and responds prompt-by-prompt. It runs as a plain agent — no PHI-wall overrides.
+Once it reaches a live human rep it hands off to VeraAgent via the `transfer_to_verification`
+tool (a one-way swap; from then on the PHI-wall overrides apply).
 
-build_agent() picks between them from the dispatch metadata.
+build_agent() picks the initial persona from the dispatch metadata.
 """
 
+import functools
 import logging
 from collections.abc import AsyncIterable
 
@@ -80,10 +83,40 @@ class IvrNavigatorAgent(Agent):
     """Generic IVR navigator: the payer's IVR talks first, so the navigator stays silent
     on enter (default no-op on_enter) and responds prompt-by-prompt, speaking menu choices
     and pressing keypad digits (DTMF) via the `press_keypad` tool. Runs as a plain agent —
-    no PHI-wall node overrides."""
+    no PHI-wall node overrides.
 
-    def __init__(self) -> None:
+    It holds a factory for its VeraAgent handoff target so that, once a live human rep
+    answers, `transfer_to_verification` can hand off to a VeraAgent (which greets the rep
+    and runs the benefits conversation)."""
+
+    def __init__(
+        self,
+        boundary: PHIBoundaryProtocol,
+        session_id: str,
+        *,
+        verification_instructions: str | None = None,
+        verification_greeting: str | None = None,
+    ) -> None:
+        # The navigator runs plain (no PHI-wall overrides); it keeps only a factory for the
+        # VeraAgent it hands off to once a human answers (see transfer_to_verification).
+        self._make_verification_agent = functools.partial(
+            VeraAgent,
+            boundary,
+            session_id,
+            instructions=verification_instructions,
+            greeting=verification_greeting,
+        )
         super().__init__(instructions=build_ivr_instructions(), tools=[])
+
+    @function_tool
+    async def transfer_to_verification(self) -> Agent:
+        """Hand the call to the verification agent. Call this ONLY when a live human
+        representative has clearly greeted you — a personal name paired with an open request
+        for your info (e.g. "Hi, this is Martha, who am I speaking with?"). This handoff is
+        FINAL: do not call it for menus, recordings, a named virtual assistant (e.g. Avery),
+        or a bare "hello". The verification agent greets the rep and takes over."""
+        logger.info("handoff: IVR navigator -> verification agent")
+        return self._make_verification_agent()
 
     @function_tool
     async def press_keypad(self, digits: str) -> str:
@@ -119,5 +152,10 @@ def build_agent(
     `ivr_navigation` is set (a plain agent, no phiwall), otherwise the chat persona
     (with the PHI-wall overrides and any persona-tweak instructions/greeting)."""
     if meta.get("ivr_navigation"):
-        return IvrNavigatorAgent()
+        return IvrNavigatorAgent(
+            boundary,
+            session_id,
+            verification_instructions=instructions,
+            verification_greeting=greeting,
+        )
     return VeraAgent(boundary, session_id, instructions=instructions, greeting=greeting)
