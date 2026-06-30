@@ -6,7 +6,12 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ApiError } from "@/lib/api/client"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { selectMfa, selectTenantSlug, verifyMfaThunk } from "@/store/authSlice"
+import {
+  platformVerifyMfaThunk,
+  selectMfa,
+  selectTenantSlug,
+  verifyMfaThunk,
+} from "@/store/authSlice"
 
 export function MfaVerify() {
   const dispatch = useAppDispatch()
@@ -25,7 +30,12 @@ export function MfaVerify() {
     setError(null)
     setBusy(true)
     try {
-      await dispatch(verifyMfaThunk({ slug, mfaToken: mfa!.token, code })).unwrap()
+      // Platform challenges verify against the slug-less platform route.
+      if (mfa!.platform) {
+        await dispatch(platformVerifyMfaThunk({ mfaToken: mfa!.token, code })).unwrap()
+      } else {
+        await dispatch(verifyMfaThunk({ slug, mfaToken: mfa!.token, code })).unwrap()
+      }
       navigate("/", { replace: true })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Verification failed.")

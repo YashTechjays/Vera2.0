@@ -20,6 +20,7 @@ the bearer token alone (`current_identity`); scope is derived from the verified 
 """
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -38,7 +39,7 @@ from control_plane.api.v1.common import (
     TenantId,
     emit_auth_event,
 )
-from control_plane.auth import mfa
+from control_plane.auth import elevation, mfa
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import INVITE_MFA_NS, INVITE_NS
 from control_plane.auth.password import MAX_PASSWORD_BYTES, hash_password, verify_password
@@ -64,7 +65,7 @@ from vera_core.audit import AuthAuditSink
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import tenant_session
 from vera_core.models import AppUser, Role, SsoProvider, UserIdentity, UserRole
-from vera_core.models.enums import AuthEvent, ProviderKind
+from vera_core.models.enums import AccountType, AuthEvent, ProviderKind
 
 router = APIRouter(tags=["auth"])
 
@@ -108,6 +109,14 @@ class KeepaliveResponse(BaseModel):
     expires_in_seconds: int
 
 
+class ActiveElevation(BaseModel):
+    """A platform operator's current break-glass grant (the tenant they're operating
+    in and when it lapses). Null for tenant users and for un-elevated operators."""
+
+    target_tenant_id: UUID
+    expires_at: datetime
+
+
 class MeResponse(BaseModel):
     """The caller's own hydrated session — identity, tenant, display name, role
     names, and effective permissions. Non-PHI (own account metadata)."""
@@ -120,6 +129,7 @@ class MeResponse(BaseModel):
     tenant_slug: str | None
     roles: list[str]
     permissions: list[str]
+    active_elevation: ActiveElevation | None = None
 
 
 class EnrollResponse(BaseModel):
@@ -277,7 +287,17 @@ async def login(
 
     async with tenant_session(sessionmaker, tenant_id) as session:
         provider = await resolve_login_provider(session, tenant_id, ProviderKind.PASSWORD.value)
-        creds = await _load_password_creds(session, body.email) if provider is not None else None
+        # Pin the tenant plane: a platform operator (account_type='platform') must
+        # use /platform/auth/login, never this tenant route. In prod RLS already
+        # hides the NULL-tenant platform row from this tenant session, but a local
+        # superuser DB bypasses RLS — without this pin the platform row would
+        # authenticate here and mint a malformed platform+tenant session that every
+        # tenant route then rejects with 401. Defense in depth, correct everywhere.
+        creds = (
+            await _load_password_creds(session, body.email, account_type="tenant")
+            if provider is not None
+            else None
+        )
 
     if provider is None:
         # No enabled provider resolved — which also covers an unknown tenant. We
@@ -549,6 +569,16 @@ async def get_me(
         .all()
     )
 
+    # Platform operators carry their active break-glass grant so the UI can reveal
+    # tenant-scoped surfaces only while elevated. Tenant users never have one.
+    active_elevation = None
+    if identity.account_type is AccountType.PLATFORM:
+        grant = await elevation.active_grant_for_operator(session, operator=identity.user_id)
+        if grant is not None:
+            active_elevation = ActiveElevation(
+                target_tenant_id=grant.target_tenant_id, expires_at=grant.expires_at
+            )
+
     return ok(
         MeResponse(
             user_id=identity.user_id,
@@ -559,6 +589,7 @@ async def get_me(
             tenant_slug=identity.tenant_slug,
             roles=sorted(roles),
             permissions=sorted(permissions),
+            active_elevation=active_elevation,
         )
     )
 

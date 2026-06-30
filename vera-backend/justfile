@@ -57,6 +57,10 @@ seed-user email password:
 seed-schemas:
     uv run python scripts/seed.py --schemas
 
+# Seed ONLY the baseline prompts (bind to each schema's published version)
+seed-prompts:
+    uv run python scripts/seed.py --prompts
+
 # Anchor audit_log chain heads to the WORM bucket (GKE CronJob entrypoint)
 anchor-audit:
     uv run python scripts/audit_anchor.py

@@ -9,10 +9,11 @@ import { formatDate } from "@/lib/patient-forms/display"
 
 // The single integration this tenant configures. The integration-type catalog is
 // not exposed over the API, so the frontend names the slug + its one credential
-// key directly (rendered raw, not prettified). Both are seeded server-side
-// (scripts/seed.py: twilio_sip → {twilio_sip_trunk}).
-const INTEGRATION_TYPE = "twilio_sip"
-const CREDENTIAL_KEY = "twilio_sip_trunk"
+// key directly. Both are seeded server-side (scripts/seed.py:
+// livekit_outbound_trunk_id → {trunk_id}).
+const INTEGRATION_TYPE = "livekit_outbound_trunk_id"
+const CREDENTIAL_KEY = "trunk_id"
+const DISPLAY_NAME = "LiveKit outbound trunk"
 
 /** Manage the tenant's single outbound integration credential: view configured
  *  state, set/replace the write-once secret. The value is never returned by the
@@ -83,7 +84,7 @@ export function IntegrationsSection() {
 
       <div className="space-y-3 rounded-lg border p-4">
         <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-sm">{INTEGRATION_TYPE}</span>
+          <span className="text-sm font-medium">{DISPLAY_NAME}</span>
           <span
             className={cn(
               "inline-block rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide",
@@ -104,7 +105,7 @@ export function IntegrationsSection() {
         <form className="flex flex-wrap items-end gap-2" onSubmit={handleSave}>
           <div className="flex flex-col gap-1">
             <label className="text-xs text-muted-foreground">
-              {configured ? `Replace ${CREDENTIAL_KEY}` : `Set ${CREDENTIAL_KEY}`}
+              {configured ? "Replace trunk id" : "Set trunk id"}
             </label>
             <Input
               type="password"

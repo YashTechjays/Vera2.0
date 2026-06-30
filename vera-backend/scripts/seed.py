@@ -31,6 +31,8 @@ from vera_core.models import (
     FormSchema,
     IntegrationType,
     Permission,
+    Prompt,
+    PromptVersion,
     Role,
     RolePermission,
     SchemaVersion,
@@ -46,6 +48,12 @@ from vera_core.models.rbac_defaults import ALL_PERMISSIONS, SYSTEM_ROLES
 # insurance type by manifest.json. form_schema.name comes from each file's
 # top-level "name"; the document itself is stored opaquely in schema_version.schema_json.
 FORM_SCHEMA_DIR = Path(__file__).parent.parent / "data" / "form_schemas"
+
+# Baseline prompts live as JSON under data/prompts/, mapped to the schema they bind
+# to (by insurance_type) via manifest.json. prompt.name comes from each file's
+# top-level "name"; the document is stored opaquely in prompt_version.composite_json.
+# Prompt *generation from a schema* is deferred — these are loaded as-is.
+PROMPT_DIR = Path(__file__).parent.parent / "data" / "prompts"
 
 SAMPLE_TENANT_NAME = "Vera Health (Example)"
 # The URL-facing tenant handle (`/tenants/{slug}/auth/login`). Override with
@@ -213,22 +221,27 @@ async def _seed_admin_user(session: AsyncSession, tenant_id: UUID) -> None:
     await session.flush()
 
 
+def _load_manifest(catalog_dir: Path) -> list[tuple[str, str, dict[str, Any]]]:
+    """Read `<catalog_dir>/manifest.json` and return one `(insurance_type, name, doc)`
+    per entry. `doc` is the parsed JSON document the manifest points to; `name` is its
+    top-level "name". Shared by the form-schema and prompt seeders (same file layout)."""
+    manifest: list[dict[str, str]] = json.loads(
+        (catalog_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    out: list[tuple[str, str, dict[str, Any]]] = []
+    for entry in manifest:
+        doc: dict[str, Any] = json.loads((catalog_dir / entry["file"]).read_text(encoding="utf-8"))
+        out.append((entry["insurance_type"], doc["name"], doc))
+    return out
+
+
 async def _seed_form_schemas(session: AsyncSession) -> list[str]:
     """Seed the baseline form schemas from data/form_schemas/. Idempotent and keyed
     on the unique insurance_type. Re-running with unchanged JSON is a no-op; changed
     JSON demotes the current published version to DRAFT and publishes a new version
     (the partial unique index allows only one published row per schema)."""
-    manifest: list[dict[str, str]] = json.loads(
-        (FORM_SCHEMA_DIR / "manifest.json").read_text(encoding="utf-8")
-    )
     summary: list[str] = []
-    for entry in manifest:
-        doc: dict[str, Any] = json.loads(
-            (FORM_SCHEMA_DIR / entry["file"]).read_text(encoding="utf-8")
-        )
-        insurance_type = entry["insurance_type"]
-        name = doc["name"]
-
+    for insurance_type, name, doc in _load_manifest(FORM_SCHEMA_DIR):
         schema = (
             await session.execute(
                 select(FormSchema).where(FormSchema.insurance_type == insurance_type)
@@ -276,11 +289,92 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
     return summary
 
 
+async def _seed_prompts(session: AsyncSession) -> list[str]:
+    """Seed the baseline prompts from data/prompts/, each bound to the published
+    schema_version of the schema it targets (manifest `insurance_type`). Mirrors
+    `_seed_form_schemas`: idempotent and keyed on `(schema_id, name)`. Re-running
+    with unchanged JSON is a no-op; changed JSON demotes the current published
+    version to DRAFT and publishes a new one.
+
+    `prompt_version.schema_version_id` is NOT NULL + RESTRICT, so a prompt can only
+    be seeded once its target schema has a published version (form schemas are
+    seeded just before this). If that version is missing, the entry is skipped with
+    a warning rather than crashing the whole seed."""
+    summary: list[str] = []
+    for insurance_type, name, doc in _load_manifest(PROMPT_DIR):
+        # The prompt binds to the published schema_version of its target schema.
+        schema = (
+            await session.execute(
+                select(FormSchema).where(FormSchema.insurance_type == insurance_type)
+            )
+        ).scalar_one_or_none()
+        if schema is None:
+            summary.append(f"{insurance_type} '{name}' (skipped — no published schema)")
+            continue
+        published_schema = (
+            await session.execute(
+                select(SchemaVersion).where(
+                    SchemaVersion.schema_id == schema.id,
+                    SchemaVersion.status == VersionStatus.PUBLISHED,
+                )
+            )
+        ).scalar_one_or_none()
+        if published_schema is None:
+            summary.append(f"{insurance_type} '{name}' (skipped — no published schema)")
+            continue
+
+        prompt = (
+            await session.execute(
+                select(Prompt).where(Prompt.schema_id == schema.id, Prompt.name == name)
+            )
+        ).scalar_one_or_none()
+        if prompt is None:
+            prompt = Prompt(schema_id=schema.id, name=name)
+            session.add(prompt)
+            await session.flush()
+
+        published = (
+            await session.execute(
+                select(PromptVersion).where(
+                    PromptVersion.prompt_id == prompt.id,
+                    PromptVersion.status == VersionStatus.PUBLISHED,
+                )
+            )
+        ).scalar_one_or_none()
+        if published is not None and published.composite_json == doc:
+            summary.append(f"{insurance_type} '{name}' v{published.version} (unchanged)")
+            continue
+
+        max_version = (
+            await session.execute(
+                select(func.max(PromptVersion.version)).where(PromptVersion.prompt_id == prompt.id)
+            )
+        ).scalar()
+        next_version = (max_version or 0) + 1
+        if published is not None:
+            # uq_prompt_version_published_per_prompt allows only one published row
+            # per prompt; free it by demoting the old version before publishing anew.
+            published.status = VersionStatus.DRAFT
+            await session.flush()
+        session.add(
+            PromptVersion(
+                prompt_id=prompt.id,
+                schema_version_id=published_schema.id,
+                version=next_version,
+                composite_json=doc,
+                status=VersionStatus.PUBLISHED,
+            )
+        )
+        await session.flush()
+        summary.append(f"{insurance_type} '{name}' v{next_version} (published)")
+    return summary
+
+
 # Global integration catalog. `credentials_schema` declares the credential shape a
 # tenant supplies (validated + sealed by the integrations endpoint). Keyed on the
 # unique `name`; idempotent — re-running refreshes the schema.
 INTEGRATION_TYPES: list[dict[str, Any]] = [
-    {"name": "twilio_sip", "credentials_schema": {"twilio_sip_trunk": "string"}},
+    {"name": "livekit_outbound_trunk_id", "credentials_schema": {"trunk_id": "string"}},
 ]
 
 
@@ -318,6 +412,7 @@ async def seed() -> None:
         await _seed_password_provider(session, tenant_id)
         await _seed_admin_user(session, tenant_id)
         schema_summary = await _seed_form_schemas(session)
+        prompt_summary = await _seed_prompts(session)
         integration_types = await _seed_integration_types(session)
     print(
         f"seeded: {len(permission_ids)} permissions,"
@@ -325,6 +420,7 @@ async def seed() -> None:
         f" tenant '{SAMPLE_TENANT_NAME}' (slug '{SAMPLE_TENANT_SLUG}', {tenant_id}),"
         f" password provider enabled, admin user '{SAMPLE_ADMIN_EMAIL}' (TENANT_ADMIN),"
         f" form schemas {schema_summary},"
+        f" prompts {prompt_summary},"
         f" integration types {integration_types}"
     )
     print(
@@ -341,8 +437,19 @@ async def seed_schemas() -> None:
     print(f"seeded form schemas: {summary}")
 
 
+async def seed_prompts() -> None:
+    """Seed ONLY the baseline prompts (`just seed-prompts`). Each prompt binds to
+    its target schema's published version, so the form schemas must already be
+    seeded (run `just seed` or `just seed-schemas` first)."""
+    async with _seeding_session() as session:
+        summary = await _seed_prompts(session)
+    print(f"seeded prompts: {summary}")
+
+
 if __name__ == "__main__":
     if "--schemas" in sys.argv:
         asyncio.run(seed_schemas())
+    elif "--prompts" in sys.argv:
+        asyncio.run(seed_prompts())
     else:
         asyncio.run(seed())
