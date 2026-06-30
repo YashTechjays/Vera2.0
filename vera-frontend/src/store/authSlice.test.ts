@@ -16,6 +16,8 @@ import authReducer, {
   selectStatus,
   selectMfa,
   selectIsElevated,
+  selectIdleTimeoutMs,
+  selectSessionExpiresAt,
 } from "@/store/authSlice"
 
 function makeStore() {
@@ -26,6 +28,7 @@ const me: api.MeResponse = {
   user_id: "u1", email: "a@b.co", name: "A", account_type: "tenant",
   tenant_id: "t1", tenant_slug: "acme", roles: ["TENANT_ADMIN"],
   permissions: ["users:manage"], active_elevation: null,
+  login_idle_timeout_seconds: 3600, login_absolute_remaining_seconds: 10 * 3600,
 }
 
 const elevatedState = (expiresAt: string | null) =>
@@ -80,5 +83,21 @@ describe("authSlice", () => {
     store.dispatch(forceLogout())
     expect(selectStatus(store.getState())).toBe("anonymous")
     expect(selectMfa(store.getState())).toBeNull()
+    expect(selectSessionExpiresAt(store.getState())).toBeNull()
+  })
+
+  it("fetchMe exposes backend-driven idle config and an absolute deadline", async () => {
+    vi.mocked(api.getMe).mockResolvedValue(me)
+    const store = makeStore()
+    const before = Date.now()
+    await store.dispatch(fetchMe())
+    const after = Date.now()
+
+    expect(selectIdleTimeoutMs(store.getState())).toBe(3600 * 1000)
+    // Deadline is computed at receipt from the skew-safe remaining seconds.
+    const deadline = selectSessionExpiresAt(store.getState())
+    expect(deadline).not.toBeNull()
+    expect(deadline!).toBeGreaterThanOrEqual(before + 10 * 3600 * 1000)
+    expect(deadline!).toBeLessThanOrEqual(after + 10 * 3600 * 1000)
   })
 })

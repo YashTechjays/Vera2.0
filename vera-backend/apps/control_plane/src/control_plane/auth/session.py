@@ -129,6 +129,11 @@ class SessionStore(Protocol):
         remaining seconds, or None if the absolute cap is reached or the session is gone."""
         ...
 
+    async def absolute_remaining(self, token: str) -> int | None:
+        """Read-only seconds left until the absolute cap (the `sess_abs` TTL), without
+        sliding anything. Returns None if the cap is reached or the companion is gone."""
+        ...
+
     async def delete_session(self, token: str) -> None:
         """Delete both the `sess` and `sess_abs` keys (logout)."""
         ...
@@ -184,6 +189,16 @@ class InMemorySessionStore:
         self._entries[sess_key] = (now + new_ttl, data)
         return new_ttl
 
+    async def absolute_remaining(self, token: str) -> int | None:
+        abs_entry = self._entries.get(_key(SESSION_ABS_NS, token))
+        if abs_entry is None:
+            return None
+        abs_expires_at, _ = abs_entry
+        abs_remaining = abs_expires_at - time.monotonic()
+        if abs_remaining <= 0:
+            return None
+        return int(abs_remaining)
+
     async def delete_session(self, token: str) -> None:
         self._entries.pop(_key(SESSION_NS, token), None)
         self._entries.pop(_key(SESSION_ABS_NS, token), None)
@@ -234,6 +249,13 @@ class RedisSessionStore:
         if not extended:  # sess key already gone (idle-expired)
             return None
         return new_ttl
+
+    async def absolute_remaining(self, token: str) -> int | None:
+        # TTL: positive seconds remaining; -1 (no expiry, never happens here) / -2 (no key).
+        abs_remaining = await self._redis.ttl(_key(SESSION_ABS_NS, token))
+        if abs_remaining <= 0:
+            return None
+        return abs_remaining
 
     async def delete_session(self, token: str) -> None:
         await self._redis.delete(_key(SESSION_NS, token), _key(SESSION_ABS_NS, token))

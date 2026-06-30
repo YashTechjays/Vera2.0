@@ -130,6 +130,15 @@ class MeResponse(BaseModel):
     roles: list[str]
     permissions: list[str]
     active_elevation: ActiveElevation | None = None
+    # Login-session timeout config so the client stops hardcoding (and drifting from) these.
+    # `login_idle_timeout_seconds` is the config idle window the client counts down from each
+    # activity event — the server can't observe mouse/keyboard, so it sends the duration.
+    # `login_absolute_remaining_seconds` is the seconds left until the fixed absolute cap; the
+    # client turns it into a deadline at receipt (`Date.now() + remaining*1000`), which is
+    # skew-safe — mirrors `KeepaliveResponse.expires_in_seconds` rather than shipping an
+    # absolute timestamp that client/server clock skew would mis-time the warning against.
+    login_idle_timeout_seconds: int
+    login_absolute_remaining_seconds: int
 
 
 class EnrollResponse(BaseModel):
@@ -530,8 +539,11 @@ async def keepalive(
 async def get_me(
     response: Response,
     identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     session: SelfScopedSession,
     resolver: Resolver,
+    store: Store,
+    settings: AppSettings,
 ) -> ResponseModel[MeResponse]:
     """Hydrate the caller's OWN session: identity, tenant, display name, role names,
     and effective permissions. Token-scoped — no tenant in the URL; the RLS scope is
@@ -547,6 +559,15 @@ async def get_me(
         session, identity.tenant_id, identity.user_id
     )
     if resolved_id is None:
+        raise UnauthorizedError(message="session no longer valid")
+
+    # Seconds left until the fixed absolute cap (`sess_abs` TTL). `current_identity`
+    # already proved a live `sess`, which never outlives its companion, so None here
+    # means an inconsistent/reaped session → fail closed.
+    absolute_remaining = (
+        await store.absolute_remaining(credentials.credentials) if credentials is not None else None
+    )
+    if absolute_remaining is None:
         raise UnauthorizedError(message="session no longer valid")
 
     # effective_permissions already confirmed the active user exists, so exactly one row
@@ -590,6 +611,8 @@ async def get_me(
             roles=sorted(roles),
             permissions=sorted(permissions),
             active_elevation=active_elevation,
+            login_idle_timeout_seconds=settings.session_ttl_seconds,
+            login_absolute_remaining_seconds=absolute_remaining,
         )
     )
 

@@ -2,9 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { IdleWarningDialog } from "@/components/auth/IdleWarningDialog"
 import { computeIdleState, KEEPALIVE_THROTTLE_MS } from "@/lib/auth/idle"
-import { getSessionStart } from "@/lib/auth/storage"
-import { keepaliveThunk, logoutThunk } from "@/store/authSlice"
-import { useAppDispatch } from "@/store/hooks"
+import {
+  keepaliveThunk,
+  logoutThunk,
+  selectIdleTimeoutMs,
+  selectSessionExpiresAt,
+} from "@/store/authSlice"
+import { useAppDispatch, useAppSelector } from "@/store/hooks"
 
 const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"] as const
 
@@ -13,6 +17,9 @@ const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchst
 export function IdleManager() {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
+  // Timeout config is backend-driven (from /me), never hardcoded here.
+  const idleTimeoutMs = useAppSelector(selectIdleTimeoutMs)
+  const sessionExpiresAt = useAppSelector(selectSessionExpiresAt)
 
   const lastActivity = useRef(0)
   const lastKeepalive = useRef(0)
@@ -63,15 +70,14 @@ export function IdleManager() {
     if (lastKeepalive.current === 0) lastKeepalive.current = now
 
     function check() {
-      const sessionStart = getSessionStart()
-      if (sessionStart === null) {
-        doLogout()
-        return
-      }
+      // /me hasn't hydrated the timeout config yet — wait for it rather than
+      // logging out a freshly-authenticated session on a transient null.
+      if (idleTimeoutMs === null || sessionExpiresAt === null) return
       const state = computeIdleState({
         now: Date.now(),
         lastActivity: lastActivity.current,
-        sessionStart,
+        idleTimeoutMs,
+        absoluteDeadline: sessionExpiresAt,
       })
       if (state.phase === "expired") {
         doLogout()
@@ -91,7 +97,7 @@ export function IdleManager() {
       document.removeEventListener("visibilitychange", check)
       window.removeEventListener("focus", check)
     }
-  }, [doLogout])
+  }, [doLogout, idleTimeoutMs, sessionExpiresAt])
 
   return (
     <IdleWarningDialog

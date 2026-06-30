@@ -61,6 +61,25 @@ async def test_extend_session_none_when_absolute_expired() -> None:
     assert (await store.extend_session(token, idle_ttl=10)) is None
 
 
+async def test_absolute_remaining_reflects_cap_without_sliding() -> None:
+    store = InMemorySessionStore()
+    token = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    remaining = await store.absolute_remaining(token)
+    assert remaining is not None
+    assert 99 <= remaining <= 100
+    # Read-only: the idle (`sess`) TTL is untouched by reading the absolute cap.
+    sess_expires, _ = store._entries[_key(SESSION_NS, token)]
+    assert (await store.absolute_remaining(token)) is not None
+    assert store._entries[_key(SESSION_NS, token)][0] == sess_expires
+
+
+async def test_absolute_remaining_none_when_cap_gone() -> None:
+    store = InMemorySessionStore()
+    token = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    store._entries.pop(_key(SESSION_ABS_NS, token))  # simulate the abs key reaped
+    assert (await store.absolute_remaining(token)) is None
+
+
 async def test_delete_session_removes_both_keys() -> None:
     store = InMemorySessionStore()
     token = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)

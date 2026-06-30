@@ -161,6 +161,11 @@ async def test_me_hydrates_session(
     assert data["tenant_slug"] == world.slug
     assert "TENANT_ADMIN" in data["roles"]
     assert len(data["permissions"]) > 0
+    # Session-timeout config the frontend configures its idle manager from (no more
+    # hardcoded/drifting constants). Idle window is the config TTL; the absolute
+    # remaining counts down from the freshly minted cap.
+    assert data["login_idle_timeout_seconds"] == 3600
+    assert 0 < data["login_absolute_remaining_seconds"] <= 10 * 3600
 
 
 async def test_me_requires_authentication(
