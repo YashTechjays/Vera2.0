@@ -11,10 +11,10 @@ from uuid import UUID
 import httpx
 import pytest
 from sqlalchemy import delete, select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.auth.permission_cache import InMemoryPermissionCache
-from control_plane.auth.session import SESSION_NS, InMemorySessionStore, SessionData
+from control_plane.auth.session import InMemorySessionStore, SessionData
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import Settings
@@ -57,8 +57,9 @@ def _auth(token: str) -> dict[str, str]:
 async def _mint(
     store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID | None, email: str
 ) -> str:
-    return await store.put(
-        SESSION_NS,
+    # Mint like production (sess + sess_abs companion) so /auth/me can read the
+    # absolute-cap TTL; a bare put() would leave no sess_abs and 401 on /me.
+    return await store.mint_session(
         SessionData(
             user_id=user_id,
             tenant_id=tenant_id,
@@ -69,6 +70,7 @@ async def _mint(
             account_type="tenant" if tenant_id is not None else "platform",
             tenant_slug=str(tenant_id) if tenant_id is not None else None,
         ),
+        3600,
         3600,
     )
 
@@ -251,7 +253,9 @@ async def prompts_world(
     await engine.dispose()
 
 
-async def test_list_prompts_and_versions(prompts_world: tuple) -> None:
+async def test_list_prompts_and_versions(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
     client, w, ids = prompts_world
     listed = await client.get("/api/v1/prompts", headers=_auth(w.super_token))
     assert listed.status_code == 200, listed.text
@@ -271,13 +275,17 @@ async def test_list_prompts_and_versions(prompts_world: tuple) -> None:
     assert detail.json()["data"]["composite_json"]["prompt"] == "hello"
 
 
-async def test_tenant_user_forbidden(prompts_world: tuple) -> None:
+async def test_tenant_user_forbidden(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
     client, w, _ids = prompts_world
     resp = await client.get("/api/v1/prompts", headers=_auth(w.tenant_admin_token))
     assert resp.status_code == 403
 
 
-async def test_create_draft_increments_version(prompts_world) -> None:
+async def test_create_draft_increments_version(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
     client, w, ids = prompts_world
     resp = await client.post(
         f"/api/v1/prompts/{ids.prompt_id}/versions",
@@ -297,7 +305,9 @@ async def test_create_draft_increments_version(prompts_world) -> None:
     assert d["composite_json"]["prompt"] == "edited"
 
 
-async def test_publish_promotes_and_demotes(prompts_world) -> None:
+async def test_publish_promotes_and_demotes(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
     client, w, ids = prompts_world
     draft = (
         await client.post(
@@ -314,16 +324,15 @@ async def test_publish_promotes_and_demotes(prompts_world) -> None:
     assert pub.json()["data"]["status"] == "published"
 
     versions = (
-        await client.get(
-            f"/api/v1/prompts/{ids.prompt_id}/versions", headers=_auth(w.super_token)
-        )
+        await client.get(f"/api/v1/prompts/{ids.prompt_id}/versions", headers=_auth(w.super_token))
     ).json()["data"]
     published = [v for v in versions if v["status"] == "published"]
     assert len(published) == 1 and published[0]["version"] == 2
 
 
 async def test_create_draft_without_published_schema_conflicts(
-    prompts_world, admin_sessionmaker
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     client, w, ids = prompts_world
     async with admin_sessionmaker() as s, s.begin():
@@ -340,7 +349,9 @@ async def test_create_draft_without_published_schema_conflicts(
     assert resp.status_code == 409
 
 
-async def test_write_endpoints_forbidden_for_tenant(prompts_world: tuple) -> None:
+async def test_write_endpoints_forbidden_for_tenant(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
     client, w, ids = prompts_world
     create_resp = await client.post(
         f"/api/v1/prompts/{ids.prompt_id}/versions",
@@ -356,7 +367,9 @@ async def test_write_endpoints_forbidden_for_tenant(prompts_world: tuple) -> Non
     assert publish_resp.status_code == 403
 
 
-async def test_unknown_prompt_and_version_404(prompts_world: tuple) -> None:
+async def test_unknown_prompt_and_version_404(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
     client, w, ids = prompts_world
     unknown_prompt_id = uuid7()
     versions_resp = await client.get(
@@ -373,7 +386,9 @@ async def test_unknown_prompt_and_version_404(prompts_world: tuple) -> None:
     assert detail_resp.status_code == 404
 
 
-async def test_publish_already_published_is_noop(prompts_world: tuple) -> None:
+async def test_publish_already_published_is_noop(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
     client, w, ids = prompts_world
     resp = await client.post(
         f"/api/v1/prompts/{ids.prompt_id}/versions/{ids.version_id}/publish",

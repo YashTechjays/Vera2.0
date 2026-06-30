@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth.invitations import InMemoryInvitationStore
 from control_plane.auth.permission_cache import InMemoryPermissionCache
-from control_plane.auth.session import SESSION_NS, InMemorySessionStore, SessionData
+from control_plane.auth.session import InMemorySessionStore, SessionData
 from control_plane.email import InMemoryEmailSender
 from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
@@ -105,8 +105,9 @@ class RBACWorld:
 
 
 async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
-    return await store.put(
-        SESSION_NS,
+    # Mint like production (sess + sess_abs companion) so /auth/me can read the
+    # absolute-cap TTL; a bare put() would leave no sess_abs and 401 on /me.
+    return await store.mint_session(
         SessionData(
             user_id=user_id,
             tenant_id=tenant_id,
@@ -119,6 +120,7 @@ async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, 
             # UUID-in-URL test helpers without a DB resolve.
             tenant_slug=str(tenant_id),
         ),
+        _LONG_TTL,
         _LONG_TTL,
     )
 
