@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
@@ -236,11 +236,14 @@ async def update_call_status(
         # the dispatcher creates the Call + CallLineage on its next pass.
         with contextlib.suppress(InvalidTransitionError):
             sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
+            # Caller owns enqueued_at — use the DB clock to avoid cross-node skew.
+            form.enqueued_at = func.now()
 
     await session.flush()
 
+    audit = get_audit(request)
     # Audit the worker-driven form status change (HIPAA evidence trail).
-    await get_audit(request).emit(
+    await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
             actor_type=ActorType.SERVICE,
@@ -259,6 +262,6 @@ async def update_call_status(
     )
 
     # Fire the dispatcher — a concurrency slot just freed up.
-    await try_dispatch(session, tenant_id, livekit)
+    await try_dispatch(session, tenant_id, livekit, audit=audit)
 
     return ok(_summary(call, form.patient_name))

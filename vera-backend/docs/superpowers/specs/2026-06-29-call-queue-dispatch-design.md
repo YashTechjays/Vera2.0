@@ -76,6 +76,7 @@ AI_PROCESSING         →  CALL_FAILED
 CALL_FAILED           →  IN_QUEUE          (auto-retry, guard: retry_count < max_retries)
 
 EXCEPTION_REVIEW      →  IN_QUEUE
+EXCEPTION_REVIEW      →  COMPLETED         (manual: once all disputes resolved)
 ```
 
 Terminal states: `COMPLETED`, `CALL_FAILED` (retries exhausted), `EXPIRED`.

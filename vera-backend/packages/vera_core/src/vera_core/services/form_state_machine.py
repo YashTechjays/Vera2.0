@@ -1,11 +1,14 @@
 """Form lifecycle state machine.
 
-Validates transitions, applies side effects (enqueued_at, retry_count),
-and guards conditional edges (retry cap). Every form status change in the
-codebase MUST go through `FormStateMachine.transition()`.
+Validates transitions, applies side effects (retry_count), and guards
+conditional edges (retry cap). Every form status change in the codebase
+MUST go through `FormStateMachine.transition()`.
+
+Note: `enqueued_at` is NOT set here — callers with DB session access set it
+to `func.now()` (the DB clock) immediately after a successful IN_QUEUE
+transition, per the project's requirement that timestamps come from Postgres.
 """
 
-from datetime import UTC, datetime
 from typing import Any
 
 from vera_core.models.enums import FormStatus
@@ -76,9 +79,5 @@ class FormStateMachine:
                     current.value, target.value, reason="retries exhausted"
                 )
             form.retry_count += 1
-
-        # Side effect: any transition into IN_QUEUE sets enqueued_at.
-        if target == FormStatus.IN_QUEUE:
-            form.enqueued_at = datetime.now(UTC)
 
         form.status = target.value

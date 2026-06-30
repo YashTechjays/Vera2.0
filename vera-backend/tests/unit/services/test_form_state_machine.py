@@ -1,9 +1,11 @@
 """Unit tests for FormStateMachine — transition validation and side effects.
 
 These are pure-logic tests: they check the transition map, guard conditions,
-and side-effect assignments without hitting a database. The state machine
-operates on in-memory PatientForm objects; only the `enqueued_at` DB-default
-needs special handling (tested via integration tests).
+and side-effect assignments without hitting a database.
+
+Note: `enqueued_at` is NOT set by the state machine — it is the caller's
+responsibility (using `func.now()`, the DB clock) after a successful IN_QUEUE
+transition. The state machine only manages `status` and `retry_count`.
 """
 
 from unittest.mock import MagicMock
@@ -65,18 +67,21 @@ class TestFormStateMachine:
         form.enqueued_at = None
         return form
 
-    def test_transition_to_in_queue_sets_enqueued_at(self) -> None:
+    def test_transition_to_in_queue_does_not_set_enqueued_at(self) -> None:
+        """The state machine must NOT set enqueued_at — the DB-clock caller owns it."""
         sm = FormStateMachine()
         form = self._make_form(FormStatus.READY_FOR_PROCESSING)
         sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
-        assert form.enqueued_at is not None
+        # enqueued_at starts as None and must remain unset by the state machine.
+        assert form.enqueued_at is None
 
     def test_transition_call_failed_to_in_queue_increments_retry(self) -> None:
         sm = FormStateMachine()
         form = self._make_form(FormStatus.CALL_FAILED, retry_count=1)
         sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
         assert form.retry_count == 2
-        assert form.enqueued_at is not None
+        # enqueued_at is the caller's responsibility, not the state machine's.
+        assert form.enqueued_at is None
 
     def test_transition_call_failed_to_in_queue_blocked_at_max_retries(self) -> None:
         sm = FormStateMachine()

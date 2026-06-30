@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from datetime import UTC, datetime, time, timedelta
+from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vera_core.audit import AuditRecord
 from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import (
     CallEventType,
     CallMode,
@@ -32,6 +34,8 @@ from vera_core.services.form_state_machine import FormStateMachine, InvalidTrans
 
 if TYPE_CHECKING:
     from uuid import UUID
+
+    from vera_core.audit import AuditSink
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,8 @@ async def try_dispatch(
     session: AsyncSession,
     tenant_id: UUID,
     livekit: Any,
+    *,
+    audit: AuditSink | None = None,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -78,6 +84,9 @@ async def try_dispatch(
         The tenant whose queue to drain.
     livekit:
         A ``LiveKitGateway`` (or duck-typed fake) with ``create_call_room``.
+    audit:
+        Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
+        ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
     """
     # 1. Load tenant config.
     tenant = (
@@ -104,6 +113,9 @@ async def try_dispatch(
         return 0
 
     # 3. Fetch FIFO candidates — FOR UPDATE SKIP LOCKED prevents double-dispatch.
+    # The expiry filter is pushed into the DB WHERE clause to use the DB clock,
+    # avoiding Python/DB clock skew (HIPAA timestamp-of-record requirement).
+    expiry_interval = text(f"'{tenant.queue_expiry_hours} hours'::interval")
     candidates = (
         (
             await session.execute(
@@ -111,6 +123,8 @@ async def try_dispatch(
                 .where(
                     PatientForm.tenant_id == tenant_id,
                     PatientForm.status == FormStatus.IN_QUEUE.value,
+                    (PatientForm.enqueued_at.is_(None))
+                    | (PatientForm.enqueued_at > func.now() - expiry_interval),
                 )
                 .order_by(PatientForm.enqueued_at.asc())
                 .limit(slots)
@@ -121,71 +135,116 @@ async def try_dispatch(
         .all()
     )
 
+    # Expired forms (outside the window) are handled in a separate pass so they
+    # get the EXPIRED transition and audit without blocking live candidates.
+    expired_candidates = (
+        (
+            await session.execute(
+                select(PatientForm)
+                .where(
+                    PatientForm.tenant_id == tenant_id,
+                    PatientForm.status == FormStatus.IN_QUEUE.value,
+                    PatientForm.enqueued_at.is_not(None),
+                    PatientForm.enqueued_at <= func.now() - expiry_interval,
+                )
+                .with_for_update(skip_locked=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     sm = FormStateMachine()
+
+    # 4a. Expire stale forms.
+    for form in expired_candidates:
+        try:
+            sm.transition(form, FormStatus.EXPIRED, tenant_max_retries=tenant.max_retries)
+            logger.info("dispatch: expired form %s", form.id)
+            if audit is not None:
+                await audit.emit(
+                    AuditRecord(
+                        tenant_id=tenant_id,
+                        actor_type=ActorType.SYSTEM,
+                        actor_label="queue-dispatcher",
+                        event_type=AuditEvent.QUEUE_EXPIRED.value,
+                        resource_type="patient_form",
+                        resource_id=str(form.id),
+                    )
+                )
+        except InvalidTransitionError:
+            pass
+
     dispatched = 0
 
     for form in candidates:
-        # 4a. Expiry check.
-        if _is_expired(form, tenant.queue_expiry_hours):
-            with contextlib.suppress(InvalidTransitionError):
-                sm.transition(form, FormStatus.EXPIRED, tenant_max_retries=tenant.max_retries)
-            continue
-
         # 4b. Working-hours check.
         if not await _provider_in_hours(session, form):
             continue
 
-        # 4c. Dispatch the call.
+        # 4c. Dispatch the call — wrap in try/except so one failure does not
+        # roll back successfully-dispatched calls earlier in the same pass.
         call_mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL
-        sm.transition(form, FormStatus.IN_CALL, tenant_max_retries=tenant.max_retries)
+        try:
+            sm.transition(form, FormStatus.IN_CALL, tenant_max_retries=tenant.max_retries)
 
-        call = Call(
-            tenant_id=tenant_id,
-            form_id=form.id,
-            current_status=CallStatus.INITIATED.value,
-            mode=call_mode.value,
-        )
-        session.add(call)
-        await session.flush()
-
-        room_name = room_name_for_call(tenant_id, call.id)
-
-        tweak = (
-            PersonaTweak.model_validate(tenant.persona_tweak)
-            if tenant.persona_tweak
-            else PersonaTweak()
-        )
-        metadata = tweak.model_dump(exclude_none=True)
-        await livekit.create_call_room(room_name, metadata=metadata)
-
-        session.add(
-            CallEvent(
+            call = Call(
                 tenant_id=tenant_id,
-                call_id=call.id,
-                event_type=CallEventType.STATUS.value,
-                event_value=CallStatus.INITIATED.value,
+                form_id=form.id,
+                current_status=CallStatus.INITIATED.value,
+                mode=call_mode.value,
             )
-        )
-        dispatched += 1
-        logger.info(
-            "dispatch: initiated call %s for form %s (mode=%s)",
-            call.id,
-            form.id,
-            call_mode.value,
-        )
+            session.add(call)
+            await session.flush()
+
+            room_name = room_name_for_call(tenant_id, call.id)
+
+            tweak = (
+                PersonaTweak.model_validate(tenant.persona_tweak)
+                if tenant.persona_tweak
+                else PersonaTweak()
+            )
+            metadata = tweak.model_dump(exclude_none=True)
+            await livekit.create_call_room(room_name, metadata=metadata)
+
+            session.add(
+                CallEvent(
+                    tenant_id=tenant_id,
+                    call_id=call.id,
+                    event_type=CallEventType.STATUS.value,
+                    event_value=CallStatus.INITIATED.value,
+                )
+            )
+            dispatched += 1
+            logger.info(
+                "dispatch: initiated call %s for form %s (mode=%s)",
+                call.id,
+                form.id,
+                call_mode.value,
+            )
+            if audit is not None:
+                await audit.emit(
+                    AuditRecord(
+                        tenant_id=tenant_id,
+                        actor_type=ActorType.SYSTEM,
+                        actor_label="queue-dispatcher",
+                        event_type=AuditEvent.QUEUE_DISPATCH.value,
+                        resource_type="patient_form",
+                        resource_id=str(form.id),
+                        detail={"call_id": str(call.id), "mode": call_mode.value},
+                    )
+                )
+        except Exception:
+            logger.exception(
+                "dispatch: failed to dispatch form %s — reverting to IN_QUEUE", form.id
+            )
+            # Revert the form back to IN_QUEUE so it will be retried on the next
+            # dispatch pass. Suppress any error here (e.g. if the transition to
+            # IN_CALL never committed we don't want a secondary error).
+            with contextlib.suppress(Exception):
+                form.status = FormStatus.IN_QUEUE.value
 
     return dispatched
-
-
-def _is_expired(form: PatientForm, queue_expiry_hours: int) -> bool:
-    """True if the form has been in the queue past the expiry window."""
-    if form.enqueued_at is None:
-        return False
-    cutoff = datetime.now(UTC) - timedelta(hours=queue_expiry_hours)
-    enqueued = form.enqueued_at
-    if enqueued.tzinfo is None:
-        enqueued = enqueued.replace(tzinfo=UTC)
-    return enqueued < cutoff
 
 
 async def _provider_in_hours(session: AsyncSession, form: PatientForm) -> bool:

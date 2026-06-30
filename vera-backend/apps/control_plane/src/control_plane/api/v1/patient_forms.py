@@ -786,10 +786,15 @@ async def update_patient_form_status(
             data={"from": current.value, "to": target.value},
         ) from exc
 
+    # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
+    if target == FormStatus.IN_QUEUE:
+        form.enqueued_at = func.now()
+
     await session.flush()
 
     # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
-    await get_audit(request).emit(
+    audit = get_audit(request)
+    await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
             actor_type=ActorType.USER,
@@ -804,7 +809,7 @@ async def update_patient_form_status(
 
     # Fire the dispatcher if a form was just enqueued.
     if target == FormStatus.IN_QUEUE:
-        await try_dispatch(session, tenant_id, livekit)
+        await try_dispatch(session, tenant_id, livekit, audit=audit)
 
     return ok(
         PatientFormStatusResponse(id=form.id, status=form.status),
