@@ -20,7 +20,7 @@ export function listIntegrations(): Promise<Integration[]> {
 
 /** PUT /integrations/{type} — set/replace the integration's credential. The caller
  *  supplies the credentials object keyed by the type's schema (e.g.
- *  { twilio_sip_trunk: "…" }); the value is envelope-encrypted server-side. */
+ *  { trunk_id: "…" }); the value is envelope-encrypted server-side. */
 export function configureIntegration(
   integrationType: string,
   credentials: Record<string, string>,

@@ -4,26 +4,26 @@ wiring. Sessions stand in for a completed login so these tests exercise the
 verify path (SessionVerifier -> tenant_guard -> require) without re-running the
 password/MFA dance, which has its own tests."""
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from uuid import UUID
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth.invitations import InMemoryInvitationStore
 from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import SESSION_NS, InMemorySessionStore, SessionData
 from control_plane.email import InMemoryEmailSender
-from control_plane.livekit_gateway import LiveKitGateway
+from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
-from vera_core.models import AppUser, Tenant, UserRole
+from vera_core.models import AppUser, Integration, IntegrationType, Tenant, UserRole
 from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
@@ -41,9 +41,13 @@ class FakeLiveKit(LiveKitGateway):
         # Skip the parent __init__ — we don't need real LiveKit credentials.
         self.created: list[str] = []
         self.dispatch_metadata: list[dict[str, object] | None] = []
-        self.sip_calls: list[tuple[str, str]] = []
+        self.sip_calls: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
         self._url = "ws://fake:7880"
+        # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
+        self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
+        self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
+        self.dial_error = False  # create_sip_participant raises OutboundDialError
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -51,8 +55,17 @@ class FakeLiveKit(LiveKitGateway):
         self.created.append(room_name)
         self.dispatch_metadata.append(metadata)
 
-    async def create_sip_participant(self, room_name: str, phone_number: str) -> None:
-        self.sip_calls.append((room_name, phone_number))
+    async def outbound_trunk_exists(self, trunk_id: str) -> bool:
+        if self.lookup_unavailable:
+            raise LiveKitUnavailable("fake LiveKit is unreachable")
+        return trunk_id in self.known_trunks
+
+    async def create_sip_participant(
+        self, room_name: str, phone_number: str, trunk_id: str
+    ) -> None:
+        if self.dial_error:
+            raise OutboundDialError("fake provider rejected the call")
+        self.sip_calls.append((room_name, phone_number, trunk_id))
 
     async def delete_room(self, room_name: str) -> None:
         self.deleted.append(room_name)
@@ -64,6 +77,16 @@ class FakeLiveKit(LiveKitGateway):
 @pytest.fixture(scope="session")
 def fake_livekit() -> FakeLiveKit:
     return FakeLiveKit()
+
+
+@pytest.fixture(autouse=True)
+def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
+    """The fake is session-scoped; reset its per-test validation/dial knobs before each
+    test so state set by one test never leaks into the next."""
+    fake_livekit.known_trunks = set()
+    fake_livekit.lookup_unavailable = False
+    fake_livekit.dial_error = False
+    yield
 
 
 @pytest.fixture(scope="session")
@@ -254,3 +277,45 @@ async def admin_session(
 ) -> AsyncGenerator[AsyncSession]:
     async with admin_sessionmaker() as session:
         yield session
+
+
+TRUNK_INTEGRATION_TYPE = "livekit_outbound_trunk_id"
+
+
+@pytest.fixture
+async def trunk_integration_type(
+    admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
+) -> AsyncIterator[None]:
+    """Ensure the `livekit_outbound_trunk_id` catalog type exists (it is seeded in real
+    deployments, but the integration tests run against a migrated, unseeded DB). Find-or-
+    create so it is safe whether or not the row is already present.
+
+    Teardown is deliberately scoped to the **test tenant only** (rbac_world). The suite
+    shares the local dev database, so a blanket "delete every integration of this type"
+    would wipe a developer's real tenant credential — NEVER widen this delete beyond the
+    test tenant. The catalog type row is removed only if this fixture created it (so a
+    seeded/real DB keeps its row, and the per-tenant delete leaves other tenants' rows
+    untouched, satisfying the FK on the conditional type delete)."""
+    async with admin_sessionmaker() as session, session.begin():
+        created = (
+            await session.execute(
+                select(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+            )
+        ).scalar_one_or_none() is None
+        if created:
+            session.add(
+                IntegrationType(
+                    name=TRUNK_INTEGRATION_TYPE, credentials_schema={"trunk_id": "string"}
+                )
+            )
+    try:
+        yield
+    finally:
+        async with admin_sessionmaker() as session, session.begin():
+            await session.execute(
+                delete(Integration).where(Integration.tenant_id == rbac_world.tenant_id)
+            )
+            if created:
+                await session.execute(
+                    delete(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+                )

@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.api.v1.common import AppSettings, LiveKit, TenantId
+from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import current_identity, get_audit, get_sessionmaker, get_transcript_service
@@ -29,11 +29,13 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.livekit_gateway import OutboundDialError
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
+from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.observability.correlation import (
     CALLER_IDENTITY_PREFIX,
@@ -58,13 +60,15 @@ _E164 = re.compile(r"^\+[1-9]\d{1,14}$")
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.CONFLICT,
         DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.BAD_GATEWAY,
     ),
 )
 async def start_voice_session(
     body: StartVoiceSessionRequest,
     tenant_id: TenantId,
     livekit: LiveKit,
-    settings: AppSettings,
+    session: TenantSession,
+    kms: Kms,
     caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[VoiceSessionResponse]:
     # Synthetic call id — no DB row; the room name is still the canonical
@@ -75,14 +79,23 @@ async def start_voice_session(
     # publishes the mic (caller-); in outbound mode it is listen-only (monitor-),
     # which the worker's wait_for_speaker skips when deciding the room is ready.
     is_outbound = body.mode == "outbound"
+    # Resolved (phone_number, trunk_id) for an outbound call; None in browser mode.
+    # Check the cheap E.164 precondition before the DB + KMS credential lookup, and carry
+    # both values as a typed pair so the dial site needs no None-narrowing asserts.
+    outbound: tuple[str, str] | None = None
     if is_outbound:
-        if settings.livekit_sip_trunk_id is None:
-            raise ConflictError(message="outbound SIP is not configured")
         if body.phone_number is None or not _E164.match(body.phone_number):
             raise CustomAPIException(
                 DefaultExceptionCode.VALIDATION_ERROR,
                 message="phone_number must be E.164 for an outbound call",
             )
+        creds = await get_integration_credentials(
+            session, kms, integration_type_name="livekit_outbound_trunk_id"
+        )
+        trunk_id = creds.get("trunk_id") if creds else None
+        if not trunk_id:
+            raise ConflictError(message="outbound SIP is not configured")
+        outbound = (body.phone_number, trunk_id)
 
     prefix = MONITOR_IDENTITY_PREFIX if is_outbound else CALLER_IDENTITY_PREFIX
     browser_identity = f"{prefix}{caller.user_id}"
@@ -90,9 +103,20 @@ async def start_voice_session(
     await livekit.create_call_room(
         room_name, metadata={"wait_for_speaker": True, "publish_transcript": True}
     )
-    if is_outbound:
-        assert body.phone_number is not None  # validated non-None above when is_outbound
-        await livekit.create_sip_participant(room_name, body.phone_number)
+    if outbound is not None:
+        phone_number, trunk_id = outbound
+        try:
+            await livekit.create_sip_participant(room_name, phone_number, trunk_id)
+        except OutboundDialError as e:
+            # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
+            # after it was stored, or the carrier refused the call). Tear down the room
+            # + dispatched agent we just created so nothing is left orphaned, and return
+            # a clean upstream error instead of letting it surface as a raw 500.
+            await livekit.delete_room(room_name)
+            raise CustomAPIException(
+                DefaultExceptionCode.BAD_GATEWAY,
+                message="could not place the outbound call — the telephony provider rejected it",
+            ) from e
 
     token = livekit.mint_join_token(room_name=room_name, identity=browser_identity)
     return ok(

@@ -58,6 +58,7 @@ class DefaultExceptionCode(_ErrorCode):
     VALIDATION_ERROR = (422, "Validation error.")
     RATE_LIMIT_EXCEEDED = (429, "Rate limit exceeded.")
     INTERNAL_SERVER_ERROR = (500, "Internal server error.")
+    BAD_GATEWAY = (502, "Upstream service error.")
 
 
 class ExceptionCode(_ErrorCode):
