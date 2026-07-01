@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.auth.permission_cache import InMemoryPermissionCache
-from control_plane.auth.session import SESSION_NS, InMemorySessionStore, SessionData
+from control_plane.auth.session import InMemorySessionStore, SessionData
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import Settings
@@ -42,8 +42,9 @@ def _auth(token: str) -> dict[str, str]:
 async def _mint(
     store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID | None, email: str
 ) -> str:
-    return await store.put(
-        SESSION_NS,
+    # Mint like production (sess + sess_abs companion) so /auth/me can read the
+    # absolute-cap TTL; a bare put() would leave no sess_abs and 401 on /me.
+    return await store.mint_session(
         SessionData(
             user_id=user_id,
             tenant_id=tenant_id,
@@ -56,6 +57,7 @@ async def _mint(
             # platform operator with no home tenant.
             tenant_slug=str(tenant_id) if tenant_id is not None else None,
         ),
+        3600,
         3600,
     )
 

@@ -22,6 +22,10 @@ type AuthState = {
   mfa: MfaState | null
   loading: boolean
   error: string | null
+  // Absolute session deadline (ms epoch), computed from /me's skew-safe
+  // `login_absolute_remaining_seconds` at receipt. Null until /me hydrates. The idle
+  // window comes straight off `user.login_idle_timeout_seconds`.
+  sessionExpiresAt: number | null
 }
 
 const initialState: AuthState = {
@@ -32,6 +36,7 @@ const initialState: AuthState = {
   mfa: null,
   loading: false,
   error: null,
+  sessionExpiresAt: null,
 }
 
 function message(err: unknown, fallback: string): string {
@@ -39,7 +44,11 @@ function message(err: unknown, fallback: string): string {
 }
 
 export const fetchMe = createAsyncThunk("auth/fetchMe", async () => {
-  return await authApi.getMe()
+  const me = await authApi.getMe()
+  // Convert the skew-safe remaining-seconds into an absolute deadline now, at receipt —
+  // immune to client/server clock drift (the alternative, an absolute server timestamp,
+  // would mis-time the warning under skew).
+  return { me, sessionExpiresAt: Date.now() + me.login_absolute_remaining_seconds * 1000 }
 })
 
 export const loginThunk = createAsyncThunk(
@@ -87,8 +96,8 @@ export const platformVerifyMfaThunk = createAsyncThunk(
   "auth/platformVerifyMfa",
   async (arg: { mfaToken: string; code: string }, { dispatch }) => {
     const res = await authApi.platformVerifyMfa(arg.mfaToken, arg.code)
-    // Platform session belongs to no tenant — store with an empty slug so the
-    // session still gets a start time (idle manager) and tenant_id stays NULL.
+    // Platform session belongs to no tenant — store with an empty slug; tenant_id
+    // stays NULL and the idle manager's timeouts come from /me, not local storage.
     setSession(res.session_token, "")
     await dispatch(fetchMe()).unwrap()
   },
@@ -132,6 +141,7 @@ const authSlice = createSlice({
       state.mfa = null
       state.loading = false
       state.error = null
+      state.sessionExpiresAt = null
     },
     clearError(state) {
       state.error = null
@@ -162,14 +172,19 @@ const authSlice = createSlice({
       .addCase(fetchMe.pending, (s) => {
         if (s.status !== "authenticated") s.status = "loading"
       })
-      .addCase(fetchMe.fulfilled, (s, a: PayloadAction<MeResponse>) => {
-        s.user = a.payload
-        s.tenantSlug = a.payload.tenant_slug ?? s.tenantSlug
-        s.status = "authenticated"
-      })
+      .addCase(
+        fetchMe.fulfilled,
+        (s, a: PayloadAction<{ me: MeResponse; sessionExpiresAt: number }>) => {
+          s.user = a.payload.me
+          s.tenantSlug = a.payload.me.tenant_slug ?? s.tenantSlug
+          s.sessionExpiresAt = a.payload.sessionExpiresAt
+          s.status = "authenticated"
+        },
+      )
       .addCase(fetchMe.rejected, (s) => {
         clearSession()
         s.user = null
+        s.sessionExpiresAt = null
         s.status = "anonymous"
       })
       .addCase(verifyMfaThunk.pending, (s) => {
@@ -225,6 +240,7 @@ const authSlice = createSlice({
         s.user = null
         s.tenantSlug = null
         s.mfa = null
+        s.sessionExpiresAt = null
       })
   },
 })
@@ -240,6 +256,12 @@ export const selectMfa = (s: { auth: AuthState }) => s.auth.mfa
 export const selectAuthLoading = (s: { auth: AuthState }) => s.auth.loading
 export const selectAuthError = (s: { auth: AuthState }) => s.auth.error
 export const selectPermissions = (s: { auth: AuthState }) => s.auth.user?.permissions ?? []
+// Backend-driven idle-manager config (from /me). `selectIdleTimeoutMs` is the idle
+// window in ms; `selectSessionExpiresAt` is the absolute deadline (ms epoch) or null
+// until /me hydrates. The IdleManager reads both instead of hardcoding constants.
+export const selectIdleTimeoutMs = (s: { auth: AuthState }) =>
+  s.auth.user != null ? s.auth.user.login_idle_timeout_seconds * 1000 : null
+export const selectSessionExpiresAt = (s: { auth: AuthState }) => s.auth.sessionExpiresAt
 // Super admins are platform-plane operators (account_type "platform"); they belong
 // to no tenant and elevate into one. Used to gate platform-only UI.
 export const selectIsSuperAdmin = (s: { auth: AuthState }) =>
