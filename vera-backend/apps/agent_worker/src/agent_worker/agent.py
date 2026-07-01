@@ -18,8 +18,17 @@ import logging
 from collections.abc import AsyncIterable
 
 from livekit import rtc
-from livekit.agents import Agent, ModelSettings, function_tool, get_job_context, llm, stt
+from livekit.agents import (
+    Agent,
+    ModelSettings,
+    StopResponse,
+    function_tool,
+    get_job_context,
+    llm,
+    stt,
+)
 
+from agent_worker.cascade import ivr_turn_handling
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.prompt import (
     build_instructions,
@@ -30,6 +39,9 @@ from agent_worker.seams import hydrate_stream, redact_event
 from vera_core.phi import PHIBoundaryProtocol
 
 logger = logging.getLogger("agent_worker")
+
+# Deterministic backstop: if the navigator takes this many IVR turns without reaching a human,
+_IVR_MAX_TURNS = 60
 
 
 class VeraAgent(Agent):
@@ -118,15 +130,44 @@ class IvrNavigatorAgent(Agent):
             instructions=verification_instructions,
             greeting=verification_greeting,
         )
-        super().__init__(instructions=build_ivr_instructions(), tools=[])
+        self._turns = 0  # IVR turns taken; the give-up backstop caps this
+        # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before
+        # answering); a per-agent override that reverts to the snappy human default at the handoff.
+        super().__init__(
+            instructions=build_ivr_instructions(),
+            tools=[],
+            turn_handling=ivr_turn_handling(),
+        )
+
+    def _end_navigation(self, reason: str) -> None:
+        """Hang up the call cleanly (drain pending audio), to bail out of an unresolvable IVR
+        loop rather than thrash forever. Mirrors VeraAgent's end_call."""
+        logger.warning("IVR navigator: ending call — %s", reason)
+        self.session.shutdown(drain=True)
+
+    async def on_user_turn_completed(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        # Deterministic backstop so the call can never loop forever even if the model never calls
+        # give_up. Scoped to the navigator: the counter is gone once the handoff swaps in VeraAgent.
+        self._turns += 1
+        if self._turns > _IVR_MAX_TURNS:
+            self._end_navigation(f"turn cap reached ({_IVR_MAX_TURNS} IVR turns, no human)")
+            raise StopResponse
+
+    @function_tool
+    async def give_up(self) -> str:
+        """Give up and end the call. Call this ONLY after the full escalation ladder
+        (rep_keyword → press 0 → "Agent") has been tried and the SAME menu keeps looping with no
+        progress — a self-service menu that never routes to a human. Ends the call cleanly."""
+        self._end_navigation("gave up on an unresolvable IVR loop")
+        return "Ending the call."
 
     @function_tool
     async def transfer_to_verification(self) -> Agent:
         """Hand the call to the verification agent. Call this ONLY when a live human
         representative has clearly greeted you — a personal name paired with an open request
-        for your info (e.g. "Hi, this is Martha, who am I speaking with?"). This handoff is
-        FINAL: do not call it for menus, recordings, a named virtual assistant (e.g. Avery),
-        or a bare "hello". The verification agent greets the rep and takes over."""
+        for your info (e.g. "Hi, this is Martha, who am I speaking with?")."""
         logger.info("handoff: IVR navigator -> verification agent")
         return self._make_verification_agent()
 

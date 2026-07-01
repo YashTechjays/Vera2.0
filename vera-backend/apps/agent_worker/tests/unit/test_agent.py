@@ -4,13 +4,15 @@ the IVR navigator (a plain agent, no phiwall), plus the metadata-driven selector
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from livekit.agents import Agent
+from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
+from livekit.agents.utils import is_given
 
-from agent_worker.agent import IvrNavigatorAgent, VeraAgent, build_agent
+from agent_worker.agent import _IVR_MAX_TURNS, IvrNavigatorAgent, VeraAgent, build_agent
+from agent_worker.cascade import ivr_turn_handling
 from agent_worker.prompt import build_instructions
 from vera_core.phi import PassthroughPHIBoundary
 from vera_core.schemas import PersonaTweak
@@ -82,10 +84,50 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     # it is a plain agent — NO PHI-wall node overrides
     assert type(agent).stt_node is Agent.stt_node
     assert type(agent).tts_node is Agent.tts_node
-    # ...but it CAN press keypad digits (DTMF) and hand off to the verifier
+    # ...but it CAN press keypad digits (DTMF), hand off to the verifier, and give up
     tool_names = {getattr(getattr(t, "info", None), "name", None) for t in agent.tools}
     assert "press_keypad" in tool_names
     assert "transfer_to_verification" in tool_names
+    assert "give_up" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_give_up_ends_the_call() -> None:
+    # give_up is the navigator's bail-out for an unresolvable IVR loop — it hangs up cleanly.
+    agent = _navigator()
+    mock_session = MagicMock()
+    give_up_tool = next(
+        t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "give_up"
+    )
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        result = await give_up_tool()
+    assert result == "Ending the call."  # the tool signals the model the call is over
+    mock_session.shutdown.assert_called_once_with(drain=True)
+
+
+@pytest.mark.asyncio
+async def test_turn_cap_backstop_ends_the_call_and_stops_the_reply() -> None:
+    # Even if the model never calls give_up, the deterministic turn cap hangs up (and suppresses
+    # the reply via StopResponse) so the call can't loop forever.
+    agent = _navigator()
+    agent._turns = _IVR_MAX_TURNS  # the next completed turn trips the cap
+    mock_session = MagicMock()
+    with (
+        patch.object(type(agent), "session", new=property(lambda self: mock_session)),
+        pytest.raises(StopResponse),
+    ):
+        await agent.on_user_turn_completed(MagicMock(), MagicMock())
+    mock_session.shutdown.assert_called_once_with(drain=True)
+
+
+@pytest.mark.asyncio
+async def test_under_the_turn_cap_does_not_end_the_call() -> None:
+    agent = _navigator()
+    mock_session = MagicMock()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        # one normal turn well under the cap — no shutdown, no StopResponse
+        await agent.on_user_turn_completed(MagicMock(), MagicMock())
+    mock_session.shutdown.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -100,6 +142,30 @@ async def test_transfer_to_verification_hands_off_to_vera_agent() -> None:
     assert type(handoff).on_enter is not Agent.on_enter  # greets the rep on enter
     assert type(handoff).stt_node is not Agent.stt_node
     assert type(handoff).tts_node is not Agent.tts_node
+
+
+def test_ivr_turn_handling_is_patient() -> None:
+    # The IVR phase uses vad end-of-turn + a moderately patient delay; barge-in stays on (so real
+    # IVR prompts still interrupt) but preemptive is off + min_words raised to stop the SIP
+    # self-echo from clipping the start of answers.
+    th = ivr_turn_handling()
+    assert th["turn_detection"] == "vad"  # not the human-trained EnglishModel
+    # patient, but not so long that answers land on the next prompt (key tunable)
+    assert 0.6 <= th["endpointing"]["min_delay"] <= 1.5
+    # preemptive OFF: keeps a tiny output buffer so a false-interruption pause can't discard the
+    # start of the utterance (self-echo clip: "Medical" → "dical").
+    assert th["preemptive_generation"]["enabled"] is False
+    assert th["interruption"]["enabled"] is True  # real IVR prompts still supersede a stale answer
+    assert th["interruption"]["min_words"] >= 2  # short self-echo transcripts don't trip the pause
+
+
+def test_ivr_navigator_wires_patient_turn_config_and_vera_does_not() -> None:
+    # The navigator carries the patient override; VeraAgent leaves it unset so it inherits the
+    # snappy human session default — which is how the config reverts automatically at the handoff.
+    nav = _navigator()
+    assert nav.turn_detection == "vad"
+    vera = VeraAgent(boundary=PassthroughPHIBoundary(), session_id="s1")
+    assert not is_given(vera.turn_detection)
 
 
 @pytest.mark.asyncio
