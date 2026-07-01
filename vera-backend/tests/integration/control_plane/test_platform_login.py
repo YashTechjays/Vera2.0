@@ -229,4 +229,4 @@ async def test_keepalive_extends_platform_session(
     assert resp.headers["Cache-Control"] == "no-store"
     remaining = resp.json()["data"]["expires_in_seconds"]
     assert isinstance(remaining, int)
-    assert 0 < remaining <= 3600  # within the default idle window
+    assert 0 < remaining <= 15 * 60  # within the default idle window

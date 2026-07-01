@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     # switch. Sessions are short-lived for HIPAA auto-logoff; revocation is a
     # Redis DEL. The MFA challenge is the brief window between password success
     # and the second factor.
-    session_ttl_seconds: int = 3600
+    # `session_ttl_seconds` is the idle window (slid by /auth/session/keepalive);
+    # default 15 min, overridable via VERA_SESSION_TTL_SECONDS.
+    session_ttl_seconds: int = 15 * 60
     mfa_challenge_ttl_seconds: int = 300
     # Hard ceiling on total session lifetime regardless of activity. `session_ttl_seconds`
     # is the idle window (slid by /auth/session/keepalive); this is the absolute max set

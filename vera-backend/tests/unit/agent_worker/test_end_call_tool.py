@@ -33,9 +33,7 @@ async def test_end_call_triggers_shutdown() -> None:
     agent = _make_agent()
     mock_session = MagicMock()
 
-    end_call_tool = next(
-        t for t in _function_tools(agent) if t.info.name == "end_call"
-    )
+    end_call_tool = next(t for t in _function_tools(agent) if t.info.name == "end_call")
 
     # Patch the session property so _end_call can access it without a live activity
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):

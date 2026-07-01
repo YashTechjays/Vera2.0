@@ -33,6 +33,13 @@ export type MeResponse = {
   /** A platform operator's current elevation grant; null for tenant users and
    *  for un-elevated operators. Drives elevation-aware UI (e.g. the sidebar). */
   active_elevation: { target_tenant_id: string; expires_at: string } | null
+  /** Backend-authoritative login-session timeout config — the frontend configures its
+   *  idle manager from these instead of hardcoding (and drifting from) the values.
+   *  `login_idle_timeout_seconds`: the idle window to count down from each activity event.
+   *  `login_absolute_remaining_seconds`: seconds left until the fixed absolute cap at
+   *  receipt; the client turns it into a deadline (`Date.now() + remaining*1000`), skew-safe. */
+  login_idle_timeout_seconds: number
+  login_absolute_remaining_seconds: number
 }
 
 export type InviteUserResult = {
