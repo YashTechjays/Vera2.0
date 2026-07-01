@@ -94,11 +94,14 @@ async def login_world(
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            yield client, LoginWorld(
-                tenant_id=tenant_id,
-                slug=slug,
-                email=email,
-                admin_sessionmaker=sessionmaker,
+            yield (
+                client,
+                LoginWorld(
+                    tenant_id=tenant_id,
+                    slug=slug,
+                    email=email,
+                    admin_sessionmaker=sessionmaker,
+                ),
             )
 
     async with sessionmaker() as session, session.begin():
@@ -468,9 +471,7 @@ async def test_logout_is_audited(
         )
     ).json()["data"]["session_token"]
 
-    resp = await client.post(
-        "/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = await client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
 
     # A logout row landed in the tenant's auth trail, attributed to the user + IP.
