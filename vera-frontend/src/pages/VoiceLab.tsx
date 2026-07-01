@@ -119,6 +119,10 @@ function SessionPanel({
 function TranscriptPanel({ roomName }: { roomName: string }) {
   const [turns, setTurns] = useState<TranscriptEvent[]>([])
   const [error, setError] = useState<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Follow the newest turn as the transcript grows, but only while the operator is already at
+  // the bottom — don't yank them down if they've scrolled up to re-read earlier turns.
+  const stickToBottom = useRef(true)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -133,12 +137,31 @@ function TranscriptPanel({ roomName }: { roomName: string }) {
     return () => controller.abort()
   }, [roomName])
 
+  // Auto-scroll to the latest turn when new ones stream in (unless the operator scrolled up).
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el && stickToBottom.current) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [turns])
+
+  function handleScroll() {
+    const el = scrollRef.current
+    if (!el) return
+    // Small tolerance so sub-pixel rounding at the very bottom doesn't disable following.
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Live transcript</CardTitle>
       </CardHeader>
-      <CardContent className="max-h-80 space-y-2 overflow-y-auto text-sm">
+      <CardContent
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="max-h-80 space-y-2 overflow-y-auto text-sm"
+      >
         {turns.length === 0 && !error && (
           <p className="text-muted-foreground">Waiting for the conversation…</p>
         )}
