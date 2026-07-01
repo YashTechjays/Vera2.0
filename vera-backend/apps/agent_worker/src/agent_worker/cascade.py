@@ -50,8 +50,8 @@ def cascade_session_kwargs(turn_detector: Any) -> dict[str, Any]:
 
 # The endpointing min_delay is the key tunable for IVR patience (see ivr_turn_handling below):
 # lower if answers arrive late/out-of-sequence, raise if the bot answers into a mid-prompt pause.
-_IVR_ENDPOINTING_MIN_DELAY = 0.5
-_IVR_ENDPOINTING_MAX_DELAY = 0.8
+_IVR_ENDPOINTING_MIN_DELAY = 0.2
+_IVR_ENDPOINTING_MAX_DELAY = 0.5
 
 
 def ivr_turn_handling() -> TurnHandlingOptions:

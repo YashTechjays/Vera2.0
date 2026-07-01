@@ -245,7 +245,8 @@ Match on INTENT; "e.g." phrasings are examples, not exact strings. Wording and k
 <rule intent="'As of today, or a past date?'" say="Today/1 (per date_scope)"/>
 <rule intent="Pre-cert vs benefits-and-eligibility vs both" say="Benefits and eligibility"/>
 <rule intent="'Eligibility status, or something else?'" say="Something else"/>
-<rule intent="Self-service benefit-DETAIL menu — options are figures to read out (copay, coinsurance, deductible, out-of-pocket, plan details, PCP, 'hear it', 'fax it', 'want benefit details?')" say="{rep_keyword}; if it loops, switch token per reach_a_human"/>
+<rule intent="'What type of benefit are you calling about?' — a topic/purpose gate the IVR needs answered to route the call, often glued after a payment disclaimer, listing narrow examples ('for example co pay, coinsurance, therapy limits, coordination of benefits'). The 'for example' list is illustrative, NOT exhaustive; distinct from the self-service benefit-DETAIL menu below (which offers to read figures out)." say="Plan details (a broad category that yields a general benefit readout — never a narrow listed example like 'co pay'). Stay silent through the readout, then escape to a human at the next prompt."/>
+<rule intent="Self-service benefit-DETAIL menu — a 'to hear X say/press X, to fax say fax it' readout menu whose options are figures to read out (copay, coinsurance, deductible, out-of-pocket, plan details, PCP, 'hear it', 'fax it', 'want benefit details?'); NOT the 'what are you calling about?' topic gate above" say="{rep_keyword}; if it loops, switch token per reach_a_human"/>
 <rule intent="'Hear those details/that again?' repeat-readout prompt" say="No"/>
 <rule intent="Confirms you want a representative" say="Yes"/>
 <rule intent="Callback vs hold" say="Per callback_vs_hold"/>
@@ -273,7 +274,7 @@ THIS HANDOFF IS FINAL: there is no way back to IVR navigation once you call tran
 - PRODUCT vs DETAIL MENU: post-ID "medical, vision, pharmacy, mental health — which?" → "Medical" (products). Post-ID "copay, deductible, plan details, PCP…" → {rep_keyword} (figures, self-service).
 - CONFIRM MISMATCH: you spelled member ID, IVR reads back "I heard medical. Correct?" → "No" (wrong field = capture failure), re-enter the ID.
 - CONFIRM ON VALUE: "That was T as in Tango, 8, S as in Sierra, correct?" (you said S as in Sam) → "Yes" (letter is S).
-- GLUED PREAMBLE: "One moment, please. And the patient's date of birth?" → "{date_of_birth}" (ignore the preamble; silence here is WRONG). Also: a payment disclaimer that ENDS in "now what type of benefit?" → answer the menu, not silence.
+- GLUED PREAMBLE: "One moment, please. And the patient's date of birth?" → "{date_of_birth}" (ignore the preamble; silence here is WRONG). Also: a payment disclaimer that ENDS in "now what type of benefit are you calling about? for example co pay, coinsurance..." → "Plan details" (answer the topic gate; the example list is illustrative, so do NOT echo a narrow example, and do NOT stay silent).
 - ROUTE TO HUMAN: "Eligibility status or something else?" → "Something else" (forces a rep).
 - SELF-SERVICE LOOP: "hear it / fax it…" → {rep_keyword} → re-offered with no progress → press 0 → still looping → "Agent" → still looping → give_up (end the call; the menu has no human path).
 - CHAINED IVR: "...connected to the appropriate Blue Cross plan." → new "Thank you for calling…" with its own menus → treat as NEW IVR, re-enter announcement mode, navigate from scratch.
@@ -290,7 +291,7 @@ Q:"I heard {id}, correct?" → A:"Yes"
 Q:"DOB incl. 4-digit year?" → A:{dob MM/DD/YYYY}
 Q:"your NPI?" → A:{npi}
 Q:"Tax ID?" → A:{tax_id}
-Q:"what benefit type are you calling about?" (2nd, post-ID ask, NOT a repeat) → A:"Plan Details" → [readout]
+Q:"what type of benefit are you calling about?" (a topic gate, incl. 'for example co pay, coinsurance...' lists; here a 2nd post-ID ask, NOT a repeat) → A:"Plan details" → [readout]
 Q:"hear those details again?" → A:"No"
 Q:"anything else? otherwise how can I help?" → A:"Advocate / Live Agent" (rep keyword)
 Q:"willing to take a survey?" → A:"Yes" (per survey_answer=Yes for this provider)
