@@ -496,14 +496,26 @@ async def mfa_enroll_activate(
     ),
 )
 async def logout(
-    _identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    identity: Annotated[VerifiedIdentity, Depends(current_identity)],
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    request: Request,
     store: Store,
+    audit: AuthAudit,
 ) -> ResponseModel[None]:
-    # Token-scoped self-op: `current_identity` proves a live session (expired → 401);
-    # the slug is irrelevant. delete_session reaps both the `sess` and `sess_abs` keys.
+    # Token-scoped self-op: `current_identity` proves a live session (expired → 401),
+    # so only real logouts are audited; the slug is irrelevant. delete_session reaps
+    # both the `sess` and `sess_abs` keys. A platform operator's tenant_id is None, so
+    # emit via emit_auth_event (accepts None → the log_auth_event definer path), not the
+    # UUID-only _audit helper.
     if credentials is not None:
         await store.delete_session(credentials.credentials)
+    await emit_auth_event(
+        audit,
+        tenant_id=identity.tenant_id,
+        event=AuthEvent.LOGOUT,
+        ip=client_ip(request),
+        user_id=identity.user_id,
+    )
     return ok(None, message="Logged out.")
 
 
