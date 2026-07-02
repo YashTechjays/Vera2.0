@@ -16,6 +16,13 @@ def test_silence_token_matches_the_prompt_sentinel() -> None:
     assert SILENCE_TOKEN in IVR_NAVIGATOR_SYSTEM_PROMPT
 
 
+def test_prompt_does_not_present_the_silence_label() -> None:
+    # The prompt must refer to the sentinel only as the bare token [[SILENT]], never as the
+    # label "SILENCE_TOKEN" — the label line once led the model to emit "SILENCE_TOKEN:" into a
+    # live call. The sentinel itself ([[SILENT]]) must still be present (guarded above).
+    assert "SILENCE_TOKEN" not in IVR_NAVIGATOR_SYSTEM_PROMPT
+
+
 def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
     prompt = IVR_NAVIGATOR_SYSTEM_PROMPT
     lower = prompt.lower()

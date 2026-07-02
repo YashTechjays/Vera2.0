@@ -266,6 +266,18 @@ async def test_strip_silence_token_passes_real_speech_through() -> None:
     assert await _drain(_strip_silence_token(_astream("Med", "ical"))) == "Medical"
 
 
+@pytest.mark.asyncio
+async def test_strip_silence_token_swallows_label_variant() -> None:
+    # Regression: on a silent turn the model sometimes emits the sentinel's LABEL
+    # ("SILENCE_TOKEN:") instead of [[SILENT]]. The exact-match stripper let it through, so
+    # "SILENCE_TOKEN:" was spoken + transcribed into a live call. All renderings must be silent.
+    assert await _drain(_strip_silence_token(_astream("SILENCE_TOKEN:"))) == ""
+    assert await _drain(_strip_silence_token(_astream("SILENCE_TOKEN: [[SILENT]]"))) == ""
+    assert await _drain(_strip_silence_token(_astream("silence_token :"))) == ""
+    # a real answer that merely follows the sentinel still gets spoken (remainder is kept)
+    assert await _drain(_strip_silence_token(_astream("[[SILENT]] Provider"))) == " Provider"
+
+
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     boundary = PassthroughPHIBoundary()
     nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")

@@ -9,6 +9,7 @@ for the IVR phase that reverts to the snappy human default at the handoff.
 
 import functools
 import logging
+import re
 from collections.abc import AsyncIterable, AsyncIterator
 
 from livekit import rtc
@@ -35,16 +36,24 @@ logger = logging.getLogger("agent_worker")
 _IVR_MAX_TURNS = 60
 
 
+# Matches the silence sentinel ([[SILENT]]) AND the label the model sometimes emits by mistake
+# ("SILENCE_TOKEN:", from the prompt's silence contract) — case-insensitive, tolerant of a stray
+# colon/whitespace. Stripping both keeps a "stay silent" turn from ever reaching TTS when the
+# model's rendering of the sentinel drifts (the historical leak was a spoken "SILENCE_TOKEN:").
+_SILENCE_RE = re.compile(rf"{re.escape(SILENCE_TOKEN)}|SILENCE_TOKEN\s*:?", re.IGNORECASE)
+
+
 async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
     """Drop the navigator's silence sentinel from an LLM text stream.
 
-    The prompt tells the model to emit exactly ``SILENCE_TOKEN`` when the right action is to
-    stay quiet — the common case. Without this, the default tts_node would synthesize the
-    literal "[[SILENT]]" into the live call. Navigator utterances are short, so buffer the
-    whole turn, remove the sentinel, and emit the remainder — nothing at all on a silent turn.
+    The prompt tells the model to emit exactly ``[[SILENT]]`` when the right action is to stay
+    quiet — the common case. Without this, the default tts_node would synthesize that token (or
+    the near-miss ``SILENCE_TOKEN:`` the model sometimes emits instead) into the live call.
+    Navigator utterances are short, so buffer the whole turn, strip the sentinel/label, and emit
+    the remainder — nothing at all on a silent turn.
     """
     buffered = "".join([chunk async for chunk in text])
-    cleaned = buffered.replace(SILENCE_TOKEN, "")
+    cleaned = _SILENCE_RE.sub("", buffered)
     if cleaned.strip():
         yield cleaned
 
