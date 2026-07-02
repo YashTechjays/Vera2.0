@@ -102,6 +102,7 @@ class RBACWorld:
         self.admin_token = ""
         self.norole_token = ""
         self.ghost_token = ""
+        self.supervisor_token = ""
 
 
 async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
@@ -187,11 +188,33 @@ async def rbac_world(
         session.add(UserRole(tenant_id=tenant_id, app_user_id=admin.id, role_id=admin_role))
         admin_id, norole_id = admin.id, norole.id
 
+        supervisor_role = (
+            await session.execute(
+                text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'SUPERVISOR'")
+            )
+        ).scalar_one()
+        supervisor = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="supervisor@test.example",
+            name="Supervisor",
+            status="active",
+        )
+        session.add(supervisor)
+        await session.flush()
+        session.add(
+            UserRole(tenant_id=tenant_id, app_user_id=supervisor.id, role_id=supervisor_role)
+        )
+        supervisor_id = supervisor.id
+
     world.admin_token = await _mint(
         session_store, user_id=admin_id, tenant_id=tenant_id, email="admin@test.example"
     )
     world.norole_token = await _mint(
         session_store, user_id=norole_id, tenant_id=tenant_id, email="norole@test.example"
+    )
+    world.supervisor_token = await _mint(
+        session_store, user_id=supervisor_id, tenant_id=tenant_id, email="supervisor@test.example"
     )
     # A valid session whose user_id has no app_user row -> "unknown user" deny.
     world.ghost_token = await _mint(

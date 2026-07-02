@@ -205,6 +205,16 @@ async def test_join_token_unknown_call_returns_404(
 
 
 @pytest.mark.asyncio
+async def test_supervisor_token_can_list_calls(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    """The second permissioned persona (SUPERVISOR) is wired and authenticated."""
+    resp = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
 async def test_calls_require_auth(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
