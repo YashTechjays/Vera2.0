@@ -9,12 +9,12 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import uuid7
-from vera_core.models import PatientForm
+from vera_core.models import Call, PatientForm
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 from vera_core.observability.correlation import parse_room_name
@@ -232,3 +232,22 @@ async def test_calls_require_auth(
 
     resp_token = await client.get(f"/api/v1/calls/{uuid4()}/join-token")
     assert resp_token.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_new_call_is_private_by_default(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = UUID(created.json()["data"]["id"])
+    row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+    assert row.published is False
+    assert row.published_at is None
