@@ -21,7 +21,6 @@ from livekit.agents import (
     get_job_context,
     llm,
 )
-from livekit.plugins.turn_detector.english import EnglishModel
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
@@ -52,8 +51,13 @@ async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
 def ivr_turn_handling() -> TurnHandlingOptions:
     """Fresh `turn_handling` for the IVR navigator (pass as `Agent(turn_handling=...)`).
 
-    The endpointing delays are the key IVR-patience tunable; they live in settings so they
-    can be adjusted without a code change (see `Settings.ivr_endpointing_*`).
+    Tuned patient for a machine, not a person:
+    - `turn_detection="vad"`, NOT the human-trained EnglishModel — an IVR reads menus and
+      readouts at machine cadence, so plain VAD end-of-turn fits and stays fully local.
+    - preemptive generation OFF — keeps a tiny output buffer so a false-interruption pause
+      can't discard the start of an utterance (SIP self-echo clip: "Medical" -> "dical").
+    - the endpointing delays are the key IVR-patience tunable; they live in settings so they
+      can be adjusted without a code change (see `Settings.ivr_endpointing_*`).
     """
     settings = get_settings()
     return {
@@ -61,8 +65,8 @@ def ivr_turn_handling() -> TurnHandlingOptions:
             "min_delay": settings.ivr_endpointing_min_delay,
             "max_delay": settings.ivr_endpointing_max_delay,
         },
-        "preemptive_generation": {"enabled": True},
-        "turn_detection": EnglishModel(),
+        "preemptive_generation": {"enabled": False},
+        "turn_detection": "vad",
         "interruption": {
             "mode": "vad",
             "enabled": True,
