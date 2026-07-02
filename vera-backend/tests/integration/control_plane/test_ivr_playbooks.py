@@ -305,14 +305,14 @@ async def test_voice_lab_injects_active_playbook_into_dispatch_metadata(
             headers=_auth(rbac_world.admin_token),
             json={
                 "mode": "browser",
-                "ivr_navigation": True,
+                "enable_ivr_navigation": True,
                 "insurance_provider_id": str(provider_id),
             },
         )
         assert resp.status_code == 200, resp.text
         meta = fake_livekit.dispatch_metadata[-1]
         assert meta is not None
-        assert meta["ivr_navigation"] is True
+        assert meta["enable_ivr_navigation"] is True
         assert meta["ivr_playbook"] == {"rep_keyword": "Advocate"}
     finally:
         async with admin_sessionmaker() as s, s.begin():
@@ -332,12 +332,16 @@ async def test_voice_lab_generic_navigator_when_provider_has_no_playbook(
     resp = await client.post(
         "/api/v1/voice-lab/sessions",
         headers=_auth(rbac_world.admin_token),
-        json={"mode": "browser", "ivr_navigation": True, "insurance_provider_id": str(uuid7())},
+        json={
+            "mode": "browser",
+            "enable_ivr_navigation": True,
+            "insurance_provider_id": str(uuid7()),
+        },
     )
     assert resp.status_code == 200, resp.text
     meta = fake_livekit.dispatch_metadata[-1]
     assert meta is not None
-    assert meta["ivr_navigation"] is True
+    assert meta["enable_ivr_navigation"] is True
     assert "ivr_playbook" not in meta  # no active playbook → generic navigator
 
 

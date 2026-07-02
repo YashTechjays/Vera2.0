@@ -11,7 +11,7 @@ export type StartVoiceSessionPayload = {
   /** Required + E.164 when mode === "outbound". */
   phone_number?: string
   /** ON → the worker boots the generic IVR navigator agent instead of the chat persona. */
-  ivr_navigation?: boolean
+  enable_ivr_navigation?: boolean
   /** When navigating, the provider whose active playbook specializes the navigator (else generic). */
   insurance_provider_id?: string
 }

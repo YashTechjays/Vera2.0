@@ -139,11 +139,11 @@ async def start_voice_session(
     metadata: dict[str, Any] = {
         "wait_for_speaker": True,
         "publish_transcript": True,
-        "ivr_navigation": body.ivr_navigation,
+        "enable_ivr_navigation": body.enable_ivr_navigation,
     }
     # When navigating, specialize the navigator with the provider's active playbook if one exists;
     # otherwise the worker falls back to the generic navigator (no ivr_playbook key).
-    if body.ivr_navigation:
+    if body.enable_ivr_navigation:
         await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
     await livekit.create_call_room(room_name, metadata=metadata)
     if outbound is not None:

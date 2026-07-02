@@ -240,7 +240,7 @@ export function VoiceLab() {
     try {
       const result = await startVoiceSession({
         mode,
-        ivr_navigation: ivrNavigation,
+        enable_ivr_navigation: ivrNavigation,
         ...(ivrNavigation && providerId ? { insurance_provider_id: providerId } : {}),
         ...(mode === "outbound" ? { phone_number: phone! } : {}),
       })

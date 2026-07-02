@@ -268,19 +268,19 @@ async def test_strip_silence_token_passes_real_speech_through() -> None:
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     boundary = PassthroughPHIBoundary()
-    nav = build_agent({"ivr_navigation": True}, boundary=boundary, session_id="s1")
+    nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")
     assert isinstance(nav, IvrNavigatorAgent)
     # absent or false → the default chat persona
     assert isinstance(build_agent({}, boundary=boundary, session_id="s1"), VeraAgent)
     assert isinstance(
-        build_agent({"ivr_navigation": False}, boundary=boundary, session_id="s1"),
+        build_agent({"enable_ivr_navigation": False}, boundary=boundary, session_id="s1"),
         VeraAgent,
     )
 
 
 def test_build_agent_selects_navigator_from_playbook_and_specializes_it() -> None:
     boundary = PassthroughPHIBoundary()
-    # A playbook overlay alone (no ivr_navigation flag) selects the navigator...
+    # A playbook overlay alone (no enable_ivr_navigation flag) selects the navigator...
     nav = build_agent(
         {"ivr_playbook": {"rep_keyword": "Advocate"}}, boundary=boundary, session_id="s1"
     )

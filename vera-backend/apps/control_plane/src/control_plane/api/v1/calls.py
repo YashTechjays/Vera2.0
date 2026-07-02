@@ -86,8 +86,8 @@ async def start_call(
     metadata = tweak.model_dump(exclude_none=True)
     # When navigating the payer IVR, specialize the navigator with the provider's active playbook
     # (non-PHI overlay) if one exists; otherwise it runs generic. Off preserves today's behavior.
-    if body.ivr_navigation:
-        metadata["ivr_navigation"] = True
+    if body.enable_ivr_navigation:
+        metadata["enable_ivr_navigation"] = True
         await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
     await livekit.create_call_room(room_name, metadata=metadata)
     form.status = FormStatus.IN_QUEUE

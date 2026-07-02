@@ -23,7 +23,7 @@ class StartCallRequest(BaseModel):
     form_id: UUID
     # When ON, the worker navigates the payer IVR first; the provider's active playbook (if any)
     # specializes the navigator, else it runs generic. Off preserves the direct-to-VeraAgent flow.
-    ivr_navigation: bool = False
+    enable_ivr_navigation: bool = False
     # Which insurance provider this call targets — populates Call.insurance_provider_id and drives
     # playbook selection. Optional until forms carry a provider FK.
     insurance_provider_id: UUID | None = None
@@ -40,9 +40,9 @@ class StartVoiceSessionRequest(BaseModel):
 
     mode: Literal["browser", "outbound"]
     phone_number: str | None = None  # required + E.164 when mode == "outbound"
-    ivr_navigation: bool = False  # ON → worker boots the IVR navigator agent
-    # Optional provider to test a specific playbook: with ivr_navigation ON, its active playbook
-    # (if any) specializes the navigator; else the navigator runs generic.
+    enable_ivr_navigation: bool = False  # ON → worker boots the IVR navigator agent
+    # Optional provider to test a specific playbook: with enable_ivr_navigation ON, its active
+    # playbook (if any) specializes the navigator; else the navigator runs generic.
     insurance_provider_id: UUID | None = None
 
 
