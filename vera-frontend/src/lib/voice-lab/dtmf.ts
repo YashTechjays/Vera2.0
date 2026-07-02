@@ -49,9 +49,10 @@ export async function sendDtmf(
   for (let i = 0; i < seq.length; i++) {
     const digit = seq[i]
     const code = DTMF_CODE[digit]
-    console.debug("[DTMF] publish", { digit, code })
     await publisher.publishDtmf(code, digit)
     if (i < seq.length - 1) await sleep(gapMs)
   }
-  console.info("[DTMF] sent %d tone(s): %s", seq.length, seq)
+  // Count only — never log the raw digit sequence (it can be PHI, e.g. a member ID),
+  // matching the backend agent_worker/dtmf.py discipline.
+  console.info("[DTMF] sent %d tone(s)", seq.length)
 }

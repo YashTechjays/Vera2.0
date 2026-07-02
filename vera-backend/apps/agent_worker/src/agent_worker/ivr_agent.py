@@ -9,9 +9,12 @@ for the IVR phase that reverts to the snappy human default at the handoff.
 
 import functools
 import logging
+from collections.abc import AsyncIterable, AsyncIterator
 
+from livekit import rtc
 from livekit.agents import (
     Agent,
+    ModelSettings,
     StopResponse,
     TurnHandlingOptions,
     function_tool,
@@ -21,7 +24,7 @@ from livekit.agents import (
 from livekit.plugins.turn_detector.english import EnglishModel
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
-from agent_worker.ivr_prompt import build_ivr_instructions
+from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
 from vera_core.phi import PHIBoundaryProtocol
 
@@ -30,6 +33,20 @@ logger = logging.getLogger("agent_worker")
 # Deterministic backstop: if the navigator takes this many IVR turns without reaching a
 # human, it hangs up rather than looping forever (enforced in on_user_turn_completed).
 _IVR_MAX_TURNS = 60
+
+
+async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    """Drop the navigator's silence sentinel from an LLM text stream.
+
+    The prompt tells the model to emit exactly ``SILENCE_TOKEN`` when the right action is to
+    stay quiet — the common case. Without this, the default tts_node would synthesize the
+    literal "[[SILENT]]" into the live call. Navigator utterances are short, so buffer the
+    whole turn, remove the sentinel, and emit the remainder — nothing at all on a silent turn.
+    """
+    buffered = "".join([chunk async for chunk in text])
+    cleaned = buffered.replace(SILENCE_TOKEN, "")
+    if cleaned.strip():
+        yield cleaned
 
 
 def ivr_turn_handling() -> TurnHandlingOptions:
@@ -88,6 +105,7 @@ class IvrNavigatorAgent(Agent):
             greeting=verification_greeting,
         )
         self._turns = 0  # IVR turns taken; the give-up backstop caps this
+        self._final_turn_used = False  # spent the one grace turn granted at the cap
         # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
         super().__init__(
@@ -95,6 +113,19 @@ class IvrNavigatorAgent(Agent):
             tools=[],
             turn_handling=ivr_turn_handling(),
         )
+
+    def tts_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ) -> AsyncIterable[rtc.AudioFrame]:
+        # Not a PHI seam (the navigator injects no call_data, so there's nothing to hydrate);
+        # this only strips the silence sentinel so a "stay silent" turn makes no sound.
+        return Agent.default.tts_node(self, _strip_silence_token(text), model_settings)
+
+    def transcription_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ) -> AsyncIterable[str]:
+        # Keep the sentinel out of the forwarded transcript too, for the same reason.
+        return Agent.default.transcription_node(self, _strip_silence_token(text), model_settings)
 
     def _end_navigation(self, reason: str) -> None:
         """Hang up the call cleanly (drain pending audio), to bail out of an unresolvable IVR
@@ -108,9 +139,19 @@ class IvrNavigatorAgent(Agent):
         # Deterministic backstop so the call can never loop forever even if the model never calls
         # give_up. Scoped to the navigator: the counter is gone once the handoff swaps in VeraAgent.
         self._turns += 1
-        if self._turns > _IVR_MAX_TURNS:
-            self._end_navigation(f"turn cap reached ({_IVR_MAX_TURNS} IVR turns, no human)")
-            raise StopResponse
+        if self._turns <= _IVR_MAX_TURNS:
+            return
+        # Over the cap. Grant exactly one grace turn before hanging up: if this incoming turn
+        # is a live rep finally answering, letting it generate lets the model recognize the
+        # human and call transfer_to_verification (which swaps this agent out) instead of being
+        # dropped. Only if we're still navigating the turn after that do we hard-stop — a genuine
+        # loop the model can't escape. (A turn counter can't tell a human from the IVR, so one
+        # preempted turn is unavoidable; this moves it past the model's last chance to hand off.)
+        if not self._final_turn_used:
+            self._final_turn_used = True
+            return
+        self._end_navigation(f"turn cap reached ({_IVR_MAX_TURNS} IVR turns, no human)")
+        raise StopResponse
 
     @function_tool
     async def give_up(self) -> str:
@@ -136,10 +177,18 @@ class IvrNavigatorAgent(Agent):
         # Log the count only — a DTMF sequence can be a member ID/NPI (PHI), and the
         # return string feeds the LLM/traces, so neither echoes the raw digits.
         count = len(digits.strip())
+        if not count:
+            # Empty input sends no tones; report that plainly instead of a false "sent"
+            # (send_dtmf would otherwise reject it, but say something useful to the model).
+            logger.info("press_keypad: called with no digits; nothing sent")
+            return "No keypad digits were provided, so nothing was pressed."
         try:
             await send_dtmf(get_job_context().room.local_participant, digits)
-        except InvalidDtmfError as exc:
-            return f"Could not send those keys: {exc}"
+        except InvalidDtmfError:
+            # The exception names the offending characters; keep them out of the return
+            # (they feed the LLM/traces and can be PHI). A fixed message says enough.
+            logger.info("press_keypad: rejected unsupported keypad input (%d char(s))", count)
+            return "Those keys aren't all valid keypad digits (use only 0-9, * or #); nothing sent."
         except DtmfTransportError:
             # Surface the failure (the logged exception carries the real cause) instead of
             # letting the tool runner swallow it — the historical reason a failed press

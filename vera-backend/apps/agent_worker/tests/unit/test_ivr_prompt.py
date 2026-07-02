@@ -1,7 +1,17 @@
 """Tests for the generic IVR-navigator prompt (agent_worker.ivr_prompt)."""
 
-from agent_worker.ivr_prompt import IVR_NAVIGATOR_SYSTEM_PROMPT, build_ivr_instructions
+from agent_worker.ivr_prompt import (
+    IVR_NAVIGATOR_SYSTEM_PROMPT,
+    SILENCE_TOKEN,
+    build_ivr_instructions,
+)
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
+
+
+def test_silence_token_matches_the_prompt_sentinel() -> None:
+    # The tts/transcription filter strips SILENCE_TOKEN; if the prompt's literal sentinel
+    # ever drifts from the constant, the token would be spoken aloud. Guard against that.
+    assert SILENCE_TOKEN in IVR_NAVIGATOR_SYSTEM_PROMPT
 
 
 def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:

@@ -19,15 +19,17 @@ export function VoiceLabDialpad({ onError }: { onError?: (message: string) => vo
   const connected = state === ConnectionState.Connected
 
   async function handleSend(digits: string) {
+    // Count only in every log — a pressed digit sequence can be PHI (e.g. a member ID),
+    // so it never lands in the browser console (mirrors backend agent_worker/dtmf.py).
     if (!connected) {
-      console.warn("[DTMF] ✗ not connected — ignoring:", digits)
+      console.warn("[DTMF] ✗ not connected — ignoring %d digit(s)", digits.length)
       onError?.("Not connected to the call yet.")
       return
     }
-    console.info("[DTMF] sending:", digits)
+    console.info("[DTMF] sending %d digit(s)", digits.length)
     try {
       await sendDtmf(localParticipant, digits)
-      console.info("[DTMF] ✓ published to LiveKit:", digits)
+      console.info("[DTMF] ✓ published %d digit(s) to LiveKit", digits.length)
     } catch (err) {
       console.error("[DTMF] ✗ failed:", err)
       onError?.("Could not send those keys.")

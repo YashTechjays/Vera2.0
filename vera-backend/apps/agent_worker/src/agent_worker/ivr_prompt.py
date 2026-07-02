@@ -11,6 +11,11 @@ call_data, so no raw PHI enters the prompt (PHI wall).
 
 from __future__ import annotations
 
+# The sentinel the model emits when the correct action is silence. It must never be spoken,
+# so the navigator's tts/transcription nodes strip it (see agent_worker.ivr_agent). Keep this
+# in sync with the literal token in the prompt below — test_ivr_prompt guards against drift.
+SILENCE_TOKEN = "[[SILENT]]"
+
 IVR_NAVIGATOR_SYSTEM_PROMPT = """
 <ivr_navigation_prompt>
 

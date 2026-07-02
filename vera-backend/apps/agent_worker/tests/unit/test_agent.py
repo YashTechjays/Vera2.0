@@ -1,7 +1,7 @@
 """Tests for the cascade agents — the chat persona (with PHI-wall node overrides) and
 the IVR navigator (a plain agent, no phiwall), plus the metadata-driven selector."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -12,7 +12,13 @@ from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, build_agent
-from agent_worker.ivr_agent import _IVR_MAX_TURNS, IvrNavigatorAgent, ivr_turn_handling
+from agent_worker.ivr_agent import (
+    _IVR_MAX_TURNS,
+    IvrNavigatorAgent,
+    _strip_silence_token,
+    ivr_turn_handling,
+)
+from agent_worker.ivr_prompt import SILENCE_TOKEN
 from agent_worker.prompt import build_instructions
 from vera_core.phi import PassthroughPHIBoundary
 from vera_core.schemas import PersonaTweak
@@ -81,9 +87,12 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     assert "infertility" not in agent.instructions.lower()
     # the navigator listens first: it does NOT greet, so on_enter stays the base no-op
     assert type(agent).on_enter is Agent.on_enter
-    # it is a plain agent — NO PHI-wall node overrides
+    # NO PHI-wall on the inbound path: stt_node stays the base default (no redaction override)
     assert type(agent).stt_node is Agent.stt_node
-    assert type(agent).tts_node is Agent.tts_node
+    # ...but tts/transcription ARE overridden — only to strip the silence sentinel (not to
+    # hydrate PHI, which the navigator has none of), so a "stay silent" turn makes no sound
+    assert type(agent).tts_node is not Agent.tts_node
+    assert type(agent).transcription_node is not Agent.transcription_node
     # ...but it CAN press keypad digits (DTMF), hand off to the verifier, and give up
     tool_names = {getattr(getattr(t, "info", None), "name", None) for t in agent.tools}
     assert "press_keypad" in tool_names
@@ -106,11 +115,25 @@ async def test_give_up_ends_the_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_turn_cap_backstop_ends_the_call_and_stops_the_reply() -> None:
-    # Even if the model never calls give_up, the deterministic turn cap hangs up (and suppresses
-    # the reply via StopResponse) so the call can't loop forever.
+async def test_turn_cap_grants_one_grace_turn_before_ending() -> None:
+    # The cap is deterministic, but the turn that first trips it gets a grace turn: if a live
+    # rep answers exactly then, the model still gets to generate and hand off instead of being
+    # hung up on. So the first over-cap turn neither shuts down nor raises StopResponse.
     agent = _navigator()
     agent._turns = _IVR_MAX_TURNS  # the next completed turn trips the cap
+    mock_session = MagicMock()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        await agent.on_user_turn_completed(MagicMock(), MagicMock())  # grace turn
+    mock_session.shutdown.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_turn_cap_backstop_ends_the_call_after_the_grace_turn() -> None:
+    # If the IVR is still looping the turn after the grace turn (no human reached), the
+    # deterministic backstop hangs up and suppresses the reply via StopResponse.
+    agent = _navigator()
+    agent._turns = _IVR_MAX_TURNS
+    agent._final_turn_used = True  # grace turn already spent
     mock_session = MagicMock()
     with (
         patch.object(type(agent), "session", new=property(lambda self: mock_session)),
@@ -189,6 +212,58 @@ async def test_press_keypad_surfaces_publish_failure_instead_of_swallowing() -> 
     with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
         result = await _press(agent, "1")
     assert "could not send" in result.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("digits", ["", "   "])
+async def test_press_keypad_empty_reports_nothing_pressed(digits: str) -> None:
+    # An empty/whitespace sequence sends no tones; the tool must tell the model nothing was
+    # pressed instead of a false "sent" — and must not publish anything.
+    agent = _navigator()
+    participant = _FakeParticipant()
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        result = await _press(agent, digits)
+    assert participant.sent == []
+    assert "nothing" in result.lower()
+    assert "sent the keypad tones" not in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_press_keypad_rejects_invalid_keys_without_echoing_them() -> None:
+    # Invalid keypad input must not be sent, and — since the return feeds the LLM/traces —
+    # the offending characters must never appear in the return string (PHI hygiene).
+    agent = _navigator()
+    participant = _FakeParticipant()
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        # digits chosen to not appear in the fixed help text ("0-9, * or #")
+        result = await _press(agent, "17x4")
+    assert participant.sent == []  # rejected up front, nothing published
+    # neither the invalid character nor the raw input digits are echoed back
+    for ch in "17x4":
+        assert ch not in result
+
+
+async def _astream(*chunks: str) -> AsyncIterator[str]:
+    for chunk in chunks:
+        yield chunk
+
+
+async def _drain(stream: AsyncIterable[str]) -> str:
+    return "".join([c async for c in stream])
+
+
+@pytest.mark.asyncio
+async def test_strip_silence_token_swallows_a_silent_turn() -> None:
+    # A turn whose entire output is the sentinel yields nothing — so tts_node makes no sound.
+    assert await _drain(_strip_silence_token(_astream(SILENCE_TOKEN))) == ""
+    # even split across streamed chunks
+    assert await _drain(_strip_silence_token(_astream("[[SIL", "ENT]]"))) == ""
+
+
+@pytest.mark.asyncio
+async def test_strip_silence_token_passes_real_speech_through() -> None:
+    # A real answer is spoken verbatim (the sentinel filter is transparent to normal output).
+    assert await _drain(_strip_silence_token(_astream("Med", "ical"))) == "Medical"
 
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:

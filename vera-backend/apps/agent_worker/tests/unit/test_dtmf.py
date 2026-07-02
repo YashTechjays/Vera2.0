@@ -35,3 +35,14 @@ async def test_send_dtmf_rejects_bad_char_and_sends_nothing() -> None:
     with pytest.raises(InvalidDtmfError):
         await send_dtmf(p, "12x", gap_s=0)  # type: ignore[arg-type]
     assert p.sent == []  # validated up front — no partial sequence emitted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("digits", ["", "   "])
+async def test_send_dtmf_rejects_empty_sequence(digits: str) -> None:
+    # An empty sequence emits zero tones; reject it so the silent no-op can't be mistaken
+    # for a successful press.
+    p = _FakeParticipant()
+    with pytest.raises(InvalidDtmfError):
+        await send_dtmf(p, digits, gap_s=0)  # type: ignore[arg-type]
+    assert p.sent == []

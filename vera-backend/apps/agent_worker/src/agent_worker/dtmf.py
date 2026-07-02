@@ -42,6 +42,10 @@ async def send_dtmf(participant: rtc.LocalParticipant, digits: str, *, gap_s: fl
     anything, so a bad character never emits a partial sequence. A publish failure on
     the live call is wrapped as `DtmfTransportError`."""
     seq = digits.strip().upper()
+    if not seq:
+        # An empty sequence emits zero tones; reject it so a caller can't mistake the
+        # silent no-op for a successful press.
+        raise InvalidDtmfError("empty DTMF sequence")
     bad = sorted({c for c in seq if c not in _DTMF_CODE})
     if bad:
         raise InvalidDtmfError(f"unsupported DTMF characters: {bad}")
