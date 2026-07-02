@@ -166,6 +166,24 @@
   ul.clean li::before { content: '›'; position: absolute; left: 6px; color: var(--accent); font-weight: 700; }
   ul.clean li:last-child { border-bottom: none; }
 
+  /* Code blocks */
+  pre.code { margin: 12px 0; background: #0a0e17; border: 1px solid var(--border); border-radius: 12px; padding: 0; overflow: hidden; }
+  pre.code .fname { display: block; font-family: var(--mono); font-size: 11px; color: var(--text-faint); padding: 9px 16px; border-bottom: 1px solid var(--border-soft); background: var(--panel); }
+  pre.code .fname.add { color: var(--green); }
+  pre.code code { display: block; background: none; border: none; padding: 16px; font-size: 12.5px; line-height: 1.6; color: #c7d3e8; white-space: pre; overflow-x: auto; border-radius: 0; }
+  pre.code .c { color: var(--text-faint); }  /* comment */
+  pre.code .k { color: var(--pink); }        /* keyword */
+  pre.code .s { color: var(--green); }        /* string */
+  pre.code .n { color: var(--amber); }        /* name/ident highlight */
+  pre.code .plus { color: var(--green); }
+  pre.code .minus { color: var(--red); }
+
+  .phase-tag { display: inline-block; font-family: var(--mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; padding: 3px 10px; border-radius: 7px; background: var(--panel-2); border: 1px solid var(--border); color: var(--accent); margin-bottom: 8px; }
+  .check li { list-style: none; }
+  ul.check { list-style: none; padding: 0; }
+  ul.check li { padding: 6px 0 6px 28px; position: relative; font-size: 14px; color: #cdd6e6; }
+  ul.check li::before { content: '☐'; position: absolute; left: 4px; color: var(--accent); }
+
   .steps { counter-reset: step; margin: 18px 0; }
   .step { position: relative; padding: 4px 0 20px 46px; counter-increment: step; }
   .step::before { content: counter(step); position: absolute; left: 0; top: 0; width: 30px; height: 30px; border-radius: 9px; background: var(--panel); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 13px; color: var(--accent); }
@@ -208,6 +226,7 @@
       <li><a href="#model" class="nav-link">Data model</a></li>
       <li><a href="#owners" class="nav-link">Who owns what</a></li>
       <li><a href="#next" class="nav-link">What&rsquo;s next</a></li>
+      <li><a href="#implement" class="nav-link">Implementation guide</a></li>
     </ol>
     <div class="foot">
       Generated from source + git history<br />
@@ -723,10 +742,186 @@ stateDiagram-v2
           <div class="a">Can a VA un-publish while someone is intervening? Who owns a call after takeover? What happens to <code>initiated_by_id</code> on handoff? Define the ownership rules alongside the state machine.</div>
         </div>
 
+      </div>
+    </section>
+
+    <!-- 7. IMPLEMENTATION GUIDE -->
+    <section id="implement">
+      <div class="wrap">
+        <h2><span class="num">07</span> Implementation guide</h2>
+        <p class="sub">A concrete, ordered path to build publish-to-others on the persistent <code>/calls</code> substrate. All snippets are proposed &mdash; not yet in the codebase.</p>
+
+        <div class="callout key">
+          <span class="label">The mental model</span>
+          <p>A call has an <b>owner</b> (<code>initiated_by_id</code>) and a <b>visibility</b> (private / published).
+          Private = only the owner&rsquo;s space sees it. Publishing flips a flag, which (a) makes the call appear
+          in <i>other</i> VAs&rsquo; live lists and (b) unlocks a foreign <code>supervisor-</code> join token so they can
+          intervene. Intervene actions are recorded as <code>intervention_event</code> rows. Nothing about the
+          existing <code>current_status</code> lifecycle changes.</p>
+        </div>
+
+        <h3>End-to-end sequence: initiate &rarr; publish &rarr; intervene</h3>
+        <div class="diagram" data-diagram>
+          <div class="bar">
+            <div class="title">Publish &amp; intervene &mdash; proposed sequence</div>
+            <div class="ctrls">
+              <button data-act="out">&minus;</button>
+              <button data-act="in">+</button>
+              <button data-act="reset" class="wide">reset</button>
+            </div>
+          </div>
+          <div class="canvas">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor VA1 as VA-1 (owner)
+  actor VA2 as VA-2 (other VA)
+  participant API as Control Plane
+  participant DB as Postgres
+  participant LK as LiveKit room
+
+  VA1->>API: POST /calls {form_id}
+  API->>DB: Call(initiated_by_id=VA1, published=false)
+  API->>LK: create room + dispatch agent
+  API-->>VA1: CallSummary (private)
+  Note over VA2,API: GET /calls for VA-2 does NOT include this call
+
+  VA1->>API: PATCH /calls/:id/publish
+  API->>DB: published=true + CallEvent(visibility,"published")
+  API-->>VA1: published ✓
+
+  VA2->>API: GET /calls
+  API->>DB: initiated_by_id==VA2 OR published==true
+  API-->>VA2: list now includes VA-1's call
+  VA2->>API: GET /calls/:id/join-token
+  API->>DB: allow? owner OR published
+  API-->>VA2: supervisor-VA2 token
+  VA2->>LK: join room (intervene)
+  VA2->>API: POST /calls/:id/interventions {type}
+  API->>DB: InterventionEvent(supervisor_id=VA2)
+</pre>
+          </div>
+          <div class="hint">◆ PROPOSED &nbsp;·&nbsp; drag to pan, scroll to zoom</div>
+        </div>
+
+        <h3>Backend &mdash; six ordered steps</h3>
+
+        <div class="phase-tag">Step 1 &middot; schema</div>
+        <p>Add the visibility axis to the <code>Call</code> model. A boolean is enough for v1; leave room for a
+        future enum. Then generate a migration &mdash; remember the repo rule: <b>never hand-number Alembic
+        revisions</b>, use <code>just makemigration</code>.</p>
+        <pre class="code"><span class="fname add">packages/vera_core/.../models/call.py &nbsp;(add to Call)</span><code><span class="c"># Visibility is orthogonal to current_status. False = private to the</span>
+<span class="c"># owner (initiated_by_id); True = visible to every VA in the tenant.</span>
+published: Mapped[<span class="k">bool</span>] = mapped_column(Boolean, nullable=<span class="k">False</span>, default=<span class="k">False</span>)
+published_at: Mapped[datetime | <span class="k">None</span>] = mapped_column(DateTime(timezone=<span class="k">True</span>), nullable=<span class="k">True</span>)
+
+<span class="c"># plus, in __table_args__ — index for the "show me published calls" scan:</span>
+Index(<span class="s">"ix_call_tenant_published"</span>, <span class="s">"tenant_id"</span>, <span class="s">"published"</span>)</code></pre>
+
+        <div class="phase-tag">Step 2 &middot; ownership</div>
+        <p>The owner column already exists but is never set on create. Populate it from the verified caller so
+        there is something to scope on. <span class="path">calls.py:70</span></p>
+        <pre class="code"><span class="fname">apps/control_plane/.../api/v1/calls.py &nbsp;(in start_call)</span><code>call = Call(
+    tenant_id=tenant_id,
+    form_id=form.id,
+    <span class="plus">initiated_by_id=_caller.user_id,   # &lt;- was unset; enables per-VA scope</span>
+    current_status=CallStatus.INITIATED,
+)</code></pre>
+
+        <div class="phase-tag">Step 3 &middot; publish endpoint</div>
+        <p>A new owner-only mutation. It flips the flag, stamps <code>published_at</code> from the DB clock, and
+        writes a <code>CallEvent</code> so the change is on the audit trail. Guard it with a write-tier permission
+        (the code already flags <code>calls:read</code> as a stopgap).</p>
+        <pre class="code"><span class="fname add">apps/control_plane/.../api/v1/calls.py &nbsp;(new route)</span><code><span class="decorator">@router.patch(<span class="s">"/calls/{call_id}/publish"</span>, response_model=ResponseModel[CallSummary])</span>
+<span class="k">async def</span> publish_call(
+    call_id: UUID,
+    body: PublishCallRequest,          <span class="c"># { published: bool }</span>
+    tenant_id: TenantId,
+    session: TenantSession,
+    caller: VerifiedIdentity = require(<span class="s">"calls:write"</span>),
+) -&gt; ResponseModel[CallSummary]:
+    call = (<span class="k">await</span> session.execute(
+        select(Call).where(Call.id == call_id)   <span class="c"># RLS = tenant scope</span>
+    )).scalar_one_or_none()
+    <span class="k">if</span> call <span class="k">is None</span>:
+        <span class="k">raise</span> NotFoundError(message=<span class="s">"call not found"</span>)
+    <span class="k">if</span> call.initiated_by_id != caller.user_id:
+        <span class="k">raise</span> CustomAPIException(FORBIDDEN, message=<span class="s">"only the owner can publish"</span>)
+
+    call.published = body.published
+    call.published_at = func.now() <span class="k">if</span> body.published <span class="k">else None</span>
+    session.add(CallEvent(
+        tenant_id=tenant_id, call_id=call.id,
+        event_type=CallEventType.STATUS,
+        event_value=<span class="s">"published"</span> <span class="k">if</span> body.published <span class="k">else</span> <span class="s">"unpublished"</span>,
+    ))
+    <span class="k">return</span> ok(_summary(call, <span class="k">None</span>))</code></pre>
+
+        <div class="phase-tag">Step 4 &middot; scope the list</div>
+        <p>Today the list returns every active tenant call. Filter it: my own calls, plus anyone&rsquo;s published
+        calls. <span class="path">calls.py:138</span></p>
+        <pre class="code"><span class="fname">apps/control_plane/.../api/v1/calls.py &nbsp;(list_calls query)</span><code>select(Call, PatientForm.patient_name)
+    .join(PatientForm, PatientForm.id == Call.form_id)
+    .where(Call.current_status.in_(list(_ACTIVE_STATUSES)))
+    <span class="plus">.where(or_(Call.initiated_by_id == caller.user_id, Call.published.is_(True)))</span>
+    .order_by(Call.created_at.desc())</code></pre>
+
+        <div class="phase-tag">Step 5 &middot; gate the join token</div>
+        <p>The intervene entry point already exists (<code>join-token</code>). Add one guard so a <i>foreign</i> VA
+        can only get a token for a call that is either theirs or published. <span class="path">calls.py:103</span></p>
+        <pre class="code"><span class="fname">apps/control_plane/.../api/v1/calls.py &nbsp;(in join_token)</span><code><span class="plus">if call.initiated_by_id != caller.user_id and not call.published:</span>
+    <span class="plus">raise NotFoundError(message="call not found")  # don't reveal private calls</span>
+identity = <span class="s">f"supervisor-{caller.user_id}"</span>
+token = livekit.mint_join_token(room_name=room_name, identity=identity)</code></pre>
+
+        <div class="phase-tag">Step 6 &middot; intervene actions</div>
+        <p>The <code>intervention_event</code> table (<span class="path">oversight.py</span>) is already modeled but has no
+        endpoints. Add <code>POST /calls/:id/interventions</code> to record a <code>flag / coach / whisper / takeover</code>,
+        gated the same way as the join token. Start with recording the event + the LiveKit join; layer richer
+        operations (barge-in audio, form takeover) behind the <code>type</code> as product defines them.</p>
+
+        <h3>Frontend &mdash; wiring it up</h3>
+        <ul class="clean">
+          <li><b>API client</b> &mdash; add <code>publishCall(callId, published)</code>, <code>listCalls()</code>, <code>getJoinToken(callId)</code>, <code>postIntervention(callId, type)</code> in <span class="path">src/lib/api/</span>, mirroring the existing <code>voiceLab.ts</code> shape.</li>
+          <li><b>State</b> &mdash; introduce a <code>callsSlice</code> in Redux (today only <code>authSlice</code> exists; call state is local component state). Hold the active list + per-call published flag.</li>
+          <li><b>Publish control</b> &mdash; a toggle/button in the owner&rsquo;s active-session UI (<code>SessionPanel</code> actions in <span class="path">VoiceLab.tsx</span>) that calls <code>publishCall</code> and reflects <code>published_at</code>.</li>
+          <li><b>Live Monitoring</b> &mdash; replace <span class="path">mock-data.ts</span> with the real <code>listCalls()</code>; the &ldquo;Visible To All&rdquo; column becomes the publish state (read-only for non-owners, toggle for the owner).</li>
+          <li><b>Intervene / View Live</b> &mdash; wire the existing modals to <code>getJoinToken</code> so a second VA actually joins the room via <code>&lt;LiveKitRoom&gt;</code>; fire <code>postIntervention</code> on takeover.</li>
+          <li><b>Propagation</b> &mdash; other VAs need to <i>learn</i> a call was published. Cheapest first step: poll <code>listCalls()</code> on the monitoring page. Later: reuse the existing SSE pattern (the transcript already streams over SSE) for push updates.</li>
+        </ul>
+
+        <h3>Suggested build order</h3>
+        <div class="steps">
+          <div class="step"><b>Phase 1 &mdash; backend contract</b><p>Steps 1&ndash;5 + tests. Ship the flag, ownership, publish endpoint, scoped list, and join-token gate. This is fully testable with integration tests before any UI exists (mirror <code>test_calls.py</code>).</p></div>
+          <div class="step"><b>Phase 2 &mdash; owner UI</b><p>API client + <code>callsSlice</code> + the publish toggle in the owner&rsquo;s session panel. Owner can now publish/unpublish.</p></div>
+          <div class="step"><b>Phase 3 &mdash; viewer UI</b><p>Point Live Monitoring at the real list, show published calls to other VAs, wire View Live &rarr; join-token.</p></div>
+          <div class="step"><b>Phase 4 &mdash; intervene</b><p>Step 6 endpoint + wire the Intervene modal (join + record event). Define what each intervention <code>type</code> actually does with product.</p></div>
+        </div>
+
+        <h3>Test checklist</h3>
+        <ul class="check">
+          <li>Owner sees their own private call in the list; a second VA does <b>not</b>.</li>
+          <li>After publish, the second VA&rsquo;s list includes the call; before publish it 404s on join-token.</li>
+          <li>Non-owner cannot publish (403); owner can publish and unpublish.</li>
+          <li>Publish and unpublish each append exactly one <code>CallEvent</code>.</li>
+          <li><code>published_at</code> is DB-clock stamped on publish, cleared on unpublish.</li>
+          <li>Intervention on a published call records an <code>InterventionEvent</code> with the joining VA&rsquo;s id.</li>
+          <li>RLS still isolates tenants &mdash; publishing never crosses a tenant boundary.</li>
+        </ul>
+
+        <div class="callout warn">
+          <span class="label">Two things to settle before Phase 1</span>
+          <p><b>(1) PHI / compliance:</b> publishing widens who can see a live transcript (PHI) &mdash; treat it as a
+          disclosure decision that likely needs its own audit event and permission, per the backend guardrails,
+          not a silent query-widening. <b>(2) Frontend substrate:</b> the UI currently drives the ephemeral
+          <code>/voice-lab/sessions</code> path; this plan assumes converging the &ldquo;concurrent call&rdquo; UI onto the
+          persistent <code>/calls</code> path. Confirm that direction first.</p>
+        </div>
+
         <hr />
         <p style="color:var(--text-faint);font-size:13px">
           This document is descriptive of the code as of branch <code>main</code> @ <code>ab28111</code>. Line
-          numbers reference files at that revision. The visibility diagram and all of section 06 are
+          numbers reference files at that revision. The visibility diagram and all of sections 06&ndash;07 are
           <b>proposed design</b>, not shipped behavior.
         </p>
       </div>
