@@ -12,6 +12,8 @@ on:
       - "vera-backend/docker/agent_worker.Dockerfile"
       - "vera-backend/pyproject.toml"
       - "vera-backend/uv.lock"
+      - "deploy/**"
+      - "!deploy/README.md" # doc-only edits shouldn't trigger a deploy
       - ".github/workflows/worker-dev.yml"
       - ".github/workflows/_ci-backend.yml"
       - ".github/workflows/_build-image.yml"

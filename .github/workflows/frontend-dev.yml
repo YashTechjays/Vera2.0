@@ -8,6 +8,8 @@ on:
     branches: [dev]
     paths:
       - "vera-frontend/**"
+      - "deploy/**"
+      - "!deploy/README.md" # doc-only edits shouldn't trigger a deploy
       - ".github/workflows/frontend-dev.yml"
       - ".github/workflows/_ci-frontend.yml"
       - ".github/workflows/_build-image.yml"
