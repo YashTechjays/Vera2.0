@@ -169,8 +169,30 @@ Auth is **keyless** — no SA JSON keys or SSH keys anywhere. All values are sto
 
 | Secret | Example / notes |
 |---|---|
-| `DEV_WIF_PROVIDER` | `projects/<num>/locations/global/workloadIdentityPools/github-pool/providers/github` — verifies the repo's OIDC token; an identifier, not a credential (the WIF condition + SA binding are the real lock). |
+| `DEV_WIF_PROVIDER` | the WIF provider's **full resource name** (see below) |
 | `DEV_DEPLOYER_SA` | `gh-deployer-dev@vera-123456.iam.gserviceaccount.com` — the SA the workflow impersonates via WIF. |
+
+**Getting `DEV_WIF_PROVIDER` right** (a wrong value gives `auth failed … invalid value for "audience" … should be the full resource name`):
+
+- **Format** — the provider's *full resource name*, nothing else:
+  ```
+  projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL_ID>/providers/<PROVIDER_ID>
+  ```
+- **Dummy example:**
+  ```
+  projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github
+  ```
+- **Fetch the exact value** (copy its output verbatim):
+  ```bash
+  gcloud iam workload-identity-pools providers describe <PROVIDER_ID> \
+    --location=global --workload-identity-pool=<POOL_ID> --project=<PROJECT_ID> \
+    --format='value(name)'
+  ```
+- **Gotchas** (each produces the "invalid audience" error):
+  - use the project **NUMBER**, not the project ID;
+  - **no** `https://` or `//iam.googleapis.com/` prefix;
+  - **no** surrounding quotes, **no** trailing space/newline;
+  - it must be a **Secret** (not a Variable), named exactly `DEV_WIF_PROVIDER`.
 
 ### B. Repo Variables (→ **Variables**)
 
