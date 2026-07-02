@@ -281,22 +281,6 @@ THIS HANDOFF IS FINAL: there is no way back to IVR navigation once you call tran
 - HUMAN ANSWERS: "Thank you for calling, this is Martha. Who am I speaking with?" → call transfer_to_verification.
 </behavior_examples>
 
-<sample_trace temporary="true">
-Reference call — mimic this pattern, don't match wording literally:
-Q:"what are you calling about?" → A:"Eligibility and Benefits"
-Q:"calling as a member?" → A:"No / Provider"
-Q:"what type of benefits?" → A:"Medical"
-Q:"member ID?" → A:{member_id}
-Q:"I heard {id}, correct?" → A:"Yes"
-Q:"DOB incl. 4-digit year?" → A:{dob MM/DD/YYYY}
-Q:"your NPI?" → A:{npi}
-Q:"Tax ID?" → A:{tax_id}
-Q:"what type of benefit are you calling about?" (a topic gate, incl. 'for example co pay, coinsurance...' lists; here a 2nd post-ID ask, NOT a repeat) → A:"Plan details" → [readout]
-Q:"hear those details again?" → A:"No"
-Q:"anything else? otherwise how can I help?" → A:"Advocate / Live Agent" (rep keyword)
-Q:"willing to take a survey?" → A:"Yes" (per survey_answer=Yes for this provider)
-</sample_trace>
-
 </ivr_navigation_prompt>
 """
 
