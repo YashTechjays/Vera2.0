@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import uuid7
-from vera_core.models import Call, PatientForm
+from vera_core.models import AuditLog, Call, PatientForm
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 from vera_core.observability.correlation import parse_room_name
@@ -299,3 +299,55 @@ async def test_list_scopes_to_owner_or_published(
     # And the owner still sees their own call.
     owner = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
     assert any(c["id"] == call_id for c in owner.json()["data"])
+
+
+@pytest.mark.asyncio
+async def test_publish_is_owner_only_idempotent_and_audited(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    call_id = created.json()["data"]["id"]
+
+    # Non-owner with calls:publish (supervisor) cannot publish someone else's call.
+    forbidden = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert forbidden.status_code == 403, forbidden.text
+
+    # No-permission user is rejected too.
+    norole = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.norole_token)
+    )
+    assert norole.status_code == 403, norole.text
+
+    async def publish_audit_rows() -> list[AuditLog]:
+        result = await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.publish", AuditLog.resource_id == call_id
+            )
+        )
+        return list(result.scalars().all())
+
+    # Owner publishes.
+    pub = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert pub.status_code == 200, pub.text
+    assert pub.json()["data"]["published"] is True
+
+    # Exactly one publish audit row exists.
+    assert len(await publish_audit_rows()) == 1
+
+    # Idempotent: a second publish is a no-op and adds no audit row.
+    again = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert again.status_code == 200
+    assert len(await publish_audit_rows()) == 1

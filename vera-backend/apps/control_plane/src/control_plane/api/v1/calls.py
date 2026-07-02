@@ -8,15 +8,23 @@ manage permission once the RBAC catalog is extended.
 
 from uuid import UUID
 
-from fastapi import APIRouter
-from sqlalchemy import or_, select
+from fastapi import APIRouter, Request
+from sqlalchemy import func, or_, select
 
-from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
-from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode, NotFoundError
+from control_plane.exceptions import (
+    CustomAPIException,
+    CustomAPIResponse,
+    DefaultExceptionCode,
+    NotFoundError,
+)
+from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import AuditRecord
 from vera_core.models import Call, CallEvent, PatientForm, Tenant
+from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
@@ -123,6 +131,52 @@ async def join_token(
     identity = f"supervisor-{caller.user_id}"
     token = livekit.mint_join_token(room_name=room_name, identity=identity)
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
+
+
+@router.post(
+    "/calls/{call_id}/publish",
+    response_model=ResponseModel[CallSummary],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def publish_call(
+    call_id: UUID,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: Audit,
+    caller: VerifiedIdentity = require("calls:publish"),
+) -> ResponseModel[CallSummary]:
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id))
+    ).scalar_one_or_none()  # RLS scopes to the caller's tenant
+    if call is None:
+        raise NotFoundError(message="call not found")
+    if call.initiated_by_id != caller.user_id:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="only the owner can publish"
+        )
+    if not call.published:  # idempotent, one-way — no un-publish
+        call.published = True
+        call.published_at = func.now()
+        await audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.USER,
+                actor_user_id=caller.user_id,
+                actor_label=caller.email or caller.subject,
+                event_type=AuditEvent.CALL_PUBLISH.value,
+                resource_type="call",
+                resource_id=str(call.id),
+                permission_key="calls:publish",
+                decision="allow",
+                request_id=current_request_id(request),
+            )
+        )
+    return ok(_summary(call, None, caller.user_id))
 
 
 @router.get(
