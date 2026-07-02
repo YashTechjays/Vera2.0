@@ -105,7 +105,7 @@ async def start_voice_session(
         metadata={
             "wait_for_speaker": True,
             "publish_transcript": True,
-            "ivr_navigation": body.ivr_navigation,
+            "enable_ivr_navigation": body.enable_ivr_navigation,
         },
     )
     if outbound is not None:

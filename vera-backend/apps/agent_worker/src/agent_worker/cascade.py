@@ -18,7 +18,7 @@ pieces are silently dropped.
 from typing import Any
 
 from google.genai.types import ThinkingConfig
-from livekit.agents import AgentSession, TurnHandlingOptions
+from livekit.agents import AgentSession
 from livekit.plugins import cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.english import EnglishModel
 
@@ -44,32 +44,6 @@ def cascade_session_kwargs(turn_detector: Any) -> dict[str, Any]:
                 "false_interruption_timeout": 2.0,
                 "resume_false_interruption": True,
             },
-        },
-    }
-
-
-# The endpointing min_delay is the key tunable for IVR patience (see ivr_turn_handling below):
-# lower if answers arrive late/out-of-sequence, raise if the bot answers into a mid-prompt pause.
-_IVR_ENDPOINTING_MIN_DELAY = 0.2
-_IVR_ENDPOINTING_MAX_DELAY = 0.5
-
-
-def ivr_turn_handling() -> TurnHandlingOptions:
-    """Fresh `turn_handling` for the IVR navigator (pass as `Agent(turn_handling=...)`).
-    """
-    return {
-        "endpointing": {
-            "min_delay": _IVR_ENDPOINTING_MIN_DELAY,
-            "max_delay": _IVR_ENDPOINTING_MAX_DELAY,
-        },
-        "preemptive_generation": {"enabled": True},
-        "turn_detection": EnglishModel(),
-        "interruption": {
-            "mode": "vad", 
-            "enabled": True, 
-            "min_words": 3,
-            "false_interruption_timeout": 2.0,
-            "resume_false_interruption": True,
         },
     }
 

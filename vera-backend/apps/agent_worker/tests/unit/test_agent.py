@@ -11,8 +11,8 @@ from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
-from agent_worker.agent import _IVR_MAX_TURNS, IvrNavigatorAgent, VeraAgent, build_agent
-from agent_worker.cascade import ivr_turn_handling
+from agent_worker.agent import VeraAgent, build_agent
+from agent_worker.ivr_agent import _IVR_MAX_TURNS, IvrNavigatorAgent, ivr_turn_handling
 from agent_worker.prompt import build_instructions
 from vera_core.phi import PassthroughPHIBoundary
 from vera_core.schemas import PersonaTweak
@@ -172,7 +172,7 @@ def test_ivr_navigator_wires_patient_turn_config_and_vera_does_not() -> None:
 async def test_press_keypad_sends_dtmf_without_echoing_digits() -> None:
     agent = _navigator()
     participant = _FakeParticipant()
-    with patch("agent_worker.agent.get_job_context", return_value=_job_ctx(participant)):
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
         result = await _press(agent, "1")
     # the tone actually went to the participant...
     assert participant.sent == ["1"]
@@ -186,18 +186,18 @@ async def test_press_keypad_surfaces_publish_failure_instead_of_swallowing() -> 
     # tool runner, looking exactly like "no DTMF". press_keypad must catch it and return.
     agent = _navigator()
     participant = _FakeParticipant(raise_on_publish=True)
-    with patch("agent_worker.agent.get_job_context", return_value=_job_ctx(participant)):
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
         result = await _press(agent, "1")
     assert "could not send" in result.lower()
 
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     boundary = PassthroughPHIBoundary()
-    nav = build_agent({"ivr_navigation": True}, boundary=boundary, session_id="s1")
+    nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")
     assert isinstance(nav, IvrNavigatorAgent)
     # absent or false → the default chat persona
     assert isinstance(build_agent({}, boundary=boundary, session_id="s1"), VeraAgent)
     assert isinstance(
-        build_agent({"ivr_navigation": False}, boundary=boundary, session_id="s1"),
+        build_agent({"enable_ivr_navigation": False}, boundary=boundary, session_id="s1"),
         VeraAgent,
     )
