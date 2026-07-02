@@ -16,6 +16,7 @@ on:
       - ".github/workflows/_ci-backend.yml"
       - ".github/workflows/_build-image.yml"
       - ".github/workflows/_deploy-vm.yml"
+  workflow_dispatch: # manual "Run workflow" trigger (full pipeline, no path filter)
 
 permissions:
   contents: read
