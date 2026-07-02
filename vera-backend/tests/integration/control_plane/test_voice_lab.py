@@ -73,7 +73,26 @@ async def test_browser_session_returns_caller_token_with_wait_metadata(
     assert fake_livekit.dispatch_metadata[before] == {
         "wait_for_speaker": True,
         "publish_transcript": True,
+        "enable_ivr_navigation": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_ivr_navigation_flag_rides_dispatch_metadata(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    before = len(fake_livekit.created)
+    resp = await client.post(
+        "/api/v1/voice-lab/sessions",
+        headers=_auth(rbac_world.admin_token),
+        json={"mode": "browser", "enable_ivr_navigation": True},
+    )
+    assert resp.status_code == 200, resp.text
+    meta = fake_livekit.dispatch_metadata[before]
+    assert meta is not None
+    assert meta["enable_ivr_navigation"] is True
 
 
 @pytest.mark.asyncio

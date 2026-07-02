@@ -101,7 +101,12 @@ async def start_voice_session(
     browser_identity = f"{prefix}{caller.user_id}"
 
     await livekit.create_call_room(
-        room_name, metadata={"wait_for_speaker": True, "publish_transcript": True}
+        room_name,
+        metadata={
+            "wait_for_speaker": True,
+            "publish_transcript": True,
+            "enable_ivr_navigation": body.enable_ivr_navigation,
+        },
     )
     if outbound is not None:
         phone_number, trunk_id = outbound
