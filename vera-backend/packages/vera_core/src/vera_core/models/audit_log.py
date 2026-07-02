@@ -39,6 +39,14 @@ class AuditEvent(enum.StrEnum):
     # A human changed a patient_form's lifecycle status by hand (the dedicated
     # status endpoint). Records from/to status only — statuses are not PHI.
     FORM_STATUS_CHANGE = "form.status_change"
+    # A VA published a call so other tenant VAs can view/intervene (visibility
+    # widening — a disclosure-enabling decision). Ids only, never PHI.
+    CALL_PUBLISH = "call.publish"
+    # A non-owner VA minted a join token for a published call — the actual PHI
+    # disclosure (they can now hear the live transcript). Ids only.
+    CALL_INTERVENE_JOIN = "call.intervene.join"
+    # The owner ejected an intervener from a published call. Ids only.
+    CALL_INTERVENE_REVOKE = "call.intervene.revoke"
 
 
 class AuditLog(Base, TenantScopedMixin):
