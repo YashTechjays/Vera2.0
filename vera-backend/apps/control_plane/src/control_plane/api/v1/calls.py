@@ -117,9 +117,11 @@ async def start_call(
 )
 async def join_token(
     call_id: UUID,
+    request: Request,
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
+    audit: Audit,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
     call = (
@@ -127,6 +129,24 @@ async def join_token(
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
+    if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
+        if not call.published:
+            raise NotFoundError(message="call not found")  # don't reveal a private call
+        await audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.USER,
+                actor_user_id=caller.user_id,
+                actor_label=caller.email or caller.subject,
+                event_type=AuditEvent.CALL_INTERVENE_JOIN.value,
+                resource_type="call",
+                resource_id=str(call.id),
+                permission_key="calls:read",
+                decision="allow",
+                request_id=current_request_id(request),
+                detail={"owner_id": str(call.initiated_by_id)},
+            )
+        )
     room_name = room_name_for_call(tenant_id, call.id)
     identity = f"supervisor-{caller.user_id}"
     token = livekit.mint_join_token(room_name=room_name, identity=identity)

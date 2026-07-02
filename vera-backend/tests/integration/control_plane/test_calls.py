@@ -351,3 +351,41 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     )
     assert again.status_code == 200
     assert len(await publish_audit_rows()) == 1
+
+
+@pytest.mark.asyncio
+async def test_join_token_gated_and_audited_for_non_owner(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    call_id = created.json()["data"]["id"]
+
+    # Non-owner on a PRIVATE call: 404 (existence not revealed).
+    private = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert private.status_code == 404, private.text
+
+    # Owner publishes.
+    await client.post(f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token))
+
+    # Non-owner on a PUBLISHED call: token + one join audit row.
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert joined.status_code == 200, joined.text
+    assert joined.json()["data"]["token"].startswith("faketoken:")
+
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.event_type == "call.intervene.join", AuditLog.resource_id == call_id
+        )
+    )
+    assert len(result.scalars().all()) == 1
