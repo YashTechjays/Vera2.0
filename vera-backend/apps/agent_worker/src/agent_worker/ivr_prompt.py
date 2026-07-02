@@ -131,7 +131,7 @@ Match on INTENT; "e.g." phrasings are examples, not exact strings. Wording and k
 <rule intent="Confirms menu choice — 'you said covered services, right?'" say="Yes"/>
 <rule intent="Coverage LINE — options are insurance PRODUCTS (medical / dental / vision / pharmacy / behavioral health), whenever asked, before OR after IDs" say="Medical"/>
 <rule intent="Provider identifier — NPI, provider ID, or Tax ID (or 'NPI or Tax ID')" say="1234567890 / 1234567890 / 1234567890 per what is asked (NPI if either offered)"/>
-<rule intent="Patient member ID (per ID-entry rule)" say="WGA200236789"/>
+<rule intent="Patient member ID (per ID-entry rule)" say="200236789"/>
 <rule intent="Member-ID letter sub-flow / 'does it start with [letter]?'" say="Per provider_subflows"/>
 <rule intent="First characters of member ID / last name (often phonetic)" say="{requested chars, phonetic if asked}"/>
 <rule intent="Patient date of birth (often '4-digit year'/'8 digits')" say="{date_of_birth}"/>

@@ -18,14 +18,17 @@ from vera_core.schemas import IvrPlaybookConfig
 _ACTIVE = "active"
 
 
-async def resolve_active_playbook(
-    session: AsyncSession, provider_id: UUID | None
-) -> IvrPlaybookConfig | None:
-    """Return the provider's ACTIVE IVR playbook overlay, or None when the provider is unset or
-    has no active playbook. The write path validates `instructions` against IvrPlaybookConfig, so
-    the stored value round-trips cleanly (mirrors calls.py trusting the stored persona_tweak)."""
+async def add_active_playbook_metadata(
+    session: AsyncSession, provider_id: UUID | None, metadata: dict[str, Any]
+) -> None:
+    """When the provider has an ACTIVE IVR playbook, add its non-PHI overlay to dispatch `metadata`
+    under `ivr_playbook`; otherwise (provider unset or no active playbook) leave `metadata`
+    untouched so the worker uses the generic navigator — a missing key is the generic default
+    (see prompt.build_ivr_instructions). The write path validates `instructions` against
+    IvrPlaybookConfig, so the stored value round-trips cleanly; `exclude_none` keeps unset fields
+    out."""
     if provider_id is None:
-        return None
+        return
     instructions = (
         await session.execute(
             select(IvrPlaybook.instructions).where(
@@ -34,17 +37,6 @@ async def resolve_active_playbook(
         )
     ).scalar_one_or_none()
     if instructions is None:
-        return None
-    return IvrPlaybookConfig.model_validate(instructions)
-
-
-async def add_active_playbook_metadata(
-    session: AsyncSession, provider_id: UUID | None, metadata: dict[str, Any]
-) -> None:
-    """When the provider has an active playbook, add its non-PHI overlay to dispatch `metadata`
-    under `ivr_playbook`; otherwise leave metadata untouched so the worker uses the generic
-    navigator. `exclude_none` keeps unset fields out — the worker treats a missing key as the
-    generic default (see prompt.build_ivr_instructions)."""
-    playbook = await resolve_active_playbook(session, provider_id)
-    if playbook is not None:
-        metadata["ivr_playbook"] = playbook.model_dump(exclude_none=True)
+        return
+    playbook = IvrPlaybookConfig.model_validate(instructions)
+    metadata["ivr_playbook"] = playbook.model_dump(exclude_none=True)

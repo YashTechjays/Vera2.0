@@ -63,6 +63,25 @@ function cleanInstructions(instructions: IvrPlaybookInstructions): IvrPlaybookIn
   return cleaned
 }
 
+/** Inline destructive banner for a request error; renders nothing when there's none. */
+function ErrorAlert({ error }: { error: string | null }) {
+  if (!error) return null
+  return (
+    <Alert variant="destructive">
+      <AlertDescription>{error}</AlertDescription>
+    </Alert>
+  )
+}
+
+/** Spinner + "Loading…" line, shared by the provider and playbook sections. */
+function LoadingLine() {
+  return (
+    <p className="flex items-center gap-2 text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" /> Loading…
+    </p>
+  )
+}
+
 export function IvrPlaybooks() {
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
 
@@ -273,15 +292,9 @@ export function IvrPlaybooks() {
           <CardDescription>Payers that playbooks attach to (global reference data).</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {loadError && (
-            <Alert variant="destructive">
-              <AlertDescription>{loadError}</AlertDescription>
-            </Alert>
-          )}
+          <ErrorAlert error={loadError} />
           {loading ? (
-            <p className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" /> Loading…
-            </p>
+            <LoadingLine />
           ) : (
             <form onSubmit={onCreateProvider} className="flex items-end gap-2">
               <div className="flex-1 space-y-1.5">
@@ -299,11 +312,7 @@ export function IvrPlaybooks() {
               </Button>
             </form>
           )}
-          {providerError && (
-            <Alert variant="destructive">
-              <AlertDescription>{providerError}</AlertDescription>
-            </Alert>
-          )}
+          <ErrorAlert error={providerError} />
         </CardContent>
       </Card>
 
@@ -331,15 +340,9 @@ export function IvrPlaybooks() {
 
           {selectedProviderId && (
             <>
-              {playbooksError && (
-                <Alert variant="destructive">
-                  <AlertDescription>{playbooksError}</AlertDescription>
-                </Alert>
-              )}
+              <ErrorAlert error={playbooksError} />
               {playbooksLoading ? (
-                <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" /> Loading…
-                </p>
+                <LoadingLine />
               ) : playbooks.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   No playbooks yet for {selectedProvider?.name}. Create one below.
@@ -424,11 +427,7 @@ export function IvrPlaybooks() {
                     </Select>
                   </div>
                 </div>
-                {editorError && (
-                  <Alert variant="destructive">
-                    <AlertDescription>{editorError}</AlertDescription>
-                  </Alert>
-                )}
+                <ErrorAlert error={editorError} />
                 <Button type="submit" disabled={editorBusy}>
                   {editorBusy ? <Loader2 className="animate-spin" /> : null}
                   {editingId ? "Save changes" : "Create playbook"}
@@ -451,11 +450,7 @@ export function IvrPlaybooks() {
               generic IVR navigator.
             </DialogDescription>
           </DialogHeader>
-          {deleteError && (
-            <Alert variant="destructive">
-              <AlertDescription>{deleteError}</AlertDescription>
-            </Alert>
-          )}
+          <ErrorAlert error={deleteError} />
           <DialogFooter>
             <Button variant="outline" onClick={() => setPendingDelete(null)} disabled={deleteBusy}>
               Cancel
