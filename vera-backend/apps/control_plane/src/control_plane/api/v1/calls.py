@@ -9,7 +9,7 @@ manage permission once the RBAC catalog is extended.
 from uuid import UUID
 
 from fastapi import APIRouter
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
@@ -143,6 +143,7 @@ async def list_calls(
             select(Call, PatientForm.patient_name)
             .join(PatientForm, PatientForm.id == Call.form_id)
             .where(Call.current_status.in_(list(_ACTIVE_STATUSES)))
+            .where(or_(Call.initiated_by_id == caller.user_id, Call.published.is_(True)))
             .order_by(Call.created_at.desc())
         )
     ).all()

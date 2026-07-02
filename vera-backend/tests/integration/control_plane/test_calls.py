@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import RBACWorld
@@ -268,3 +268,34 @@ async def test_create_call_summary_reports_owner_and_private(
     data = created.json()["data"]
     assert data["published"] is False
     assert data["is_owner"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_scopes_to_owner_or_published(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    call_id = created.json()["data"]["id"]
+
+    # A non-owner (supervisor) does NOT see the admin's private call.
+    before = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
+    assert all(c["id"] != call_id for c in before.json()["data"])
+
+    # Flip published directly in the DB (publish endpoint is Task 6).
+    await admin_session.execute(
+        update(Call).where(Call.id == UUID(call_id)).values(published=True)
+    )
+    await admin_session.commit()
+
+    after = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
+    assert any(c["id"] == call_id for c in after.json()["data"])
+    # And the owner still sees their own call.
+    owner = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
+    assert any(c["id"] == call_id for c in owner.json()["data"])
