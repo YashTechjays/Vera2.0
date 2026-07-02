@@ -227,6 +227,7 @@
       <li><a href="#owners" class="nav-link">Who owns what</a></li>
       <li><a href="#next" class="nav-link">What&rsquo;s next</a></li>
       <li><a href="#implement" class="nav-link">Implementation guide</a></li>
+      <li><a href="#ownership-map" class="nav-link">Feature ownership map</a></li>
     </ol>
     <div class="foot">
       Generated from source + git history<br />
@@ -924,6 +925,153 @@ token = livekit.mint_join_token(room_name=room_name, identity=identity)</code></
           numbers reference files at that revision. The visibility diagram and all of sections 06&ndash;07 are
           <b>proposed design</b>, not shipped behavior.
         </p>
+      </div>
+    </section>
+
+    <!-- 8. FEATURE OWNERSHIP MAP -->
+    <section id="ownership-map">
+      <div class="wrap">
+        <h2><span class="num">08</span> Feature ownership map</h2>
+        <p class="sub">Who built which parts of the call system, as a diagram &mdash; derived from git history (branch <code>main</code> @ <code>ab28111</code>).</p>
+
+        <div class="legend">
+          <span><i style="background:linear-gradient(135deg,#5b9dff,#7c5cff)"></i> Tapu Sutradhar &mdash; transport &amp; Voice Lab</span>
+          <span><i style="background:linear-gradient(135deg,#3ddc97,#5b9dff)"></i> Abdullah Al Mamun &mdash; IVR &amp; DTMF</span>
+          <span><i style="background:linear-gradient(135deg,#ffcb6b,#ff8ac4)"></i> YashTechjays &mdash; agent persona &amp; import</span>
+          <span><i style="background:linear-gradient(135deg,#ff8ac4,#7c5cff)"></i> azadvt &mdash; Voice Lab UI &amp; auth</span>
+        </div>
+
+        <h3>Contributor &rarr; feature map</h3>
+        <p>Each hub is a contributor; each leaf is a feature/file they own. Drag to pan, scroll to zoom.</p>
+        <div class="diagram" data-diagram>
+          <div class="bar">
+            <div class="title">Who owns which feature</div>
+            <div class="ctrls">
+              <button data-act="out">&minus;</button>
+              <button data-act="in">+</button>
+              <button data-act="reset" class="wide">reset</button>
+            </div>
+          </div>
+          <div class="canvas">
+<pre class="mermaid">
+flowchart LR
+  classDef tapu fill:#16224a,stroke:#5b9dff,color:#e6ecf5;
+  classDef abd fill:#123026,stroke:#3ddc97,color:#e6ecf5;
+  classDef yash fill:#2b2410,stroke:#ffcb6b,color:#e6ecf5;
+  classDef azad fill:#2a1533,stroke:#ff8ac4,color:#e6ecf5;
+  classDef hub fill:#0d121d,stroke:#8fa3c4,color:#fff,font-weight:bold;
+
+  T(("Tapu")):::hub
+  A(("Abdullah")):::hub
+  Y(("Yash")):::hub
+  Z(("azadvt")):::hub
+
+  T --> T1["Voice Lab page<br/>VoiceLab.tsx · voice_lab.py"]:::tapu
+  T --> T2["Transcript pipeline<br/>publisher · SSE · live panel"]:::tapu
+  T --> T3["LiveKit gateway dial<br/>SIP + tenant-trunk outbound"]:::tapu
+  T --> T4["Backend idle/session timeout"]:::tapu
+  T --> T5["Call hangup / teardown"]:::tapu
+
+  A --> A1["IVR navigator agent<br/>ivr_agent.py · ivr_prompt.py"]:::abd
+  A --> A2["DTMF subsystem<br/>dtmf.py · dialpad · lib/dtmf"]:::abd
+  A --> A3["IVR turn-handling + give-up"]:::abd
+  A --> A4["Verification handoff"]:::abd
+
+  Y --> Y1["Monorepo import<br/>Call model · cascade · correlation"]:::yash
+  Y --> Y2["Agent persona / greeting<br/>main.py · prompt.py"]:::yash
+  Y --> Y3["end_call tool"]:::yash
+  Y --> Y4["Unanswered-call handling"]:::yash
+
+  Z --> Z1["Auth flow + IdleManager<br/>authSlice.ts"]:::azad
+  Z --> Z2["Platform / super-admin login<br/>+ elevation"]:::azad
+  Z --> Z3["Voice Lab UI polish<br/>phone input · a11y · lazy-load"]:::azad
+  Z --> Z4["Invite send-mail toggle"]:::azad
+
+  A2 -. shared file .- T1
+  Y2 -. shared file .- A1
+</pre>
+          </div>
+          <div class="hint">◆ solid = built by that person &nbsp;·&nbsp; dotted = a file multiple people touch (agent.py, VoiceLab.tsx)</div>
+        </div>
+
+        <h3>Timeline &mdash; who shipped what, when</h3>
+        <div class="diagram" data-diagram>
+          <div class="bar">
+            <div class="title">Feature ownership over time</div>
+            <div class="ctrls">
+              <button data-act="out">&minus;</button>
+              <button data-act="in">+</button>
+              <button data-act="reset" class="wide">reset</button>
+            </div>
+          </div>
+          <div class="canvas">
+<pre class="mermaid">
+gantt
+  title Call system — features shipped so far
+  dateFormat YYYY-MM-DD
+  axisFormat %b %d
+  section Tapu
+    Voice Lab page        :2026-06-23, 1d
+    Transcript pipeline   :2026-06-24, 2d
+    LiveKit gateway dial  :2026-06-29, 1d
+    Idle timeout          :2026-06-30, 1d
+  section Abdullah
+    IVR navigator         :2026-06-25, 1d
+    DTMF keypad           :2026-06-29, 1d
+    Verification handoff  :2026-06-30, 1d
+    IVR turn-handling     :2026-07-02, 1d
+  section Yash
+    Monorepo import       :2026-06-19, 1d
+    Persona / greeting    :2026-06-23, 1d
+    end_call tool         :2026-06-29, 1d
+  section azadvt
+    Auth + IdleManager    :2026-06-19, 1d
+    Voice Lab UI polish   :2026-06-29, 1d
+</pre>
+          </div>
+          <div class="hint">◆ dates are commit dates from git log &nbsp;·&nbsp; drag to pan, scroll to zoom</div>
+        </div>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Contributor</th><th>Primary domain</th><th>Key files owned</th><th>~Commits</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#5b9dff,#7c5cff)">TS</span><b>Tapu</b></div></td>
+                <td>Call transport &amp; Voice Lab foundation</td>
+                <td><code>voice_lab.py</code>, <code>livekit_gateway.py</code>, <code>transcript_publisher.py</code>, <code>VoiceLab.tsx</code></td>
+                <td>~67</td>
+              </tr>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#3ddc97,#5b9dff)">AM</span><b>Abdullah</b></div></td>
+                <td>IVR navigator &amp; DTMF (hottest area)</td>
+                <td><code>ivr_agent.py</code>, <code>ivr_prompt.py</code>, <code>dtmf.py</code>, <code>VoiceLabDialpad.tsx</code></td>
+                <td>~31</td>
+              </tr>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#ffcb6b,#ff8ac4)">YT</span><b>Yash</b></div></td>
+                <td>Agent persona/prompt + repo import</td>
+                <td><code>main.py</code>, <code>prompt.py</code>, seeded <code>call.py</code> / <code>cascade.py</code></td>
+                <td>~40</td>
+              </tr>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#ff8ac4,#7c5cff)">AV</span><b>azadvt</b></div></td>
+                <td>Voice Lab UI polish + auth/session</td>
+                <td><code>authSlice.ts</code>, <code>IdleManager.tsx</code>, <code>InviteUserDialog.tsx</code>, VL form UX</td>
+                <td>~54</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <span class="label">Reading the map</span>
+          <p>The <b>stable core</b> (<code>cascade.py</code>, <code>seams.py</code>, the <code>Call</code> model) came in with Yash&rsquo;s
+          import and hasn&rsquo;t changed since. The <b>active churn</b> is Abdullah&rsquo;s IVR/DTMF. The <b>shared
+          files</b> (dotted) are <code>agent.py</code> (Yash&rsquo;s persona + Abdullah&rsquo;s IVR) and <code>VoiceLab.tsx</code>
+          (Tapu founded it, azadvt polished it, Abdullah added the IVR toggle) &mdash; the natural review
+          touchpoints when you change them.</p>
+        </div>
       </div>
     </section>
   </main>
