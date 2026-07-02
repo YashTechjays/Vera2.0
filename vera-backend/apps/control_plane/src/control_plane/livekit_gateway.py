@@ -140,6 +140,13 @@ class LiveKitGateway:
                     return  # room already gone — agent's close path deleted it first
                 raise
 
+    async def remove_participant(self, room_name: str, identity: str) -> None:
+        """Eject a participant from a room (owner revoking an intervener's access)."""
+        async with self._client() as lk:
+            await lk.room.remove_participant(
+                api.RoomParticipantIdentity(room=room_name, identity=identity)
+            )
+
     def mint_join_token(self, room_name: str, identity: str) -> str:
         grants = api.VideoGrants(room_join=True, room=room_name)
         return (

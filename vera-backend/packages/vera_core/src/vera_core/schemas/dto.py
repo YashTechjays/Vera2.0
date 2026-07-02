@@ -25,6 +25,10 @@ class StartCallRequest(BaseModel):
     form_id: UUID
 
 
+class RevokeAccessRequest(BaseModel):
+    target_user_id: UUID
+
+
 class JoinTokenResponse(BaseModel):
     token: str
     url: str

@@ -1,6 +1,6 @@
 """Integration tests for the /calls endpoints.
 
-All three endpoints are tested against a live RLS-enforcing Postgres
+Every endpoint is exercised against a live RLS-enforcing Postgres
 connection with a FakeLiveKit injected in the authz_app fixture (see conftest.py).
 """
 
@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from tests.integration.control_plane.conftest import RBACWorld
+from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
 from vera_core.db import uuid7
 from vera_core.models import AuditLog, Call, PatientForm
 from vera_core.models.authoring import FormSchema, SchemaVersion
@@ -389,3 +389,51 @@ async def test_join_token_gated_and_audited_for_non_owner(
         )
     )
     assert len(result.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_revokes_intervener_access(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    call_id = created.json()["data"]["id"]
+    await client.post(f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token))
+
+    # Non-owner cannot revoke.
+    forbidden = await client.post(
+        f"/api/v1/calls/{call_id}/revoke-access",
+        headers=_auth(rbac_world.supervisor_token),
+        json={"target_user_id": str(uuid4())},
+    )
+    assert forbidden.status_code == 403, forbidden.text
+
+    # Owner revokes a target; LiveKit removal is invoked and audited.
+    target = uuid4()
+    revoked = await client.post(
+        f"/api/v1/calls/{call_id}/revoke-access",
+        headers=_auth(rbac_world.admin_token),
+        json={"target_user_id": str(target)},
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert any(ident == f"supervisor-{target}" for _room, ident in fake_livekit.removed)
+
+    rows = (
+        await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+
+    # The call is still published.
+    row = (await admin_session.execute(select(Call).where(Call.id == UUID(call_id)))).scalar_one()
+    assert row.published is True

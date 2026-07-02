@@ -1,9 +1,12 @@
-"""Verification-call endpoints: create, join-token, active-list.
+"""Verification-call endpoints: create, join-token, active-list, publish,
+and revoke-access.
 
-Auth note (acknowledged stopgap): all three endpoints guard with
-`require("calls:read")` for now — the SPA has no real auth yet, and the
-spec flags this.  A later task tightens POST / join-token to a write /
-manage permission once the RBAC catalog is extended.
+Auth note (acknowledged stopgap): create / join-token / active-list guard
+with `require("calls:read")` for now — the SPA has no real auth yet, and
+the spec flags this. `publish` and `revoke-access` are owner-only actions
+gated on `require("calls:publish")`: the caller must hold the permission
+*and* be the call's `initiated_by_id`, enforced by an explicit 403 check
+in each handler.
 """
 
 from uuid import UUID
@@ -27,7 +30,13 @@ from vera_core.models import Call, CallEvent, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
 from vera_core.observability.correlation import room_name_for_call
-from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
+from vera_core.schemas import (
+    CallSummary,
+    JoinTokenResponse,
+    PersonaTweak,
+    RevokeAccessRequest,
+    StartCallRequest,
+)
 
 router = APIRouter(tags=["calls"])
 
@@ -222,3 +231,51 @@ async def list_calls(
         )
     ).all()
     return ok([_summary(c, name, caller.user_id) for c, name in rows])
+
+
+@router.post(
+    "/calls/{call_id}/revoke-access",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def revoke_access(
+    call_id: UUID,
+    body: RevokeAccessRequest,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    livekit: LiveKit,
+    audit: Audit,
+    caller: VerifiedIdentity = require("calls:publish"),
+) -> ResponseModel[None]:
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id))
+    ).scalar_one_or_none()  # RLS scopes to the caller's tenant
+    if call is None:
+        raise NotFoundError(message="call not found")
+    if call.initiated_by_id != caller.user_id:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="only the owner can revoke access"
+        )
+    room_name = room_name_for_call(tenant_id, call.id)
+    await livekit.remove_participant(room_name, f"supervisor-{body.target_user_id}")
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.CALL_INTERVENE_REVOKE.value,
+            resource_type="call",
+            resource_id=str(call.id),
+            permission_key="calls:publish",
+            decision="allow",
+            request_id=current_request_id(request),
+            detail={"target_user_id": str(body.target_user_id)},
+        )
+    )
+    return ok(None, message="Access revoked.")

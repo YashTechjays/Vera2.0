@@ -1,6 +1,7 @@
 from .dto import (
     CallSummary,
     JoinTokenResponse,
+    RevokeAccessRequest,
     StartCallRequest,
     StartVoiceSessionRequest,
     VoiceSessionResponse,
@@ -15,6 +16,7 @@ __all__ = [
     "FormTemplate",
     "JoinTokenResponse",
     "PersonaTweak",
+    "RevokeAccessRequest",
     "StartCallRequest",
     "StartVoiceSessionRequest",
     "VoiceSessionResponse",
