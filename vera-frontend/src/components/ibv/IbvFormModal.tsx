@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils"
 import { usePermission } from "@/lib/auth/permissions"
 import {
   allowedStatusTransitions,
+  humanizeSegment,
   statusActionLabel,
   statusBadgeClass,
   statusLabel,
@@ -34,6 +35,7 @@ export function IbvFormModal() {
     changeStatus,
     statusError,
     statusChanging,
+    insuranceType,
   } = useIbv()
   const canWrite = usePermission("forms:write")
   const transitions = status ? allowedStatusTransitions(status) : []
@@ -45,6 +47,12 @@ export function IbvFormModal() {
         className="flex max-h-[92vh] w-[96vw] max-w-[1200px] flex-col gap-0 p-0"
       >
         <DialogHeader className="border-b border-border p-4">
+          {/* Form-type eyebrow, from the loaded form's insurance type. */}
+          {insuranceType && (
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {humanizeSegment(insuranceType)}
+            </p>
+          )}
           <DialogTitle>{patientName ? `IBV — ${patientName}` : "IBV Data Entry Form"}</DialogTitle>
           <DialogDescription>
             Insurance Benefit Verification — review captured values and resolve

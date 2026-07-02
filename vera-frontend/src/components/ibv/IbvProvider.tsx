@@ -59,6 +59,9 @@ type IbvContextValue = {
   /** A rejected status change (e.g. open disputes block completion) — shown inline. */
   statusError: string | null
   statusChanging: boolean
+  /** The open form's insurance type (e.g. "infertility_treatment"); null for the
+   *  demo/mock form. Format for display with `humanizeSegment`. */
+  insuranceType: string | null
   /** Increments after each successful save — worklists watch it to refetch. */
   savedTick: number
   modalOpen: boolean
@@ -112,6 +115,7 @@ export function IbvProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<PatientFormStatus | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
   const [statusChanging, setStatusChanging] = useState(false)
+  const [insuranceType, setInsuranceType] = useState<string | null>(null)
 
   const errors = useMemo(() => validateAll(values), [values])
 
@@ -136,6 +140,7 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     setLoading(false)
     setStatus(null)
     setStatusError(null)
+    setInsuranceType(null)
     seed({ ...mockValues, ...seedValues(mockDisputes) }, mockDisputes, "Demo Patient")
     setModalOpen(true)
   }, [seed])
@@ -157,11 +162,13 @@ export function IbvProvider({ children }: { children: ReactNode }) {
       setSaveState("idle")
       setStatus(null)
       setStatusError(null)
+      setInsuranceType(null)
       getPatientForm(id)
         .then((detail) => {
           const { values: v, disputes: d } = adaptDetail(detail)
           seed(v, d, detail.patient_name)
           setStatus(detail.status)
+          setInsuranceType(detail.insurance_type)
         })
         .catch((err) => {
           setError(err instanceof ApiError ? err.message : "Could not load this form.")
@@ -309,6 +316,7 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     changeStatus,
     statusError,
     statusChanging,
+    insuranceType,
     savedTick,
     modalOpen,
     openForm,
