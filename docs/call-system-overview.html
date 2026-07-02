@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Vera 2.0 — Call System Overview</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --bg-soft: #111725;
+    --panel: #151c2c;
+    --panel-2: #1a2233;
+    --border: #263047;
+    --border-soft: #1e2739;
+    --text: #e6ecf5;
+    --text-dim: #9aa7bd;
+    --text-faint: #6b7a94;
+    --accent: #5b9dff;
+    --accent-2: #7c5cff;
+    --green: #3ddc97;
+    --amber: #ffcb6b;
+    --red: #ff6b81;
+    --pink: #ff8ac4;
+    --mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, Consolas, monospace;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    background: radial-gradient(1200px 800px at 15% -10%, #16203a 0%, transparent 55%),
+                radial-gradient(1000px 700px at 110% 0%, #1c1533 0%, transparent 50%),
+                var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Layout */
+  .shell { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  nav.side {
+    position: sticky; top: 0; align-self: start; height: 100vh;
+    border-right: 1px solid var(--border-soft);
+    background: linear-gradient(180deg, rgba(21,28,44,0.9), rgba(11,15,23,0.9));
+    backdrop-filter: blur(6px);
+    padding: 28px 22px; overflow-y: auto;
+  }
+  nav .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 6px; }
+  nav .brand .dot {
+    width: 30px; height: 30px; border-radius: 9px; flex: 0 0 auto;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 0 22px rgba(91,157,255,0.45);
+  }
+  nav .brand b { font-size: 16px; letter-spacing: .2px; }
+  nav .tag { font-size: 11px; color: var(--text-faint); margin: 0 0 26px 41px; text-transform: uppercase; letter-spacing: 1.5px; }
+  nav ol { list-style: none; padding: 0; margin: 0; counter-reset: s; }
+  nav ol li { counter-increment: s; }
+  nav ol li a {
+    display: flex; gap: 12px; align-items: baseline;
+    padding: 9px 12px; border-radius: 9px; color: var(--text-dim);
+    font-size: 13.5px; font-weight: 500; transition: all .15s;
+  }
+  nav ol li a::before { content: counter(s, decimal-leading-zero); color: var(--text-faint); font-family: var(--mono); font-size: 11px; }
+  nav ol li a:hover { background: var(--panel-2); color: var(--text); text-decoration: none; }
+  nav ol li a.active { background: linear-gradient(90deg, rgba(91,157,255,0.16), transparent); color: #fff; border-left: 2px solid var(--accent); }
+  nav .foot { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--border-soft); font-size: 11px; color: var(--text-faint); }
+
+  main { padding: 0 0 120px; max-width: 1080px; }
+  .wrap { padding: 0 56px; }
+
+  /* Hero */
+  header.hero {
+    padding: 72px 56px 46px;
+    border-bottom: 1px solid var(--border-soft);
+    background: linear-gradient(180deg, rgba(124,92,255,0.06), transparent);
+  }
+  header.hero .kicker { font-family: var(--mono); font-size: 12px; letter-spacing: 2px; color: var(--accent); text-transform: uppercase; }
+  header.hero h1 { font-size: 42px; line-height: 1.12; margin: 14px 0 12px; letter-spacing: -0.5px; font-weight: 700; }
+  header.hero h1 span { background: linear-gradient(120deg, var(--accent), var(--pink)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  header.hero p.lead { font-size: 17px; color: var(--text-dim); max-width: 720px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+  .chip { font-family: var(--mono); font-size: 12px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--text-dim); }
+  .chip b { color: var(--text); }
+
+  section { padding-top: 56px; scroll-margin-top: 20px; }
+  section > .wrap > h2 { font-size: 27px; letter-spacing: -0.3px; margin: 0 0 6px; display: flex; align-items: center; gap: 12px; }
+  section > .wrap > h2 .num { font-family: var(--mono); font-size: 14px; color: var(--accent); border: 1px solid var(--border); border-radius: 8px; padding: 3px 9px; background: var(--panel); }
+  section > .wrap > .sub { color: var(--text-faint); margin: 0 0 26px; font-size: 15px; }
+  h3 { font-size: 18px; margin: 34px 0 10px; letter-spacing: -0.2px; }
+  h4 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-faint); margin: 26px 0 10px; }
+  p { color: var(--text); }
+  section p { color: #cdd6e6; }
+
+  code { font-family: var(--mono); font-size: 0.88em; background: var(--panel-2); border: 1px solid var(--border-soft); padding: 1.5px 6px; border-radius: 6px; color: #b9c6df; }
+  .path { color: var(--green); }
+
+  /* Cards */
+  .grid { display: grid; gap: 16px; }
+  .grid.c2 { grid-template-columns: 1fr 1fr; }
+  .grid.c3 { grid-template-columns: repeat(3, 1fr); }
+  .card {
+    background: linear-gradient(180deg, var(--panel), var(--bg-soft));
+    border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 16px; }
+  .card p { margin: 0; font-size: 14px; color: var(--text-dim); }
+  .card .icon { font-size: 20px; margin-bottom: 6px; display: block; }
+
+  .callout { border-left: 3px solid var(--accent); background: linear-gradient(90deg, rgba(91,157,255,0.09), transparent); padding: 14px 18px; border-radius: 0 12px 12px 0; margin: 20px 0; }
+  .callout.warn { border-color: var(--amber); background: linear-gradient(90deg, rgba(255,203,107,0.09), transparent); }
+  .callout.key { border-color: var(--pink); background: linear-gradient(90deg, rgba(255,138,196,0.10), transparent); }
+  .callout b { color: #fff; }
+  .callout p { margin: 6px 0 0; font-size: 14.5px; }
+  .callout .label { font-family: var(--mono); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--pink); }
+  .callout.warn .label { color: var(--amber); }
+  .callout.key .label { color: var(--pink); }
+  .callout:not(.warn):not(.key) .label { color: var(--accent); }
+
+  /* Diagram */
+  .diagram {
+    margin: 22px 0; border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
+    background: repeating-linear-gradient(45deg, #0d121d, #0d121d 12px, #0e1420 12px, #0e1420 24px);
+  }
+  .diagram .bar { display: flex; align-items: center; justify-content: space-between; padding: 11px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .diagram .bar .title { font-size: 13px; font-weight: 600; color: var(--text-dim); display: flex; align-items: center; gap: 9px; }
+  .diagram .bar .title::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .diagram .ctrls { display: flex; gap: 6px; }
+  .diagram .ctrls button {
+    font-family: var(--mono); font-size: 12px; cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim);
+    width: 30px; height: 28px; border-radius: 8px; transition: all .12s;
+  }
+  .diagram .ctrls button:hover { background: var(--accent); color: #06101f; border-color: var(--accent); }
+  .diagram .ctrls button.wide { width: auto; padding: 0 10px; }
+  .diagram .canvas { height: 480px; cursor: grab; }
+  .diagram .canvas:active { cursor: grabbing; }
+  .diagram .canvas .mermaid { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  .diagram .canvas svg { max-width: none !important; }
+  .diagram .hint { font-size: 11px; color: var(--text-faint); padding: 7px 16px; border-top: 1px solid var(--border-soft); font-family: var(--mono); }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-faint); font-weight: 600; }
+  tbody tr:hover { background: rgba(91,157,255,0.04); }
+  td code { font-size: 12px; }
+  .tbl-wrap { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  .tbl-wrap table { margin: 0; }
+  .tbl-wrap th { background: var(--panel); padding-top: 14px; padding-bottom: 14px; }
+
+  .pill { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+  .pill.g { background: rgba(61,220,151,0.14); color: var(--green); }
+  .pill.a { background: rgba(255,203,107,0.14); color: var(--amber); }
+  .pill.r { background: rgba(255,107,129,0.14); color: var(--red); }
+  .pill.b { background: rgba(91,157,255,0.14); color: var(--accent); }
+  .pill.p { background: rgba(255,138,196,0.14); color: var(--pink); }
+  .pill.n { background: var(--panel-2); color: var(--text-faint); }
+
+  ul.clean { list-style: none; padding: 0; }
+  ul.clean li { padding: 7px 0 7px 26px; position: relative; color: #cdd6e6; font-size: 14.5px; border-bottom: 1px solid var(--border-soft); }
+  ul.clean li::before { content: '›'; position: absolute; left: 6px; color: var(--accent); font-weight: 700; }
+  ul.clean li:last-child { border-bottom: none; }
+
+  .steps { counter-reset: step; margin: 18px 0; }
+  .step { position: relative; padding: 4px 0 20px 46px; counter-increment: step; }
+  .step::before { content: counter(step); position: absolute; left: 0; top: 0; width: 30px; height: 30px; border-radius: 9px; background: var(--panel); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .step::after { content: ''; position: absolute; left: 15px; top: 34px; bottom: 0; width: 1px; background: var(--border-soft); }
+  .step:last-child::after { display: none; }
+  .step b { color: #fff; }
+  .step .m { font-family: var(--mono); font-size: 12px; color: var(--green); }
+  .step p { margin: 3px 0 0; font-size: 14px; color: var(--text-dim); }
+
+  .owner { display: flex; align-items: center; gap: 10px; }
+  .avatar { width: 32px; height: 32px; border-radius: 50%; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; color: #06101f; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 10px 0 0; font-size: 12.5px; color: var(--text-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
+
+  .risk { border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin: 12px 0; background: var(--panel); }
+  .risk .q { font-weight: 600; color: #fff; font-size: 15px; }
+  .risk .a { color: var(--text-dim); font-size: 14px; margin-top: 5px; }
+
+  hr { border: none; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: 1fr; }
+    nav.side { display: none; }
+    .wrap, header.hero { padding-left: 24px; padding-right: 24px; }
+    .grid.c2, .grid.c3 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav class="side">
+    <div class="brand"><div class="dot"></div><b>Vera 2.0</b></div>
+    <div class="tag">Call System</div>
+    <ol>
+      <li><a href="#overview" class="nav-link">Overview</a></li>
+      <li><a href="#flow" class="nav-link">Current call flow</a></li>
+      <li><a href="#lifecycle" class="nav-link">State lifecycle</a></li>
+      <li><a href="#model" class="nav-link">Data model</a></li>
+      <li><a href="#owners" class="nav-link">Who owns what</a></li>
+      <li><a href="#next" class="nav-link">What&rsquo;s next</a></li>
+    </ol>
+    <div class="foot">
+      Generated from source + git history<br />
+      branch <code style="font-size:10px">main</code> &middot; 2026-07-02
+    </div>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <div class="kicker">Architecture Walkthrough</div>
+      <h1>How Vera makes a <span>call</span>.</h1>
+      <p class="lead">
+        Vera is a HIPAA-regulated, multi-tenant AI <b>voice</b> platform. An AI agent phones
+        insurance payers to verify patient benefits &mdash; while a human VA (virtual assistant) can
+        listen in and take over. This document traces that call system end to end: how a call is
+        born, the states it moves through, who built each piece, and exactly where today&rsquo;s
+        <b>publish-to-others</b> feature slots in.
+      </p>
+      <div class="chips">
+        <span class="chip"><b>2</b> processes</span>
+        <span class="chip"><b>2</b> call entry paths</span>
+        <span class="chip"><b>10</b> call states</span>
+        <span class="chip">Deepgram &rarr; Gemini &rarr; Cartesia</span>
+        <span class="chip">self-hosted LiveKit OSS</span>
+      </div>
+    </header>
+
+    <!-- 1. OVERVIEW -->
+    <section id="overview">
+      <div class="wrap">
+        <h2><span class="num">01</span> Overview</h2>
+        <p class="sub">The big picture in plain language, before any diagrams.</p>
+
+        <p>
+          A Vera &ldquo;call&rdquo; is one AI agent phone conversation with an insurance payer. The system that
+          runs it is split into <b>two processes that never share memory</b>. They stay in sync purely
+          through a shared naming convention &mdash; there is no shared database session between them.
+        </p>
+
+        <div class="grid c2">
+          <div class="card">
+            <span class="icon">🎛️</span>
+            <h3>Control plane <span class="pill b">FastAPI</span></h3>
+            <p>The gateway. It owns Postgres, authenticates users, creates the LiveKit room, dispatches
+            the agent worker, and mints the browser join token. It handles <b>no audio</b>.</p>
+          </div>
+          <div class="card">
+            <span class="icon">🤖</span>
+            <h3>Agent worker <span class="pill p">LiveKit</span></h3>
+            <p>The voice brain. It joins the room and runs the cascade &mdash; Deepgram (speech-to-text)
+            &rarr; Gemini (the LLM) &rarr; Cartesia (text-to-speech) &mdash; plus PHI redaction at the seams.</p>
+          </div>
+        </div>
+
+        <div class="callout key">
+          <span class="label">The one idea that ties it together</span>
+          <p><b>The room name IS the correlation key.</b> One call = one LiveKit room, named
+          <code>call--&lt;tenant_uuid&gt;--&lt;call_uuid&gt;</code>. Both processes derive the same trace/session id
+          from that string without ever talking to each other. It is built and parsed only through
+          <code>vera_core.observability.correlation</code>.</p>
+        </div>
+
+        <h3>Two call paths exist today &mdash; this is the single most important thing to know</h3>
+        <p>
+          There are <b>two different ways a call gets started</b>, and they behave very differently. Keeping
+          them straight is essential for planning the publish feature.
+        </p>
+        <div class="grid c2">
+          <div class="card" style="border-color:#2d6a4f">
+            <h3><code>POST /api/v1/calls</code> <span class="pill g">persistent</span></h3>
+            <p>The <b>real</b> production flow. Writes a <code>Call</code> row to Postgres, runs the full
+            <code>CallStatus</code> lifecycle, records an append-only event log, and exposes a
+            <code>supervisor-{user_id}</code> join-token so humans can join a live call.
+            <br /><br /><span class="path">calls.py</span></p>
+          </div>
+          <div class="card" style="border-color:#7a4a2d">
+            <h3><code>POST /voice-lab/sessions</code> <span class="pill a">ephemeral</span></h3>
+            <p>A developer/QA harness. Creates a room and dials out but <b>writes no DB rows</b> and
+            &ldquo;never appears in Live Monitoring.&rdquo; Deliberately decoupled from <code>/calls</code>.
+            <b>This is the path the current frontend actually uses.</b>
+            <br /><br /><span class="path">voice_lab.py</span></p>
+          </div>
+        </div>
+        <div class="callout warn">
+          <span class="label">Consequence for the UI</span>
+          <p>The Live Monitoring page &mdash; the call list, the &ldquo;Visible To All&rdquo; toggle, the Intervene
+          and View-Live modals &mdash; is currently driven by <b>mock data</b> (<span class="path">src/lib/mock-data.ts</span>),
+          not the persistent <code>/calls</code> API. The backend has the machinery for real multi-call
+          supervision; the frontend hasn&rsquo;t been wired to it yet.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. CURRENT CALL FLOW -->
+    <section id="flow">
+      <div class="wrap">
+        <h2><span class="num">02</span> Current call flow</h2>
+        <p class="sub">Components, data flow, and the step-by-step of how a call is initiated.</p>
+
+        <h3>Component &amp; data flow</h3>
+        <p>Drag to pan, scroll or use the buttons to zoom. This is the whole system on one canvas.</p>
+
+        <div class="diagram" data-diagram>
+          <div class="bar">
+            <div class="title">System &mdash; components &amp; data flow</div>
+            <div class="ctrls">
+              <button data-act="out">&minus;</button>
+              <button data-act="in">+</button>
+              <button data-act="reset" class="wide">reset</button>
+            </div>
+          </div>
+          <div class="canvas">
+<pre class="mermaid">
+flowchart LR
+  classDef browser fill:#12203a,stroke:#5b9dff,color:#e6ecf5;
+  classDef cp fill:#151c2c,stroke:#7c5cff,color:#e6ecf5;
+  classDef lk fill:#1a1330,stroke:#ff8ac4,color:#e6ecf5;
+  classDef worker fill:#12261d,stroke:#3ddc97,color:#e6ecf5;
+  classDef ext fill:#241a12,stroke:#ffcb6b,color:#e6ecf5;
+  classDef db fill:#0e1420,stroke:#263047,color:#9aa7bd;
+
+  subgraph BR["🖥️ Browser — VA / Supervisor"]
+    UI["VoiceLab.tsx · LiveMonitoring.tsx"]:::browser
+    LKC["LiveKit JS client<br/>(LiveKitRoom)"]:::browser
+  end
+
+  subgraph CP["🎛️ Control Plane (FastAPI)"]
+    direction TB
+    CALLS["POST /api/v1/calls<br/>persistent flow"]:::cp
+    VLAB["POST /voice-lab/sessions<br/>ephemeral flow"]:::cp
+    JOIN["GET /calls/:id/join-token<br/>supervisor-{user_id}"]:::cp
+    GW["LiveKitGateway<br/>create_call_room · mint_join_token"]:::cp
+    DB[("Postgres<br/>Call · CallEvent · CallLineage")]:::db
+  end
+
+  subgraph LK["📡 LiveKit (self-hosted OSS)"]
+    ROOM["Room<br/>call--tenant--call"]:::lk
+  end
+
+  subgraph WK["🤖 Agent Worker"]
+    CAS["Cascade<br/>Deepgram→Gemini→Cartesia"]:::worker
+    SEAM["PHI seams<br/>redact @ STT · hydrate @ TTS"]:::worker
+  end
+
+  PAYER["☎️ Insurance payer<br/>SIP / phone"]:::ext
+
+  UI -->|"start call"| CALLS
+  UI -->|"start session"| VLAB
+  UI -->|"listen / intervene"| JOIN
+  CALLS --> DB
+  CALLS --> GW
+  VLAB --> GW
+  JOIN --> GW
+  GW -->|"create room + dispatch vera-agent"| ROOM
+  GW -->|"JWT join token"| LKC
+  LKC <-->|"audio + transcript"| ROOM
+  ROOM <--> CAS
+  CAS --- SEAM
+  ROOM <-->|"SIP audio"| PAYER
+</pre>
+          </div>
+          <div class="hint">◆ drag to pan &nbsp;·&nbsp; scroll to zoom &nbsp;·&nbsp; colors: blue = control plane, pink = LiveKit, green = worker, amber = external</div>
+        </div>
+
+        <h3>Initiation, step by step (the persistent <code>/calls</code> path)</h3>
+        <div class="steps">
+          <div class="step">
+            <b>Request arrives</b> &nbsp;<span class="m">calls.py:57</span>
+            <p>A <code>StartCallRequest {form_id}</code> hits <code>POST /api/v1/calls</code>. It passes the standard
+            chain: authenticate &rarr; <code>require("calls:read")</code> &rarr; tenant-scoped session (RLS on).</p>
+          </div>
+          <div class="step">
+            <b>Validate the patient form</b> &nbsp;<span class="m">calls.py:64</span>
+            <p>Looks up the <code>PatientForm</code>. Row-level security already constrains the query to the
+            caller&rsquo;s tenant, so a missing form is a clean 404.</p>
+          </div>
+          <div class="step">
+            <b>Create the Call row</b> &nbsp;<span class="m">calls.py:70</span>
+            <p>Inserts <code>Call(tenant_id, form_id, current_status=INITIATED)</code> and flushes to get the
+            UUIDv7 primary key. The tenant is taken from the verified identity &mdash; never from the request.</p>
+          </div>
+          <div class="step">
+            <b>Derive the room name</b> &nbsp;<span class="m">calls.py:74</span>
+            <p><code>room_name_for_call(tenant_id, call.id)</code> &rarr; <code>call--&lt;tenant&gt;--&lt;call&gt;</code>. This is the
+            single string that lets the worker correlate everything with zero shared state.</p>
+          </div>
+          <div class="step">
+            <b>Create room + dispatch the agent</b> &nbsp;<span class="m">calls.py:81</span>
+            <p><code>livekit.create_call_room(...)</code> creates the LiveKit room <b>and</b> explicitly dispatches
+            the <code>vera-agent</code> worker into it. Non-PHI persona config rides along as room metadata.</p>
+          </div>
+          <div class="step">
+            <b>Queue the form &amp; log the event</b> &nbsp;<span class="m">calls.py:82</span>
+            <p>The form flips to <code>IN_QUEUE</code>, and an append-only <code>CallEvent(STATUS, "initiated")</code>
+            row is written &mdash; the beginning of the audit trail. Returns a <code>CallSummary</code>.</p>
+          </div>
+        </div>
+
+        <div class="callout">
+          <span class="label">How a human joins a live call today</span>
+          <p><code>GET /calls/:id/join-token</code> mints a LiveKit token under the identity
+          <code>supervisor-{user_id}</code> scoped to that one room. That is the existing hook the &ldquo;intervene&rdquo;
+          feature will build on. The worker recognizes identity prefixes: <code>caller-</code> (browser mic),
+          <code>monitor-</code> (listen-only), <code>phone-callee</code> (the payer), and <code>supervisor-</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. STATE LIFECYCLE -->
+    <section id="lifecycle">
+      <div class="wrap">
+        <h2><span class="num">03</span> State lifecycle</h2>
+        <p class="sub">The states a call moves through &mdash; and where the new visibility states will overlay.</p>
+
+        <p>
+          A call&rsquo;s status lives in <code>Call.current_status</code>, a maintained enum guarded by a database
+          CHECK constraint (the v1 fix for free-text status drift). Every transition also appends a
+          <code>CallEvent</code> row, so the history is never lost. There are ten states; six are
+          &ldquo;active&rdquo; (shown in the live list) and four are terminal.
+        </p>
+
+        <div class="diagram" data-diagram>
+          <div class="bar">
+            <div class="title">Call status &mdash; state machine</div>
+            <div class="ctrls">
+              <button data-act="out">&minus;</button>
+              <button data-act="in">+</button>
+              <button data-act="reset" class="wide">reset</button>
+            </div>
+          </div>
+          <div class="canvas">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> initiated
+  initiated --> ringing: outbound dial
+  ringing --> ivr: payer menu
+  ringing --> active: human answers
+  ivr --> active: reached a rep
+  active --> waiting: on hold
+  waiting --> active: resumed
+  active --> critical: needs intervention
+  critical --> active: resolved
+  active --> completed: success
+  active --> failed: error
+  ringing --> no_answer: not answered
+  ringing --> busy: line busy
+  completed --> [*]
+  failed --> [*]
+  no_answer --> [*]
+  busy --> [*]
+
+  note right of critical
+    active statuses:
+    initiated · ringing · ivr
+    active · waiting · critical
+  end note
+  note right of completed
+    terminal statuses:
+    completed · failed
+    no_answer · busy
+  end note
+</pre>
+          </div>
+          <div class="hint">◆ drag to pan &nbsp;·&nbsp; scroll to zoom &nbsp;·&nbsp; source: vera_core.models.enums.CallStatus</div>
+        </div>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>State</th><th>Kind</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>initiated</code></td><td><span class="pill b">active</span></td><td>Row created, room not yet entered</td></tr>
+              <tr><td><code>ringing</code></td><td><span class="pill b">active</span></td><td>Outbound SIP call is ringing</td></tr>
+              <tr><td><code>ivr</code></td><td><span class="pill b">active</span></td><td>Navigating the payer&rsquo;s phone menu</td></tr>
+              <tr><td><code>active</code></td><td><span class="pill b">active</span></td><td>Agent is greeting / conversing</td></tr>
+              <tr><td><code>waiting</code></td><td><span class="pill b">active</span></td><td>On hold or paused</td></tr>
+              <tr><td><code>critical</code></td><td><span class="pill a">active</span></td><td>High-risk &mdash; intervention needed</td></tr>
+              <tr><td><code>completed</code></td><td><span class="pill g">terminal</span></td><td>Finished successfully</td></tr>
+              <tr><td><code>failed</code></td><td><span class="pill r">terminal</span></td><td>Ended with an error</td></tr>
+              <tr><td><code>no_answer</code></td><td><span class="pill n">terminal</span></td><td>Outbound call not answered</td></tr>
+              <tr><td><code>busy</code></td><td><span class="pill n">terminal</span></td><td>Outbound line was busy</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout key">
+          <span class="label">Where publish/intervene overlays the lifecycle</span>
+          <p>Visibility is <b>orthogonal</b> to status &mdash; a call can be <code>active</code> and either private or
+          published. So the new feature is best modeled as a <b>separate axis</b>, not new
+          <code>CallStatus</code> values. The diagram below shows that proposed second axis
+          (nothing here is built yet).</p>
+        </div>
+
+        <div class="diagram" data-diagram>
+          <div class="bar">
+            <div class="title">Proposed visibility axis &mdash; private → published → intervene</div>
+            <div class="ctrls">
+              <button data-act="out">&minus;</button>
+              <button data-act="in">+</button>
+              <button data-act="reset" class="wide">reset</button>
+            </div>
+          </div>
+          <div class="canvas">
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> Private: VA starts concurrent call
+  Private --> Published: VA clicks &quot;Publish&quot;
+  Published --> Private: VA unpublishes (optional)
+  state Published {
+    [*] --> Viewable
+    Viewable --> Intervening: other VA joins via supervisor token
+    Intervening --> Viewable: leaves / hands back
+  }
+  Published --> [*]: call ends
+  Private --> [*]: call ends
+
+  note right of Private
+    visible only to
+    initiated_by_id (owner)
+  end note
+  note right of Published
+    visible to all VAs
+    in the tenant
+  end note
+</pre>
+          </div>
+          <div class="hint">◆ PROPOSED — not yet implemented &nbsp;·&nbsp; drag to pan, scroll to zoom</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. DATA MODEL -->
+    <section id="model">
+      <div class="wrap">
+        <h2><span class="num">04</span> Data model</h2>
+        <p class="sub">The tables behind a call &mdash; and the fields the publish feature will lean on.</p>
+
+        <h3><code>call</code> &mdash; the main entity <span class="path">packages/vera_core/.../models/call.py</span></h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>id</code></td><td>UUIDv7 (PK)</td><td>Generated client-side before flush</td></tr>
+              <tr><td><code>tenant_id</code></td><td>UUID (FK)</td><td>RLS key; indexed with status</td></tr>
+              <tr><td><code>form_id</code></td><td>UUID (FK)</td><td>&rarr; <code>patient_form</code></td></tr>
+              <tr><td><code>insurance_provider_id</code></td><td>UUID (FK, null)</td><td>Payer context</td></tr>
+              <tr><td><code>prompt_version_id</code></td><td>UUID (FK, null)</td><td>Pins the exact prompt that ran</td></tr>
+              <tr><td><code>initiated_by_id</code></td><td>UUID (FK, null)</td><td><b>The owning supervisor / VA.</b> Indexed with <code>created_at</code>. &larr; <span class="pill p">publish pivots on this</span></td></tr>
+              <tr><td><code>mode</code></td><td>str(16)</td><td><code>full</code> | <code>retry</code></td></tr>
+              <tr><td><code>current_status</code></td><td>str(32)</td><td>The lifecycle enum (CHECK-guarded)</td></tr>
+              <tr><td><code>provider_call_id</code></td><td>str(128, null)</td><td>Telephony transport id</td></tr>
+              <tr><td><code>call_reference_no</code></td><td>str(128, null)</td><td><span class="pill r">PHI</span> insurance tracking</td></tr>
+              <tr><td><code>rep_info</code></td><td>JSONB</td><td><span class="pill r">PHI</span> rep/callee contact details</td></tr>
+              <tr><td><code>completion_pct</code></td><td>numeric(5,2)</td><td>0&ndash;100</td></tr>
+              <tr><td><code>started_at</code> / <code>ended_at</code></td><td>timestamptz (null)</td><td>Greeting start / room close</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="label">Notably absent</span>
+          <p>There is <b>no</b> <code>published</code> / <code>visibility</code> column today, and the list endpoint
+          (<code>calls.py:138</code>) returns <b>all</b> active tenant calls with no per-VA filter &mdash; even
+          though <code>initiated_by_id</code> exists and is already indexed for exactly this. The scoping slot
+          is pre-cut; nothing fills it yet.</p>
+        </div>
+
+        <div class="grid c3">
+          <div class="card">
+            <h3><code>call_event</code></h3>
+            <p>Append-only status/phase/health log. <code>event_type</code>, lowercase <code>event_value</code>,
+            JSONB <code>detail</code>. The audit trail behind every transition.</p>
+          </div>
+          <div class="card">
+            <h3><code>call_lineage</code></h3>
+            <p><code>retry_call_id</code> &rarr; <code>parent_call_id</code>. Traces retry descent for partial re-runs of a call.</p>
+          </div>
+          <div class="card">
+            <h3><code>intervention_event</code> <span class="pill a">exists, unused</span></h3>
+            <p>In <span class="path">oversight.py</span>: <code>call_id</code>, <code>supervisor_id</code>,
+            <code>type</code> (flag/coach/whisper/takeover). <b>No endpoints yet</b> &mdash; a natural home for intervene actions.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. WHO OWNS WHAT -->
+    <section id="owners">
+      <div class="wrap">
+        <h2><span class="num">05</span> Who owns what</h2>
+        <p class="sub">From git history. The core cascade + Call model arrived pre-built in the monorepo import (2026-06-19); everything below is what was actively built here.</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Contributor</th><th>Owns</th><th>Signature work</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#5b9dff,#7c5cff)">TS</span><b>Tapu&nbsp;Sutradhar</b></div></td>
+                <td>Call transport &amp; <b>Voice Lab foundation</b></td>
+                <td>Founded Voice Lab (<code>0604806</code>), transcript pipeline (publisher + SSE + panel), LiveKit gateway outbound SIP / tenant-trunk dial path, backend-driven idle timeout.</td>
+              </tr>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#3ddc97,#5b9dff)">AM</span><b>Abdullah&nbsp;Al&nbsp;Mamun</b></div></td>
+                <td><b>IVR navigator &amp; DTMF</b> (hottest area)</td>
+                <td>Sole author of <code>ivr_agent.py</code>, <code>ivr_prompt.py</code>, <code>dtmf.py</code> + frontend dialpad. IVR turn-handling &amp; give-up, DTMF hardening (PR #24, through 2026-07-02).</td>
+              </tr>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#ffcb6b,#ff8ac4)">YT</span><b>YashTechjays</b></div></td>
+                <td>Agent-worker <b>persona/prompt</b> + repo import</td>
+                <td>Seeded the monorepo (<code>d92cf41</code>). Per-call instructions + greeting, dispatch metadata, the <code>end_call</code> tool, unanswered-call handling.</td>
+              </tr>
+              <tr>
+                <td><div class="owner"><span class="avatar" style="background:linear-gradient(135deg,#ff8ac4,#7c5cff)">AV</span><b>azadvt</b></div></td>
+                <td>Voice Lab <b>UI polish</b> + auth/session</td>
+                <td>Frontend auth flow &amp; <code>IdleManager</code>, platform/super-admin login &amp; elevation, outbound-form UX (country-code dropdown, phone-input, a11y). <span class="pill p">that&rsquo;s you</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Timeline of major milestones</h3>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Commit</th><th>Author</th><th>Milestone</th></tr></thead>
+            <tbody>
+              <tr><td>06-19</td><td><code>d92cf41</code></td><td>Yash</td><td>Monorepo import &mdash; Call model, cascade, correlation seeded</td></tr>
+              <tr><td>06-19</td><td><code>f1b9939</code></td><td>azadvt</td><td>Frontend auth flow + IdleManager</td></tr>
+              <tr><td>06-23</td><td><code>0604806</code></td><td>Tapu</td><td><b>Voice Lab lands</b> &mdash; browser + outbound session page</td></tr>
+              <tr><td>06-24</td><td><code>4a50f2d</code></td><td>Tapu</td><td>SSE transcript endpoint + live panel</td></tr>
+              <tr><td>06-25</td><td><code>b458f00</code></td><td>Abdullah</td><td><b>Generic IVR navigator agent</b></td></tr>
+              <tr><td>06-29</td><td><code>3286e3b</code></td><td>Tapu</td><td><b>LiveKit gateway</b> tenant-trunk outbound dial</td></tr>
+              <tr><td>06-29</td><td><code>acc4b5f</code></td><td>Yash</td><td><code>end_call</code> auto-terminate tool</td></tr>
+              <tr><td>06-30</td><td><code>653e61b</code></td><td>Tapu</td><td>Backend-driven idle/session timeout</td></tr>
+              <tr><td>07-02</td><td><code>ab28111</code></td><td>Abdullah</td><td><b>IVR turn-handling + give-up</b> (PR #24, current HEAD)</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <span class="label">Stability read</span>
+          <p>The core cascade (<code>cascade.py</code>, <code>seams.py</code>) and the <code>Call</code> model have <b>not
+          changed since import</b> &mdash; they&rsquo;re the stable foundation. The churn is all in IVR/DTMF and
+          Voice Lab UI. The publish feature will touch fresh ground: the <code>Call</code> model and the
+          <code>/calls</code> endpoints, which have been quiet.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. WHAT'S NEXT -->
+    <section id="next">
+      <div class="wrap">
+        <h2><span class="num">06</span> What&rsquo;s next &mdash; publish &amp; intervene</h2>
+        <p class="sub">Where today&rsquo;s feature fits, what changes, and the open questions. (Plan only &mdash; no code yet.)</p>
+
+        <div class="callout key">
+          <span class="label">The feature in one sentence</span>
+          <p>When a VA initiates a concurrent call it is <b>private</b> to that VA by default; once the VA
+          <b>publishes</b> it, other VAs in the tenant can view it, intervene, and operate on it.</p>
+        </div>
+
+        <h3>The first decision: which call path is the substrate?</h3>
+        <p>
+          This is the fork in the road. &ldquo;Concurrent calls&rdquo; with ownership and visibility need
+          <b>persistence and a per-VA scope</b> &mdash; things the ephemeral Voice Lab path deliberately does
+          not have, but the persistent <code>/calls</code> path already does (<code>initiated_by_id</code>, the event
+          log, the join-token). The realistic plan is to <b>build on the persistent path</b> and wire the
+          frontend to it, replacing the mock Live Monitoring data.
+        </p>
+
+        <div class="grid c2">
+          <div class="card">
+            <h4 style="margin-top:0">Backend touchpoints</h4>
+            <ul class="clean">
+              <li>Add a visibility axis to <code>Call</code> &mdash; a <code>published</code> boolean (or a small <code>visibility</code> enum for future <code>team_only</code> states). Independent of <code>current_status</code>.</li>
+              <li>Set <code>initiated_by_id</code> on create (currently left null) so ownership exists to scope on.</li>
+              <li>New <code>PATCH /calls/:id/publish</code> &mdash; owner-only; flips the flag and appends a <code>CallEvent</code> for the audit trail.</li>
+              <li>Scope the list query (<code>calls.py:138</code>): <code>initiated_by_id == me OR published</code>, instead of all active calls.</li>
+              <li>Tighten authz &mdash; the code already flags that <code>calls:read</code> is a stopgap; publish/intervene likely want <code>calls:write</code> / a manage permission.</li>
+              <li>Intervene: give <code>intervention_event</code> (already modeled, unused) its first endpoints, gated so only <b>published</b> calls accept a foreign <code>supervisor-</code> join.</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h4 style="margin-top:0">Frontend touchpoints</h4>
+            <ul class="clean">
+              <li>Introduce a real call-state slice in Redux (today call state is <b>local component state</b> in <code>VoiceLab.tsx</code>; only <code>authSlice</code> exists).</li>
+              <li>A <b>Publish</b> control in the active-session UI (<code>SessionPanel</code> actions) for the owning VA.</li>
+              <li>Point Live Monitoring at the real list API; replace the mock &ldquo;Visible To All&rdquo; toggle + <code>mock-data.ts</code> with server state.</li>
+              <li>Wire the existing <b>Intervene</b> / <b>View Live</b> modals to <code>join-token</code> so a second VA actually joins the room.</li>
+              <li>Support viewing another VA&rsquo;s published call &mdash; today the browser hosts a single <code>&lt;LiveKitRoom&gt;</code> at a time.</li>
+            </ul>
+          </div>
+        </div>
+
+        <h3>Open questions &amp; risks</h3>
+
+        <div class="risk">
+          <div class="q">① Substrate: extend Voice Lab, or wire up the persistent <code>/calls</code> path?</div>
+          <div class="a">Voice Lab is explicitly ephemeral and stateless &mdash; it can&rsquo;t carry ownership or cross-VA visibility. Confirm the intent is to move to (or converge on) the persistent path. This is the biggest scoping question and should be settled before code.</div>
+        </div>
+        <div class="risk">
+          <div class="q">② What can an intervening VA actually <em>do</em>?</div>
+          <div class="a">View-only vs. speak (barge-in) vs. take over the form vs. DTMF. The <code>intervention_event.type</code> enum hints at <code>flag / coach / whisper / takeover</code> &mdash; the product definition of each needs pinning down, and each has a different LiveKit permission + PHI implication.</div>
+        </div>
+        <div class="risk">
+          <div class="q">③ Visibility is a PHI disclosure decision, not just a flag.</div>
+          <div class="a">Publishing widens who can see a live call&rsquo;s transcript (PHI). Per the backend guardrails, &ldquo;who may see this&rdquo; is a compliance call &mdash; publish likely needs its own audit event and possibly its own permission, not a silent query widening.</div>
+        </div>
+        <div class="risk">
+          <div class="q">④ Can visibility live on <code>Call</code>, or does it need a real-time channel?</div>
+          <div class="a">A DB flag answers &ldquo;is it published?&rdquo; but other VAs&rsquo; screens need to <em>learn</em> it changed. Decide between polling the list, an SSE/websocket signal, or a LiveKit data-channel event &mdash; the transcript already streams over SSE, so there&rsquo;s a pattern to reuse.</div>
+        </div>
+        <div class="risk">
+          <div class="q">⑤ Unpublish &amp; ownership edges.</div>
+          <div class="a">Can a VA un-publish while someone is intervening? Who owns a call after takeover? What happens to <code>initiated_by_id</code> on handoff? Define the ownership rules alongside the state machine.</div>
+        </div>
+
+        <hr />
+        <p style="color:var(--text-faint);font-size:13px">
+          This document is descriptive of the code as of branch <code>main</code> @ <code>ab28111</code>. Line
+          numbers reference files at that revision. The visibility diagram and all of section 06 are
+          <b>proposed design</b>, not shipped behavior.
+        </p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'dark',
+    securityLevel: 'loose',
+    fontFamily: "'Inter', sans-serif",
+    themeVariables: {
+      background: '#0d121d',
+      primaryColor: '#151c2c',
+      primaryTextColor: '#e6ecf5',
+      primaryBorderColor: '#5b9dff',
+      lineColor: '#5b7093',
+      secondaryColor: '#1a1330',
+      tertiaryColor: '#12261d',
+      noteBkgColor: '#1a2233',
+      noteTextColor: '#9aa7bd',
+      noteBorderColor: '#263047',
+      fontSize: '15px'
+    },
+    flowchart: { curve: 'basis', padding: 18, nodeSpacing: 45, rankSpacing: 65 },
+    state: { padding: 12 }
+  });
+
+  (async () => {
+    await mermaid.run({ querySelector: '.mermaid' });
+
+    // Attach pan/zoom to each rendered diagram
+    document.querySelectorAll('[data-diagram]').forEach((box) => {
+      const svg = box.querySelector('.canvas svg');
+      if (!svg) return;
+      svg.removeAttribute('height');
+      svg.setAttribute('width', '100%');
+      svg.style.width = '100%';
+      svg.style.height = '100%';
+      svg.style.maxWidth = 'none';
+
+      const pz = svgPanZoom(svg, {
+        zoomEnabled: true,
+        controlIcons: false,
+        fit: true,
+        center: true,
+        minZoom: 0.3,
+        maxZoom: 12,
+        zoomScaleSensitivity: 0.35,
+        dblClickZoomEnabled: false
+      });
+      // Re-fit once layout settles
+      setTimeout(() => { pz.resize(); pz.fit(); pz.center(); }, 60);
+
+      box.querySelectorAll('.ctrls button').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const act = btn.getAttribute('data-act');
+          if (act === 'in') pz.zoomBy(1.3);
+          else if (act === 'out') pz.zoomBy(0.75);
+          else { pz.resize(); pz.fit(); pz.center(); }
+        });
+      });
+    });
+  })();
+
+  // Scroll-spy for the side nav
+  const links = document.querySelectorAll('.nav-link');
+  const sections = [...links].map((l) => document.querySelector(l.getAttribute('href')));
+  const spy = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (e.isIntersecting) {
+        links.forEach((l) => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id));
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach((s) => s && spy.observe(s));
+</script>
+</body>
+</html>
