@@ -289,9 +289,7 @@ async def test_list_scopes_to_owner_or_published(
     assert all(c["id"] != call_id for c in before.json()["data"])
 
     # Flip published directly in the DB (publish endpoint is Task 6).
-    await admin_session.execute(
-        update(Call).where(Call.id == UUID(call_id)).values(published=True)
-    )
+    await admin_session.execute(update(Call).where(Call.id == UUID(call_id)).values(published=True))
     await admin_session.commit()
 
     after = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
@@ -426,12 +424,16 @@ async def test_owner_revokes_intervener_access(
     assert any(ident == f"supervisor-{target}" for _room, ident in fake_livekit.removed)
 
     rows = (
-        await admin_session.execute(
-            select(AuditLog).where(
-                AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
+        (
+            await admin_session.execute(
+                select(AuditLog).where(
+                    AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 1
 
     # The call is still published.
