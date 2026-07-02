@@ -1,0 +1,31 @@
+{
+  "_source": "Single source of truth for the env each component requires. Benchmarked from the proven manual dev deploy: control-plane/worker from the docker-run -e flags in the start scripts, frontend from the cloudbuild secretEnv. Consumed by deploy/verify-*.sh via jq (in CI); the VM never parses this file.",
+  "control-plane": {
+    "required": [
+      "VERA_ENV",
+      "VERA_DATABASE_URL",
+      "VERA_REDIS_URL",
+      "LOCAL_KMS_MASTER_KEY",
+      "VERA_LIVEKIT_URL",
+      "LIVEKIT_API_KEY",
+      "LIVEKIT_API_SECRET",
+      "VERA_FRONTEND_BASE_URL"
+    ]
+  },
+  "worker": {
+    "required": [
+      "VERA_ENV",
+      "LIVEKIT_URL",
+      "LIVEKIT_API_KEY",
+      "LIVEKIT_API_SECRET",
+      "DEEPGRAM_API_KEY",
+      "CARTESIA_API_KEY",
+      "VERA_REDIS_URL"
+    ]
+  },
+  "frontend": {
+    "buildRequired": [
+      "VITE_API_BASE_URL"
+    ]
+  }
+}

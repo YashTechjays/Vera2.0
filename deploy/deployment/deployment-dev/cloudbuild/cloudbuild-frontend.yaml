@@ -1,0 +1,37 @@
+steps:
+  - name: node:22
+    id: install
+    entrypoint: npm
+    args: [ci]
+    dir: vera-frontend
+
+  - name: node:22
+    id: build
+    entrypoint: bash
+    args:
+      - -c
+      - VITE_API_BASE_URL=$$VITE_API_BASE_URL npm run build
+    dir: vera-frontend
+    secretEnv: [VITE_API_BASE_URL]
+    waitFor: [install]
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: sync
+    entrypoint: gsutil
+    args:
+      - -m
+      - rsync
+      - -r
+      - -c
+      - dist/
+      - gs://vera-frontend-$PROJECT_ID/
+    dir: vera-frontend
+    waitFor: [build]
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/vera-api-base-url/versions/latest
+      env: VITE_API_BASE_URL
+
+options:
+  logging: CLOUD_LOGGING_ONLY

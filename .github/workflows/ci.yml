@@ -1,0 +1,24 @@
+name: ci
+
+# CI gate for pull requests and pushes to `main`. On direct pushes to `dev`, CI runs
+# *inside* each component pipeline (`build: needs: ci`) so a red gate blocks build +
+# deploy — so `dev` is intentionally NOT listed here to avoid running CI twice.
+# GitHub only runs workflows under the repo-root `.github/` (the old
+# vera-backend/.github/workflows/ci.yml never executed), so the gate lives here and
+# delegates to the same reusable workflows the component pipelines use.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege: this gate only reads code to lint/typecheck/test.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    uses: ./.github/workflows/_ci-backend.yml
+
+  frontend:
+    uses: ./.github/workflows/_ci-frontend.yml

@@ -1,0 +1,120 @@
+# Reusable: build one component image and push it to Artifact Registry.
+#
+# Keyless auth via Workload Identity Federation (no SA JSON key). The image is
+# tagged with the immutable commit SHA (what deploys pin) plus a moving `dev`
+# tag. Called by the per-component *-dev.yml pipelines, which pass the branch's
+# config IN explicitly (repo-level <BRANCH>_* vars/secrets — GitHub Environments
+# need a paid plan on private repos, so config can't be environment-scoped).
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment label (e.g. test) — labeling only; config is passed in below.
+        required: true
+        type: string
+      component:
+        description: Image name under the AR repo (e.g. control-plane)
+        required: true
+        type: string
+      context:
+        description: Docker build context directory
+        required: true
+        type: string
+      dockerfile:
+        description: Path to the Dockerfile
+        required: true
+        type: string
+      build-args:
+        description: Newline-separated docker build args
+        required: false
+        type: string
+        default: ""
+      gcp_project_id:
+        description: GCP project id
+        required: true
+        type: string
+      gcp_region:
+        description: GCP region (e.g. us-central1)
+        required: true
+        type: string
+      ar_repo:
+        description: Artifact Registry repo name
+        required: true
+        type: string
+    secrets:
+      wif_provider:
+        description: Workload Identity Federation provider resource
+        required: true
+      deployer_sa:
+        description: Deployer service account email to impersonate
+        required: true
+    outputs:
+      image:
+        description: Fully-qualified image pushed (without tag)
+        value: ${{ jobs.build.outputs.image }}
+
+# A newer push supersedes an in-flight build of the same image + ref, so a burst of pushes
+# doesn't stack N parallel builds. Safe to cancel: the image manifest is pushed last, so a
+# cancelled build never yields a deployable tag. Keyed by `inputs.component` so each image
+# (control-plane / agent-worker / frontend) is its own group. Deploy is the one stage we
+# never cancel — see _deploy-vm.yml.
+concurrency:
+  group: build-${{ inputs.component }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Config is passed in by the caller (branch-prefixed repo vars/secrets).
+    permissions:
+      contents: read
+      id-token: write # required for Workload Identity Federation
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.wif_provider }}
+          service_account: ${{ secrets.deployer_sa }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ inputs.gcp_region }}-docker.pkg.dev --quiet
+
+      - id: meta
+        name: Resolve image path
+        run: |
+          echo "image=${{ inputs.gcp_region }}-docker.pkg.dev/${{ inputs.gcp_project_id }}/${{ inputs.ar_repo }}/${{ inputs.component }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          build-args: ${{ inputs.build-args }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Scan the just-built image; fail the build (and thus block deploy) on serious, FIXABLE
+      # vulnerabilities. `ignore-unfixed` keeps it actionable — no noise from base CVEs with no
+      # upstream fix. Trivy pulls the pushed image from AR via the gcloud docker cred helper
+      # configured above.
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"

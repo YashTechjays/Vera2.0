@@ -1,0 +1,73 @@
+# Agent worker — build + auto-deploy to the dev VM on push to `dev`.
+# No migrations here (the control-plane deploy owns the schema).
+
+name: worker-dev
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "vera-backend/apps/agent_worker/**"
+      - "vera-backend/packages/**"
+      - "vera-backend/docker/agent_worker.Dockerfile"
+      - "vera-backend/pyproject.toml"
+      - "vera-backend/uv.lock"
+      - ".github/workflows/worker-dev.yml"
+      - ".github/workflows/_ci-backend.yml"
+      - ".github/workflows/_build-image.yml"
+      - ".github/workflows/_deploy-vm.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: worker-dev
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/_ci-backend.yml
+
+  # Fail-closed before building: every env var the worker requires must be supplied by the
+  # pipeline (mapped in deploy/secrets.map or a render-env built-in). See deploy/env-manifest.json.
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # only checks out + runs a script; no id-token needed
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - run: bash deploy/verify-config.sh worker
+
+  build:
+    needs: [ci, verify]
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      environment: test
+      component: agent-worker
+      context: vera-backend
+      dockerfile: vera-backend/docker/agent_worker.Dockerfile
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}
+
+  deploy:
+    needs: build
+    uses: ./.github/workflows/_deploy-vm.yml
+    with:
+      environment: test
+      service: agent-worker
+      tag_var: WORKER_TAG
+      image_sha: ${{ github.sha }}
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+      secret_prefix: ${{ vars.DEV_SECRET_PREFIX }}
+      vm_name: ${{ vars.DEV_VM_NAME }}
+      vm_zone: ${{ vars.DEV_VM_ZONE }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}

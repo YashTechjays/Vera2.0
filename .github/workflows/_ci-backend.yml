@@ -1,13 +1,31 @@
-name: ci
+# Reusable backend CI gate. Called by `ci.yml` (PRs + main) and, on `dev`, as the
+# first job of the backend component pipelines so build only starts if CI is green.
+
+name: _ci-backend
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+
+# A newer push supersedes an in-flight CI run for the same caller pipeline + ref, so a
+# burst of pushes doesn't stack N parallel runs. Safe to cancel: CI has no durable side
+# effects (ephemeral service DB, no image pushed). `github.workflow` is the caller
+# pipeline, so control-plane and worker CI stay in separate groups (both still run on a
+# shared-core push). Deploy is the one stage we never cancel — see _deploy-vm.yml.
+concurrency:
+  group: ci-backend-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only reads code. Declared here too so a caller that has id-token:write
+# (the component pipelines) can't leak the deploy token into this reusable CI job.
+permissions:
+  contents: read
 
 jobs:
-  gate:
+  backend:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vera-backend
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -23,9 +41,9 @@ jobs:
           --health-timeout 3s
           --health-retries 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
 

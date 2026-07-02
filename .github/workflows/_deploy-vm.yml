@@ -1,0 +1,122 @@
+# Reusable: deploy one component to the dev VM over an IAP SSH tunnel.
+#
+# Keyless end to end: Workload Identity Federation for GCP auth, OS Login +
+# IAP for SSH (no public port 22, no stored SSH keys), and the VM's attached
+# service account pulls from Artifact Registry (no registry password on the box).
+# The repo's docker-compose + remote-deploy.sh are shipped each run so the repo
+# stays the source of truth. Config is passed IN by the per-component *-dev.yml
+# callers (branch-prefixed repo vars/secrets — no GitHub Environments on Free).
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment label (e.g. test) — used for the concurrency group; config is passed in.
+        required: true
+        type: string
+      service:
+        description: Compose service name (frontend | control-plane | agent-worker)
+        required: true
+        type: string
+      tag_var:
+        description: .env var to pin (FRONTEND_TAG | CONTROL_PLANE_TAG | WORKER_TAG)
+        required: true
+        type: string
+      image_sha:
+        description: Image tag (git SHA) to deploy
+        required: true
+        type: string
+      run_migrations:
+        description: Run alembic upgrade head before restart
+        required: false
+        type: boolean
+        default: false
+      gcp_project_id:
+        description: GCP project id
+        required: true
+        type: string
+      gcp_region:
+        description: GCP region (e.g. us-central1)
+        required: true
+        type: string
+      ar_repo:
+        description: Artifact Registry repo name
+        required: true
+        type: string
+      secret_prefix:
+        description: Secret Manager name prefix (e.g. vera-test)
+        required: true
+        type: string
+      vm_name:
+        description: Target VM name
+        required: true
+        type: string
+      vm_zone:
+        description: Target VM zone
+        required: true
+        type: string
+    secrets:
+      wif_provider:
+        description: Workload Identity Federation provider resource
+        required: true
+      deployer_sa:
+        description: Deployer service account email to impersonate
+        required: true
+
+# Serialize every deploy to a given environment's VM: one static group shared by all three
+# components means at most one deploy touches /opt/vera + `docker compose` at a time. Unlike
+# ci/build this NEVER cancels a running deploy (`cancel-in-progress: false`) — killing a
+# deploy mid-SSH would leave the VM in a half-written state. A second deploy queues, then runs.
+concurrency:
+  group: deploy-vm-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Config is passed in by the caller (branch-prefixed repo vars/secrets).
+    permissions:
+      contents: read
+      id-token: write # required for Workload Identity Federation
+    env:
+      VM: ${{ inputs.vm_name }}
+      ZONE: ${{ inputs.vm_zone }}
+      PROJECT: ${{ inputs.gcp_project_id }}
+      REGISTRY_HOST: ${{ inputs.gcp_region }}-docker.pkg.dev
+      AR_IMAGE_BASE: ${{ inputs.gcp_region }}-docker.pkg.dev/${{ inputs.gcp_project_id }}/${{ inputs.ar_repo }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.wif_provider }}
+          service_account: ${{ secrets.deployer_sa }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      # Resolve this service's required env names from env-manifest.json HERE (jq is on the
+      # runner), so the VM never parses JSON — it just receives the list. Frontend has no
+      # runtime `required` list (its env is baked at build), so this is empty for it.
+      - name: Resolve required env
+        id: reqenv
+        run: |
+          case "${{ inputs.service }}" in
+            control-plane) key=control-plane ;;
+            agent-worker)  key=worker ;;
+            frontend)      key=frontend ;;
+            *) echo "unknown service '${{ inputs.service }}'" >&2; exit 1 ;;
+          esac
+          req=$(jq -r --arg k "$key" '.[$k].required // [] | join(" ")' deploy/env-manifest.json)
+          echo "required=$req" >> "$GITHUB_OUTPUT"
+
+      - name: Ship deploy assets to the VM
+        run: |
+          gcloud compute scp --tunnel-through-iap --zone "$ZONE" --project "$PROJECT" \
+            deploy/docker-compose.dev.yml deploy/remote-deploy.sh \
+            deploy/render-env.sh deploy/secrets.map \
+            deploy/verify-app-env.sh "$VM:/opt/vera/"
+
+      - name: Deploy ${{ inputs.service }}
+        run: |
+          gcloud compute ssh "$VM" --tunnel-through-iap --zone "$ZONE" --project "$PROJECT" \
+            --command "bash /opt/vera/remote-deploy.sh '${{ inputs.service }}' '${{ inputs.tag_var }}' '${{ inputs.image_sha }}' '$AR_IMAGE_BASE' '$REGISTRY_HOST' '${{ inputs.secret_prefix }}' '$PROJECT' '${{ inputs.run_migrations }}' '${{ steps.reqenv.outputs.required }}'"
