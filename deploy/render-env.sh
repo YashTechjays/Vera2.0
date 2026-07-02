@@ -40,6 +40,11 @@ while IFS= read -r line; do
   value="$(gcloud secrets versions access latest \
     --project="$PROJECT" --secret="${SECRET_PREFIX}-${basename}")"
 
+  # Compose interpolates ${...}/$VAR in env_file values, so a literal `$` in a secret (e.g. a DB
+  # password) would be eaten and the container would get a truncated value. Escape each `$` as `$$`;
+  # Compose turns `$$` back into one `$`, so the container receives the secret verbatim.
+  value="$(printf '%s' "$value" | sed 's/[$]/$$/g')"
+
   # Fan out one secret to one or more env vars (comma-separated).
   IFS=',' read -ra names <<< "$envvars"
   for name in "${names[@]}"; do

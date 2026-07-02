@@ -145,6 +145,10 @@ idempotent — safe on an existing DB. Migrations build everything else (tables,
    - `<SECRET_PREFIX>-database-url` → user **`vera_user`** (running app; RLS-bound)
    - `<SECRET_PREFIX>-migration-database-url` → user **`postgres`** (migrations only; BYPASSRLS)
 
+   > Secret values may safely contain `$` (or any character). `render-env.sh` escapes `$`→`$$` when
+   > rendering `app.env`, so Docker Compose's `env_file` interpolation passes it through verbatim —
+   > no need to avoid special characters in passwords/keys.
+
 Then the first control-plane deploy runs `alembic upgrade head` and builds the rest.
 
 No hand-placed files or shell exports are needed on the VM: the compose file, `remote-deploy.sh`,
