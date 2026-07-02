@@ -26,6 +26,7 @@ from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
 from vera_core.phi import PHIBoundaryProtocol
+from vera_core.schemas import IvrPlaybookConfig
 
 logger = logging.getLogger("agent_worker")
 
@@ -92,6 +93,7 @@ class IvrNavigatorAgent(Agent):
         boundary: PHIBoundaryProtocol,
         session_id: str,
         *,
+        playbook: IvrPlaybookConfig | None = None,
         verification_instructions: str | None = None,
         verification_greeting: str | None = None,
     ) -> None:
@@ -112,8 +114,9 @@ class IvrNavigatorAgent(Agent):
         self._final_turn_used = False  # spent the one grace turn granted at the cap
         # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
+        # A per-provider playbook (when present) specializes the generic navigator prompt.
         super().__init__(
-            instructions=build_ivr_instructions(),
+            instructions=build_ivr_instructions(playbook),
             tools=[],
             turn_handling=ivr_turn_handling(),
         )

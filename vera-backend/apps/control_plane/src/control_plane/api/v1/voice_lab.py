@@ -12,7 +12,7 @@ interim convention in `calls.py`.
 
 import re
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -29,6 +29,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.livekit_gateway import OutboundDialError
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
@@ -100,14 +101,16 @@ async def start_voice_session(
     prefix = MONITOR_IDENTITY_PREFIX if is_outbound else CALLER_IDENTITY_PREFIX
     browser_identity = f"{prefix}{caller.user_id}"
 
-    await livekit.create_call_room(
-        room_name,
-        metadata={
-            "wait_for_speaker": True,
-            "publish_transcript": True,
-            "enable_ivr_navigation": body.enable_ivr_navigation,
-        },
-    )
+    metadata: dict[str, Any] = {
+        "wait_for_speaker": True,
+        "publish_transcript": True,
+        "ivr_navigation": body.ivr_navigation,
+    }
+    # When navigating, specialize the navigator with the provider's active playbook if one exists;
+    # otherwise the worker falls back to the generic navigator (no ivr_playbook key).
+    if body.ivr_navigation:
+        await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
+    await livekit.create_call_room(room_name, metadata=metadata)
     if outbound is not None:
         phone_number, trunk_id = outbound
         try:

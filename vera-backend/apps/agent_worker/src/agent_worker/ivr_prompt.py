@@ -11,6 +11,10 @@ call_data, so no raw PHI enters the prompt (PHI wall).
 
 from __future__ import annotations
 
+from typing import Any
+
+from vera_core.schemas import IvrPlaybookConfig
+
 # The sentinel the model emits when the correct action is silence. It must never be spoken,
 # so the navigator's tts/transcription nodes strip it (see agent_worker.ivr_agent). Keep this
 # in sync with the literal token in the prompt below — test_ivr_prompt guards against drift.
@@ -176,8 +180,64 @@ THIS HANDOFF IS FINAL: there is no way back to IVR navigation once you call tran
 """
 
 
-def build_ivr_instructions() -> str:
-    """Generic IVR-navigator instructions. The navigator reasons over plain transcript
-    text and drives TTS with plain words, so — unlike the chat persona — it needs no
-    Cartesia readback markup guide."""
-    return IVR_NAVIGATOR_SYSTEM_PROMPT
+# <config> knobs a playbook may override, in emit order. Each maps to a config key the
+# response-rule table already reads ("Per callback_vs_hold", "{rep_keyword}", …); a playbook
+# restates the ones it sets so they supersede the generic defaults.
+_PLAYBOOK_CONFIG_KEYS: tuple[str, ...] = (
+    "transition_trigger",
+    "rep_keyword",
+    "multiple_patients_answer",
+    "survey_answer",
+    "date_scope",
+    "callback_vs_hold",
+    "provider_subflows",
+)
+
+
+def _render_playbook_overrides(playbook: IvrPlaybookConfig) -> str | None:
+    """Render a per-provider playbook as high-priority override sections appended after the
+    base navigator prompt. Only fields the playbook actually sets are emitted: each restates a
+    <config> key with the provider's value (superseding the generic default), and extra_rules
+    is appended as provider-specific guidance. Returns None when the playbook sets nothing."""
+    config_lines = [
+        f"  <{key}>{value}</{key}>"
+        for key in _PLAYBOOK_CONFIG_KEYS
+        if (value := getattr(playbook, key))
+    ]
+    sections: list[str] = []
+    if config_lines:
+        sections.append(
+            '<provider_playbook priority="high">\n'
+            "These provider-specific values OVERRIDE the matching defaults in the <config> "
+            "block above.\n" + "\n".join(config_lines) + "\n</provider_playbook>"
+        )
+    if playbook.extra_rules:
+        sections.append(
+            '<provider_specific_rules priority="high">\n'
+            f"{playbook.extra_rules}\n"
+            "</provider_specific_rules>"
+        )
+    return "\n\n".join(sections) if sections else None
+
+
+def build_ivr_instructions(playbook: IvrPlaybookConfig | None = None) -> str:
+    """Generic IVR-navigator instructions, optionally specialized by a per-provider playbook
+    overlay. The navigator reasons over plain transcript text and drives TTS with plain words,
+    so — unlike the chat persona — it needs no Cartesia readback markup guide. With no playbook
+    (or an empty one) the output is the generic navigator, unchanged."""
+    overrides = _render_playbook_overrides(playbook) if playbook is not None else None
+    if not overrides:
+        return IVR_NAVIGATOR_SYSTEM_PROMPT
+    return f"{IVR_NAVIGATOR_SYSTEM_PROMPT}\n\n{overrides}"
+
+
+def parse_ivr_playbook(value: Any) -> IvrPlaybookConfig | None:
+    """Parse the `ivr_playbook` dispatch-metadata overlay into an IvrPlaybookConfig. Fail-safe:
+    any missing, empty, or malformed value yields None so a bad playbook falls back to the
+    generic navigator instead of killing a live call (mirrors parse_persona_tweak's posture)."""
+    if not value:
+        return None
+    try:
+        return IvrPlaybookConfig.model_validate(value)
+    except ValueError:
+        return None

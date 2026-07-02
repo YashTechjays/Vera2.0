@@ -16,10 +16,12 @@ import "react-phone-number-input/style.css"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
+import { listProviders, type ProviderSummary } from "@/lib/api/insuranceProviders"
 import {
   endVoiceSession,
   startVoiceSession,
@@ -28,6 +30,8 @@ import {
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
 import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
+import { useAppSelector } from "@/store/hooks"
+import { selectIsSuperAdmin } from "@/store/authSlice"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -201,6 +205,11 @@ export function VoiceLab() {
   // The PhoneInput yields an E.164 string (e.g. "+15551234567") or undefined.
   const [phone, setPhone] = useState<string | undefined>(undefined)
   const [ivrNavigation, setIvrNavigation] = useState(false)
+  // Provider picker for IVR-playbook selection — platform-only (the providers list requires a
+  // platform grant), so tenant users just get the generic navigator.
+  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
+  const [providers, setProviders] = useState<ProviderSummary[]>([])
+  const [providerId, setProviderId] = useState("")
   // Only flag the number field once the operator has interacted with it, so an
   // untouched empty form doesn't show a red error.
   const [touched, setTouched] = useState(false)
@@ -213,13 +222,29 @@ export function VoiceLab() {
   const phoneValid = !!phone && isValidPhoneNumber(phone)
   const showPhoneError = touched && !phoneValid
 
+  // Load selectable providers once (platform operators only); a failed load just leaves the
+  // picker with the generic option, so errors are non-fatal here.
+  useEffect(() => {
+    if (!isSuperAdmin) return
+    let cancelled = false
+    listProviders()
+      .then((rows) => {
+        if (!cancelled) setProviders(rows)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [isSuperAdmin])
+
   async function start(mode: VoiceSessionMode) {
     setError(null)
     setPending(mode)
     try {
       const result = await startVoiceSession({
         mode,
-        enable_ivr_navigation: ivrNavigation,
+        ivr_navigation: ivrNavigation,
+        ...(ivrNavigation && providerId ? { insurance_provider_id: providerId } : {}),
         ...(mode === "outbound" ? { phone_number: phone! } : {}),
       })
       setSession(result)
@@ -377,6 +402,27 @@ export function VoiceLab() {
                 onCheckedChange={setIvrNavigation}
               />
             </div>
+
+            {isSuperAdmin && ivrNavigation && (
+              <div className="space-y-1.5 rounded-lg border p-3">
+                <Label htmlFor="ivr-provider">Insurance provider</Label>
+                <Select
+                  id="ivr-provider"
+                  value={providerId}
+                  onChange={(ev) => setProviderId(ev.target.value)}
+                >
+                  <option value="">Generic navigator (no playbook)</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-sm text-muted-foreground">
+                  Uses the provider's active playbook to specialize the navigator, if one exists.
+                </p>
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-3">
               <Button

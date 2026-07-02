@@ -268,11 +268,27 @@ async def test_strip_silence_token_passes_real_speech_through() -> None:
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     boundary = PassthroughPHIBoundary()
-    nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")
+    nav = build_agent({"ivr_navigation": True}, boundary=boundary, session_id="s1")
     assert isinstance(nav, IvrNavigatorAgent)
     # absent or false → the default chat persona
     assert isinstance(build_agent({}, boundary=boundary, session_id="s1"), VeraAgent)
     assert isinstance(
-        build_agent({"enable_ivr_navigation": False}, boundary=boundary, session_id="s1"),
+        build_agent({"ivr_navigation": False}, boundary=boundary, session_id="s1"),
+        VeraAgent,
+    )
+
+
+def test_build_agent_selects_navigator_from_playbook_and_specializes_it() -> None:
+    boundary = PassthroughPHIBoundary()
+    # A playbook overlay alone (no ivr_navigation flag) selects the navigator...
+    nav = build_agent(
+        {"ivr_playbook": {"rep_keyword": "Advocate"}}, boundary=boundary, session_id="s1"
+    )
+    assert isinstance(nav, IvrNavigatorAgent)
+    # ...and its instructions carry the provider override.
+    assert "<rep_keyword>Advocate</rep_keyword>" in nav.instructions
+    # A malformed playbook is fail-safe: it does not select the navigator on its own.
+    assert isinstance(
+        build_agent({"ivr_playbook": {"bogus": "x"}}, boundary=boundary, session_id="s1"),
         VeraAgent,
     )

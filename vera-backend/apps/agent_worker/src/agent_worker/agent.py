@@ -22,6 +22,7 @@ from livekit.agents import (
 )
 
 from agent_worker.ivr_agent import IvrNavigatorAgent
+from agent_worker.ivr_prompt import parse_ivr_playbook
 from agent_worker.prompt import build_instructions, resolve_greeting
 from agent_worker.seams import hydrate_stream, redact_event
 from vera_core.phi import PHIBoundaryProtocol
@@ -96,13 +97,16 @@ def build_agent(
     instructions: str | None = None,
     greeting: str | None = None,
 ) -> Agent:
-    """Pick the agent persona from dispatch metadata: the IVR navigator when
-    `enable_ivr_navigation` is set (a plain agent, no phiwall), otherwise the chat persona
-    (with the PHI-wall overrides and any persona-tweak instructions/greeting)."""
-    if meta.get("enable_ivr_navigation"):
+    """Pick the agent persona from dispatch metadata: the IVR navigator when `ivr_navigation`
+    is set or a per-provider `ivr_playbook` overlay is present (a plain agent, no phiwall, the
+    playbook specializing its prompt), otherwise the chat persona (with the PHI-wall overrides
+    and any persona-tweak instructions/greeting)."""
+    playbook = parse_ivr_playbook(meta.get("ivr_playbook"))
+    if meta.get("ivr_navigation") or playbook is not None:
         return IvrNavigatorAgent(
             boundary,
             session_id,
+            playbook=playbook,
             verification_instructions=instructions,
             verification_greeting=greeting,
         )

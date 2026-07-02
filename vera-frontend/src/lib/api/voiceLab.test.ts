@@ -39,12 +39,12 @@ describe("startVoiceSession", () => {
     })
   })
 
-  it("includes the enable_ivr_navigation flag in the body when set", async () => {
+  it("includes the ivr_navigation flag in the body when set", async () => {
     vi.mocked(apiRequest).mockResolvedValue(response)
-    await startVoiceSession({ mode: "browser", enable_ivr_navigation: true })
+    await startVoiceSession({ mode: "browser", ivr_navigation: true })
     expect(apiRequest).toHaveBeenCalledWith("/voice-lab/sessions", {
       method: "POST",
-      body: { mode: "browser", enable_ivr_navigation: true },
+      body: { mode: "browser", ivr_navigation: true },
     })
   })
 

@@ -15,6 +15,7 @@ from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode, NotFoundError
+from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import Call, CallEvent, PatientForm, Tenant
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
@@ -67,7 +68,12 @@ async def start_call(
     if form is None:
         raise NotFoundError(message="patient form not found")
 
-    call = Call(tenant_id=tenant_id, form_id=form.id, current_status=CallStatus.INITIATED)
+    call = Call(
+        tenant_id=tenant_id,
+        form_id=form.id,
+        current_status=CallStatus.INITIATED,
+        insurance_provider_id=body.insurance_provider_id,
+    )
     session.add(call)
     await session.flush()  # populates call.id (UUIDv7)
 
@@ -78,6 +84,11 @@ async def start_call(
     # persona_tweak is admin-authored, non-PHI config; safe to serialize into metadata.
     tweak = PersonaTweak.model_validate(persona) if persona is not None else PersonaTweak()
     metadata = tweak.model_dump(exclude_none=True)
+    # When navigating the payer IVR, specialize the navigator with the provider's active playbook
+    # (non-PHI overlay) if one exists; otherwise it runs generic. Off preserves today's behavior.
+    if body.ivr_navigation:
+        metadata["ivr_navigation"] = True
+        await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
     await livekit.create_call_room(room_name, metadata=metadata)
     form.status = FormStatus.IN_QUEUE
     session.add(

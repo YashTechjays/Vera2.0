@@ -9,7 +9,7 @@ from datetime import time
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, String, Time
+from sqlalchemy import ForeignKey, Index, String, Time, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -28,6 +28,17 @@ class InsuranceProvider(Base, UUIDv7PKMixin, TimestampMixin):
 
 class IvrPlaybook(Base, UUIDv7PKMixin, TimestampMixin):
     __tablename__ = "ivr_playbook"
+
+    # At most one active playbook per provider — runtime selection resolves exactly one
+    # (mirrors the published-per-family partial unique index on authoring.PromptVersion).
+    __table_args__ = (
+        Index(
+            "uq_ivr_playbook_active_per_provider",
+            "provider_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     provider_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
