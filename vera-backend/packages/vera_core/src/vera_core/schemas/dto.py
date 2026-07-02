@@ -17,6 +17,8 @@ class CallSummary(BaseModel):
     patient_name: str | None = None
     started_at: datetime | None = None
     created_at: datetime
+    published: bool = False
+    is_owner: bool = False
 
 
 class StartCallRequest(BaseModel):

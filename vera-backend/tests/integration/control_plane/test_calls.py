@@ -251,3 +251,20 @@ async def test_new_call_is_private_by_default(
     row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
     assert row.published is False
     assert row.published_at is None
+
+
+@pytest.mark.asyncio
+async def test_create_call_summary_reports_owner_and_private(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    data = created.json()["data"]
+    assert data["published"] is False
+    assert data["is_owner"] is True

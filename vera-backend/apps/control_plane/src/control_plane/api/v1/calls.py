@@ -33,7 +33,7 @@ _ACTIVE_STATUSES = (
 )
 
 
-def _summary(call: Call, patient_name: str | None) -> CallSummary:
+def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
     return CallSummary(
         id=call.id,
         tenant_id=call.tenant_id,
@@ -42,6 +42,8 @@ def _summary(call: Call, patient_name: str | None) -> CallSummary:
         patient_name=patient_name,
         started_at=call.started_at,
         created_at=call.created_at,
+        published=call.published,
+        is_owner=call.initiated_by_id == caller_id,
     )
 
 
@@ -59,7 +61,7 @@ async def start_call(
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
-    _caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
+    caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[CallSummary]:
     form = (
         await session.execute(select(PatientForm).where(PatientForm.id == body.form_id))
@@ -67,7 +69,12 @@ async def start_call(
     if form is None:
         raise NotFoundError(message="patient form not found")
 
-    call = Call(tenant_id=tenant_id, form_id=form.id, current_status=CallStatus.INITIATED)
+    call = Call(
+        tenant_id=tenant_id,
+        form_id=form.id,
+        current_status=CallStatus.INITIATED,
+        initiated_by_id=caller.user_id,
+    )
     session.add(call)
     await session.flush()  # populates call.id (UUIDv7)
 
@@ -88,7 +95,7 @@ async def start_call(
             event_value=CallStatus.INITIATED,
         )
     )
-    return ok(_summary(call, form.patient_name))
+    return ok(_summary(call, form.patient_name, caller.user_id))
 
 
 @router.get(
@@ -129,7 +136,7 @@ async def join_token(
 async def list_calls(
     _tenant_id: TenantId,
     session: TenantSession,
-    _caller: VerifiedIdentity = require("calls:read"),
+    caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[list[CallSummary]]:
     rows = (
         await session.execute(
@@ -139,4 +146,4 @@ async def list_calls(
             .order_by(Call.created_at.desc())
         )
     ).all()
-    return ok([_summary(c, name) for c, name in rows])
+    return ok([_summary(c, name, caller.user_id) for c, name in rows])
