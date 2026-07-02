@@ -339,3 +339,38 @@ async def test_voice_lab_generic_navigator_when_provider_has_no_playbook(
     assert meta is not None
     assert meta["ivr_navigation"] is True
     assert "ivr_playbook" not in meta  # no active playbook → generic navigator
+
+
+async def test_voice_lab_lists_active_providers_for_tenant_user(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A tenant user (calls:read) can read the provider list for the call-start picker; only
+    # active providers are offered.
+    active_id, inactive_id = uuid7(), uuid7()
+    async with admin_sessionmaker() as s, s.begin():
+        s.add(InsuranceProvider(id=active_id, name=f"Sel {active_id.hex[:8]}", status="active"))
+        s.add(
+            InsuranceProvider(id=inactive_id, name=f"Sel {inactive_id.hex[:8]}", status="inactive")
+        )
+    try:
+        resp = await client.get(
+            "/api/v1/voice-lab/insurance-providers", headers=_auth(rbac_world.admin_token)
+        )
+        assert resp.status_code == 200, resp.text
+        ids = [p["id"] for p in resp.json()["data"]]
+        assert str(active_id) in ids
+        assert str(inactive_id) not in ids
+    finally:
+        async with admin_sessionmaker() as s, s.begin():
+            await s.execute(
+                text("DELETE FROM insurance_provider WHERE id IN (:a, :b)").bindparams(
+                    a=active_id, b=inactive_id
+                )
+            )
+
+
+async def test_voice_lab_providers_requires_auth(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/api/v1/voice-lab/insurance-providers")
+    assert resp.status_code == 401

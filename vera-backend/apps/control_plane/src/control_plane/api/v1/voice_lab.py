@@ -13,9 +13,12 @@ interim convention in `calls.py`.
 import re
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
@@ -37,6 +40,7 @@ from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
 from vera_core.integrations.credentials import get_integration_credentials
+from vera_core.models import InsuranceProvider
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.observability.correlation import (
     CALLER_IDENTITY_PREFIX,
@@ -51,6 +55,37 @@ router = APIRouter(tags=["voice-lab"])
 
 # E.164: a leading + and 1-15 digits, first digit non-zero.
 _E164 = re.compile(r"^\+[1-9]\d{1,14}$")
+
+
+class ProviderOption(BaseModel):
+    """Minimal insurance-provider option for the call-start provider picker (non-PHI)."""
+
+    id: UUID
+    name: str
+
+
+@router.get(
+    "/voice-lab/insurance-providers",
+    response_model=ResponseModel[list[ProviderOption]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_call_providers(
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[list[ProviderOption]]:
+    """Active insurance providers a tenant operator can pick when starting an IVR call. The
+    insurance_provider table is GLOBAL (no RLS), so it resolves on the tenant-scoped session;
+    the provider's active playbook is then applied server-side at call start."""
+    rows = (
+        await session.execute(
+            select(InsuranceProvider.id, InsuranceProvider.name)
+            .where(InsuranceProvider.status == "active")
+            .order_by(InsuranceProvider.name)
+        )
+    ).all()
+    return ok([ProviderOption(id=row.id, name=row.name) for row in rows])
 
 
 @router.post(

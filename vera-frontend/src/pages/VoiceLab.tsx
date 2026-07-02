@@ -21,17 +21,16 @@ import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
-import { listProviders, type ProviderSummary } from "@/lib/api/insuranceProviders"
 import {
   endVoiceSession,
+  listCallProviders,
   startVoiceSession,
+  type ProviderOption,
   type VoiceSessionMode,
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
 import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
-import { useAppSelector } from "@/store/hooks"
-import { selectIsSuperAdmin } from "@/store/authSlice"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -205,10 +204,9 @@ export function VoiceLab() {
   // The PhoneInput yields an E.164 string (e.g. "+15551234567") or undefined.
   const [phone, setPhone] = useState<string | undefined>(undefined)
   const [ivrNavigation, setIvrNavigation] = useState(false)
-  // Provider picker for IVR-playbook selection — platform-only (the providers list requires a
-  // platform grant), so tenant users just get the generic navigator.
-  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
-  const [providers, setProviders] = useState<ProviderSummary[]>([])
+  // Provider picker for IVR-playbook selection. The list is readable by any operator with
+  // calls:read (tenant users included); the provider's active playbook is applied server-side.
+  const [providers, setProviders] = useState<ProviderOption[]>([])
   const [providerId, setProviderId] = useState("")
   // Only flag the number field once the operator has interacted with it, so an
   // untouched empty form doesn't show a red error.
@@ -222,12 +220,11 @@ export function VoiceLab() {
   const phoneValid = !!phone && isValidPhoneNumber(phone)
   const showPhoneError = touched && !phoneValid
 
-  // Load selectable providers once (platform operators only); a failed load just leaves the
-  // picker with the generic option, so errors are non-fatal here.
+  // Load selectable providers once; a failed load just leaves the picker with the generic
+  // option, so errors are non-fatal here.
   useEffect(() => {
-    if (!isSuperAdmin) return
     let cancelled = false
-    listProviders()
+    listCallProviders()
       .then((rows) => {
         if (!cancelled) setProviders(rows)
       })
@@ -235,7 +232,7 @@ export function VoiceLab() {
     return () => {
       cancelled = true
     }
-  }, [isSuperAdmin])
+  }, [])
 
   async function start(mode: VoiceSessionMode) {
     setError(null)
@@ -403,7 +400,7 @@ export function VoiceLab() {
               />
             </div>
 
-            {isSuperAdmin && ivrNavigation && (
+            {ivrNavigation && (
               <div className="space-y-1.5 rounded-lg border p-3">
                 <Label htmlFor="ivr-provider">Insurance provider</Label>
                 <Select

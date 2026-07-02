@@ -23,6 +23,18 @@ export type VoiceSessionResponse = {
   mode: VoiceSessionMode
 }
 
+/** An insurance provider the operator can pick when starting an IVR call. */
+export type ProviderOption = {
+  id: string
+  name: string
+}
+
+/** GET /voice-lab/insurance-providers — active providers, readable by any operator with
+ *  calls:read (tenant users included), for the call-start provider picker. */
+export function listCallProviders(): Promise<ProviderOption[]> {
+  return apiRequest<ProviderOption[]>("/voice-lab/insurance-providers")
+}
+
 /** POST /voice-lab/sessions — create an ephemeral room + browser join token. */
 export function startVoiceSession(
   payload: StartVoiceSessionPayload,
