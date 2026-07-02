@@ -34,9 +34,6 @@ services:
     image: ${AR_IMAGE_BASE}/agent-worker:${WORKER_TAG:-dev}
     restart: unless-stopped
     env_file: [./app.env]
-    depends_on:
-      control-plane:
-        condition: service_healthy
 
   frontend:
     image: ${AR_IMAGE_BASE}/frontend:${FRONTEND_TAG:-dev}
@@ -52,5 +49,3 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    depends_on:
-      - control-plane
