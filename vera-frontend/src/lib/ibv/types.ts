@@ -26,6 +26,9 @@ export type IbvField = {
   required_state?: "required" | "optional"
   /** reference/context field the bot never asks and the form renders non-editable */
   read_only?: boolean
+  /** all-or-nothing re-ask unit: on a service group (whole service) or on a CPT row
+   *  (that code alone). Consumed by the prompt builder, not the form UI. */
+  group_integrity?: string
   enum?: string[]
   confirm_only?: boolean
   confirm_value?: unknown

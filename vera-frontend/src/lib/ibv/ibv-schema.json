@@ -733,7 +733,8 @@
         }
        }
       }
-     }
+     },
+     "group_integrity": "all_or_nothing"
     },
     "asc_professional": {
      "type": "object",
@@ -784,7 +785,8 @@
         }
        }
       }
-     }
+     },
+     "group_integrity": "all_or_nothing"
     },
     "asc_facility": {
      "type": "object",
@@ -835,7 +837,8 @@
         }
        }
       }
-     }
+     },
+     "group_integrity": "all_or_nothing"
     }
    },
    "required": [],
@@ -850,7 +853,6 @@
      "type": "object",
      "title": "Diagnostic Testing (Labs, X-ray/Ultrasound)",
      "description": "8 CPT codes verified one-at-a-time; single coverage/copay/prior-auth record.",
-     "group_integrity": "all_or_nothing",
      "prompt_role": "question",
      "verbatim_prompt": "<if_asked_icd10>If rep asks for ICD-10 code or diagnostic code — say: \"The diagnostic code is... Z-three-one... point four-one.\" Then resume where you left off.</if_asked_icd10>\n\n\n<critical_rule name=\"blanket_prior_auth_check\">\n⚠️ If the rep already said prior auth is handled by another department earlier in the call — do NOT ask prior auth for diagnostic codes. Record \"Prior auth department\" instead. Still ask ALL other questions (coverage, copay/coinsurance) as normal.\n</critical_rule>\n\n<critical_warning>\n- ONLY read the codes EXACTLY as written below - do NOT change or improvise codes\n- Every CPT code has EXACTLY 5 digits. Count before you speak.\n- Do NOT provide any coverage information yourself - ONLY ASK the representative\n- IMPORTANT: Say EACH code only ONE TIME. Do NOT repeat the codes list unless the representative asks you to repeat.\n</critical_warning>\n\n<opening_statement>\n<say>Now I need to verify coverage for Labs, X-ray, and Ultrasound services. I have 8 CPT codes to check — I'll say them one by one.</say>\n<wait>WAIT for the representative to acknowledge before reading any codes</wait>\n</opening_statement>\n\n<code_verification>\n<instruction>\nSay codes ONE AT A TIME. Wait for rep to acknowledge each code.\n</instruction>\n\n<code_1>\n<say>Code 1 is: five, eight, three, four, zero.</say>\n<wait>WAIT for rep to acknowledge or write it down</wait>\n</code_1>\n\n<code_2>\n<say>Code 2 is: eight, two, six, seven, zero.</say>\n<wait>WAIT for rep to acknowledge</wait>\n</code_2>\n\n<code_3>\n<say>Code 3 is: eight, three, zero, zero, one.</say>\n<wait>WAIT for rep to acknowledge</wait>\n</code_3>\n\n<code_4>\n<say>Code 4 is: eight, three, zero, zero, two.</say>\n<wait>WAIT for rep to acknowledge</wait>\n</code_4>\n\n<code_5>\n<say>Code 5 is: eight, four, one, four, six.</say>\n<wait>WAIT for rep to acknowledge</wait>\n</code_5>\n\n<code_6>\n<say>Code 6 is: eight, four, four, four, three.</say>\n<wait>WAIT for rep to acknowledge</wait>\n</code_6>\n\n<code_7>\n<say>Code 7 is: eight, four, one, four, four.</say>\n<wait>WAIT for rep to acknowledge</wait>\n</code_7>\n\n<code_8>\n<say>Code 8 is: seven, six, eight, three, zero.</say>\n<wait>WAIT for rep to acknowledge</wait>\n</code_8>\n</code_verification>\n\n<after_all_codes>\n\n<note>\nIf rep says any codes are NOT covered during the sequence, note which ones and ask for copay/prior auth only for the covered codes.\n</note>\n\n<completeness_check>\n⚠️ BEFORE proceeding to copay/prior auth questions, you MUST verify you have a clear coverage status (covered or not covered) for ALL 8 codes:\n1. 58340\n2. 82670\n3. 83001\n4. 83002\n5. 84146\n6. 84443\n7. 84144\n8. 76830\n\nIf ANY code's coverage was unclear, skipped, or not explicitly addressed by the representative, you MUST re-ask specifically about that code before moving on.\nExample: \"I want to make sure I have coverage status for all codes. Can you confirm whether code [X] is covered?\"\n\nOnly after you have a definitive covered/not-covered status for all 8 codes should you proceed to ask about copay/coinsurance and prior authorization.\n</completeness_check>\n</after_all_codes>\n\n<only_if_asked_to_repeat>\nIf asked to repeat ALL codes, restart the sequence from <code_1> through <code_8>, reading each one at a time and waiting for acknowledgment after each code.\n\nIf asked to repeat specific code(s), restart from the first requested code and continue through <code_8>, reading each one at a time and waiting for acknowledgment after each code.\n\nAlways follow the one-at-a-time flow: say one code → wait for acknowledgment → say next code → wait for acknowledgment, etc.\n\n**ICD-10 REMINDER:** If rep asks for ICD-10 code or diagnostic code, say: \"The diagnostic code is... Z-three-one... point four-one.\"\n</only_if_asked_to_repeat>\n\n<record>diagnostic_testing: {{covered, copay_coinsurance, prior_auth}}</record>",
      "icd10": "Z31.41",
@@ -897,7 +899,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       },
       "cpt_2": {
        "type": "object",
@@ -941,7 +944,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       },
       "cpt_3": {
        "type": "object",
@@ -985,7 +989,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       },
       "cpt_4": {
        "type": "object",
@@ -1029,7 +1034,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       },
       "cpt_5": {
        "type": "object",
@@ -1073,7 +1079,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       },
       "cpt_6": {
        "type": "object",
@@ -1117,7 +1124,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       },
       "cpt_7": {
        "type": "object",
@@ -1161,7 +1169,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       },
       "cpt_8": {
        "type": "object",
@@ -1205,7 +1214,8 @@
           "N/A"
          ]
         }
-       }
+       },
+       "group_integrity": "all_or_nothing"
       }
      }
     }
@@ -1332,7 +1342,8 @@
         }
        }
       }
-     }
+     },
+     "group_integrity": "all_or_nothing"
     },
     "sperm_cryo": {
      "type": "object",
@@ -1383,7 +1394,8 @@
         }
        }
       }
-     }
+     },
+     "group_integrity": "all_or_nothing"
     }
    },
    "required": [],
