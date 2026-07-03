@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { AlertTriangle, Loader2, Mic, PhoneOutgoing, Radio } from "lucide-react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import { AlertTriangle, ListTree, Loader2, Mic, PhoneOutgoing, Radio } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -16,6 +16,7 @@ import "react-phone-number-input/style.css"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
@@ -26,6 +27,7 @@ import {
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
+import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -50,7 +52,15 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
 
 /** Renders live connection + participant state. Must live inside <LiveKitRoom>
  *  so the LiveKit room context is available to its hooks. */
-function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => void }) {
+function SessionPanel({
+  mode,
+  onEnd,
+  actions,
+}: {
+  mode: VoiceSessionMode
+  onEnd: () => void
+  actions?: ReactNode
+}) {
   const state = useConnectionState()
   const participants = useParticipants()
   const wasConnected = useRef(false)
@@ -68,7 +78,7 @@ function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => vo
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
         <CardTitle className="flex items-center gap-2">
           <Radio className="size-4 text-emerald-600" />
           Live session
@@ -76,9 +86,12 @@ function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => vo
             ({mode === "browser" ? "in-browser — mic on" : "outbound — listen-only"})
           </span>
         </CardTitle>
-        <Button variant="destructive" onClick={onEnd}>
-          End session
-        </Button>
+        <div className="flex items-center gap-2">
+          {actions}
+          <Button variant="destructive" size="sm" onClick={onEnd}>
+            End session
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="text-sm">
@@ -106,6 +119,10 @@ function SessionPanel({ mode, onEnd }: { mode: VoiceSessionMode; onEnd: () => vo
 function TranscriptPanel({ roomName }: { roomName: string }) {
   const [turns, setTurns] = useState<TranscriptEvent[]>([])
   const [error, setError] = useState<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Follow the newest turn as the transcript grows, but only while the operator is already at
+  // the bottom — don't yank them down if they've scrolled up to re-read earlier turns.
+  const stickToBottom = useRef(true)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -120,12 +137,31 @@ function TranscriptPanel({ roomName }: { roomName: string }) {
     return () => controller.abort()
   }, [roomName])
 
+  // Auto-scroll to the latest turn when new ones stream in (unless the operator scrolled up).
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el && stickToBottom.current) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [turns])
+
+  function handleScroll() {
+    const el = scrollRef.current
+    if (!el) return
+    // Small tolerance so sub-pixel rounding at the very bottom doesn't disable following.
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Live transcript</CardTitle>
       </CardHeader>
-      <CardContent className="max-h-80 space-y-2 overflow-y-auto text-sm">
+      <CardContent
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="max-h-80 space-y-2 overflow-y-auto text-sm"
+      >
         {turns.length === 0 && !error && (
           <p className="text-muted-foreground">Waiting for the conversation…</p>
         )}
@@ -164,6 +200,7 @@ function ErrorAlert({ error }: { error: string | null }) {
 export function VoiceLab() {
   // The PhoneInput yields an E.164 string (e.g. "+15551234567") or undefined.
   const [phone, setPhone] = useState<string | undefined>(undefined)
+  const [ivrNavigation, setIvrNavigation] = useState(false)
   // Only flag the number field once the operator has interacted with it, so an
   // untouched empty form doesn't show a red error.
   const [touched, setTouched] = useState(false)
@@ -180,9 +217,11 @@ export function VoiceLab() {
     setError(null)
     setPending(mode)
     try {
-      const result = await startVoiceSession(
-        mode === "outbound" ? { mode, phone_number: phone! } : { mode },
-      )
+      const result = await startVoiceSession({
+        mode,
+        enable_ivr_navigation: ivrNavigation,
+        ...(mode === "outbound" ? { phone_number: phone! } : {}),
+      })
       setSession(result)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not start the session.")
@@ -228,8 +267,16 @@ export function VoiceLab() {
           video={false}
           onError={(e) => setError(e.message)}
         >
-          <SessionPanel mode={session.mode} onEnd={endSession} />
-          <TranscriptPanel key={session.room_name} roomName={session.room_name} />
+          <div className="space-y-6">
+            <SessionPanel
+              mode={session.mode}
+              onEnd={endSession}
+              actions={
+                session.mode === "outbound" ? <VoiceLabDialpad onError={setError} /> : undefined
+              }
+            />
+            <TranscriptPanel key={session.room_name} roomName={session.room_name} />
+          </div>
           <RoomAudioRenderer />
         </LiveKitRoom>
       ) : (
@@ -302,6 +349,33 @@ export function VoiceLab() {
                   <span className="font-medium text-foreground">{phone || "…"}</span>.
                 </p>
               )}
+            </div>
+
+            <div
+              className={cn(
+                "flex items-center justify-between gap-4 rounded-lg border p-3 transition-colors",
+                ivrNavigation && "border-primary/40 bg-primary/5",
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                  <ListTree className="size-4 text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="ivr-navigation" className="leading-none">
+                    IVR navigation
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    Let the agent navigate the payer's phone menu automatically before reaching
+                    a rep.
+                  </p>
+                </div>
+              </div>
+              <Switch
+                id="ivr-navigation"
+                checked={ivrNavigation}
+                onCheckedChange={setIvrNavigation}
+              />
             </div>
 
             <div className="flex flex-wrap gap-3">
