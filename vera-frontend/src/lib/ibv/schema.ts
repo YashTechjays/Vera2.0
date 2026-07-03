@@ -3,13 +3,9 @@ import type { FlatField, FormValues, IbvField, IbvSchema, IbvSection } from "./t
 
 export const schema = rawSchema as unknown as IbvSchema
 
-/** Options for a select/radio field: explicit enum wins, else constraint_library. */
+/** Options for a select/radio field: the field's inline enum (empty if none). */
 export function resolveOptions(field: IbvField): string[] {
-  if (field.enum?.length) return field.enum
-  if (field.constraint_ref) {
-    return schema.constraint_library[field.constraint_ref]?.values ?? []
-  }
-  return []
+  return field.enum ?? []
 }
 
 /** Effective widget for a leaf field (defaults to text). */

@@ -27,7 +27,6 @@ export type IbvField = {
   /** reference/context field the bot never asks and the form renders non-editable */
   read_only?: boolean
   enum?: string[]
-  constraint_ref?: string
   confirm_only?: boolean
   confirm_value?: unknown
   /** narrative guidance ("prose") is not a data field — not rendered */
@@ -59,15 +58,8 @@ export type IbvSection = {
   no_op?: boolean
 }
 
-export type ConstraintDef = {
-  category?: string
-  values?: string[]
-  description?: string
-}
-
 export type IbvSchema = {
   name: string
-  constraint_library: Record<string, ConstraintDef>
   sections: IbvSection[]
 }
 

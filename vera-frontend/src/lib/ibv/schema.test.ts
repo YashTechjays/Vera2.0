@@ -18,12 +18,7 @@ describe("resolveOptions", () => {
     expect(resolveOptions(f)).toEqual(["A", "B"])
   })
 
-  it("falls back to the constraint library", () => {
-    const f: IbvField = { type: "string", title: "X", constraint_ref: "YES_NO" }
-    expect(resolveOptions(f)).toEqual(["Yes", "No"])
-  })
-
-  it("returns [] when neither is present", () => {
+  it("returns [] when no enum is present", () => {
     expect(resolveOptions({ type: "string", title: "X" })).toEqual([])
   })
 })

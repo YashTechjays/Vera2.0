@@ -23,12 +23,12 @@ Conventions agreed:
 
 | # | Comment | Decision | Status |
 |---|---------|----------|--------|
-| 1 | Remove `constraint_library` (+ `constraint_ref`) | **Skip for now**, keep it. Revisit later. | ⏸️ deferred |
+| 1 | Remove `constraint_library` (+ `constraint_ref`) | **DONE (option b).** Inlined `enum` on all 58 ref-only fields (values from the library), removed all 72 `constraint_ref` + the top-level `constraint_library`. Cleaned code: `resolveOptions`→`field.enum ?? []`; dropped `constraint_ref`/`ConstraintDef`/`constraint_library` from types + obsolete test. 25 tests, tsc, eslint green. | ✅ done |
 | 2 | `chart_number` read-only, not a prompt question | Set `prompt_role: "context"` **and** `read_only: true`. **Applied GLOBALLY (per global-rule principle):** `read_only` added to pre-provided/confirm fields `policy_number` + `patient_name` + `patient_dob` (keep `verifiable_question`); `context` + `read_only` added to the 6 reference fields whose section says "context only / do not ask" — `patient_gender`, `appointment_type`, `appointment_date`, `verified_by`, `verified_at`, `callback_number`. FLAGGED (unchanged): `spouse_partner_name/dob/gender` — patient_information desc says "don't ask" but they carry ask-prompts + Family rules → contradiction for reviewer. `insurance_representative` left as-is (bot collects it). | ✅ done (global) |
 | 3 | `patient_name` context-only | **Keep as-is** (`verifiable_question` + `confirm_only`) for now — the bot's identity-verification step needs it. May add `read_only` later. | ⏸️ keep-as-is |
 | 4 | Cross-section ref in the field key (not `summary`) | Applied to all 5 rules using **dotted paths** (7 refs). Tests green. | ✅ done |
 | 5 | Remove `summary` from `rules` | Removed all 6 `summary` keys from the rule blocks. Tests green (26). | ✅ done |
-| 6 | Remove `constraint_ref` (pairs with #1) | Deferred with #1. | ⏸️ deferred |
+| 6 | Remove `constraint_ref` (pairs with #1) | Done together with #1 — all 72 removed after inlining enums. | ✅ done |
 | 7 | Diagnostic testing → per-CPT groups (covered/copay/coinsurance/prior_auth) | Frontend schema **already** has this shape; backend to catch up later. | ✅ already in FE |
 | 8 | Male-partner section conditionally mandatory | Section-level `rules`: required when `benefit_coverage.coverage_type = Family` **AND** `patient_information.spouse_gender = Male`. Recorded as intent; **enforcement in validation.ts is a follow-up** (section rules not read yet). `rules?` added to `IbvSection` type. Tests + tsc green. | ✅ done |
 
