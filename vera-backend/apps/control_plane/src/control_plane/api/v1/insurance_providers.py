@@ -7,7 +7,7 @@ no tenant context. Mirrors api/v1/prompts.py.
 """
 
 from datetime import datetime, time
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
@@ -27,6 +27,7 @@ from control_plane.idempotency import (
 )
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import InsuranceProvider
+from vera_core.models.enums import ProviderStatus
 
 router = APIRouter(prefix="/insurance-providers", tags=["insurance-providers"])
 
@@ -40,8 +41,8 @@ class CreateProviderRequest(BaseModel):
     working_hour_start: time | None = None
     working_hour_end: time | None = None
     # A mis-cased status would silently drop the provider from every status == "active"
-    # lookup (e.g. the Voice Lab picker), so only the two known values are admitted.
-    status: Literal["active", "inactive"] = "active"
+    # lookup (e.g. the Voice Lab picker), so only the catalog values are admitted.
+    status: ProviderStatus = ProviderStatus.ACTIVE
 
 
 class ProviderSummary(BaseModel):

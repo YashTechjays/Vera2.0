@@ -343,11 +343,16 @@ async def test_platform_routes_forbidden_for_tenant(
 
 
 async def _seed_provider_with_active_playbook(
-    sm: async_sessionmaker[AsyncSession], instructions: dict[str, str]
+    sm: async_sessionmaker[AsyncSession],
+    instructions: dict[str, str],
+    *,
+    provider_status: str = "active",
 ) -> tuple[UUID, UUID]:
     provider_id, playbook_id = uuid7(), uuid7()
     async with sm() as s, s.begin():
-        s.add(InsuranceProvider(id=provider_id, name=f"Sel {provider_id.hex[:8]}", status="active"))
+        s.add(
+            InsuranceProvider(id=provider_id, name=f"Sel {provider_id.hex}", status=provider_status)
+        )
         await s.flush()
         s.add(
             IvrPlaybook(
@@ -449,6 +454,42 @@ async def test_malformed_active_playbook_degrades_to_generic_navigator(
             )
 
 
+async def test_inactive_provider_never_steers_a_call(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    fake_livekit: FakeLiveKit,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # An inactive provider with an active playbook must not steer the call — the provider-status
+    # gate lives in add_active_playbook_metadata, so Voice Lab (no provider check of its own) is
+    # covered centrally.
+    provider_id, playbook_id = await _seed_provider_with_active_playbook(
+        admin_sessionmaker, {"rep_keyword": "Advocate"}, provider_status="inactive"
+    )
+    try:
+        resp = await client.post(
+            "/api/v1/voice-lab/sessions",
+            headers=_auth(rbac_world.admin_token),
+            json={
+                "mode": "browser",
+                "enable_ivr_navigation": True,
+                "insurance_provider_id": str(provider_id),
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        meta = fake_livekit.dispatch_metadata[-1]
+        assert meta is not None
+        assert "ivr_playbook" not in meta
+    finally:
+        async with admin_sessionmaker() as s, s.begin():
+            await s.execute(
+                text("DELETE FROM ivr_playbook WHERE id = :i").bindparams(i=playbook_id)
+            )
+            await s.execute(
+                text("DELETE FROM insurance_provider WHERE id = :i").bindparams(i=provider_id)
+            )
+
+
 async def test_voice_lab_lists_active_providers_for_tenant_user(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -458,10 +499,8 @@ async def test_voice_lab_lists_active_providers_for_tenant_user(
     # active providers are offered.
     active_id, inactive_id = uuid7(), uuid7()
     async with admin_sessionmaker() as s, s.begin():
-        s.add(InsuranceProvider(id=active_id, name=f"Sel {active_id.hex[:8]}", status="active"))
-        s.add(
-            InsuranceProvider(id=inactive_id, name=f"Sel {inactive_id.hex[:8]}", status="inactive")
-        )
+        s.add(InsuranceProvider(id=active_id, name=f"Sel {active_id.hex}", status="active"))
+        s.add(InsuranceProvider(id=inactive_id, name=f"Sel {inactive_id.hex}", status="inactive"))
     try:
         resp = await client.get(
             "/api/v1/voice-lab/insurance-providers", headers=_auth(rbac_world.admin_token)

@@ -18,7 +18,7 @@ from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode, No
 from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
-from vera_core.models.enums import CallEventType, CallStatus, FormStatus
+from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
 
@@ -68,16 +68,18 @@ async def start_call(
     if form is None:
         raise NotFoundError(message="patient form not found")
     if body.insurance_provider_id is not None:
-        # Checked here so an unknown id is a 404, not an FK violation → 500 at flush.
-        provider_exists = (
+        # Require an ACTIVE provider here: an unknown id would otherwise FK-violate → 500 at
+        # flush, and an inactive provider must not start a call (nor let its playbook steer one).
+        provider_active = (
             await session.execute(
                 select(InsuranceProvider.id).where(
-                    InsuranceProvider.id == body.insurance_provider_id
+                    InsuranceProvider.id == body.insurance_provider_id,
+                    InsuranceProvider.status == ProviderStatus.ACTIVE,
                 )
             )
         ).scalar_one_or_none()
-        if provider_exists is None:
-            raise NotFoundError(message="unknown insurance provider")
+        if provider_active is None:
+            raise NotFoundError(message="unknown or inactive insurance provider")
 
     call = Call(
         tenant_id=tenant_id,

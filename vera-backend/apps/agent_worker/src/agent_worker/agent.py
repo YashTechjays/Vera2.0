@@ -107,7 +107,7 @@ def build_agent(
         return IvrNavigatorAgent(
             boundary,
             session_id,
-            playbook=parse_ivr_playbook(meta.get("ivr_playbook")),
+            playbook=parse_ivr_playbook(meta),
             verification_instructions=instructions,
             verification_greeting=greeting,
         )

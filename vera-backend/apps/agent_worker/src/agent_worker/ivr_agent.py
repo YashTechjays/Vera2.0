@@ -38,9 +38,10 @@ _IVR_MAX_TURNS = 60
 
 # Matches the silence sentinel ([[SILENT]]) AND the label the model sometimes emits by mistake
 # ("SILENCE_TOKEN:", from the prompt's silence contract) — case-insensitive, tolerant of a stray
-# colon/whitespace. Stripping both keeps a "stay silent" turn from ever reaching TTS when the
-# model's rendering of the sentinel drifts (the historical leak was a spoken "SILENCE_TOKEN:").
-_SILENCE_RE = re.compile(rf"{re.escape(SILENCE_TOKEN)}|SILENCE_TOKEN\s*:?", re.IGNORECASE)
+# colon/whitespace. The label alternative is word-boundaried so it can only strip the standalone
+# label, never splice a word that merely contains it (e.g. "SILENCE_TOKENS"). Stripping both keeps
+# a "stay silent" turn from reaching TTS when the model's rendering of the sentinel drifts.
+_SILENCE_RE = re.compile(rf"{re.escape(SILENCE_TOKEN)}|\bSILENCE_TOKEN\b\s*:?", re.IGNORECASE)
 
 
 async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:

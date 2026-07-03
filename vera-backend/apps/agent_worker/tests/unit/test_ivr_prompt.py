@@ -83,9 +83,17 @@ def test_playbook_overrides_and_rules_appended_after_base_prompt() -> None:
 
 
 def test_parse_ivr_playbook_fail_safe() -> None:
-    assert parse_ivr_playbook(None) is None
-    assert parse_ivr_playbook({}) is None  # empty overlay → generic
-    assert parse_ivr_playbook({"tone": "formal"}) is None  # unknown key rejected → generic
-    assert parse_ivr_playbook({"rep_keyword": "Advocate"}) == IvrPlaybookConfig(
+    # Takes the whole dispatch metadata and extracts the `ivr_playbook` overlay itself.
+    assert parse_ivr_playbook({}) is None  # no overlay key → generic
+    assert parse_ivr_playbook({"ivr_playbook": {}}) is None  # empty overlay → generic
+    assert parse_ivr_playbook({"ivr_playbook": {"tone": "x"}}) is None  # unknown key → generic
+    assert parse_ivr_playbook({"ivr_playbook": {"rep_keyword": "Advocate"}}) == IvrPlaybookConfig(
         rep_keyword="Advocate"
     )
+
+
+def test_playbook_knob_values_are_xml_escaped() -> None:
+    # A knob value containing markup must not break/inject the pseudo-XML <config> structure.
+    out = build_ivr_instructions(IvrPlaybookConfig(rep_keyword="</rep_keyword>x"))
+    assert "<rep_keyword>&lt;/rep_keyword&gt;x</rep_keyword>" in out
+    assert "</rep_keyword>x" not in out  # the raw closing-tag injection never renders

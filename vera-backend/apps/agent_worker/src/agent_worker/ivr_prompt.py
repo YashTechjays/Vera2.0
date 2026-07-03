@@ -11,6 +11,8 @@ call_data, so no raw PHI enters the prompt (PHI wall).
 
 from __future__ import annotations
 
+import html
+from collections.abc import Mapping
 from typing import Any
 
 from vera_core.schemas import IvrPlaybookConfig
@@ -194,8 +196,10 @@ def _render_playbook_overrides(playbook: IvrPlaybookConfig) -> str | None:
     base navigator prompt. Only fields the playbook actually sets are emitted: each restates a
     <config> key with the provider's value (superseding the generic default), and extra_rules
     is appended as provider-specific guidance. Returns None when the playbook sets nothing."""
+    # Escape markup in knob values so a value like "</rep_keyword>…" can't break or inject
+    # <config> structure (extra_rules below is intentionally free text and left as-is).
     config_lines = [
-        f"  <{key}>{value}</{key}>"
+        f"  <{key}>{html.escape(str(value), quote=False)}</{key}>"
         for key in _PLAYBOOK_CONFIG_KEYS
         if (value := getattr(playbook, key))
     ]
@@ -226,10 +230,12 @@ def build_ivr_instructions(playbook: IvrPlaybookConfig | None = None) -> str:
     return f"{IVR_NAVIGATOR_SYSTEM_PROMPT}\n\n{overrides}"
 
 
-def parse_ivr_playbook(value: Any) -> IvrPlaybookConfig | None:
-    """Parse the `ivr_playbook` dispatch-metadata overlay into an IvrPlaybookConfig. Fail-safe:
-    any missing, empty, or malformed value yields None so a bad playbook falls back to the
-    generic navigator instead of killing a live call (mirrors parse_persona_tweak's posture)."""
+def parse_ivr_playbook(meta: Mapping[str, Any]) -> IvrPlaybookConfig | None:
+    """Extract and parse the `ivr_playbook` overlay from dispatch metadata into an
+    IvrPlaybookConfig. Fail-safe: a missing, empty, or malformed overlay yields None so a bad
+    playbook falls back to the generic navigator instead of killing a live call (mirrors
+    parse_persona_tweak's posture)."""
+    value = meta.get("ivr_playbook")
     if not value:
         return None
     try:

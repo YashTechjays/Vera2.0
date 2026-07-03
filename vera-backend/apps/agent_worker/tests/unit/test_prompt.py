@@ -1,3 +1,7 @@
+import logging
+
+import pytest
+
 from agent_worker.prompt import (
     CARTESIA_MARKUP_GUIDE,
     GREETING,
@@ -56,5 +60,15 @@ def test_parse_persona_tweak_ignores_sibling_dispatch_keys() -> None:
         ' "ivr_playbook": {"rep_keyword": "Advocate"}}'
     )
     assert parse_persona_tweak(metadata) == PersonaTweak(greeting="Hi")
-    # no nested key (e.g. Voice Lab) → no-op tweak, not an error
+    # no nested key (e.g. Voice Lab dispatch) → no-op tweak, not an error
     assert parse_persona_tweak('{"wait_for_speaker": true}') == PersonaTweak()
+
+
+def test_parse_persona_tweak_accepts_legacy_flat_shape(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Deploy skew: a not-yet-updated control plane sends the flat shape (the whole dict IS
+    # the tweak). Accept it for one release and warn, so the persona isn't silently dropped.
+    with caplog.at_level(logging.WARNING, logger="agent_worker"):
+        assert parse_persona_tweak('{"greeting": "Hi"}') == PersonaTweak(greeting="Hi")
+    assert any("legacy flat metadata shape" in r.message for r in caplog.records)

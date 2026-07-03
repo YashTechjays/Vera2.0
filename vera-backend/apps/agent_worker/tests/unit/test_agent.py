@@ -278,6 +278,16 @@ async def test_strip_silence_token_swallows_label_variant() -> None:
     assert await _drain(_strip_silence_token(_astream("[[SILENT]] Provider"))) == " Provider"
 
 
+@pytest.mark.asyncio
+async def test_strip_silence_token_label_is_word_boundaried() -> None:
+    # The label alternative must strip only the standalone label, never a word that merely
+    # contains it — an unanchored regex turned "the SILENCE_TOKENS list" into "the S list".
+    assert (
+        await _drain(_strip_silence_token(_astream("read the SILENCE_TOKENS list")))
+        == "read the SILENCE_TOKENS list"
+    )
+
+
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     boundary = PassthroughPHIBoundary()
     nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")

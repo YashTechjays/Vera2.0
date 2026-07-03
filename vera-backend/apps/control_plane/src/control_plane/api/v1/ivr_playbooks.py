@@ -10,7 +10,7 @@ prompts.py::publish_version. Authorization is platform_require; no tenant contex
 """
 
 from datetime import datetime
-from typing import Annotated, Final, Literal
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
@@ -36,6 +36,7 @@ from control_plane.idempotency import (
 )
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import InsuranceProvider, IvrPlaybook
+from vera_core.models.enums import PlaybookStatus
 from vera_core.schemas import IvrPlaybookConfig
 
 router = APIRouter(prefix="/ivr-playbooks", tags=["ivr-playbooks"])
@@ -44,19 +45,14 @@ PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
 _READ = platform_require("platform:ivr_playbooks:read")
 _WRITE = platform_require("platform:ivr_playbooks:write")
 
-_ACTIVE: Final = "active"
-_INACTIVE: Final = "inactive"
-
-# Free-form status strings silently disable a playbook (the active lookup, the partial
-# unique index, and _demote_active all compare against exactly "active"), so the API
-# only admits the two known values.
-PlaybookStatus = Literal["active", "inactive"]
-
 
 class CreatePlaybookRequest(BaseModel):
     provider_id: UUID
     instructions: IvrPlaybookConfig
-    status: PlaybookStatus = _ACTIVE
+    # Free-form status strings silently disable a playbook (the active lookup, the partial
+    # unique index, and _demote_active all compare against exactly "active"), so the API
+    # only admits the catalog values.
+    status: PlaybookStatus = PlaybookStatus.ACTIVE
 
 
 class UpdatePlaybookRequest(BaseModel):
@@ -87,15 +83,15 @@ def _summary(pb: IvrPlaybook) -> PlaybookSummary:
 
 
 def _detail(pb: IvrPlaybook) -> PlaybookDetail:
-    # Tolerant read: drop unknown keys before validating (IvrPlaybookConfig is extra="forbid")
-    # so a legacy/hand-written row can still be viewed and repaired via PATCH instead of
-    # 500ing every read of it.
-    known = {k: v for k, v in pb.instructions.items() if k in IvrPlaybookConfig.model_fields}
+    # Lenient read (from_stored drops unknown keys AND bad-value fields, never raises) so a
+    # legacy/hand-written row can still be viewed and repaired via PATCH instead of 500ing
+    # every read — and it renders exactly what runtime selection would use (both call
+    # from_stored), so display and behaviour never disagree.
     return PlaybookDetail(
         id=pb.id,
         provider_id=pb.provider_id,
         status=pb.status,
-        instructions=IvrPlaybookConfig.model_validate(known),
+        instructions=IvrPlaybookConfig.from_stored(pb.instructions),
         created_at=pb.created_at,
         updated_at=pb.updated_at,
     )
@@ -116,12 +112,12 @@ async def _demote_active(
     """Demote any currently-active playbook for the provider so the partial unique index
     (one active per provider) frees up before another is activated."""
     stmt = select(IvrPlaybook).where(
-        IvrPlaybook.provider_id == provider_id, IvrPlaybook.status == _ACTIVE
+        IvrPlaybook.provider_id == provider_id, IvrPlaybook.status == PlaybookStatus.ACTIVE
     )
     if except_id is not None:
         stmt = stmt.where(IvrPlaybook.id != except_id)
     for pb in (await session.execute(stmt)).scalars():
-        pb.status = _INACTIVE
+        pb.status = PlaybookStatus.INACTIVE
     await session.flush()
 
 
@@ -206,7 +202,7 @@ async def create_playbook(
     ).scalar_one_or_none()
     if provider_exists is None:
         raise NotFoundError(message="unknown insurance provider")
-    if body.status == _ACTIVE:
+    if body.status == PlaybookStatus.ACTIVE:
         await _demote_active(session, body.provider_id)
     pb = IvrPlaybook(
         provider_id=body.provider_id,
@@ -236,7 +232,7 @@ async def update_playbook(
 ) -> ResponseModel[PlaybookDetail]:
     pb = await _require_playbook(session, playbook_id)
     new_status = body.status if body.status is not None else pb.status
-    if new_status == _ACTIVE:
+    if new_status == PlaybookStatus.ACTIVE:
         await _demote_active(session, pb.provider_id, except_id=pb.id)
     if body.instructions is not None:
         pb.instructions = body.instructions.model_dump(exclude_none=True)
