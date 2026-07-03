@@ -31,6 +31,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_seed:
+        description: Run the idempotent DB seed after migrations (control-plane only)
+        required: false
+        type: boolean
+        default: false
       gcp_project_id:
         description: GCP project id
         required: true
@@ -119,4 +124,4 @@ jobs:
       - name: Deploy ${{ inputs.service }}
         run: |
           gcloud compute ssh "$VM" --tunnel-through-iap --zone "$ZONE" --project "$PROJECT" \
-            --command "bash /opt/vera/remote-deploy.sh '${{ inputs.service }}' '${{ inputs.tag_var }}' '${{ inputs.image_sha }}' '$AR_IMAGE_BASE' '$REGISTRY_HOST' '${{ inputs.secret_prefix }}' '$PROJECT' '${{ inputs.run_migrations }}' '${{ steps.reqenv.outputs.required }}'"
+            --command "bash /opt/vera/remote-deploy.sh '${{ inputs.service }}' '${{ inputs.tag_var }}' '${{ inputs.image_sha }}' '$AR_IMAGE_BASE' '$REGISTRY_HOST' '${{ inputs.secret_prefix }}' '$PROJECT' '${{ inputs.run_migrations }}' '${{ steps.reqenv.outputs.required }}' '${{ inputs.run_seed }}'"

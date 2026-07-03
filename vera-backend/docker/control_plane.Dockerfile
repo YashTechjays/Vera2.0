@@ -15,6 +15,8 @@ RUN uv sync --frozen --no-dev --package control-plane
 COPY alembic.ini ./
 COPY migrations migrations
 COPY scripts scripts
+# Seed fixtures (form-schema / prompt catalogs) that scripts/seed.py reads at deploy time.
+COPY data data
 
 FROM python:3.12-slim-bookworm
 # Patch base-image OS packages to the latest security fixes (the image scan blocks on fixable CVEs).

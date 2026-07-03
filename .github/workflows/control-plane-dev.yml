@@ -66,6 +66,7 @@ jobs:
       tag_var: CONTROL_PLANE_TAG
       image_sha: ${{ github.sha }}
       run_migrations: true
+      run_seed: true
       gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
       gcp_region: ${{ vars.DEV_GCP_REGION }}
       ar_repo: ${{ vars.DEV_AR_REPO }}

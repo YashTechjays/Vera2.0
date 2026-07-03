@@ -21,6 +21,7 @@ SECRET_PREFIX="$6"  # e.g. vera-test
 PROJECT="$7"        # GCP project id
 RUN_MIGRATIONS="${8:-false}"
 REQUIRED_VARS="${9:-}"  # space-separated env names for this service; CI resolved them from env-manifest.json
+RUN_SEED="${10:-false}" # control-plane only: run the idempotent DB seed after migrations
 
 cd /opt/vera
 export COMPOSE_FILE=/opt/vera/docker-compose.dev.yml
@@ -36,6 +37,12 @@ upsert() {
 }
 upsert AR_IMAGE_BASE "$AR_IMAGE_BASE"
 upsert "$TAG_VAR" "$SHA"
+
+# Fetch the latest version of a "${SECRET_PREFIX}-<name>" secret from Secret Manager
+# (via the VM's attached SA). Used for the privileged one-off migrate/seed steps below.
+fetch_secret() {
+  gcloud secrets versions access latest --project="$PROJECT" --secret="${SECRET_PREFIX}-$1"
+}
 
 # Render the container env from Secret Manager (VM's attached SA), so a rotated
 # secret is picked up on the next deploy.
@@ -53,6 +60,16 @@ gcloud auth configure-docker "$REGISTRY_HOST" --quiet
 
 docker compose pull "$SERVICE"
 
+# Both migrating and seeding write rows the least-privilege app role cannot (NULL-tenant
+# platform rows / global + cross-tenant catalog under FORCE RLS), so both run on a privileged
+# (BYPASSRLS/superuser) connection. Fetch it ONCE, up front — before any service stop, so a
+# missing secret fails with no downtime — and use it ONLY for these one-offs, never writing it
+# into app.env / the running container (which keeps the least-privilege app role).
+migration_db_url=""
+if [ "$RUN_MIGRATIONS" = "true" ] || [ "$RUN_SEED" = "true" ]; then
+  migration_db_url="$(fetch_secret migration-database-url)"
+fi
+
 # Migrate only when the DB is behind head, and only for control-plane deploys.
 # The check runs against the OLD control-plane, still serving: `alembic current`
 # prints "(head)" when the DB is up to date; anything else (older rev, or empty on
@@ -63,13 +80,6 @@ if [ "$RUN_MIGRATIONS" = "true" ]; then
   if printf '%s' "$current" | grep -q '(head)'; then
     echo "DB already at head; skipping migration, no downtime." >&2
   else
-    # Migrations seed NULL-tenant platform rows under FORCE RLS that the app role cannot write,
-    # so run alembic on a privileged (BYPASSRLS/superuser) connection. Fetched HERE — before the
-    # stop, so a missing secret fails with no downtime — and used ONLY for this one-off, never
-    # written into app.env / the running container (which keeps the least-privilege app role).
-    migration_db_url="$(gcloud secrets versions access latest \
-      --project="$PROJECT" --secret="${SECRET_PREFIX}-migration-database-url")"
-
     # Pending migration: stop the old control-plane FIRST so the previous code never
     # serves against the newly-migrated schema (no backward-compat overlap). Brief,
     # deliberate downtime — only when a real schema change lands.
@@ -77,6 +87,23 @@ if [ "$RUN_MIGRATIONS" = "true" ]; then
     docker compose stop control-plane
     docker compose run --rm -e VERA_DATABASE_URL="$migration_db_url" control-plane alembic upgrade head
   fi
+fi
+
+# Seed the DB (idempotent) when requested — control-plane deploys only. Runs as a one-off on
+# the same privileged connection; seed.py existence-checks every row, so re-runs are no-ops.
+# The sample-tenant admin creds come from Secret Manager (never baked into app.env); redact the
+# password seed.py echoes on its final line so it never lands in the deploy log.
+if [ "$RUN_SEED" = "true" ]; then
+  seed_email="$(fetch_secret seed-admin-email)"
+  seed_pw="$(fetch_secret seed-admin-password)"
+  echo "Seeding database (idempotent)..." >&2
+  docker compose run --rm \
+    -e VERA_DATABASE_URL="$migration_db_url" \
+    -e SEED_TENANT_SLUG="vera-health-example" \
+    -e SEED_ADMIN_EMAIL="$seed_email" \
+    -e SEED_ADMIN_PASSWORD="$seed_pw" \
+    control-plane python scripts/seed.py \
+    | sed 's/"password": "[^"]*"/"password": "***"/'
 fi
 
 # Bring the service up and BLOCK until it is healthy. `--wait` exits non-zero if
