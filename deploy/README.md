@@ -138,10 +138,28 @@ idempotent — safe on an existing DB. Migrations build everything else (tables,
      GRANT EXECUTE                     ON FUNCTIONS TO vera_user;
    ```
 
-4. **Extensions** — none to do; migrations run `CREATE EXTENSION IF NOT EXISTS` for `vector`,
+4. **Definer role for migration 0002** (Cloud SQL / PG 15+ — older Postgres grants these implicitly):
+   0002 creates `vera_definer_owner` and reassigns four SECURITY DEFINER functions to it. On Cloud SQL,
+   `postgres` is **not** a true superuser, and PG 15+ dropped the default `CREATE` on `public`, so
+   `ALTER FUNCTION … OWNER TO vera_definer_owner` is refused. Pre-create the role and grant what the
+   ownership reassignment needs (migration then skips creation via its `IF NOT EXISTS` guard):
+   ```sql
+   DO $$ BEGIN
+     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'vera_definer_owner') THEN
+       CREATE ROLE vera_definer_owner NOLOGIN BYPASSRLS;
+     END IF;
+   END $$;
+   GRANT vera_definer_owner TO postgres;                 -- migrator must be a MEMBER to reassign ownership
+   GRANT CREATE ON SCHEMA public TO vera_definer_owner;  -- new owner needs CREATE on the schema
+   ```
+   Not a security regression: only the admin/migration role (`postgres`) gains membership; the app
+   role `vera_user` stays a **non-member** and RLS-bound (it reaches the definer functions only via
+   `EXECUTE`).
+
+5. **Extensions** — none to do; migrations run `CREATE EXTENSION IF NOT EXISTS` for `vector`,
    `pg_trgm`, `pgcrypto`. Only pre-enable them in the console if your instance blocks `CREATE EXTENSION`.
 
-5. **Two secrets** (both → `vera_db`; format `postgresql+asyncpg://<user>:<pass>@<host>:5432/vera_db`):
+6. **Two secrets** (both → `vera_db`; format `postgresql+asyncpg://<user>:<pass>@<host>:5432/vera_db`):
    - `<SECRET_PREFIX>-database-url` → user **`vera_user`** (running app; RLS-bound)
    - `<SECRET_PREFIX>-migration-database-url` → user **`postgres`** (migrations only; BYPASSRLS)
 
