@@ -86,7 +86,8 @@
      "ui": {
       "widget": "text"
      },
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "patient_name": {
      "type": "string",
@@ -147,10 +148,9 @@
         {
          "comparison": "is",
          "value": "Family",
-         "field": "coverage_type"
+         "field": "benefit_coverage.coverage_type"
         }
-       ],
-       "summary": "Required when sections/benefit_coverage/coverage_type = \"Family\""
+       ]
       }
      ],
      "prompt_role": "question"
@@ -174,10 +174,9 @@
         {
          "comparison": "is",
          "value": "Family",
-         "field": "coverage_type"
+         "field": "benefit_coverage.coverage_type"
         }
-       ],
-       "summary": "Required when sections/benefit_coverage/coverage_type = \"Family\""
+       ]
       }
      ],
      "prompt_role": "question"
@@ -203,10 +202,9 @@
         {
          "comparison": "is",
          "value": "Family",
-         "field": "coverage_type"
+         "field": "benefit_coverage.coverage_type"
         }
-       ],
-       "summary": "Required when sections/benefit_coverage/coverage_type = \"Family\""
+       ]
       }
      ],
      "prompt_role": "question"
@@ -216,8 +214,7 @@
     "patient_name",
     "patient_dob",
     "patient_gender"
-   ],
-   "prompt_role": "intro_prose"
+   ]
   },
   {
    "section_key": "appointment_information",
@@ -253,8 +250,7 @@
    },
    "required": [
     "appointment_date"
-   ],
-   "prompt_role": "intro_prose"
+   ]
   },
   {
    "section_key": "verification_information",
@@ -296,8 +292,7 @@
     "verified_by",
     "verified_at",
     "callback_number"
-   ],
-   "prompt_role": "intro_prose"
+   ]
   },
   {
    "section_key": "hospital_information",
@@ -312,7 +307,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "address": {
      "type": "string",
@@ -322,7 +318,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "tax_id": {
      "type": "string",
@@ -332,7 +329,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "npi": {
      "type": "string",
@@ -342,7 +340,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     }
    },
    "required": [
@@ -350,8 +349,7 @@
     "address",
     "tax_id",
     "npi"
-   ],
-   "prompt_role": "intro_prose"
+   ]
   },
   {
    "section_key": "insurance_information",
@@ -417,10 +415,9 @@
         {
          "comparison": "is",
          "value": "No",
-         "field": "out_of_network_coverage"
+         "field": "insurance_information.out_of_network_coverage"
         }
-       ],
-       "summary": "End the call when out-of-network coverage is not available"
+       ]
       },
       {
        "effect": "ask this question",
@@ -429,15 +426,14 @@
         {
          "comparison": "is",
          "value": "No",
-         "field": "doctor_inside_network"
+         "field": "insurance_information.doctor_inside_network"
         },
         {
          "comparison": "is",
          "value": "No",
-         "field": "facility_inside_network"
+         "field": "insurance_information.facility_inside_network"
         }
-       ],
-       "summary": "Only ask when both doctor and facility are out of network"
+       ]
       }
      ]
     },
@@ -514,7 +510,6 @@
     "policy_number",
     "policy_situs"
    ],
-   "prompt_role": "intro_prose",
    "section_policies": [
     {
      "title": "Phase 2 — start (introduction + verification)",
@@ -627,10 +622,9 @@
         {
          "comparison": "is",
          "value": "Calendar Year",
-         "field": "benefit_year_type"
+         "field": "benefit_coverage.benefit_year_type"
         }
-       ],
-       "summary": "Auto-fill January 1st of current year when benefit year type is Calendar Year"
+       ]
       }
      ],
      "verbatim_prompt": "<field name=\"effective_date\">\n<conditional>\n<if_calendar_year>\nIf benefit_year_type is \"Calendar Year\", the effective date is automatically set to \"01/01/{current_year}\". Do NOT ask anything about the effective date. Do NOT mention it. Silently move to the next question.\n</if_calendar_year>\n<if_plan_year>\nIf benefit_year_type is NOT \"Calendar Year\", ask this question:\n<ask>What is the effective date for this coverage?</ask>\n<expected>Date (e.g., \"January 1, 2024\", \"01/01/2024\")</expected>\n<critical_validation>\nDate MUST include Month + Day + Year. If ANY part is missing (e.g., \"March 3\" without year), ask: \"And what year was that?\" Do NOT proceed until you have the complete date.\n</critical_validation>\n</if_plan_year>\n</conditional>\n<record>effective_date: The coverage effective date</record>\n</field>"
@@ -752,8 +746,7 @@
     "plan_effective_date",
     "coverage_type",
     "referrals_telehealth"
-   ],
-   "prompt_role": "intro_prose"
+   ]
   },
   {
    "section_key": "general_coverage",
@@ -1359,7 +1352,25 @@
     }
    },
    "required": [],
-   "row_header": "Male Partner"
+   "row_header": "Male Partner",
+   "rules": [
+    {
+     "effect": "make this required",
+     "match": "all of these",
+     "conditions": [
+      {
+       "comparison": "is",
+       "value": "Family",
+       "field": "benefit_coverage.coverage_type"
+      },
+      {
+       "comparison": "is",
+       "value": "Male",
+       "field": "patient_information.spouse_gender"
+      }
+     ]
+    }
+   ]
   },
   {
    "section_key": "infertility_treatment",
@@ -1369,7 +1380,6 @@
     "infertility_treatment_overview": {
      "type": "string",
      "title": "Infertility Treatment — Section Guidance",
-     "description": "Section-level warnings and the infertility-coverage gate, copied verbatim from v1.",
      "prompt": {
       "ask": "",
       "category": "intro_prose"
@@ -2231,7 +2241,6 @@
     "infertility_treatment_egg_cryopreservation_cancer",
     "infertility_treatment_embryo_biopsy"
    ],
-   "prompt_role": "intro_prose",
    "section_policies": [],
    "row_header": "Infertility Treatment (TX)"
   },
@@ -2379,18 +2388,15 @@
   {
    "section_key": "embryo_cryo_storage",
    "title": "Embryo Cryo Storage",
-   "description": "Collect embryo cryopreservation storage time coverage information.",
    "properties": {
     "embryo_cryo_storage": {
      "type": "string",
      "title": "Embryo Cryopreservation Storage Time (CPT 89342)",
-     "description": "Storage time coverage (1 year vs renewal). Verbatim from v1.",
      "required_state": "required",
      "verbatim_prompt": "<field name=\"storage_time\">\n<ask>For cryo storage, CPT code eight, nine, three, four, two, is it for one year only or is renewal covered?</ask>\n<expected>Storage time coverage details (e.g., \"1 year only\", \"renewal covered\", duration, limits)</expected>\n<record>storage_time: The embryo cryo storage time coverage</record>\n</field>"
     }
    },
-   "required": [],
-   "prompt_role": "intro_prose"
+   "required": []
   },
   {
    "section_key": "infertility_limits",
@@ -2650,7 +2656,7 @@
       "widget": "text"
      }
     },
-    "pbm_phone_number": {
+    "pharmacy_benefit_manager_phone_number": {
      "type": "string",
      "title": "PBM Phone Number",
      "ui": {
@@ -2665,12 +2671,41 @@
    "title": "Infertility Specialty Pharmacy",
    "description": "Collect Infertility Specialty Pharmacy information.\nIMPORTANT: Always use the full term \"Infertility Specialty Pharmacy\" — NEVER abbreviate to \"ISP\".",
    "properties": {
-    "infertility_specialty_pharmacy": {
+    "isp_exists": {
      "type": "string",
-     "title": "Infertility Specialty Pharmacy (ISP)",
+     "title": "Infertility Specialty Pharmacy?",
+     "description": "Whether an infertility specialty pharmacy handles medications.",
+     "constraint_ref": "YES_NO",
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "ui": {
+      "widget": "radio"
+     },
+     "required_state": "required",
+     "prompt_role": "question"
+    },
+    "isp_name": {
+     "type": "string",
+     "title": "ISP Name",
      "ui": {
       "widget": "text"
-     }
+     },
+     "description": "Name of the infertility specialty pharmacy (if one exists).",
+     "rules": [
+      {
+       "effect": "make this required",
+       "match": "all of these",
+       "conditions": [
+        {
+         "comparison": "is",
+         "value": "Yes",
+         "field": "infertility_specialty_pharmacy.isp_exists"
+        }
+       ]
+      }
+     ]
     },
     "isp_phone_number": {
      "type": "string",
@@ -2683,16 +2718,45 @@
    "required": []
   },
   {
-   "section_key": "third_party",
+   "section_key": "third_party_administrator",
    "title": "Third Party Administrator",
-   "description": "Determine if there is a third party administrator for infertility services.\nThis is MANDATORY - you must know if there is a TPA or not.",
    "properties": {
-    "third_party": {
+    "third_party_administrator_exists": {
      "type": "string",
-     "title": "Third Party Administrator",
-     "description": "v1 third_party section, verbatim.",
+     "title": "Third Party Administrator?",
+     "description": "Whether a third party administrator handles infertility services.",
+     "constraint_ref": "YES_NO",
+     "enum": [
+      "Yes",
+      "No"
+     ],
+     "ui": {
+      "widget": "radio"
+     },
      "required_state": "required",
-     "verbatim_prompt": "<field name=\"third_party_admin\">\n<ask>Is there a third party administrator for infertility services?</ask>\n<expected>\"Yes\" or \"No\"</expected>\n<wait>for the answer</wait>\n<record>third_party_admin: yes/no</record>\n</field>\n\n<if_yes>\n<ask>What is the name of the third party administrator?</ask>\n<wait>for the answer</wait>\n<record>third_party_name: The TPA name</record>\n</if_yes>\n\n<clarification>\nIf the answer is vague, clarify. You MUST know if there is a TPA or not.\n</clarification>"
+     "prompt_role": "question"
+    },
+    "third_party_administrator_name": {
+     "type": "string",
+     "title": "Third Party Administrator Name",
+     "description": "Name of the third party administrator (if one exists).",
+     "ui": {
+      "widget": "text"
+     },
+     "prompt_role": "question",
+     "rules": [
+      {
+       "effect": "make this required",
+       "match": "all of these",
+       "conditions": [
+        {
+         "comparison": "is",
+         "value": "Yes",
+         "field": "third_party_administrator.third_party_administrator_exists"
+        }
+       ]
+      }
+     ]
     }
    },
    "required": []
@@ -2743,7 +2807,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "npi": {
      "type": "string",
@@ -2757,7 +2822,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "location": {
      "type": "string",
@@ -2771,15 +2837,15 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     }
    },
    "required": [
     "provider_name",
     "npi",
     "location"
-   ],
-   "prompt_role": "intro_prose"
+   ]
   },
   {
    "section_key": "form_information",
@@ -2819,7 +2885,7 @@
     "practice",
     "ibv_form_type"
    ],
-   "prompt_role": "intro_prose"
+   "no_op": true
   }
  ],
  "global_policies": [

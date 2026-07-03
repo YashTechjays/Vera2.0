@@ -1,0 +1,43 @@
+IBV Schema — Reviewer Comments: Status
+Target file: vera-frontend/src/lib/ibv/ibv-schema.json (latest schema; migrates to backend later)
+Branch: feat/ibv-schema-cleanup
+
+Legend: [FIXED] applied · [ALREADY OK] already correct in this schema · [DEFERRED] intentionally not done (reason)
+
+--- FIXED ---
+2.  chart_number read-only          [FIXED] set prompt_role:"context" + read_only:true (bot never asks; UI non-editable)
+4.  cross-section ref in field key   [FIXED] rules now use dotted paths (e.g. benefit_coverage.coverage_type); removes bare-key ambiguity
+5.  remove rule `summary`            [FIXED] summary was prose only, unread by code; dropped from all rules
+8.  male-partner conditional-required[FIXED] section rule: required when coverage_type=Family AND spouse_gender=Male (enforcement in validation.ts is a follow-up)
+9.  remove "verbatim from v1" desc    [FIXED] deleted all verbatim-from-v1 descriptions (authoring cruft, rendered nowhere)
+12. rename third_party section        [FIXED] section_key third_party -> third_party_administrator
+13. split third_party blob            [FIXED] -> third_party_administrator_exists (Yes/No) + third_party_administrator_name (required when exists=Yes)
+14. split pharmacy blob               [FIXED] pbm_phone_number -> pharmacy_benefit_manager_phone_number (exact reviewer naming)
+15. split ISP blob                    [FIXED] added isp_exists (Yes/No gate) + isp_name (required when Yes) + isp_phone_number
+17. provider/hospital = context-only  [FIXED] hospital_information + provider_reference_information: all fields prompt_role:"context" + read_only:true
+18. no-op section marker              [FIXED] added no_op:true to form_information (UI-only; excluded from prompt/agent build)
+19. reconsider intro_prose            [FIXED] removed section-level intro_prose (auto-assigned default, consumed by no renderer)
+
+--- ALREADY OK (no change needed) ---
+7.  diagnostic per-CPT               [ALREADY OK] 8 CPT groups, each with covered/copay/coinsurance/prior_auth; copay/coinsurance already split
+11. no flat dotted keys              [ALREADY OK] 0 dotted property keys; everything already nested
+16. insurance_representative fields  [ALREADY OK] insurance_rep_name + call_reference_number (+ web_portal_ref_number) already present
+
+--- DEFERRED (reason) ---
+1.  remove constraint_library        [DEFERRED] user chose to keep for now
+3.  patient_name context-only        [DEFERRED] keep verifiable_question + confirm_only (identity-verification step needs it)
+6.  remove constraint_ref            [DEFERRED] pairs with #1
+10. group_integrity meaningless      [DEFERRED] NOT meaningless: vera-schema-builder harness uses it (all-or-nothing group collection); builder-side change, not a FE edit
+20. remove `source` from policies    [DEFERRED] REQUIRED: assemble.py keys/pools policy blocks by `source`
+21. remove rejection handling        [DEFERRED] REQUIRED: lives in global_policies, composed into the bot prompt
+22. remove IVR script                [DEFERRED] REQUIRED: IVR scripts in global_policies drive IVR navigation
+23. remove field-order array         [DEFERRED] REQUIRED: field_list_order/phase_order drive prompt block ordering
+
+NOTE: #20-23 (and stripping global_policies/section_policies/verbatim_prompt) are NOT safe deletions —
+this schema is the prompt-generation source: vera-schema-builder/assemble.py builds the bot prompt
+directly from verbatim_prompt + global_policies/section_policies (keyed by source) + phase_order.
+Moving prompt material out is a coordinated schema-builder refactor, not a frontend edit.
+
+FOLLOW-UPS (deferred, tracked in ibv-schema-decisions.md):
+- validation.ts: enforce section-level `rules` (today only field-level "make this required" is enforced)
+- prompt/agent-task compiler: honor `no_op` (skip section) and `read_only`/prompt_role:"context" (don't ask; render non-editable)

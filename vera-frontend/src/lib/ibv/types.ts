@@ -24,6 +24,8 @@ export type IbvField = {
   description?: string
   ui?: { widget?: FieldWidget }
   required_state?: "required" | "optional"
+  /** reference/context field the bot never asks and the form renders non-editable */
+  read_only?: boolean
   enum?: string[]
   constraint_ref?: string
   confirm_only?: boolean
@@ -49,6 +51,12 @@ export type IbvSection = {
   required?: string[]
   /** override for the matrix table's first-column header */
   row_header?: string
+  /** section-level conditional rules (e.g. the whole section is required only when
+   *  another section's field has a given value). Not yet enforced by validation. */
+  rules?: FieldRule[]
+  /** UI-only section: rendered in the form but excluded from prompt/agent-task
+   *  generation (the voice pipeline never touches it). */
+  no_op?: boolean
 }
 
 export type ConstraintDef = {
