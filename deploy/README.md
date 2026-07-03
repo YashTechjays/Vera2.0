@@ -10,26 +10,34 @@ Manager (no registry password, no secrets on the box at rest except a rendered
 0600 env file).
 
 ```
-push to dev ─▶ <component>-dev.yml
-                 ├─ ci     → _ci-*.yml          → lint / typecheck / test
-                 ├─ verify →                       env preflight, fail-closed (before build)
-                 ├─ build  → _build-image.yml  → push <sha> + dev to Artifact Registry
-                 └─ deploy → _deploy-vm.yml     → scp compose+scripts, ssh over IAP,
+push to dev ─▶ dev.yml
+                 ├─ changes → per-component path filter (build/deploy ONLY what changed)
+                 ├─ ci      → _ci-*.yml          → lint / typecheck / test  (backend CI runs ONCE)
+                 ├─ verify  →                       env preflight, fail-closed (before build)
+                 ├─ build   → _build-image.yml  → push <sha> + dev to Artifact Registry
+                 └─ deploy  → _deploy-vm.yml     → scp compose+scripts, ssh over IAP,
                                                    render env from Secret Manager,
                                                    verify app env → pull →
-                                                   (control-plane) migrate-if-pending →
+                                                   (control-plane) migrate-if-pending + seed →
                                                    up -d --wait (health-gated)
+                    order: control-plane + worker deploy first, then frontend LAST — the SPA
+                    only flips once the control-plane it proxies /api to is up and migrated.
 ```
 
 The load balancer does **path-based routing**: `/api/*` → control-plane `:8000`,
 `/*` → frontend `:80`. The browser sees one origin, so `VITE_API_BASE_URL=/api/v1`
 with no CORS.
 
-| Component | Trigger workflow | Build context | Dockerfile |
-|---|---|---|---|
-| frontend | `frontend-dev.yml` | `vera-frontend` | `vera-frontend/Dockerfile` (nginx SPA) |
-| control-plane | `control-plane-dev.yml` | `vera-backend` | `vera-backend/docker/control_plane.Dockerfile` |
-| agent-worker | `worker-dev.yml` | `vera-backend` | `vera-backend/docker/agent_worker.Dockerfile` |
+All three components share **one** pipeline, `dev.yml`. Its `changes` job path-filters each
+component so a push builds+deploys only what it touched; a shared change (`vera-backend/packages/**`,
+`pyproject.toml`, `uv.lock`) rebuilds both backend apps but still runs backend CI **once**, and a
+`deploy/**` change touches all three:
+
+| Component | Build context | Dockerfile |
+|---|---|---|
+| frontend | `vera-frontend` | `vera-frontend/Dockerfile` (nginx SPA) |
+| control-plane | `vera-backend` | `vera-backend/docker/control_plane.Dockerfile` |
+| agent-worker | `vera-backend` | `vera-backend/docker/agent_worker.Dockerfile` |
 
 Reusable building blocks: `_ci-backend.yml`, `_ci-frontend.yml`, `_build-image.yml`,
 `_deploy-vm.yml`. Shipped to the VM each deploy (a subset of the files in this directory):
@@ -41,10 +49,12 @@ The env benchmark `env-manifest.json` and the CI-only checks (`verify-config.sh`
 
 ## Guardrails (what keeps a bad deploy from going live)
 
-- **One deploy at a time.** All deploys share a single concurrency group (`deploy-vm-<env>`,
-  `cancel-in-progress: false`) so two pushes never mutate the VM at once. `ci`/`build` use
-  per-component groups with `cancel-in-progress: true`, so a burst of pushes collapses to the
-  latest without stacking runs or wasting minutes. A running **deploy** is never cancelled.
+- **One run at a time, one deploy at a time.** The whole pipeline runs under a single
+  `dev-deploy` group (`cancel-in-progress: false`), so a burst of pushes queues (GitHub keeps
+  only the newest pending run) instead of overlapping deploys; within a run, the deploy jobs
+  additionally share the VM-level `deploy-vm-<env>` mutex so two `docker compose` calls never
+  hit the VM at once. `ci`/`build` keep per-component groups with `cancel-in-progress: true`
+  for within-run dedup. A running **deploy** is never cancelled.
 - **Env verification (two-phase, fail-closed).** The required env per component is the single
   source of truth in **`env-manifest.json`** (benchmarked from the proven manual deploy).
   - *Before build (CI):* `verify-config.sh` asserts every backend-required var is supplied by
@@ -179,8 +189,8 @@ No hand-placed files or shell exports are needed on the VM: the compose file, `r
 
 Auth is **keyless** — no SA JSON keys or SSH keys anywhere. All values are stored as
 **repo-level** Actions secrets/variables (Settings → Secrets and variables → Actions), and are
-**prefixed by branch** (`DEV_*` for the `dev` pipeline). The branch-specific caller workflow
-(`*-dev.yml`) reads its `DEV_*` values and passes them into the shared reusables.
+**prefixed by branch** (`DEV_*` for the `dev` pipeline). The branch pipeline (`dev.yml`) reads
+its `DEV_*` values and passes them into the shared reusables.
 
 > **Why repo-level + branch-prefixed:** GitHub **Environments** (with their own secrets/variables
 > and deployment-branch rules) require a paid plan on **private** repos. On Free, a repo-level name
@@ -232,8 +242,8 @@ Auth is **keyless** — no SA JSON keys or SSH keys anywhere. All values are sto
 
 Because config is branch-prefixed and passed into the reusables, a new branch is self-contained:
 1. Create a `<BRANCH>_*` set of the same **2 secrets + 7 variables** at repo level.
-2. Add `*-<branch>.yml` caller pipelines (copy the `*-dev.yml` ones) that trigger on that branch and
-   pass the `<BRANCH>_*` values into `_build-image.yml` / `_deploy-vm.yml`.
+2. Add a `<branch>.yml` pipeline (copy `dev.yml`) that triggers on that branch and passes the
+   `<BRANCH>_*` values into `_build-image.yml` / `_deploy-vm.yml`.
 3. Bind a WIF principal for that branch's ref in GCP (see the branch-gate note).
 The shared reusables (`_build-image.yml`, `_deploy-vm.yml`) need no change.
 
@@ -260,9 +270,11 @@ GitHub Environment.
 2. **Env preflight (fail-closed):** the `verify` job runs before `build`. Temporarily
    drop a mapped var from `secrets.map` (or unset the frontend `VITE_API_BASE_URL`
    variable) → the pipeline goes **red before building**, naming the missing var. Restore.
-3. **Build isolation:** push a trivial change under one component's path; only
-   that component's pipeline runs. Confirm `…/<component>:<sha>` and `:dev` appear
-   in Artifact Registry.
+3. **Build isolation:** push a trivial change under one component's path; in the single
+   `dev.yml` run only that component's `ci`/`build`/`deploy` jobs execute and the rest show
+   **skipped** (the `changes` job decides). Confirm `…/<component>:<sha>` and `:dev` appear
+   in Artifact Registry. On a shared-core push, backend CI runs once and the frontend deploy
+   job starts only after both backend deploys finish.
 4. **Deploy:** the `deploy` job connects via `--tunnel-through-iap` (VM has no
    public SSH). On the VM, `docker compose ps` shows the service updated, and
    `/opt/vera/app.env` exists (0600) with the rendered secrets. `verify-app-env.sh`
