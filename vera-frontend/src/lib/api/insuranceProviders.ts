@@ -1,6 +1,6 @@
 // Platform (super admin) insurance-provider catalog endpoints.
 // Mirrors backend api/v1/insurance_providers.py.
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, randomId } from "@/lib/api/client"
 
 export type ProviderSummary = {
   id: string
@@ -24,5 +24,9 @@ export function listProviders() {
 }
 
 export function createProvider(payload: CreateProviderPayload) {
-  return apiRequest<ProviderSummary>("/insurance-providers", { method: "POST", body: payload })
+  return apiRequest<ProviderSummary>("/insurance-providers", {
+    method: "POST",
+    body: payload,
+    headers: { "Idempotency-Key": randomId() },
+  })
 }

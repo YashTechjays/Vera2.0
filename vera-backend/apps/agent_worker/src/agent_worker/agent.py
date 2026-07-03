@@ -97,17 +97,20 @@ def build_agent(
     instructions: str | None = None,
     greeting: str | None = None,
 ) -> Agent:
-    """Pick the agent persona from dispatch metadata: the IVR navigator when `enable_ivr_navigation`
-    is set or a per-provider `ivr_playbook` overlay is present (a plain agent, no phiwall, the
-    playbook specializing its prompt), otherwise the chat persona (with the PHI-wall overrides
-    and any persona-tweak instructions/greeting)."""
-    playbook = parse_ivr_playbook(meta.get("ivr_playbook"))
-    if meta.get("enable_ivr_navigation") or playbook is not None:
+    """Pick the agent persona from dispatch metadata: the IVR navigator when
+    `enable_ivr_navigation` is set (a plain agent, no phiwall, an optional per-provider
+    `ivr_playbook` overlay specializing its prompt), otherwise the chat persona (with the
+    PHI-wall overrides and any persona-tweak instructions/greeting). The flag is the sole
+    selector — a playbook without it is a producer inconsistency, logged and ignored, so it
+    can never silently override an explicit opt-out."""
+    if meta.get("enable_ivr_navigation"):
         return IvrNavigatorAgent(
             boundary,
             session_id,
-            playbook=playbook,
+            playbook=parse_ivr_playbook(meta.get("ivr_playbook")),
             verification_instructions=instructions,
             verification_greeting=greeting,
         )
+    if meta.get("ivr_playbook") is not None:
+        logger.warning("ivr_playbook present without enable_ivr_navigation; ignoring playbook")
     return VeraAgent(boundary, session_id, instructions=instructions, greeting=greeting)

@@ -6,14 +6,18 @@ dispatch metadata. No active playbook → the worker uses the generic navigator.
 / `ivr_playbook` are GLOBAL tables (no RLS), so this resolves on any session scope.
 """
 
+import logging
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.models import IvrPlaybook
 from vera_core.schemas import IvrPlaybookConfig
+
+logger = logging.getLogger(__name__)
 
 _ACTIVE = "active"
 
@@ -25,8 +29,9 @@ async def add_active_playbook_metadata(
     under `ivr_playbook`; otherwise (provider unset or no active playbook) leave `metadata`
     untouched so the worker uses the generic navigator — a missing key is the generic default
     (see prompt.build_ivr_instructions). The write path validates `instructions` against
-    IvrPlaybookConfig, so the stored value round-trips cleanly; `exclude_none` keeps unset fields
-    out."""
+    IvrPlaybookConfig, but the table predates that path (seed scripts, raw SQL), so a row that
+    no longer validates degrades to the generic navigator instead of 500ing every call start
+    for the provider; `exclude_none` keeps unset fields out."""
     if provider_id is None:
         return
     instructions = (
@@ -38,5 +43,12 @@ async def add_active_playbook_metadata(
     ).scalar_one_or_none()
     if instructions is None:
         return
-    playbook = IvrPlaybookConfig.model_validate(instructions)
+    try:
+        playbook = IvrPlaybookConfig.model_validate(instructions)
+    except ValidationError:
+        logger.warning(
+            "active ivr_playbook for provider %s failed validation; using generic navigator",
+            provider_id,
+        )
+        return
     metadata["ivr_playbook"] = playbook.model_dump(exclude_none=True)

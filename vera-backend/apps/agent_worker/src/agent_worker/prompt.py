@@ -107,12 +107,14 @@ def resolve_greeting(tweak: PersonaTweak | None = None) -> str:
 
 
 def parse_persona_tweak(metadata: str | None) -> PersonaTweak:
-    """Parse LiveKit dispatch metadata into a PersonaTweak. Fail-safe: any missing,
-    empty, or malformed metadata yields the no-op tweak so a bad config never kills
-    a live call (mirrors the cascade's fail-safe posture, not the strict PHI seams)."""
+    """Parse the `persona_tweak` key of LiveKit dispatch metadata into a PersonaTweak.
+    The tweak is nested under its own key so unrelated dispatch keys (enable_ivr_navigation,
+    ivr_playbook, wait_for_speaker, …) never trip its extra="forbid" validation. Fail-safe:
+    any missing, empty, or malformed metadata yields the no-op tweak so a bad config never
+    kills a live call (mirrors the cascade's fail-safe posture, not the strict PHI seams)."""
     if not metadata:
         return PersonaTweak()
     try:
-        return PersonaTweak.model_validate(json.loads(metadata))
-    except (json.JSONDecodeError, ValueError):
+        return PersonaTweak.model_validate(json.loads(metadata).get("persona_tweak") or {})
+    except (json.JSONDecodeError, ValueError, AttributeError):
         return PersonaTweak()

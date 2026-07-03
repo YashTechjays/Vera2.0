@@ -10,23 +10,29 @@ prompts.py::publish_version. Authorization is platform_require; no tenant contex
 """
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Final, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from control_plane.api.v1.common import AppSettings
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import platform_require
-from control_plane.deps import platform_scoped_session
+from control_plane.deps import get_idempotency_store, platform_scoped_session
 from control_plane.exceptions import (
     ConflictError,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
+)
+from control_plane.idempotency import (
+    PLATFORM_IDEM_SCOPE,
+    claim_or_conflict,
+    require_idempotency_key,
 )
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import InsuranceProvider, IvrPlaybook
@@ -38,19 +44,24 @@ PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
 _READ = platform_require("platform:ivr_playbooks:read")
 _WRITE = platform_require("platform:ivr_playbooks:write")
 
-_ACTIVE = "active"
-_INACTIVE = "inactive"
+_ACTIVE: Final = "active"
+_INACTIVE: Final = "inactive"
+
+# Free-form status strings silently disable a playbook (the active lookup, the partial
+# unique index, and _demote_active all compare against exactly "active"), so the API
+# only admits the two known values.
+PlaybookStatus = Literal["active", "inactive"]
 
 
 class CreatePlaybookRequest(BaseModel):
     provider_id: UUID
     instructions: IvrPlaybookConfig
-    status: str = _ACTIVE
+    status: PlaybookStatus = _ACTIVE
 
 
 class UpdatePlaybookRequest(BaseModel):
     instructions: IvrPlaybookConfig | None = None
-    status: str | None = None
+    status: PlaybookStatus | None = None
 
 
 class PlaybookSummary(BaseModel):
@@ -76,11 +87,15 @@ def _summary(pb: IvrPlaybook) -> PlaybookSummary:
 
 
 def _detail(pb: IvrPlaybook) -> PlaybookDetail:
+    # Tolerant read: drop unknown keys before validating (IvrPlaybookConfig is extra="forbid")
+    # so a legacy/hand-written row can still be viewed and repaired via PATCH instead of
+    # 500ing every read of it.
+    known = {k: v for k, v in pb.instructions.items() if k in IvrPlaybookConfig.model_fields}
     return PlaybookDetail(
         id=pb.id,
         provider_id=pb.provider_id,
         status=pb.status,
-        instructions=IvrPlaybookConfig.model_validate(pb.instructions),
+        instructions=IvrPlaybookConfig.model_validate(known),
         created_at=pb.created_at,
         updated_at=pb.updated_at,
     )
@@ -162,6 +177,7 @@ async def get_playbook(
     status_code=status.HTTP_201_CREATED,
     response_model=ResponseModel[PlaybookDetail],
     responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.BAD_REQUEST,
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.NOT_FOUND,
@@ -170,9 +186,19 @@ async def get_playbook(
 )
 async def create_playbook(
     body: CreatePlaybookRequest,
+    request: Request,
     session: PlatformSession,
-    _caller: Annotated[VerifiedIdentity, _WRITE],
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PlaybookDetail]:
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        PLATFORM_IDEM_SCOPE,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
     provider_exists = (
         await session.execute(
             select(InsuranceProvider.id).where(InsuranceProvider.id == body.provider_id)
@@ -224,7 +250,7 @@ async def update_playbook(
 
 @router.delete(
     "/{playbook_id}",
-    response_model=ResponseModel[PlaybookDetail],
+    response_model=ResponseModel[None],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
@@ -235,9 +261,10 @@ async def delete_playbook(
     playbook_id: UUID,
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _WRITE],
-) -> ResponseModel[PlaybookDetail]:
+) -> ResponseModel[None]:
+    # No detail body: serializing the row would re-validate `instructions`, and delete is the
+    # one op that must still work on a row whose payload no longer validates.
     pb = await _require_playbook(session, playbook_id)
-    detail = _detail(pb)
     await session.delete(pb)
     await session.flush()
-    return ok(detail)
+    return ok(None)

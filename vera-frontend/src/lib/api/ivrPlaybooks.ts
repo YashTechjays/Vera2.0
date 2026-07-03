@@ -1,7 +1,7 @@
 // Platform (super admin) per-provider IVR playbook endpoints.
 // Mirrors backend api/v1/ivr_playbooks.py. A playbook is a non-PHI navigation overlay
 // (config knobs that specialize the generic IVR navigator) attached to an insurance provider.
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, randomId } from "@/lib/api/client"
 
 /** The structured config overlay stored in ivr_playbook.instructions. All fields optional;
  *  an unset field falls back to the generic navigator's built-in default. */
@@ -49,7 +49,11 @@ export function getPlaybook(id: string) {
 }
 
 export function createPlaybook(payload: CreatePlaybookPayload) {
-  return apiRequest<PlaybookDetail>("/ivr-playbooks", { method: "POST", body: payload })
+  return apiRequest<PlaybookDetail>("/ivr-playbooks", {
+    method: "POST",
+    body: payload,
+    headers: { "Idempotency-Key": randomId() },
+  })
 }
 
 export function updatePlaybook(id: string, patch: UpdatePlaybookPayload) {
@@ -59,8 +63,10 @@ export function updatePlaybook(id: string, patch: UpdatePlaybookPayload) {
   })
 }
 
+// DELETE intentionally returns no body: serializing the row would re-validate its payload,
+// and delete must still work on a row whose stored instructions no longer validate.
 export function deletePlaybook(id: string) {
-  return apiRequest<PlaybookDetail>(`/ivr-playbooks/${encodeURIComponent(id)}`, {
+  return apiRequest<null>(`/ivr-playbooks/${encodeURIComponent(id)}`, {
     method: "DELETE",
   })
 }

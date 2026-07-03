@@ -179,17 +179,13 @@ THIS HANDOFF IS FINAL: there is no way back to IVR navigation once you call tran
 """
 
 
-# <config> knobs a playbook may override, in emit order. Each maps to a config key the
-# response-rule table already reads ("Per callback_vs_hold", "{rep_keyword}", …); a playbook
-# restates the ones it sets so they supersede the generic defaults.
-_PLAYBOOK_CONFIG_KEYS: tuple[str, ...] = (
-    "transition_trigger",
-    "rep_keyword",
-    "multiple_patients_answer",
-    "survey_answer",
-    "date_scope",
-    "callback_vs_hold",
-    "provider_subflows",
+# <config> knobs a playbook may override. Each maps to a config key the response-rule table
+# already reads ("Per callback_vs_hold", "{rep_keyword}", …); a playbook restates the ones it
+# sets so they supersede the generic defaults. Derived from the schema (model_fields preserves
+# declaration order = emit order) so a knob added there is emitted without touching this file;
+# extra_rules is free text rendered separately, not a <config> key.
+_PLAYBOOK_CONFIG_KEYS: tuple[str, ...] = tuple(
+    k for k in IvrPlaybookConfig.model_fields if k != "extra_rules"
 )
 
 

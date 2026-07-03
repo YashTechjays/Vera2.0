@@ -38,6 +38,11 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _write_headers(token: str) -> dict[str, str]:
+    """Auth + a fresh Idempotency-Key (mutating platform ingress requires one)."""
+    return {**_auth(token), "Idempotency-Key": str(uuid7())}
+
+
 async def _mint(
     store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID | None, email: str
 ) -> str:
@@ -163,7 +168,7 @@ async def test_list_and_create_provider(
 
     created = await client.post(
         "/api/v1/insurance-providers",
-        headers=_auth(w.super_token),
+        headers=_write_headers(w.super_token),
         json={"name": f"Cigna {w.name_suffix}"},
     )
     assert created.status_code == 201, created.text
@@ -176,7 +181,7 @@ async def test_playbook_crud_happy_path(
     client, w = playbooks_world
     created = await client.post(
         "/api/v1/ivr-playbooks",
-        headers=_auth(w.super_token),
+        headers=_write_headers(w.super_token),
         json={
             "provider_id": str(w.provider_id),
             "instructions": {"rep_keyword": "Advocate", "survey_answer": "Yes"},
@@ -218,14 +223,14 @@ async def test_activating_second_playbook_demotes_the_first(
     first = (
         await client.post(
             "/api/v1/ivr-playbooks",
-            headers=_auth(w.super_token),
+            headers=_write_headers(w.super_token),
             json={"provider_id": str(w.provider_id), "instructions": {"rep_keyword": "A"}},
         )
     ).json()["data"]
     # A second active for the same provider is allowed — it demotes the first (one active max).
     second = await client.post(
         "/api/v1/ivr-playbooks",
-        headers=_auth(w.super_token),
+        headers=_write_headers(w.super_token),
         json={
             "provider_id": str(w.provider_id),
             "instructions": {"rep_keyword": "B"},
@@ -249,10 +254,75 @@ async def test_create_playbook_unknown_provider_404(
     client, w = playbooks_world
     resp = await client.post(
         "/api/v1/ivr-playbooks",
-        headers=_auth(w.super_token),
+        headers=_write_headers(w.super_token),
         json={"provider_id": str(uuid7()), "instructions": {}},
     )
     assert resp.status_code == 404
+
+
+async def test_create_playbook_rejects_unknown_status(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    # A mis-cased/typo status would silently escape every status == "active" comparison
+    # (demote, unique index, runtime selection) — the API must reject it outright.
+    client, w = playbooks_world
+    resp = await client.post(
+        "/api/v1/ivr-playbooks",
+        headers=_write_headers(w.super_token),
+        json={"provider_id": str(w.provider_id), "instructions": {}, "status": "Active"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_create_playbook_requires_idempotency_key(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = playbooks_world
+    resp = await client.post(
+        "/api/v1/ivr-playbooks",
+        headers=_auth(w.super_token),
+        json={"provider_id": str(w.provider_id), "instructions": {}},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+async def test_malformed_playbook_row_is_viewable_and_deletable(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+    database_url: str,
+) -> None:
+    """A row whose stored instructions no longer validate (seed script, raw SQL, schema
+    rename) must still be readable (unknown keys dropped) and deletable via the API."""
+    client, w = playbooks_world
+    playbook_id = uuid7()
+    engine = create_async_engine(database_url)
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sm() as s, s.begin():
+            s.add(
+                IvrPlaybook(
+                    id=playbook_id,
+                    provider_id=w.provider_id,
+                    instructions={"legacy_key": "x", "rep_keyword": "Advocate"},
+                    status="inactive",
+                )
+            )
+        detail = await client.get(
+            f"/api/v1/ivr-playbooks/{playbook_id}", headers=_auth(w.super_token)
+        )
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["data"]["instructions"]["rep_keyword"] == "Advocate"
+
+        deleted = await client.delete(
+            f"/api/v1/ivr-playbooks/{playbook_id}", headers=_auth(w.super_token)
+        )
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["data"] is None
+    finally:
+        async with sm() as s, s.begin():
+            await s.execute(
+                text("DELETE FROM ivr_playbook WHERE id = :i").bindparams(i=playbook_id)
+            )
+        await engine.dispose()
 
 
 async def test_platform_routes_forbidden_for_tenant(
@@ -263,7 +333,7 @@ async def test_platform_routes_forbidden_for_tenant(
     assert listed.status_code == 403
     created = await client.post(
         "/api/v1/ivr-playbooks",
-        headers=_auth(w.tenant_admin_token),
+        headers=_write_headers(w.tenant_admin_token),
         json={"provider_id": str(w.provider_id), "instructions": {}},
     )
     assert created.status_code == 403
@@ -343,6 +413,40 @@ async def test_voice_lab_generic_navigator_when_provider_has_no_playbook(
     assert meta is not None
     assert meta["enable_ivr_navigation"] is True
     assert "ivr_playbook" not in meta  # no active playbook → generic navigator
+
+
+async def test_malformed_active_playbook_degrades_to_generic_navigator(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    fake_livekit: FakeLiveKit,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # A poisoned active row must not 500 call start — it degrades to the generic navigator.
+    provider_id, playbook_id = await _seed_provider_with_active_playbook(
+        admin_sessionmaker, {"legacy_key": "x"}
+    )
+    try:
+        resp = await client.post(
+            "/api/v1/voice-lab/sessions",
+            headers=_auth(rbac_world.admin_token),
+            json={
+                "mode": "browser",
+                "enable_ivr_navigation": True,
+                "insurance_provider_id": str(provider_id),
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        meta = fake_livekit.dispatch_metadata[-1]
+        assert meta is not None
+        assert "ivr_playbook" not in meta
+    finally:
+        async with admin_sessionmaker() as s, s.begin():
+            await s.execute(
+                text("DELETE FROM ivr_playbook WHERE id = :i").bindparams(i=playbook_id)
+            )
+            await s.execute(
+                text("DELETE FROM insurance_provider WHERE id = :i").bindparams(i=provider_id)
+            )
 
 
 async def test_voice_lab_lists_active_providers_for_tenant_user(

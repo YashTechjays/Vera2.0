@@ -17,7 +17,7 @@ from control_plane.auth.rbac import require
 from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode, NotFoundError
 from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.responses import ResponseModel, ok
-from vera_core.models import Call, CallEvent, PatientForm, Tenant
+from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
@@ -67,6 +67,17 @@ async def start_call(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
+    if body.insurance_provider_id is not None:
+        # Checked here so an unknown id is a 404, not an FK violation → 500 at flush.
+        provider_exists = (
+            await session.execute(
+                select(InsuranceProvider.id).where(
+                    InsuranceProvider.id == body.insurance_provider_id
+                )
+            )
+        ).scalar_one_or_none()
+        if provider_exists is None:
+            raise NotFoundError(message="unknown insurance provider")
 
     call = Call(
         tenant_id=tenant_id,
@@ -82,8 +93,12 @@ async def start_call(
         await session.execute(select(Tenant.persona_tweak).where(Tenant.id == tenant_id))
     ).scalar_one_or_none()  # RLS on `tenant` keys on id → only the caller's own row
     # persona_tweak is admin-authored, non-PHI config; safe to serialize into metadata.
+    # Nested under its own key so sibling dispatch keys never trip the worker's
+    # extra="forbid" PersonaTweak validation (see agent_worker.prompt.parse_persona_tweak).
     tweak = PersonaTweak.model_validate(persona) if persona is not None else PersonaTweak()
-    metadata = tweak.model_dump(exclude_none=True)
+    metadata: dict[str, object] = {}
+    if tweak_fields := tweak.model_dump(exclude_none=True):
+        metadata["persona_tweak"] = tweak_fields
     # When navigating the payer IVR, specialize the navigator with the provider's active playbook
     # (non-PHI overlay) if one exists; otherwise it runs generic. Off preserves today's behavior.
     if body.enable_ivr_navigation:
