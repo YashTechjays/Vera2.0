@@ -99,7 +99,8 @@
      "required_state": "required",
      "prompt_role": "verifiable_question",
      "confirm_only": true,
-     "confirm_value": "{patient_name}"
+     "confirm_value": "{patient_name}",
+     "read_only": true
     },
     "patient_dob": {
      "type": "string",
@@ -111,7 +112,8 @@
      "required_state": "required",
      "prompt_role": "verifiable_question",
      "confirm_only": true,
-     "confirm_value": "{date_of_birth}"
+     "confirm_value": "{date_of_birth}",
+     "read_only": true
     },
     "patient_gender": {
      "type": "string",
@@ -127,7 +129,8 @@
       "widget": "radio"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "spouse_partner_name": {
      "type": "string",
@@ -235,7 +238,8 @@
      "ui": {
       "widget": "radio"
      },
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "appointment_date": {
      "type": "string",
@@ -245,7 +249,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     }
    },
    "required": [
@@ -265,7 +270,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "verified_at": {
      "type": "string",
@@ -275,7 +281,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     },
     "callback_number": {
      "type": "string",
@@ -285,7 +292,8 @@
       "widget": "text"
      },
      "required_state": "required",
-     "prompt_role": "question"
+     "prompt_role": "context",
+     "read_only": true
     }
    },
    "required": [
@@ -474,7 +482,8 @@
      "required_state": "required",
      "prompt_role": "verifiable_question",
      "confirm_only": true,
-     "confirm_value": "{member_id}"
+     "confirm_value": "{member_id}",
+     "read_only": true
     },
     "group_information": {
      "type": "string",

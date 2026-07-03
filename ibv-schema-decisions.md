@@ -7,6 +7,10 @@ Working file (source of truth for now): **`vera-frontend/src/lib/ibv/ibv-schema.
 Comments being worked through: `ibv-schema-comments.txt`
 Full validity assessment: `ibv-schema-annotations-assessment.md`
 
+**Comments are GLOBAL rules (reviewer confirmed 2026-07-03):** each comment is pinned to an
+example line but states a rule for the WHOLE schema. Apply every rule as a full-schema sweep,
+not just at the commented spot, and re-audit globally after each.
+
 Conventions agreed:
 - **Read-only / context fields:** use `prompt_role: "context"` (bot never asks it) and,
   where the form should be non-editable, also `read_only: true`. `read_only?: boolean`
@@ -20,7 +24,7 @@ Conventions agreed:
 | # | Comment | Decision | Status |
 |---|---------|----------|--------|
 | 1 | Remove `constraint_library` (+ `constraint_ref`) | **Skip for now**, keep it. Revisit later. | ⏸️ deferred |
-| 2 | `chart_number` read-only, not a prompt question | Set `prompt_role: "context"` **and** `read_only: true`. | ✅ done |
+| 2 | `chart_number` read-only, not a prompt question | Set `prompt_role: "context"` **and** `read_only: true`. **Applied GLOBALLY (per global-rule principle):** `read_only` added to pre-provided/confirm fields `policy_number` + `patient_name` + `patient_dob` (keep `verifiable_question`); `context` + `read_only` added to the 6 reference fields whose section says "context only / do not ask" — `patient_gender`, `appointment_type`, `appointment_date`, `verified_by`, `verified_at`, `callback_number`. FLAGGED (unchanged): `spouse_partner_name/dob/gender` — patient_information desc says "don't ask" but they carry ask-prompts + Family rules → contradiction for reviewer. `insurance_representative` left as-is (bot collects it). | ✅ done (global) |
 | 3 | `patient_name` context-only | **Keep as-is** (`verifiable_question` + `confirm_only`) for now — the bot's identity-verification step needs it. May add `read_only` later. | ⏸️ keep-as-is |
 | 4 | Cross-section ref in the field key (not `summary`) | Applied to all 5 rules using **dotted paths** (7 refs). Tests green. | ✅ done |
 | 5 | Remove `summary` from `rules` | Removed all 6 `summary` keys from the rule blocks. Tests green (26). | ✅ done |
