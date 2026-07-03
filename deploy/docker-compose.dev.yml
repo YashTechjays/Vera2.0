@@ -13,8 +13,10 @@
 #                  DEEPGRAM_*, …), rendered from Secret Manager by render-env.sh
 #                  each deploy. Never in the repo. Injected via env_file.
 #
-# The HTTP load balancer does path-based routing: /api/* → control-plane :8000,
-# /* → frontend :80 — so both ports are published; the worker stays portless.
+# The load balancer routes all HTTP traffic to the frontend :80; the frontend
+# nginx serves the SPA and reverse-proxies /api/* to control-plane :8000 (see
+# vera-frontend/nginx.conf). control-plane's :8000 stays published for health
+# checks / direct access; the worker stays portless.
 
 services:
   control-plane:
