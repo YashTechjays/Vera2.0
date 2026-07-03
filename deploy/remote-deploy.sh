@@ -110,7 +110,7 @@ fi
 # the container never reaches healthy (or exits) within the timeout, so a
 # crash-looping image fails the deploy instead of reporting success. On failure,
 # dump recent logs so CI shows why.
-if ! docker compose up -d --wait --wait-timeout 120 "$SERVICE"; then
+if ! docker compose up -d --wait --wait-timeout 120 --force-recreate "$SERVICE"; then
   echo "Deploy of $SERVICE did not become healthy; recent logs:" >&2
   docker compose logs --tail=100 "$SERVICE" >&2 || true
   exit 1
