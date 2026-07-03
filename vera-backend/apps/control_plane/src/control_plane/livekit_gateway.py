@@ -141,11 +141,19 @@ class LiveKitGateway:
                 raise
 
     async def remove_participant(self, room_name: str, identity: str) -> None:
-        """Eject a participant from a room (owner revoking an intervener's access)."""
+        """Eject a participant from a room (owner revoking an intervener's access).
+        Idempotent: revoking a participant who already left / never joined is a
+        no-op instead of raising.
+        """
         async with self._client() as lk:
-            await lk.room.remove_participant(
-                api.RoomParticipantIdentity(room=room_name, identity=identity)
-            )
+            try:
+                await lk.room.remove_participant(
+                    api.RoomParticipantIdentity(room=room_name, identity=identity)
+                )
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return  # participant/room already gone — nothing to revoke
+                raise
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
         grants = api.VideoGrants(room_join=True, room=room_name)

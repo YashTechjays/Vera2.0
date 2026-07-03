@@ -10,6 +10,7 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi import FastAPI
+from livekit.api.twirp_client import TwirpError
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -49,6 +50,7 @@ class FakeLiveKit(LiveKitGateway):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
+        self.remove_not_found = False  # remove_participant raises TwirpError(not_found)
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -72,7 +74,17 @@ class FakeLiveKit(LiveKitGateway):
         self.deleted.append(room_name)
 
     async def remove_participant(self, room_name: str, identity: str) -> None:
-        self.removed.append((room_name, identity))
+        # Mirrors LiveKitGateway.remove_participant's except-pattern: the knob
+        # simulates the underlying SDK raising a not-found TwirpError, and this
+        # swallows it the same way, so callers see the same idempotent no-op.
+        try:
+            if self.remove_not_found:
+                raise TwirpError(code="not_found", msg="participant not found", status=404)
+            self.removed.append((room_name, identity))
+        except TwirpError as exc:
+            if exc.code == "not_found":
+                return
+            raise
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
         return f"faketoken:{room_name}:{identity}"
@@ -90,6 +102,7 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.known_trunks = set()
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
+    fake_livekit.remove_not_found = False
     yield
 
 

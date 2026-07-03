@@ -50,6 +50,11 @@ _ACTIVE_STATUSES = (
 )
 
 
+def _supervisor_identity(user_id: UUID) -> str:
+    """LiveKit participant identity for a VA joining/intervening on a call."""
+    return f"supervisor-{user_id}"
+
+
 def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
     return CallSummary(
         id=call.id,
@@ -157,7 +162,7 @@ async def join_token(
             )
         )
     room_name = room_name_for_call(tenant_id, call.id)
-    identity = f"supervisor-{caller.user_id}"
+    identity = _supervisor_identity(caller.user_id)
     token = livekit.mint_join_token(room_name=room_name, identity=identity)
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 
@@ -179,9 +184,10 @@ async def publish_call(
     audit: Audit,
     caller: VerifiedIdentity = require("calls:publish"),
 ) -> ResponseModel[CallSummary]:
+    # RLS scopes to the caller's tenant; the row lock serializes concurrent publishes.
     call = (
-        await session.execute(select(Call).where(Call.id == call_id))
-    ).scalar_one_or_none()  # RLS scopes to the caller's tenant
+        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
+    ).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
     if call.initiated_by_id != caller.user_id:
@@ -262,7 +268,7 @@ async def revoke_access(
             DefaultExceptionCode.FORBIDDEN, message="only the owner can revoke access"
         )
     room_name = room_name_for_call(tenant_id, call.id)
-    await livekit.remove_participant(room_name, f"supervisor-{body.target_user_id}")
+    await livekit.remove_participant(room_name, _supervisor_identity(body.target_user_id))
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,

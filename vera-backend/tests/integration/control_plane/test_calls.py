@@ -282,6 +282,7 @@ async def test_list_scopes_to_owner_or_published(
         headers=_auth(rbac_world.admin_token),
         json={"form_id": str(seeded_form_id)},
     )
+    assert created.status_code == 200, created.text
     call_id = created.json()["data"]["id"]
 
     # A non-owner (supervisor) does NOT see the admin's private call.
@@ -311,6 +312,7 @@ async def test_publish_is_owner_only_idempotent_and_audited(
         headers=_auth(rbac_world.admin_token),
         json={"form_id": str(seeded_form_id)},
     )
+    assert created.status_code == 200, created.text
     call_id = created.json()["data"]["id"]
 
     # Non-owner with calls:publish (supervisor) cannot publish someone else's call.
@@ -363,6 +365,7 @@ async def test_join_token_gated_and_audited_for_non_owner(
         headers=_auth(rbac_world.admin_token),
         json={"form_id": str(seeded_form_id)},
     )
+    assert created.status_code == 200, created.text
     call_id = created.json()["data"]["id"]
 
     # Non-owner on a PRIVATE call: 404 (existence not revealed).
@@ -372,7 +375,10 @@ async def test_join_token_gated_and_audited_for_non_owner(
     assert private.status_code == 404, private.text
 
     # Owner publishes.
-    await client.post(f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token))
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert published.status_code == 200, published.text
 
     # Non-owner on a PUBLISHED call: token + one join audit row.
     joined = await client.get(
@@ -402,8 +408,12 @@ async def test_owner_revokes_intervener_access(
         headers=_auth(rbac_world.admin_token),
         json={"form_id": str(seeded_form_id)},
     )
+    assert created.status_code == 200, created.text
     call_id = created.json()["data"]["id"]
-    await client.post(f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token))
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert published.status_code == 200, published.text
 
     # Non-owner cannot revoke.
     forbidden = await client.post(
@@ -423,19 +433,51 @@ async def test_owner_revokes_intervener_access(
     assert revoked.status_code == 200, revoked.text
     assert any(ident == f"supervisor-{target}" for _room, ident in fake_livekit.removed)
 
-    rows = (
-        (
-            await admin_session.execute(
-                select(AuditLog).where(
-                    AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
-                )
-            )
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
         )
-        .scalars()
-        .all()
     )
-    assert len(rows) == 1
+    assert len(result.scalars().all()) == 1
 
     # The call is still published.
     row = (await admin_session.execute(select(Call).where(Call.id == UUID(call_id)))).scalar_one()
     assert row.published is True
+
+
+@pytest.mark.asyncio
+async def test_owner_revoke_of_departed_intervener_is_noop_but_audited(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = created.json()["data"]["id"]
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert published.status_code == 200, published.text
+
+    # The intervener already left / never joined — LiveKit reports not_found.
+    fake_livekit.remove_not_found = True
+
+    revoked = await client.post(
+        f"/api/v1/calls/{call_id}/revoke-access",
+        headers=_auth(rbac_world.admin_token),
+        json={"target_user_id": str(uuid4())},
+    )
+    assert revoked.status_code == 200, revoked.text
+
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
+        )
+    )
+    assert len(result.scalars().all()) == 1
