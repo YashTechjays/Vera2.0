@@ -22,13 +22,11 @@ services:
     restart: unless-stopped
     env_file: [./app.env]
     # Ship container stdout/stderr to GCP Cloud Logging. The driver auth's via
-    # the VM's attached SA (ADC over the metadata server) — no creds file. A
-    # per-service gcp-log-name keeps each service its own queryable logName;
-    # env-prefixed (vera-test-) since dev/test share one GCP project.
+    # the VM's attached SA (ADC over the metadata server) — no creds file.
+    # Entries carry the container name + instance id, so services stay
+    # distinguishable in Logs Explorer (gcplogs has no custom-log-name option).
     logging:
       driver: gcplogs
-      options:
-        gcp-log-name: vera-test-control-plane
     ports:
       - "8000:8000"
     healthcheck:
@@ -44,16 +42,12 @@ services:
     env_file: [./app.env]
     logging:
       driver: gcplogs
-      options:
-        gcp-log-name: vera-test-agent-worker
 
   frontend:
     image: ${AR_IMAGE_BASE}/frontend:${FRONTEND_TAG:-dev}
     restart: unless-stopped
     logging:
       driver: gcplogs
-      options:
-        gcp-log-name: vera-test-frontend
     ports:
       - "80:80"
     # So `docker compose up --wait` (in remote-deploy.sh) verifies nginx
