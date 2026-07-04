@@ -31,6 +31,7 @@ class TestTransitionMap:
             (FormStatus.IN_QUEUE, FormStatus.IN_CALL),
             (FormStatus.IN_QUEUE, FormStatus.EXPIRED),
             (FormStatus.IN_CALL, FormStatus.AI_PROCESSING),
+            (FormStatus.IN_CALL, FormStatus.COMPLETED),
             (FormStatus.IN_CALL, FormStatus.CALL_FAILED),
             (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED),

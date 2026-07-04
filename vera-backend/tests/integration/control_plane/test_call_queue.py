@@ -10,7 +10,7 @@ from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import RBACWorld
@@ -29,32 +29,53 @@ async def queue_form_id(
     database_url: str,
     rbac_world: RBACWorld,
 ) -> AsyncGenerator[UUID]:
-    """Seed a PatientForm in READY_FOR_PROCESSING for queue tests."""
-    form_schema_id = uuid7()
-    schema_version_id = uuid7()
+    """Seed a PatientForm in READY_FOR_PROCESSING for queue tests.
+
+    `form_schema.insurance_type` is a globally UNIQUE catalog key and CI seeds the
+    INFERTILITY_TREATMENT schema before pytest, so the schema is find-or-create;
+    teardown only drops the schema chain this fixture actually created.
+    """
     patient_form_id = uuid7()
 
     engine = create_async_engine(database_url)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with sessionmaker() as session, session.begin():
-            session.add(
-                FormSchema(
-                    id=form_schema_id,
+            schema = (
+                await session.execute(
+                    select(FormSchema).where(
+                        FormSchema.insurance_type == InsuranceType.INFERTILITY_TREATMENT.value
+                    )
+                )
+            ).scalar_one_or_none()
+            created_schema = schema is None
+            if schema is None:
+                schema = FormSchema(
+                    id=uuid7(),
                     insurance_type=InsuranceType.INFERTILITY_TREATMENT.value,
                     name="Queue Test Schema",
                 )
-            )
-            await session.flush()
-            session.add(
-                SchemaVersion(
-                    id=schema_version_id,
-                    schema_id=form_schema_id,
-                    version=1,
-                    schema_json={},
+                session.add(schema)
+                await session.flush()
+                schema_version_id = uuid7()
+                session.add(
+                    SchemaVersion(
+                        id=schema_version_id,
+                        schema_id=schema.id,
+                        version=1,
+                        schema_json={},
+                    )
                 )
-            )
-            await session.flush()
+            else:
+                schema_version_id = (
+                    await session.execute(
+                        select(SchemaVersion.id)
+                        .where(SchemaVersion.schema_id == schema.id)
+                        .order_by(SchemaVersion.version.desc())
+                        .limit(1)
+                    )
+                ).scalar_one()
+            schema_id = schema.id
             session.add(
                 PatientForm(
                     id=patient_form_id,
@@ -79,12 +100,15 @@ async def queue_form_id(
             await session.execute(
                 text("DELETE FROM patient_form WHERE id = :fid").bindparams(fid=patient_form_id)
             )
-            await session.execute(
-                text("DELETE FROM schema_version WHERE id = :sid").bindparams(sid=schema_version_id)
-            )
-            await session.execute(
-                text("DELETE FROM form_schema WHERE id = :fsid").bindparams(fsid=form_schema_id)
-            )
+            if created_schema:
+                await session.execute(
+                    text("DELETE FROM schema_version WHERE id = :sid").bindparams(
+                        sid=schema_version_id
+                    )
+                )
+                await session.execute(
+                    text("DELETE FROM form_schema WHERE id = :fsid").bindparams(fsid=schema_id)
+                )
     finally:
         await engine.dispose()
 
@@ -113,6 +137,49 @@ async def test_enqueue_form_triggers_dispatch(
     # At least one call should exist for this tenant.
     calls = calls_resp.json()["data"]
     assert len(calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_completed_callback_moves_form_to_completed(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    database_url: str,
+    queue_form_id: UUID,
+) -> None:
+    """Worker reporting COMPLETED on an IN_CALL form succeeds (no 500) and the
+    form reaches COMPLETED — the IN_CALL → COMPLETED edge the worker drives."""
+    # Enqueue → dispatcher creates the call (form is now IN_CALL).
+    await client.put(
+        f"/api/v1/patient-forms/{queue_form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    call_id = (await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))).json()[
+        "data"
+    ][0]["id"]
+
+    resp = await client.post(
+        f"/api/v1/calls/{call_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["status"] == "completed"
+
+    engine = create_async_engine(database_url)
+    try:
+        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessionmaker() as session:
+            status = (
+                await session.execute(
+                    text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
+                        fid=queue_form_id
+                    )
+                )
+            ).scalar_one()
+        assert status == "completed"
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

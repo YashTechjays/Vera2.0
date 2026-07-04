@@ -115,7 +115,9 @@ async def try_dispatch(
     # 3. Fetch FIFO candidates — FOR UPDATE SKIP LOCKED prevents double-dispatch.
     # The expiry filter is pushed into the DB WHERE clause to use the DB clock,
     # avoiding Python/DB clock skew (HIPAA timestamp-of-record requirement).
-    expiry_interval = func.make_interval(hours=tenant.queue_expiry_hours)
+    # func.make_interval takes positional args (years, months, weeks, days, hours, ...);
+    # SQLAlchemy's func does not forward keyword args, so hours is the 5th positional.
+    expiry_interval = func.make_interval(0, 0, 0, 0, tenant.queue_expiry_hours)
     candidates = (
         (
             await session.execute(
@@ -188,33 +190,38 @@ async def try_dispatch(
         try:
             sm.transition(form, FormStatus.IN_CALL, tenant_max_retries=tenant.max_retries)
 
-            call = Call(
-                tenant_id=tenant_id,
-                form_id=form.id,
-                current_status=CallStatus.INITIATED.value,
-                mode=call_mode.value,
-            )
-            session.add(call)
-            await session.flush()
-
-            room_name = room_name_for_call(tenant_id, call.id)
-
             tweak = (
                 PersonaTweak.model_validate(tenant.persona_tweak)
                 if tenant.persona_tweak
                 else PersonaTweak()
             )
             metadata = tweak.model_dump(exclude_none=True)
-            await livekit.create_call_room(room_name, metadata=metadata)
 
-            session.add(
-                CallEvent(
+            # Insert the Call and provision its room inside a savepoint: if
+            # create_call_room fails, the savepoint rolls back the flushed Call
+            # so a failed dispatch leaves no orphan INITIATED row behind (the
+            # form is reverted to IN_QUEUE in the except handler below).
+            async with session.begin_nested():
+                call = Call(
                     tenant_id=tenant_id,
-                    call_id=call.id,
-                    event_type=CallEventType.STATUS.value,
-                    event_value=CallStatus.INITIATED.value,
+                    form_id=form.id,
+                    current_status=CallStatus.INITIATED.value,
+                    mode=call_mode.value,
                 )
-            )
+                session.add(call)
+                await session.flush()
+
+                room_name = room_name_for_call(tenant_id, call.id)
+                await livekit.create_call_room(room_name, metadata=metadata)
+
+                session.add(
+                    CallEvent(
+                        tenant_id=tenant_id,
+                        call_id=call.id,
+                        event_type=CallEventType.STATUS.value,
+                        event_value=CallStatus.INITIATED.value,
+                    )
+                )
             dispatched += 1
             logger.info(
                 "dispatch: initiated call %s for form %s (mode=%s)",

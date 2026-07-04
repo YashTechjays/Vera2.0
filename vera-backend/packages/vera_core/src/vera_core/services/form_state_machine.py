@@ -18,7 +18,11 @@ from vera_core.models.enums import FormStatus
 ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE, FormStatus.EXCEPTION_REVIEW}),
     FormStatus.IN_QUEUE: frozenset({FormStatus.IN_CALL, FormStatus.EXPIRED}),
-    FormStatus.IN_CALL: frozenset({FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED}),
+    # The worker reports a terminal COMPLETED directly from IN_CALL; AI_PROCESSING
+    # is a reserved intermediate for post-call processing that no code path sets yet.
+    FormStatus.IN_CALL: frozenset(
+        {FormStatus.AI_PROCESSING, FormStatus.COMPLETED, FormStatus.CALL_FAILED}
+    ),
     FormStatus.AI_PROCESSING: frozenset({FormStatus.COMPLETED, FormStatus.CALL_FAILED}),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
