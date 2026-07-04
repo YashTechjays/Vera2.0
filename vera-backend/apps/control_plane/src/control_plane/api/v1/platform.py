@@ -13,6 +13,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,7 @@ from control_plane.exceptions import (
 )
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuthAuditRecord, AuthAuditSink
+from vera_core.models import Tenant
 from vera_core.models.enums import AuthEvent
 
 router = APIRouter(prefix="/platform")
@@ -159,6 +161,37 @@ async def list_active_elevations(
 ) -> ResponseModel[list[ElevationResponse]]:
     grants = await elevation.active_grants(session)
     return ok([_to_response(g) for g in grants])
+
+
+class TenantSummary(BaseModel):
+    id: UUID
+    name: str
+    slug: str
+
+
+@router.get(
+    "/tenants",
+    response_model=ResponseModel[list[TenantSummary]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_tenants(
+    session: PlatformSession,
+    _caller: Annotated[VerifiedIdentity, platform_require("platform:elevations:read")],
+) -> ResponseModel[list[TenantSummary]]:
+    """Active tenants (id / name / slug — org metadata, not PHI) for the elevation
+    tenant picker. Readable here via the tenant_platform_read RLS policy (migration
+    0020); gated on platform:elevations:read since it serves the elevation workflow."""
+    rows = (
+        await session.execute(
+            select(Tenant.id, Tenant.name, Tenant.slug)
+            .where(Tenant.status == "active")
+            .order_by(Tenant.name)
+        )
+    ).all()
+    return ok([TenantSummary(id=r.id, name=r.name, slug=r.slug) for r in rows])
 
 
 def _map_create_error(exc: IntegrityError) -> CustomAPIException:

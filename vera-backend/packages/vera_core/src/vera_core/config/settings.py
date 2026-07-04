@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     # switch. Sessions are short-lived for HIPAA auto-logoff; revocation is a
     # Redis DEL. The MFA challenge is the brief window between password success
     # and the second factor.
-    session_ttl_seconds: int = 3600
+    # `session_ttl_seconds` is the idle window (slid by /auth/session/keepalive);
+    # default 15 min, overridable via VERA_SESSION_TTL_SECONDS.
+    session_ttl_seconds: int = 15 * 60
     mfa_challenge_ttl_seconds: int = 300
     # Hard ceiling on total session lifetime regardless of activity. `session_ttl_seconds`
     # is the idle window (slid by /auth/session/keepalive); this is the absolute max set
@@ -98,6 +100,15 @@ class Settings(BaseSettings):
     # Unset → `build_livekit_gateway` raises ValueError.
     livekit_url: str | None = None
 
+    # --- IVR navigator ------------------------------------------------------
+    # Endpointing delays for the IVR-navigator turn handling (agent_worker
+    # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:
+    # lower if answers arrive late/out-of-sequence, raise if the bot answers into
+    # a mid-prompt pause. Patient by default (a machine pauses mid-readout more than
+    # a person does), well above the snappy human-cascade delays.
+    ivr_endpointing_min_delay: float = 0.8  # VERA_IVR_ENDPOINTING_MIN_DELAY
+    ivr_endpointing_max_delay: float = 1.5  # VERA_IVR_ENDPOINTING_MAX_DELAY
+
     # --- audit anchoring (WORM bucket) -------------------------------------
     # Periodic anchoring of audit_log chain heads to an object-locked GCS bucket
     # (tamper-PROOF hardening of the tamper-EVIDENT hash chain; devops-todo #10b).
@@ -105,10 +116,6 @@ class Settings(BaseSettings):
     audit_anchor_bucket: str | None = None
     audit_anchor_prefix: str = "audit-anchors"
     audit_anchor_local_dir: str = ".audit-anchors"
-    # Outbound telephony trunk for Voice Lab / SIP calls. Unset → outbound disabled
-    # (fail closed); the LiveKit SIP service + trunk are provisioned out of band.
-    livekit_sip_trunk_id: str | None = None  # VERA_LIVEKIT_SIP_TRUNK_ID
-
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require

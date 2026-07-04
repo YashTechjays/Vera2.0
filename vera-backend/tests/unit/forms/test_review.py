@@ -4,12 +4,12 @@ from uuid import uuid4
 
 from vera_core.forms.review import (
     AnswerRow,
-    EvalRow,
     adjudication_action,
     all_required_paths,
     build_field_views,
     completion_pct,
     is_disputed,
+    normalize_value,
     unwrap_value,
 )
 from vera_core.models.enums import DisputeActionType
@@ -42,20 +42,79 @@ class TestUnwrapValue:
         assert unwrap_value(None) is None
 
 
+class TestNormalizeValue:
+    def test_strings_are_trimmed_and_lowercased(self) -> None:
+        assert normalize_value("  Primary ") == "primary"
+        assert normalize_value("SECONDARY") == "secondary"
+
+    def test_non_strings_pass_through(self) -> None:
+        assert normalize_value(None) is None
+        assert normalize_value(5) == 5
+        assert normalize_value(True) is True
+        assert normalize_value({"a": 1}) == {"a": 1}
+
+    def test_only_ascii_whitespace_is_trimmed(self) -> None:
+        # A non-breaking space (U+00A0) is NOT ASCII whitespace, so it is retained — it
+        # stays a real value difference (a deliberately conservative, stable rule).
+        assert normalize_value("\tPrimary\n") == "primary"
+        assert normalize_value("\u00a0Primary") == "\u00a0primary"
+
+
 class TestIsDisputed:
-    def test_none_evaluation_not_disputed(self) -> None:
-        assert is_disputed(None) is False
+    def _answer(self, value: object, source: str = "ai_call") -> AnswerRow:
+        return AnswerRow(
+            id=uuid4(),
+            field_path="insurance_information.health_plan",
+            value={"value": value},
+            source=source,
+            confidence=None,
+            evidence=None,
+        )
 
-    def test_unsupported_is_disputed(self) -> None:
-        assert is_disputed(EvalRow(supported=False, confidence=80, evidence="x")) is True
+    def test_ai_value_diverging_from_baseline_is_disputed(self) -> None:
+        assert is_disputed(self._answer("Blue Cross"), {"value": "BCBS TX"}) is True
 
-    def test_supported_not_disputed(self) -> None:
-        assert is_disputed(EvalRow(supported=True, confidence=95, evidence=None)) is False
+    def test_ai_value_equal_to_baseline_not_disputed(self) -> None:
+        assert is_disputed(self._answer("BCBS TX"), {"value": "BCBS TX"}) is False
 
-    def test_low_confidence_disputed_when_threshold_set(self) -> None:
-        ev = EvalRow(supported=True, confidence=50, evidence=None)
-        assert is_disputed(ev, min_confidence=70) is True
-        assert is_disputed(ev) is False  # no threshold → only `supported` matters
+    def test_intake_or_human_current_never_disputed(self) -> None:
+        # The current row IS the baseline → never a dispute, however the value compares.
+        assert (
+            is_disputed(self._answer("Blue Cross", source="intake"), {"value": "BCBS TX"}) is False
+        )
+        assert is_disputed(self._answer("X", source="human"), None) is False
+
+    def test_ai_value_with_no_baseline_is_disputed(self) -> None:
+        # Absent baseline is NULL → IS DISTINCT FROM a non-null AI value → disputed.
+        assert is_disputed(self._answer("Blue Cross"), None) is True
+
+    def test_null_value_and_no_baseline_not_disputed(self) -> None:
+        assert is_disputed(self._answer(None), None) is False
+
+    def test_ai_value_diverging_from_explicit_null_baseline_is_disputed(self) -> None:
+        # Intake explicitly set null ({"value": None}) → AI value diverges → disputed.
+        assert is_disputed(self._answer("Tertiary"), {"value": None}) is True
+
+    def test_ai_null_diverging_from_value_baseline_is_disputed(self) -> None:
+        # AI cleared a field the baseline had set → null IS DISTINCT FROM value → disputed.
+        assert is_disputed(self._answer(None), {"value": "Primary"}) is True
+
+    def test_case_only_difference_is_not_disputed(self) -> None:
+        assert is_disputed(self._answer("primary"), {"value": "Primary"}) is False
+
+    def test_whitespace_only_difference_is_not_disputed(self) -> None:
+        assert is_disputed(self._answer(" Primary "), {"value": "Primary"}) is False
+
+    def test_case_and_whitespace_difference_is_not_disputed(self) -> None:
+        assert is_disputed(self._answer("  PRIMARY  "), {"value": "primary"}) is False
+
+    def test_genuinely_different_value_still_disputed(self) -> None:
+        assert is_disputed(self._answer("Secondary"), {"value": "Primary"}) is True
+
+    def test_non_ascii_whitespace_difference_is_disputed(self) -> None:
+        # A non-breaking space (U+00A0) is not ASCII whitespace, so it is NOT stripped —
+        # this stays a dispute.
+        assert is_disputed(self._answer("\u00a0Primary"), {"value": "Primary"}) is True
 
 
 class TestRequiredPathsAndCompletion:
@@ -112,31 +171,36 @@ class TestBuildFieldViews:
             "insurance_information.health_plan", "Blue Cross", confidence=95, evidence="rep said so"
         )
         a2 = self._answer("patient_information.patient_name", "Jane", source="intake")
-        evals = {a1.id: EvalRow(supported=False, confidence=72, evidence="judge: disagrees")}
-        priors = {"insurance_information.health_plan": {"value": "BCBS TX"}}
+        baselines = {"insurance_information.health_plan": {"value": "BCBS TX"}}
 
-        views = build_field_views([a1, a2], evals, priors, resolved_answer_ids=set())
+        views = build_field_views([a1, a2], baselines)
 
         by_path = {v["field_path"]: v for v in views}
         d = by_path["insurance_information.health_plan"]["dispute"]
         assert d == {
-            "previous_value": "BCBS TX",
-            "current_value": "Blue Cross",
-            "confidence": 72,
+            "previous_value": "BCBS TX",  # the intake/human baseline
+            "current_value": "Blue Cross",  # the diverging AI value
+            "confidence": 95,  # the AI answer's own confidence
             "evidence": "rep said so",  # field_answer.evidence (what was captured)
-            "reasoning": "judge: disagrees",  # field_evaluation.evidence (why disputed)
+            "reasoning": None,  # field_evaluation plays no part in disputes
         }
         assert by_path["insurance_information.health_plan"]["value"] == "Blue Cross"
         assert by_path["patient_information.patient_name"]["dispute"] is None
 
-    def test_resolved_answer_is_not_disputed(self) -> None:
-        a1 = self._answer("insurance_information.health_plan", "Blue Cross")
-        evals = {a1.id: EvalRow(supported=False, confidence=72, evidence="x")}
-        views = build_field_views([a1], evals, {}, resolved_answer_ids={a1.id})
+    def test_ai_value_matching_baseline_is_not_disputed(self) -> None:
+        a = self._answer("insurance_information.health_plan", "X", confidence=80)
+        views = build_field_views([a], {"insurance_information.health_plan": {"value": "X"}})
         assert views[0]["dispute"] is None
+
+    def test_ai_value_without_baseline_is_disputed(self) -> None:
+        a = self._answer("insurance_information.health_plan", "New", confidence=80)
+        d = build_field_views([a], {})[0]["dispute"]
+        assert d is not None
+        assert d["previous_value"] is None
+        assert d["current_value"] == "New"
 
     def test_sorted_by_path(self) -> None:
         a = self._answer("b.x", "1")
         b = self._answer("a.y", "2")
-        views = build_field_views([a, b], {}, {}, resolved_answer_ids=set())
+        views = build_field_views([a, b], {})
         assert [v["field_path"] for v in views] == ["a.y", "b.x"]

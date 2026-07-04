@@ -22,6 +22,12 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   A `SECURITY DEFINER` fn whose **param type** changes needs `DROP FUNCTION` + recreate +
   re-`ALTER FUNCTION … OWNER TO vera_definer_owner` — `CREATE OR REPLACE` leaves the old
   overload behind and the recreated fn loses its definer ownership (so BYPASSRLS stops applying).
+  Revision IDs are alembic's **random hex** (`just makemigration` auto-generates them; files are
+  date-prefixed for chronological order) — **never hand-number them sequentially** (`0023`, `0024`…).
+  Sequential IDs collide when two branches both grab "the next number," which silently breaks
+  `alembic upgrade head` on `main` (duplicate-revision error). Legacy `0001`–`0022` keep their
+  sequential names; new ones don't. Two branches off one head produce multiple heads after merge —
+  resolve with `just merge-heads` (= `alembic merge heads`), never by renumbering.
 - `LOCAL_KMS_MASTER_KEY` — required for local dev when `VERA_KMS_KEY_NAME` is unset.
   Generate once: `python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"`.
   In production, set `VERA_KMS_KEY_NAME` to the Cloud KMS key resource path instead (see `adr/devops-todo.md`).

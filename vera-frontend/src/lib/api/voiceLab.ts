@@ -10,6 +10,8 @@ export type StartVoiceSessionPayload = {
   mode: VoiceSessionMode
   /** Required + E.164 when mode === "outbound". */
   phone_number?: string
+  /** ON → the worker boots the generic IVR navigator agent instead of the chat persona. */
+  enable_ivr_navigation?: boolean
 }
 
 export type VoiceSessionResponse = {

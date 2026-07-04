@@ -17,7 +17,7 @@ def _kms() -> LocalDevKMS:
 async def test_seal_then_open_roundtrips() -> None:
     kms = _kms()
     integration = Integration()
-    creds = {"twilio_sip_trunk": "ST0123456789abcdef0123456789abcdef"}
+    creds = {"trunk_id": "ST0123456789abcdef0123456789abcdef"}
 
     await seal_credentials(kms, integration=integration, credentials=creds)
 
@@ -25,7 +25,7 @@ async def test_seal_then_open_roundtrips() -> None:
     assert integration.credential_ct is not None
     assert integration.dek_ct is not None
     assert integration.secret_ref == "local:1"
-    assert b"twilio_sip_trunk" not in integration.credential_ct
+    assert b"trunk_id" not in integration.credential_ct
     assert b"ST0123456789" not in integration.credential_ct
 
     assert await open_credentials(kms, integration=integration) == creds
@@ -40,7 +40,7 @@ async def test_open_returns_none_when_unset() -> None:
 async def test_each_seal_uses_a_fresh_dek() -> None:
     kms = _kms()
     a, b = Integration(), Integration()
-    creds = {"twilio_sip_trunk": "STsame"}
+    creds = {"trunk_id": "STsame"}
 
     await seal_credentials(kms, integration=a, credentials=creds)
     await seal_credentials(kms, integration=b, credentials=creds)

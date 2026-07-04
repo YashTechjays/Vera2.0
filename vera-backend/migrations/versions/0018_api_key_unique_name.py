@@ -1,8 +1,14 @@
 """api_key: at most one active key per (tenant, name)
 
-Revision ID: 0015
-Revises: 0014
+Revision ID: 0018
+Revises: 0017
 Create Date: 2026-06-24
+
+Renumbered from 0015 → 0018: it was branched off 0014 in parallel with
+0015_audit_log_hash_chain and merged without renumbering, so two revisions shared the
+id "0015" — leaving this one an orphaned second head that `alembic upgrade head` never
+applied. Re-parented onto the current tip (0017) to restore a single linear head. Its
+body is position-independent (de-dup + CREATE INDEX IF NOT EXISTS on api_key).
 
 A partial unique index enforces a single ACTIVE (`revoked = false`) key per name
 within a tenant, so the create endpoint can't mint duplicate-named keys. Partial so
@@ -21,8 +27,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0015"
-down_revision: str | None = "0014"
+revision: str = "0018"
+down_revision: str | None = "0017"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

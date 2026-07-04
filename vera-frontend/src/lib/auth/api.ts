@@ -30,6 +30,16 @@ export type MeResponse = {
   tenant_slug: string | null
   roles: string[]
   permissions: string[]
+  /** A platform operator's current elevation grant; null for tenant users and
+   *  for un-elevated operators. Drives elevation-aware UI (e.g. the sidebar). */
+  active_elevation: { target_tenant_id: string; expires_at: string } | null
+  /** Backend-authoritative login-session timeout config — the frontend configures its
+   *  idle manager from these instead of hardcoding (and drifting from) the values.
+   *  `login_idle_timeout_seconds`: the idle window to count down from each activity event.
+   *  `login_absolute_remaining_seconds`: seconds left until the fixed absolute cap at
+   *  receipt; the client turns it into a deadline (`Date.now() + remaining*1000`), skew-safe. */
+  login_idle_timeout_seconds: number
+  login_absolute_remaining_seconds: number
 }
 
 export type InviteUserResult = {
@@ -51,6 +61,25 @@ export function login(slug: string, email: string, password: string) {
 
 export function verifyMfa(slug: string, mfaToken: string, code: string) {
   return apiRequest<SessionResult>(`${tenantAuth(slug)}/mfa/verify`, {
+    method: "POST",
+    body: { mfa_token: mfaToken, code },
+    auth: false,
+  })
+}
+
+// --- Platform-operator (super admin) auth: NO tenant slug. Login ALWAYS returns
+// an MFA challenge (mandatory); verify mints a platform session (tenant_id stays
+// NULL — the operator then elevates into a tenant). ---
+export function platformLogin(email: string, password: string) {
+  return apiRequest<LoginResult>(`/platform/auth/login`, {
+    method: "POST",
+    body: { email, password },
+    auth: false,
+  })
+}
+
+export function platformVerifyMfa(mfaToken: string, code: string) {
+  return apiRequest<SessionResult>(`/platform/auth/mfa/verify`, {
     method: "POST",
     body: { mfa_token: mfaToken, code },
     auth: false,

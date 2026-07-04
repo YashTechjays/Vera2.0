@@ -5,10 +5,13 @@ its `call_id` provenance and an `is_current` flag. A partial unique index
 guarantees exactly one current value per field no matter how many calls
 contributed — so "the current form" is one indexed query, never an N-instance
 merge in Python (the v1 P1 fix). `call_form_snapshot` keeps the spec's legitimate
-per-call before/after snapshot as an immutable artifact. `field_evaluation` is the
-separate post-call LLM-as-judge verdict (two-pass design); disagreement with the
-realtime fill is the dispute signal. `dispute_action` resolutions emit a NEW
-`field_answer` (source=human) rather than mutating in place.
+per-call before/after snapshot as an immutable artifact. The dispute signal is derived
+purely from `field_answer` history: a field is disputed when its current row came from
+the AI call and its value diverges from the most recent `intake`/`human` baseline.
+`field_evaluation` is unrelated advisory metadata (confidence/sort) and plays no part in
+disputes. `dispute_action` is a pure audit record of a human adjudication and does not
+gate the dispute; resolutions emit a NEW `field_answer` (source=human) — advancing the
+baseline — rather than mutating in place.
 """
 
 from typing import Any
@@ -52,6 +55,15 @@ class FieldAnswer(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
             postgresql_where=text("is_current"),
         ),
         Index("ix_field_answer_call", "call_id"),
+        # Baseline lookup: most recent intake/human answer per (form, field). Backs the
+        # dispute derivation (DISTINCT ON … ORDER BY created_at DESC) on the worklist.
+        Index(
+            "ix_field_answer_baseline",
+            "form_id",
+            "field_path",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
         check_in("source", AnswerSource),
         CheckConstraint("confidence BETWEEN 0 AND 100", name="confidence_range"),
     )

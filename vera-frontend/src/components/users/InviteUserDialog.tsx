@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from "react"
+import { Check, Copy } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog"
@@ -12,16 +14,23 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
   const [open, setOpen] = useState(false)
   const [email, setEmail] = useState("")
   const [name, setName] = useState("")
+  const [sendEmail, setSendEmail] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<InviteUserResult | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  function copyLink() {
+    if (!result) return
+    void navigator.clipboard.writeText(result.invite_url).then(() => setCopied(true))
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
     setBusy(true)
     try {
-      const res = await inviteUser({ email, name, roleIds: [], sendEmail: true })
+      const res = await inviteUser({ email, name, roleIds: [], sendEmail })
       setResult(res)
       onInvited?.()
     } catch (err) {
@@ -33,8 +42,11 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
 
   function reset() {
     setOpen(false)
-    setEmail(""); setName(""); setError(null); setResult(null); setBusy(false)
+    setEmail(""); setName(""); setSendEmail(true); setError(null); setResult(null); setBusy(false); setCopied(false)
   }
+
+  const submitLabel = sendEmail ? "Send invitation" : "Create invitation"
+  const submitBusyLabel = sendEmail ? "Sending…" : "Creating…"
 
   return (
     <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : reset())}>
@@ -58,13 +70,25 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
               </p>
               <div className="space-y-1.5">
                 <Label htmlFor="invite-url">Invite link</Label>
-                <Input
-                  id="invite-url"
-                  readOnly
-                  value={result.invite_url}
-                  onFocus={(e) => e.target.select()}
-                  className="font-mono text-xs"
-                />
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="invite-url"
+                    readOnly
+                    value={result.invite_url}
+                    onFocus={(e) => e.target.select()}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={copyLink}
+                    aria-label={copied ? "Link copied" : "Copy invite link"}
+                    title={copied ? "Copied" : "Copy"}
+                  >
+                    {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                  </Button>
+                </div>
               </div>
             </div>
             <div className="flex justify-end border-t border-border p-4">
@@ -95,12 +119,22 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
                   onChange={(e) => setName(e.target.value)}
                 />
               </div>
+              <div className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  id="invite-send-email"
+                  checked={sendEmail}
+                  onCheckedChange={(checked) => setSendEmail(checked === true)}
+                />
+                <Label htmlFor="invite-send-email" className="font-normal">
+                  Send invitation email
+                </Label>
+              </div>
               {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
             </div>
             <div className="flex justify-end gap-3 border-t border-border p-4">
               <Button type="button" variant="outline" onClick={reset}>Cancel</Button>
               <Button type="submit" disabled={busy} className="min-w-[120px]">
-                {busy ? "Sending…" : "Send invitation"}
+                {busy ? submitBusyLabel : submitLabel}
               </Button>
             </div>
           </form>

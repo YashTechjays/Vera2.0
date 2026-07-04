@@ -45,6 +45,11 @@ migrate:
 makemigration message:
     uv run alembic revision --autogenerate -m "{{message}}"
 
+# Join divergent migration heads into one merge revision (never renumber by hand).
+# See the migrations bullet in CLAUDE.md for why concurrent branches become heads.
+merge-heads message="merge heads":
+    uv run alembic merge heads -m "{{message}}"
+
 # Seed the shared sample admin (admin@veratechsolutions.example / dev-password-change-me)
 seed:
     uv run python scripts/seed.py
@@ -56,6 +61,10 @@ seed-user email password:
 # Seed ONLY the baseline form schemas (IBV Form Standard DSL)
 seed-schemas:
     uv run python scripts/seed.py --schemas
+
+# Seed ONLY the baseline prompts (bind to each schema's published version)
+seed-prompts:
+    uv run python scripts/seed.py --prompts
 
 # Anchor audit_log chain heads to the WORM bucket (GKE CronJob entrypoint)
 anchor-audit:
