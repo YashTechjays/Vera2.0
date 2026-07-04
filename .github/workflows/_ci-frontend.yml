@@ -1,0 +1,47 @@
+# Reusable frontend CI gate. Called by `ci.yml` (PRs + main) and, on `dev`, as the
+# first job of the frontend component pipeline so build only starts if CI is green.
+
+name: _ci-frontend
+
+on:
+  workflow_call:
+
+# A newer push supersedes an in-flight CI run for the same caller pipeline + ref, so a
+# burst of pushes doesn't stack N parallel runs. Safe to cancel: CI has no durable side
+# effects. `github.workflow` is the caller pipeline, keeping this isolated from backend CI.
+# Deploy is the one stage we never cancel — see _deploy-vm.yml.
+concurrency:
+  group: ci-frontend-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only reads code. Declared here too so a caller that has id-token:write
+# (the component pipelines) can't leak the deploy token into this reusable CI job.
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vera-frontend
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vera-frontend/package-lock.json
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck + build
+        run: npm run build
+
+      - name: Test
+        run: npm test -- --passWithNoTests

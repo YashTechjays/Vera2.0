@@ -1,0 +1,63 @@
+# Vera dev VM — the three application containers only.
+#
+# This is NOT the local-dev stack (vera-backend/docker-compose.yml, which also
+# runs Postgres/Redis/LiveKit). On the VM those are MANAGED services reached via
+# env; here we run only what we build and ship.
+#
+# The deploy job ships this file to /opt/vera on the VM and drives it. Two config
+# sources, deliberately separated (both in /opt/vera, beside this file):
+#   * .env       — image coordinates the pipeline rewrites each deploy
+#                  (AR_IMAGE_BASE + the per-service *_TAG). Compose reads it
+#                  automatically for ${...} below.
+#   * app.env    — the container runtime config/secrets (VERA_*, LIVEKIT_*,
+#                  DEEPGRAM_*, …), rendered from Secret Manager by render-env.sh
+#                  each deploy. Never in the repo. Injected via env_file.
+#
+# The load balancer routes all HTTP traffic to the frontend :80; the frontend
+# nginx serves the SPA and reverse-proxies /api/* to control-plane :8000 (see
+# vera-frontend/nginx.conf). control-plane's :8000 stays published for health
+# checks / direct access; the worker stays portless.
+
+services:
+  control-plane:
+    image: ${AR_IMAGE_BASE}/control-plane:${CONTROL_PLANE_TAG:-dev}
+    restart: unless-stopped
+    env_file: [./app.env]
+    # Ship container stdout/stderr to GCP Cloud Logging. The driver auth's via
+    # the VM's attached SA (ADC over the metadata server) — no creds file.
+    # Entries carry the container name + instance id, so services stay
+    # distinguishable in Logs Explorer (gcplogs has no custom-log-name option).
+    logging:
+      driver: gcplogs
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  agent-worker:
+    image: ${AR_IMAGE_BASE}/agent-worker:${WORKER_TAG:-dev}
+    restart: unless-stopped
+    env_file: [./app.env]
+    logging:
+      driver: gcplogs
+
+  frontend:
+    image: ${AR_IMAGE_BASE}/frontend:${FRONTEND_TAG:-dev}
+    restart: unless-stopped
+    logging:
+      driver: gcplogs
+    ports:
+      - "80:80"
+    # So `docker compose up --wait` (in remote-deploy.sh) verifies nginx
+    # actually serves, not just that the container exists. busybox wget
+    # ships in the nginx:alpine image.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
