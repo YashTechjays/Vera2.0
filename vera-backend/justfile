@@ -50,6 +50,11 @@ makemigration message:
 merge-heads message="merge heads":
     uv run alembic merge heads -m "{{message}}"
 
+# Recompile data/form_schemas/*.json from the vera_core.forms.catalog author sources.
+# The freshness test in tests/unit/forms/test_schema_dsl.py fails when artifacts drift.
+compile-schemas:
+    uv run python scripts/compile_schemas.py
+
 # Seed the shared sample admin (admin@veratechsolutions.example / dev-password-change-me)
 seed:
     uv run python scripts/seed.py
