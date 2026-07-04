@@ -1,0 +1,265 @@
+# Dev branch — one pipeline for all three components (control-plane, agent-worker,
+# frontend). Replaces the old per-component control-plane-dev / worker-dev / frontend-dev
+# workflows, which each re-ran the *shared* backend CI and raced each other for the deploy
+# lock.
+#
+# A leading `changes` job re-derives the per-component path filtering a single workflow
+# would otherwise lose, so we still build+deploy ONLY what changed. `needs:` then gives a
+# deterministic order the three separate runs couldn't: backend CI runs ONCE, and the
+# frontend deploys LAST — so the SPA only flips once the control-plane it proxies /api to
+# is already up and migrated.
+
+name: dev
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch: # manual "Run workflow" — treated as "everything changed" (see `changes`)
+
+# id-token for the keyless WIF auth the build/deploy reusables need; contents:read to check
+# out. Individual jobs that only run a script drop id-token (see their permissions blocks).
+permissions:
+  contents: read
+  id-token: write
+
+# One run at a time for the whole dev deploy. cancel-in-progress:false never kills a run that
+# might be mid-`docker compose` on the VM; a burst of pushes queues (GitHub keeps only the
+# newest pending run). The reusables keep their own cancel-friendly CI/build groups for
+# within-run dedup, and _deploy-vm keeps the deploy-vm-<env> VM-level mutex.
+concurrency:
+  group: dev-deploy
+  cancel-in-progress: false
+
+jobs:
+  # Which components does this push touch? Outputs drive every downstream `if`. The filters
+  # reproduce the union of the three old workflows' `paths:` blocks — so trigger behavior is
+  # unchanged, just deduped into one run.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # only checks out + diffs; no deploy token needed
+    outputs:
+      control_plane: ${{ steps.decide.outputs.control_plane }}
+      worker: ${{ steps.decide.outputs.worker }}
+      frontend: ${{ steps.decide.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Skipped on workflow_dispatch: a manual run has no github.event.before, so the filter
+      # would resolve everything to false and deploy nothing. The `decide` step forces all-true
+      # in that case. (paths-filter treats an initial-push all-zeros base as "all changed".)
+      - id: filter
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        with:
+          filters: |
+            control_plane:
+              - 'vera-backend/apps/control_plane/**'
+              - 'vera-backend/packages/**'
+              - 'vera-backend/docker/control_plane.Dockerfile'
+              - 'vera-backend/pyproject.toml'
+              - 'vera-backend/uv.lock'
+              - 'deploy/**'
+              - '!deploy/README.md'
+              - '.github/workflows/dev.yml'
+              - '.github/workflows/_ci-backend.yml'
+              - '.github/workflows/_build-image.yml'
+              - '.github/workflows/_deploy-vm.yml'
+            worker:
+              - 'vera-backend/apps/agent_worker/**'
+              - 'vera-backend/packages/**'
+              - 'vera-backend/docker/agent_worker.Dockerfile'
+              - 'vera-backend/pyproject.toml'
+              - 'vera-backend/uv.lock'
+              - 'deploy/**'
+              - '!deploy/README.md'
+              - '.github/workflows/dev.yml'
+              - '.github/workflows/_ci-backend.yml'
+              - '.github/workflows/_build-image.yml'
+              - '.github/workflows/_deploy-vm.yml'
+            frontend:
+              - 'vera-frontend/**'
+              - 'deploy/**'
+              - '!deploy/README.md'
+              - '.github/workflows/dev.yml'
+              - '.github/workflows/_ci-frontend.yml'
+              - '.github/workflows/_build-image.yml'
+              - '.github/workflows/_deploy-vm.yml'
+
+      - id: decide
+        env:
+          DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+          CP: ${{ steps.filter.outputs.control_plane }}
+          WK: ${{ steps.filter.outputs.worker }}
+          FE: ${{ steps.filter.outputs.frontend }}
+        run: |
+          if [ "$DISPATCH" = "true" ]; then CP=true; WK=true; FE=true; fi
+          {
+            echo "control_plane=${CP:-false}"
+            echo "worker=${WK:-false}"
+            echo "frontend=${FE:-false}"
+          } >> "$GITHUB_OUTPUT"
+
+  # Backend CI gate — runs ONCE for any backend change (the old two-workflow layout ran it
+  # twice on a shared-core push).
+  ci-backend:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true' || needs.changes.outputs.worker == 'true'
+    uses: ./.github/workflows/_ci-backend.yml
+
+  ci-frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/_ci-frontend.yml
+
+  # Fail-closed config gates: every env var a component needs must be supplied by the pipeline
+  # (mapped in deploy/secrets.map or a render-env built-in). See deploy/env-manifest.json.
+  # Both backend apps verify in one job (one runner) — each step runs only for the app that
+  # changed; the shared workspace makes a config error in either a reason to hold the build.
+  verify-backend:
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true' || needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - if: needs.changes.outputs.control_plane == 'true'
+        run: bash deploy/verify-config.sh control-plane
+      - if: needs.changes.outputs.worker == 'true'
+        run: bash deploy/verify-config.sh worker
+
+  # Frontend's required BUILD vars must be present & non-empty (they're baked into the bundle).
+  verify-frontend-env:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - run: bash deploy/verify-frontend-build-env.sh
+        env:
+          VITE_API_BASE_URL: ${{ vars.DEV_VITE_API_BASE_URL }}
+
+  build-control-plane:
+    needs: [changes, ci-backend, verify-backend]
+    if: needs.changes.outputs.control_plane == 'true'
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      environment: test
+      component: control-plane
+      context: vera-backend
+      dockerfile: vera-backend/docker/control_plane.Dockerfile
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}
+
+  build-worker:
+    needs: [changes, ci-backend, verify-backend]
+    if: needs.changes.outputs.worker == 'true'
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      environment: test
+      component: agent-worker
+      context: vera-backend
+      dockerfile: vera-backend/docker/agent_worker.Dockerfile
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}
+
+  build-frontend:
+    needs: [changes, ci-frontend, verify-frontend-env]
+    if: needs.changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      environment: test
+      component: frontend
+      context: vera-frontend
+      dockerfile: vera-frontend/Dockerfile
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+      # Baked into the bundle. Same-origin path (`/api/v1`); the LB path-routes /api/* to the
+      # control-plane, so no CORS.
+      build-args: |
+        VITE_API_BASE_URL=${{ vars.DEV_VITE_API_BASE_URL }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}
+
+  # control-plane owns the schema: migrate + idempotent seed run here before the restart.
+  deploy-control-plane:
+    needs: [changes, build-control-plane]
+    if: needs.changes.outputs.control_plane == 'true'
+    uses: ./.github/workflows/_deploy-vm.yml
+    with:
+      environment: test
+      service: control-plane
+      tag_var: CONTROL_PLANE_TAG
+      image_sha: ${{ github.sha }}
+      run_migrations: true
+      run_seed: true
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+      secret_prefix: ${{ vars.DEV_SECRET_PREFIX }}
+      vm_name: ${{ vars.DEV_VM_NAME }}
+      vm_zone: ${{ vars.DEV_VM_ZONE }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}
+
+  deploy-worker:
+    needs: [changes, build-worker]
+    if: needs.changes.outputs.worker == 'true'
+    uses: ./.github/workflows/_deploy-vm.yml
+    with:
+      environment: test
+      service: agent-worker
+      tag_var: WORKER_TAG
+      image_sha: ${{ github.sha }}
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+      secret_prefix: ${{ vars.DEV_SECRET_PREFIX }}
+      vm_name: ${{ vars.DEV_VM_NAME }}
+      vm_zone: ${{ vars.DEV_VM_ZONE }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}
+
+  # Frontend deploys LAST. It `needs` both backend deploys, so when they run it waits for them;
+  # the `!cancelled()` guard lets it still run when they were SKIPPED (frontend-only change →
+  # deploy straight against the already-running backend). Each backend deploy must be `success`
+  # OR `skipped`; a backend deploy that FAILS blocks the frontend, so a broken backend never
+  # gets a fresh SPA pointed at it.
+  deploy-frontend:
+    needs: [changes, build-frontend, deploy-control-plane, deploy-worker]
+    if: >-
+      !cancelled()
+      && needs.changes.outputs.frontend == 'true'
+      && needs.build-frontend.result == 'success'
+      && (needs.deploy-control-plane.result == 'success' || needs.deploy-control-plane.result == 'skipped')
+      && (needs.deploy-worker.result == 'success' || needs.deploy-worker.result == 'skipped')
+    uses: ./.github/workflows/_deploy-vm.yml
+    with:
+      environment: test
+      service: frontend
+      tag_var: FRONTEND_TAG
+      image_sha: ${{ github.sha }}
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+      gcp_region: ${{ vars.DEV_GCP_REGION }}
+      ar_repo: ${{ vars.DEV_AR_REPO }}
+      secret_prefix: ${{ vars.DEV_SECRET_PREFIX }}
+      vm_name: ${{ vars.DEV_VM_NAME }}
+      vm_zone: ${{ vars.DEV_VM_ZONE }}
+    secrets:
+      wif_provider: ${{ secrets.DEV_WIF_PROVIDER }}
+      deployer_sa: ${{ secrets.DEV_DEPLOYER_SA }}
