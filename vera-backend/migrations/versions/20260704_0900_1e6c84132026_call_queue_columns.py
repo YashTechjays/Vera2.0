@@ -77,6 +77,6 @@ def downgrade() -> None:
         ["scheduled_at"],
         postgresql_where=sa.text("status = 'in_queue'"),
     )
-    op.drop_column("patient_form", "enqueued_at")
-    op.drop_column("tenant", "queue_expiry_hours")
-    op.drop_column("tenant", "max_retries")
+    op.execute("ALTER TABLE patient_form DROP COLUMN IF EXISTS enqueued_at")
+    op.execute("ALTER TABLE tenant DROP COLUMN IF EXISTS queue_expiry_hours")
+    op.execute("ALTER TABLE tenant DROP COLUMN IF EXISTS max_retries")

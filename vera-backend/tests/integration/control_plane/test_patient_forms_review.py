@@ -88,10 +88,18 @@ async def cleanup_forms(
 ) -> AsyncGenerator[None]:
     yield
     async with admin_sessionmaker() as s, s.begin():
+        # Enqueueing a form fires the dispatcher, which creates call rows that
+        # FK-reference the form — clear them (and their events) first.
+        params = {"a": rbac_world.tenant_id, "b": rbac_world.other_tenant_id}
         await s.execute(
-            text("DELETE FROM patient_form WHERE tenant_id IN (:a, :b)").bindparams(
-                a=rbac_world.tenant_id, b=rbac_world.other_tenant_id
-            )
+            text(
+                "DELETE FROM call_event WHERE call_id IN "
+                "(SELECT id FROM call WHERE tenant_id IN (:a, :b))"
+            ).bindparams(**params)
+        )
+        await s.execute(text("DELETE FROM call WHERE tenant_id IN (:a, :b)").bindparams(**params))
+        await s.execute(
+            text("DELETE FROM patient_form WHERE tenant_id IN (:a, :b)").bindparams(**params)
         )
 
 
@@ -991,8 +999,10 @@ async def test_status_queues_a_ready_form(
         json={"status": "in_queue"},
     )
     assert resp.status_code == 200, resp.text
+    # The response acknowledges the manual transition; the dispatcher then fires
+    # synchronously and (with free slots and FakeLiveKit) dispatches the form.
     assert resp.json()["data"]["status"] == "in_queue"
-    assert await _status(admin_sessionmaker, form_id) == "in_queue"
+    assert await _status(admin_sessionmaker, form_id) == "in_call"
 
 
 async def test_status_rejects_illegal_transition(

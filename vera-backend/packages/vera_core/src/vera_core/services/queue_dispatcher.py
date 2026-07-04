@@ -10,7 +10,6 @@ tenant/provider config only.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
@@ -179,6 +178,14 @@ async def try_dispatch(
 
     dispatched = 0
 
+    # Room metadata is tenant-level — compute it once for the whole pass.
+    tweak = (
+        PersonaTweak.model_validate(tenant.persona_tweak)
+        if tenant.persona_tweak
+        else PersonaTweak()
+    )
+    metadata = tweak.model_dump(exclude_none=True)
+
     for form in candidates:
         # 4b. Working-hours check.
         if not await _provider_in_hours(session, form):
@@ -189,13 +196,6 @@ async def try_dispatch(
         call_mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL
         try:
             sm.transition(form, FormStatus.IN_CALL, tenant_max_retries=tenant.max_retries)
-
-            tweak = (
-                PersonaTweak.model_validate(tenant.persona_tweak)
-                if tenant.persona_tweak
-                else PersonaTweak()
-            )
-            metadata = tweak.model_dump(exclude_none=True)
 
             # Insert the Call and provision its room inside a savepoint: if
             # create_call_room fails, the savepoint rolls back the flushed Call
@@ -245,11 +245,9 @@ async def try_dispatch(
             logger.exception(
                 "dispatch: failed to dispatch form %s — reverting to IN_QUEUE", form.id
             )
-            # Revert the form back to IN_QUEUE so it will be retried on the next
-            # dispatch pass. Suppress any error here (e.g. if the transition to
-            # IN_CALL never committed we don't want a secondary error).
-            with contextlib.suppress(Exception):
-                form.status = FormStatus.IN_QUEUE.value
+            # The savepoint rolled back the Call; revert the in-memory form to
+            # IN_QUEUE so it will be retried on the next dispatch pass.
+            form.status = FormStatus.IN_QUEUE.value
 
     return dispatched
 

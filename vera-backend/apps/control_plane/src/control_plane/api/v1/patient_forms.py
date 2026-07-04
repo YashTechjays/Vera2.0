@@ -792,11 +792,13 @@ async def update_patient_form_status(
         )
     )
 
-    # Fire the dispatcher if a form was just enqueued.
+    # Fire the dispatcher if a form was just enqueued. The response acknowledges
+    # the manual transition (target), not whatever the dispatcher advanced the
+    # form to afterwards — clients observe dispatch via the calls list.
     if target == FormStatus.IN_QUEUE:
         await try_dispatch(session, tenant_id, livekit, audit=audit)
 
     return ok(
-        PatientFormStatusResponse(id=form.id, status=form.status),
+        PatientFormStatusResponse(id=form.id, status=target.value),
         message="Status updated.",
     )

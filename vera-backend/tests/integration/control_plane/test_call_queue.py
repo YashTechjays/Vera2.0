@@ -11,7 +11,7 @@ from uuid import UUID
 import httpx
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import uuid7
@@ -75,7 +75,7 @@ async def queue_form_id(
                         .limit(1)
                     )
                 ).scalar_one()
-            schema_id = schema.id
+            form_schema_id = schema.id
             session.add(
                 PatientForm(
                     id=patient_form_id,
@@ -107,7 +107,7 @@ async def queue_form_id(
                     )
                 )
                 await session.execute(
-                    text("DELETE FROM form_schema WHERE id = :fsid").bindparams(fsid=schema_id)
+                    text("DELETE FROM form_schema WHERE id = :fsid").bindparams(fsid=form_schema_id)
                 )
     finally:
         await engine.dispose()
@@ -143,7 +143,7 @@ async def test_enqueue_form_triggers_dispatch(
 async def test_completed_callback_moves_form_to_completed(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
-    database_url: str,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
     queue_form_id: UUID,
 ) -> None:
     """Worker reporting COMPLETED on an IN_CALL form succeeds (no 500) and the
@@ -166,20 +166,15 @@ async def test_completed_callback_moves_form_to_completed(
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"]["status"] == "completed"
 
-    engine = create_async_engine(database_url)
-    try:
-        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-        async with sessionmaker() as session:
-            status = (
-                await session.execute(
-                    text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
-                        fid=queue_form_id
-                    )
+    async with admin_sessionmaker() as session:
+        status = (
+            await session.execute(
+                text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
+                    fid=queue_form_id
                 )
-            ).scalar_one()
-        assert status == "completed"
-    finally:
-        await engine.dispose()
+            )
+        ).scalar_one()
+    assert status == "completed"
 
 
 @pytest.mark.asyncio

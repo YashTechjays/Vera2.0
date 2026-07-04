@@ -163,6 +163,7 @@ _TERMINAL_FAILURE_STATUSES = frozenset({CallStatus.FAILED, CallStatus.NO_ANSWER,
 _ALLOWED_CALLBACK_STATUSES = frozenset(
     {CallStatus.COMPLETED, CallStatus.FAILED, CallStatus.NO_ANSWER, CallStatus.BUSY}
 )
+_ALLOWED_CALLBACK_STATUS_VALUES = frozenset(s.value for s in _ALLOWED_CALLBACK_STATUSES)
 
 
 @router.post(
@@ -206,7 +207,7 @@ async def update_call_status(
         )
 
     # Idempotent: if the call is already terminal, no-op.
-    if call.current_status in {s.value for s in _ALLOWED_CALLBACK_STATUSES}:
+    if call.current_status in _ALLOWED_CALLBACK_STATUS_VALUES:
         form = (
             await session.execute(select(PatientForm).where(PatientForm.id == call.form_id))
         ).scalar_one_or_none()
