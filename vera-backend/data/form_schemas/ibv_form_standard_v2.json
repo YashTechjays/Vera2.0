@@ -36,6 +36,11 @@
       "op": "eq",
       "value": "Yes"
     },
+    "diagnostic_testing_covered": {
+      "field": "sections.diagnostic_testing.diagnostic_testing_covered",
+      "op": "eq",
+      "value": "Yes"
+    },
     "male_partner_in_scope": {
       "all": [
         {
@@ -2818,6 +2823,19 @@
         "layout": "table"
       },
       "fields": {
+        "diagnostic_testing_covered": {
+          "type": "enum",
+          "title": "Diagnostic Testing Covered",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Yes",
+            "No"
+          ],
+          "prompt": {
+            "ask": "Is diagnostic testing covered under this plan?"
+          }
+        },
         "cpt_58340": {
           "type": "group",
           "title": "CPT 58340",
@@ -2825,6 +2843,9 @@
             "cpt": [
               "58340"
             ]
+          },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
           },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 58340?"
@@ -2922,6 +2943,9 @@
               "82670"
             ]
           },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
+          },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 82670?"
           },
@@ -3017,6 +3041,9 @@
             "cpt": [
               "83001"
             ]
+          },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
           },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 83001?"
@@ -3114,6 +3141,9 @@
               "83002"
             ]
           },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
+          },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 83002?"
           },
@@ -3209,6 +3239,9 @@
             "cpt": [
               "84146"
             ]
+          },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
           },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 84146?"
@@ -3306,6 +3339,9 @@
               "84443"
             ]
           },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
+          },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 84443?"
           },
@@ -3402,6 +3438,9 @@
               "84144"
             ]
           },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
+          },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 84144?"
           },
@@ -3497,6 +3536,9 @@
             "cpt": [
               "76830"
             ]
+          },
+          "applicable_when": {
+            "ref": "diagnostic_testing_covered"
           },
           "prompt": {
             "ask": "Can you provide coverage details for CPT code 76830?"

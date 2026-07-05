@@ -523,6 +523,17 @@ def _diagnostic_testing() -> Section:
         "coinsurance": "What is the coinsurance percentage for diagnostic testing?",
         "prior_auth": "Is prior authorization required for diagnostic testing? Please answer Yes, No, or N/A.",
     }
+    fields: dict[str, FormField] = {
+        "diagnostic_testing_covered": enum_ask(
+            "Diagnostic Testing Covered",
+            "Is diagnostic testing covered under this plan?",
+            YES_NO,
+        )
+    }
+    for c in _DIAG_CODES:
+        fields[f"cpt_{c}"] = cpt_group(
+            base, c, "plain", applicable_when=ref("diagnostic_testing_covered")
+        )
     return Section(
         title="Diagnostic Testing (Labs, X-ray & Ultrasound)",
         ui=Ui(layout="table"),
@@ -532,7 +543,7 @@ def _diagnostic_testing() -> Section:
             for sub, panel_ask in panel_asks.items()
         ],
         alternatives=[cost_pair(f"{base}.cpt_{c}") for c in _DIAG_CODES],
-        fields={f"cpt_{c}": cpt_group(base, c, "plain") for c in _DIAG_CODES},
+        fields=fields,
     )
 
 
@@ -1017,6 +1028,9 @@ def build_ibv_standard() -> FormSchemaDoc:
             "family_coverage": eq("sections.benefit_coverage.coverage_type", "Family"),
             "infertility_covered": eq(
                 "sections.infertility_treatment.infertility_tx_covered", "Yes"
+            ),
+            "diagnostic_testing_covered": eq(
+                "sections.diagnostic_testing.diagnostic_testing_covered", "Yes"
             ),
             "male_partner_in_scope": AllCondition(
                 all=[

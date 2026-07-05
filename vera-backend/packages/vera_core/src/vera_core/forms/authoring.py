@@ -125,13 +125,16 @@ def service_fields(
     }
 
 
-def cpt_group(parent_base: str, code: str, flavor: Flavor) -> Group:
+def cpt_group(
+    parent_base: str, code: str, flavor: Flavor, *, applicable_when: Condition | None = None
+) -> Group:
     """A per-CPT-code service item under ``parent_base`` (group key = ``cpt_<code>``)."""
     base = f"{parent_base}.cpt_{code}"
     return Group(
         type="group",
         title=f"CPT {code}",
         codes=Codes(cpt=[code]),
+        applicable_when=applicable_when,
         prompt=ask(f"Can you provide coverage details for CPT code {code}?"),
         fields=service_fields(
             base,
