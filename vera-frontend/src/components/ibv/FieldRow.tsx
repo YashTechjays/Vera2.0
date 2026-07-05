@@ -44,6 +44,7 @@ export function FieldRow({ field, path, depth, gates }: Props) {
   const required = schema !== null && applicable && isRequired(schema, field, values)
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
+  const invalidReason = errors[path]
   // Voice-call participation tint on the label cell (see UsageLegend).
   const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
@@ -82,8 +83,8 @@ export function FieldRow({ field, path, depth, gates }: Props) {
           onChange={(v) => setValue(path, v)}
           disabled={!applicable}
           placeholder={!applicable ? field.inapplicable_value : undefined}
-          title={disabledReason ?? undefined}
-          invalid={!!errors[path]}
+          title={disabledReason ?? invalidReason}
+          invalid={!!invalidReason}
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? "150px" : undefined}
           noRightBorder

@@ -37,6 +37,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
+  const invalidReason = errors[path]
   const showDispute = !!dispute && !flags.applied && applicable
   const highlightClass = showDispute
     ? confidenceHighlightClass(dispute!.confidence)
@@ -55,8 +56,8 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           onChange={(v) => setValue(path, v)}
           disabled={!applicable}
           placeholder={!applicable ? field.inapplicable_value : undefined}
-          title={disabledReason ?? undefined}
-          invalid={!!errors[path]}
+          title={disabledReason ?? invalidReason}
+          invalid={!!invalidReason}
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? "70px" : undefined}
           borderless

@@ -13,7 +13,8 @@ type Props = {
   disabled?: boolean
   /** shown when empty; callers pass inapplicable_value for skipped fields */
   placeholder?: string
-  /** hover tooltip explaining why — callers pass the applicability reason when disabled */
+  /** hover tooltip explaining why — the applicability reason when disabled, or the
+   *  validation message when invalid (required/pattern/range/date_format) */
   title?: string
   /** current value fails client-side validation (pattern/range/required) */
   invalid?: boolean
@@ -47,23 +48,25 @@ function baseLook(borderless?: boolean, noRightBorder?: boolean): string {
 }
 
 /**
- * A `disabled` form control doesn't fire hover/focus events in Chrome (disabled
- * elements are excluded from pointer hit-testing), so a native `title` on it never
- * shows. Wrap it in a non-disabled trigger instead (same box, `flex h-full w-full`,
- * so it doesn't affect layout) and render the reason as a real tooltip.
+ * Explain a disabled-or-invalid control on hover. A `disabled` form control
+ * doesn't fire hover/focus events in Chrome (disabled elements are excluded from
+ * pointer hit-testing), so a native `title` on it never shows — wrap in a
+ * non-disabled trigger instead (same box, `flex h-full w-full`, so it doesn't
+ * affect layout) and render the reason as a real tooltip. Applied whenever there's
+ * something to explain (gated off, or failing validation), not just when disabled.
  */
-function withDisabledTooltip(
+function withReasonTooltip(
   node: ReactNode,
-  disabled: boolean | undefined,
-  title: string | undefined
+  shouldExplain: boolean | undefined,
+  reason: string | undefined
 ): ReactNode {
-  if (!disabled || !title) return node
+  if (!shouldExplain || !reason) return node
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="flex h-full w-full">{node}</span>
       </TooltipTrigger>
-      <TooltipContent>{title}</TooltipContent>
+      <TooltipContent>{reason}</TooltipContent>
     </Tooltip>
   )
 }
@@ -101,6 +104,8 @@ export function FieldRenderer({
     disabled && DISABLED_LOOK,
     invalid && !disabled && INVALID_LOOK
   )
+  // Something worth explaining on hover: gated off, or failing validation.
+  const explainable = disabled || invalid
   const padStyle = inputPaddingRight
     ? { paddingRight: inputPaddingRight }
     : undefined
@@ -124,7 +129,7 @@ export function FieldRenderer({
 
   if (field.type === "enum") {
     const options = optionsOf(field)
-    return withDisabledTooltip(
+    return withReasonTooltip(
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -141,13 +146,13 @@ export function FieldRenderer({
           </option>
         ))}
       </select>,
-      disabled,
+      explainable,
       title
     )
   }
 
   if (field.ui?.widget === "textarea") {
-    return withDisabledTooltip(
+    return withReasonTooltip(
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -159,7 +164,7 @@ export function FieldRenderer({
           look
         )}
       />,
-      disabled,
+      explainable,
       title
     )
   }
@@ -168,7 +173,7 @@ export function FieldRenderer({
   const listId = suggestions.length > 0 ? `${path}--suggestions` : undefined
   const inputMode = inputModeFor(field.type)
 
-  return withDisabledTooltip(
+  return withReasonTooltip(
     <>
       <input
         type={field.type === "phone" ? "tel" : "text"}
@@ -191,7 +196,7 @@ export function FieldRenderer({
         </datalist>
       )}
     </>,
-    disabled,
+    explainable,
     title
   )
 }
