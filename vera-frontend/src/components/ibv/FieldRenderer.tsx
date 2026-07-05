@@ -1,4 +1,6 @@
+import type { ReactNode } from "react"
 import { cn } from "@/lib/utils"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { optionsOf, suggestionsOf } from "@/lib/ibv/schema"
 import type { LeafField } from "@/lib/ibv/types"
 
@@ -11,6 +13,8 @@ type Props = {
   disabled?: boolean
   /** shown when empty; callers pass inapplicable_value for skipped fields */
   placeholder?: string
+  /** hover tooltip explaining why — callers pass the applicability reason when disabled */
+  title?: string
   /** current value fails client-side validation (pattern/range/required) */
   invalid?: boolean
   highlightClass?: string
@@ -42,6 +46,28 @@ function baseLook(borderless?: boolean, noRightBorder?: boolean): string {
   return CELL_LOOK
 }
 
+/**
+ * A `disabled` form control doesn't fire hover/focus events in Chrome (disabled
+ * elements are excluded from pointer hit-testing), so a native `title` on it never
+ * shows. Wrap it in a non-disabled trigger instead (same box, `flex h-full w-full`,
+ * so it doesn't affect layout) and render the reason as a real tooltip.
+ */
+function withDisabledTooltip(
+  node: ReactNode,
+  disabled: boolean | undefined,
+  title: string | undefined
+): ReactNode {
+  if (!disabled || !title) return node
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="flex h-full w-full">{node}</span>
+      </TooltipTrigger>
+      <TooltipContent>{title}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 /** Numeric soft-keyboard hint for the currency/percent/integer widgets. */
 function inputModeFor(type: LeafField["type"]): "decimal" | "numeric" | undefined {
   switch (type) {
@@ -63,6 +89,7 @@ export function FieldRenderer({
   onChange,
   disabled,
   placeholder,
+  title,
   invalid,
   highlightClass,
   inputPaddingRight,
@@ -84,6 +111,7 @@ export function FieldRenderer({
   if (field.role === "readonly") {
     return (
       <div
+        title={title}
         className={cn(
           "flex h-full min-h-[24px] w-full items-center px-[3px] font-ibv text-[13.3px] font-bold text-black",
           look
@@ -96,7 +124,7 @@ export function FieldRenderer({
 
   if (field.type === "enum") {
     const options = optionsOf(field)
-    return (
+    return withDisabledTooltip(
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -112,12 +140,14 @@ export function FieldRenderer({
             {opt}
           </option>
         ))}
-      </select>
+      </select>,
+      disabled,
+      title
     )
   }
 
   if (field.ui?.widget === "textarea") {
-    return (
+    return withDisabledTooltip(
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -128,7 +158,9 @@ export function FieldRenderer({
           "block h-full min-h-[44px] w-full resize-none rounded-none border-0 px-[3px] py-0.5 font-ibv text-[13.3px] font-bold leading-tight text-black outline-none focus:bg-white focus:shadow-[inset_0_0_0_2px_rgba(59,130,246,0.2)]",
           look
         )}
-      />
+      />,
+      disabled,
+      title
     )
   }
 
@@ -136,7 +168,7 @@ export function FieldRenderer({
   const listId = suggestions.length > 0 ? `${path}--suggestions` : undefined
   const inputMode = inputModeFor(field.type)
 
-  return (
+  return withDisabledTooltip(
     <>
       <input
         type={field.type === "phone" ? "tel" : "text"}
@@ -158,6 +190,8 @@ export function FieldRenderer({
           ))}
         </datalist>
       )}
-    </>
+    </>,
+    disabled,
+    title
   )
 }

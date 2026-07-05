@@ -11,6 +11,7 @@ import { FieldRow } from "./FieldRow"
 import { SectionMatrix } from "./SectionMatrix"
 import { useIbv } from "./IbvProvider"
 import {
+  applicabilityReason,
   flattenSection,
   getSectionTable,
   isApplicable,
@@ -23,28 +24,29 @@ function Rows({ rows }: { rows: FlatRow[] }) {
   const { schema, values } = useIbv()
   return (
     <div>
-      {rows.map(({ path, field, depth, gates }) =>
-        isGroup(field) ? (
+      {rows.map(({ path, field, depth, gates }) => {
+        if (!isGroup(field)) {
+          return <FieldRow key={path} field={field} path={path} depth={depth} gates={gates} />
+        }
+        // A non-applicable node always yields a reason, so it also drives the graying.
+        const disabledReason =
+          schema && !isApplicable(schema, gates, values)
+            ? applicabilityReason(schema, gates, values)
+            : null
+        return (
           <div
             key={path}
+            title={disabledReason ?? undefined}
             className={cn(
               "border-b border-ibv-row bg-ibv-label-bg px-[3px] py-[2px] text-[13.3px] font-bold text-black",
-              schema && !isApplicable(schema, gates, values) && "opacity-60"
+              disabledReason && "opacity-60"
             )}
             style={depth > 0 ? { paddingLeft: 6 + depth * 10 } : undefined}
           >
             {field.title}
           </div>
-        ) : (
-          <FieldRow
-            key={path}
-            field={field}
-            path={path}
-            depth={depth}
-            gates={gates}
-          />
         )
-      )}
+      })}
     </div>
   )
 }

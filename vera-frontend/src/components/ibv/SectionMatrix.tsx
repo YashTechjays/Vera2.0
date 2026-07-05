@@ -7,7 +7,7 @@ import {
   DisputeBadge,
 } from "./DisputeControls"
 import { badgeValue, confidenceHighlightClass } from "@/lib/ibv/disputes"
-import { isApplicable } from "@/lib/ibv/schema"
+import { applicabilityReason, isApplicable } from "@/lib/ibv/schema"
 import type { SectionTable, TableCell } from "@/lib/ibv/schema"
 
 const TH = "border border-ibv-input-border bg-ibv-label-bg px-2 py-0.5 font-bold"
@@ -35,6 +35,8 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const dispute = disputeFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
+  const disabledReason =
+    !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   const showDispute = !!dispute && !flags.applied && applicable
   const highlightClass = showDispute
     ? confidenceHighlightClass(dispute!.confidence)
@@ -53,6 +55,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           onChange={(v) => setValue(path, v)}
           disabled={!applicable}
           placeholder={!applicable ? field.inapplicable_value : undefined}
+          title={disabledReason ?? undefined}
           invalid={!!errors[path]}
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? "70px" : undefined}
@@ -110,10 +113,15 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
           {table.groups.map((group) => {
             const groupApplicable =
               schema !== null && isApplicable(schema, group.gates, values)
+            const groupDisabledReason =
+              !groupApplicable && schema !== null
+                ? applicabilityReason(schema, group.gates, values)
+                : null
             return group.rows.map((row, rowIdx) => (
               <tr key={row.path}>
                 {rowIdx === 0 && (
                   <td
+                    title={groupDisabledReason ?? undefined}
                     className={cn(
                       "w-[170px] border border-ibv-input-border bg-white px-2 py-0.5 align-top font-semibold text-ibv-label-border",
                       !groupApplicable && "opacity-60"

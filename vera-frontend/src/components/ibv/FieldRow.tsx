@@ -7,7 +7,7 @@ import {
   DisputeBadge,
 } from "./DisputeControls"
 import { badgeValue, confidenceHighlightClass } from "@/lib/ibv/disputes"
-import { fieldUsageOf, isApplicable, isRequired } from "@/lib/ibv/schema"
+import { applicabilityReason, fieldUsageOf, isApplicable, isRequired } from "@/lib/ibv/schema"
 import { USAGE_META } from "./usageMeta"
 import type { Condition, LeafField } from "@/lib/ibv/types"
 
@@ -42,6 +42,8 @@ export function FieldRow({ field, path, depth, gates }: Props) {
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const required = schema !== null && applicable && isRequired(schema, field, values)
+  const disabledReason =
+    !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   // Voice-call participation tint on the label cell (see UsageLegend).
   const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
@@ -54,6 +56,7 @@ export function FieldRow({ field, path, depth, gates }: Props) {
   return (
     <div className="flex min-h-[26px]">
       <div
+        title={disabledReason ?? undefined}
         className={cn(
           "flex w-[210px] min-w-[210px] shrink-0 items-center gap-1 border-r border-b border-ibv-label-border bg-white px-1.5 py-1 text-left font-ibv text-[13.3px] font-semibold text-ibv-label-border",
           USAGE_META[usage].labelCellClass,
@@ -79,6 +82,7 @@ export function FieldRow({ field, path, depth, gates }: Props) {
           onChange={(v) => setValue(path, v)}
           disabled={!applicable}
           placeholder={!applicable ? field.inapplicable_value : undefined}
+          title={disabledReason ?? undefined}
           invalid={!!errors[path]}
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? "150px" : undefined}

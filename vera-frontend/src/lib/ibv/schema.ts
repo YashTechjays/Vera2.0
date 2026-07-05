@@ -104,6 +104,56 @@ export function isApplicable(
   return gates.every((g) => evaluateCondition(g, values, schema.shared_conditions))
 }
 
+const _titlesBySchema = new WeakMap<FormSchema, Map<string, string>>()
+
+/** The title of the leaf at `path`, for describing a gate in human terms. */
+function titleOf(schema: FormSchema, path: string): string {
+  let titles = _titlesBySchema.get(schema)
+  if (!titles) {
+    titles = new Map(allLeaves(schema).map((l) => [l.path, l.field.title]))
+    _titlesBySchema.set(schema, titles)
+  }
+  return titles.get(path) ?? path
+}
+
+/** Render a condition (resolving `ref`s) as a short human-readable clause. */
+function describeCondition(cond: Condition, schema: FormSchema): string {
+  if ("ref" in cond) {
+    const target = schema.shared_conditions?.[cond.ref]
+    return target ? describeCondition(target, schema) : cond.ref
+  }
+  if ("all" in cond) return cond.all.map((c) => describeCondition(c, schema)).join(" and ")
+  if ("any" in cond) return cond.any.map((c) => describeCondition(c, schema)).join(" or ")
+  if ("not" in cond) return `not (${describeCondition(cond.not, schema)})`
+
+  const title = titleOf(schema, cond.field)
+  const value = Array.isArray(cond.value) ? cond.value.join(", ") : cond.value
+  switch (cond.op) {
+    case "eq":
+      return `"${title}" is "${value}"`
+    case "ne":
+      return `"${title}" is not "${value}"`
+    case "in":
+      return `"${title}" is one of "${value}"`
+    case "not_in":
+      return `"${title}" is not one of "${value}"`
+  }
+}
+
+/**
+ * Why a field is currently inapplicable: the first failing gate in its chain,
+ * described in human terms (e.g. `Only applicable when "Diagnostic Testing
+ * Covered" is "Yes"`). `null` when the field is applicable.
+ */
+export function applicabilityReason(
+  schema: FormSchema,
+  gates: Condition[],
+  values: FormValues
+): string | null {
+  const failing = gates.find((g) => !evaluateCondition(g, values, schema.shared_conditions))
+  return failing ? `Only applicable when ${describeCondition(failing, schema)}` : null
+}
+
 /** Resolve `required: true | {when}` against current values. */
 export function isRequired(
   schema: FormSchema,
