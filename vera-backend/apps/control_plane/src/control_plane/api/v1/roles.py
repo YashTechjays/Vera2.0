@@ -52,6 +52,7 @@ class RoleResponse(BaseModel):
 
 class CreateRoleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2000)
     permission_ids: list[UUID] = Field(default_factory=list)
 
 
@@ -200,7 +201,7 @@ async def create_role(
             message="cannot grant a platform-tier permission to a tenant role",
         )
 
-    role = Role(tenant_id=tenant_id, name=body.name, description="")
+    role = Role(tenant_id=tenant_id, name=body.name, description=body.description)
     session.add(role)
     try:
         await session.flush()

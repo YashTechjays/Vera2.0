@@ -350,6 +350,18 @@ async def test_get_system_role_detail_hides_platform_permissions(
     assert not any(p["code"].startswith("platform:") for p in data["permissions"])
 
 
+async def test_create_role_accepts_description(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "DESCRIBED", "description": "Sees billing", "permission_ids": []},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["data"]["description"] == "Sees billing"
+
+
 # --- providers ---------------------------------------------------------------
 
 
