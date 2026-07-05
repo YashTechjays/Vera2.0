@@ -22,6 +22,7 @@ class FormStatus(enum.StrEnum):
     EXCEPTION_REVIEW = "exception_review"
     COMPLETED = "completed"
     CALL_FAILED = "call_failed"
+    EXPIRED = "expired"
 
 
 class CallMode(enum.StrEnum):
