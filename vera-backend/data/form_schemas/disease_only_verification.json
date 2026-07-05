@@ -1,0 +1,1037 @@
+{
+  "dsl_version": "2.1",
+  "name": "Disease-Only Insurance Verification",
+  "insurance_type": "disease_only",
+  "description": "Dummy disease-only (critical illness) benefits verification form. Small but construct-complete: exercises every DSL feature the dynamic renderer supports.",
+  "system_fields": {
+    "chart_number": "sections.patient_information.chart_number",
+    "patient_name": "sections.patient_information.patient_name",
+    "patient_dob": "sections.patient_information.patient_dob",
+    "patient_gender": "sections.patient_information.patient_gender",
+    "member_id": "sections.policy_details.policy_number",
+    "policy_id": "sections.policy_details.policy_number",
+    "verified_by": "sections.verification_information.verified_by",
+    "callback_number": "sections.verification_information.callback_number",
+    "form_completed_at": "sections.verification_information.verified_at"
+  },
+  "shared_conditions": {
+    "disease_covered": {
+      "field": "sections.coverage_summary.disease_coverage_active",
+      "op": "eq",
+      "value": "Yes"
+    }
+  },
+  "sections": {
+    "patient_information": {
+      "title": "Patient Information",
+      "role": "context",
+      "description": "Patient identity supplied at intake; background for the agent.",
+      "fields": {
+        "chart_number": {
+          "type": "text",
+          "title": "Chart Number",
+          "role": "input",
+          "default": "N/A",
+          "description": "Clinic-internal chart number. Display only; never part of the call."
+        },
+        "patient_name": {
+          "type": "text",
+          "title": "Patient Name",
+          "role": "context",
+          "required": true
+        },
+        "patient_dob": {
+          "type": "date",
+          "title": "Patient Date of Birth",
+          "role": "context",
+          "required": true
+        },
+        "patient_gender": {
+          "type": "enum",
+          "title": "Patient Gender",
+          "role": "context",
+          "required": true,
+          "values": [
+            "Female",
+            "Male",
+            "Other"
+          ],
+          "default": "N/A"
+        }
+      }
+    },
+    "verification_information": {
+      "title": "Verification Information",
+      "role": "context",
+      "description": "Who is running this verification and how the clinic can be called back.",
+      "fields": {
+        "verified_by": {
+          "type": "text",
+          "title": "Verified By",
+          "role": "context",
+          "description": "Human supervisor named in the call introduction."
+        },
+        "verified_at": {
+          "type": "date",
+          "title": "Verified At",
+          "role": "input"
+        },
+        "callback_number": {
+          "type": "phone",
+          "title": "Callback Number",
+          "role": "context",
+          "default": "N/A",
+          "description": "The callback phone number of your supervisor."
+        }
+      }
+    },
+    "policy_details": {
+      "title": "Policy Details",
+      "fields": {
+        "policy_number": {
+          "type": "text",
+          "title": "Policy / Member ID",
+          "role": "confirm",
+          "required": true,
+          "prompt": {
+            "confirm": "I have the member ID as {{value}} — can you confirm that is correct?"
+          }
+        },
+        "plan_name": {
+          "type": "text",
+          "title": "Plan Name",
+          "role": "ask",
+          "required": true,
+          "special_values": [
+            "Critical Illness Basic",
+            "Critical Illness Plus",
+            "Disease Shield Complete"
+          ],
+          "prompt": {
+            "ask": "What is the name of this disease-only plan?"
+          }
+        },
+        "plan_type": {
+          "type": "enum",
+          "title": "Plan Type",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Individual",
+            "Group"
+          ],
+          "special_values": [
+            "Association"
+          ],
+          "prompt": {
+            "ask": "Is this an individual or a group disease-only policy?"
+          }
+        },
+        "effective_date": {
+          "type": "date",
+          "title": "Effective Date",
+          "role": "ask",
+          "required": true,
+          "prompt": {
+            "ask": "What is the effective date for this coverage?"
+          }
+        },
+        "group_number": {
+          "type": "text",
+          "title": "Group Number",
+          "role": "ask",
+          "required": {
+            "when": {
+              "field": "sections.policy_details.plan_type",
+              "op": "eq",
+              "value": "Group"
+            }
+          },
+          "applicable_when": {
+            "field": "sections.policy_details.plan_type",
+            "op": "eq",
+            "value": "Group"
+          },
+          "prompt": {
+            "ask": "What is the group number for this policy?"
+          }
+        }
+      }
+    },
+    "coverage_summary": {
+      "title": "Coverage Summary",
+      "fields": {
+        "disease_coverage_active": {
+          "type": "enum",
+          "title": "Disease Coverage Active",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Yes",
+            "No"
+          ],
+          "prompt": {
+            "ask": "Is disease-specific coverage active on this policy?"
+          }
+        },
+        "benefit_year_type": {
+          "type": "enum",
+          "title": "Benefit Year Type",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Calendar Year",
+            "Plan Year"
+          ],
+          "default": "Calendar Year",
+          "prompt": {
+            "ask": "Does the benefit year run on a Calendar Year or a Plan Year?"
+          }
+        },
+        "renewal_date": {
+          "type": "date",
+          "title": "Renewal Date",
+          "role": "ask",
+          "required": true,
+          "inapplicable_value": "N/A",
+          "applicable_when": {
+            "field": "sections.coverage_summary.benefit_year_type",
+            "op": "eq",
+            "value": "Plan Year"
+          },
+          "prompt": {
+            "ask": "What is the renewal date for the plan year?"
+          }
+        },
+        "annual_benefit_maximum": {
+          "type": "currency",
+          "title": "Annual Benefit Maximum",
+          "role": "ask",
+          "required": true,
+          "special_values": [
+            "No Limit"
+          ],
+          "validation": {
+            "range": {
+              "min": 0,
+              "max": 1000000
+            }
+          },
+          "prompt": {
+            "ask": "What is the annual benefit maximum for disease coverage?"
+          }
+        },
+        "policy_state": {
+          "type": "text",
+          "title": "Policy State",
+          "role": "ask",
+          "required": true,
+          "validation": {
+            "pattern": "^[A-Z]{2}$"
+          },
+          "prompt": {
+            "ask": "What is the two-letter policy state, for example T X for Texas?"
+          },
+          "description": "Two-letter state code whose law governs the policy."
+        },
+        "state_mandate": {
+          "type": "enum",
+          "title": "State Disease Coverage Mandate",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Yes",
+            "No"
+          ],
+          "prompt": {
+            "ask": "Is there a state mandate for disease-specific coverage on this policy?"
+          }
+        }
+      }
+    },
+    "covered_diseases": {
+      "title": "Covered Diseases",
+      "applicable_when": {
+        "ref": "disease_covered"
+      },
+      "prompt": {
+        "intro": "Now I'd like to go through the covered diseases one at a time."
+      },
+      "ui": {
+        "layout": "table"
+      },
+      "fields": {
+        "cancer": {
+          "type": "group",
+          "title": "Cancer",
+          "codes": {
+            "icd10": [
+              "C80.1"
+            ]
+          },
+          "prompt": {
+            "ask": "Can you provide coverage and benefit details for the cancer diagnosis benefit?"
+          },
+          "fields": {
+            "cpt_77067": {
+              "type": "group",
+              "title": "CPT 77067",
+              "codes": {
+                "cpt": [
+                  "77067"
+                ]
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 77067?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "inapplicable_value": "No",
+                  "prompt": {
+                    "ask": "Is CPT code 77067 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cancer.cpt_77067.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cancer.cpt_77067.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cancer.cpt_77067.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
+                }
+              }
+            },
+            "cpt_85025": {
+              "type": "group",
+              "title": "CPT 85025",
+              "codes": {
+                "cpt": [
+                  "85025"
+                ]
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 85025?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "inapplicable_value": "No",
+                  "prompt": {
+                    "ask": "Is CPT code 85025 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cancer.cpt_85025.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cancer.cpt_85025.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cancer.cpt_85025.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
+                }
+              }
+            },
+            "waiting_period": {
+              "type": "text",
+              "title": "Waiting Period",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "None",
+                "30 days",
+                "90 days"
+              ],
+              "prompt": {
+                "ask": "Is there a waiting period for the cancer benefit?"
+              }
+            },
+            "notes": {
+              "type": "text",
+              "title": "Notes",
+              "role": "ask",
+              "inapplicable_value": "N/A",
+              "prompt": {
+                "ask": "Are there any notes or limitations for the cancer benefit?"
+              },
+              "ui": {
+                "widget": "textarea"
+              }
+            }
+          }
+        },
+        "cardiac": {
+          "type": "group",
+          "title": "Cardiac Disease",
+          "codes": {
+            "icd10": [
+              "I25.10"
+            ]
+          },
+          "prompt": {
+            "ask": "Can you provide coverage and benefit details for the cardiac disease benefit?"
+          },
+          "fields": {
+            "cpt_93000": {
+              "type": "group",
+              "title": "CPT 93000",
+              "codes": {
+                "cpt": [
+                  "93000"
+                ]
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 93000?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "inapplicable_value": "No",
+                  "prompt": {
+                    "ask": "Is CPT code 93000 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cardiac.cpt_93000.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cardiac.cpt_93000.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.cardiac.cpt_93000.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
+                }
+              }
+            },
+            "waiting_period": {
+              "type": "text",
+              "title": "Waiting Period",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "None",
+                "30 days",
+                "90 days"
+              ],
+              "prompt": {
+                "ask": "Is there a waiting period for the cardiac disease benefit?"
+              }
+            },
+            "notes": {
+              "type": "text",
+              "title": "Notes",
+              "role": "ask",
+              "inapplicable_value": "N/A",
+              "prompt": {
+                "ask": "Are there any notes or limitations for the cardiac disease benefit?"
+              },
+              "ui": {
+                "widget": "textarea"
+              }
+            }
+          }
+        },
+        "stroke": {
+          "type": "group",
+          "title": "Stroke",
+          "codes": {
+            "icd10": [
+              "I63.9"
+            ]
+          },
+          "prompt": {
+            "ask": "Can you provide coverage and benefit details for the stroke benefit?"
+          },
+          "fields": {
+            "cpt_70450": {
+              "type": "group",
+              "title": "CPT 70450",
+              "codes": {
+                "cpt": [
+                  "70450"
+                ]
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 70450?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "inapplicable_value": "No",
+                  "prompt": {
+                    "ask": "Is CPT code 70450 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.stroke.cpt_70450.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.stroke.cpt_70450.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.covered_diseases.stroke.cpt_70450.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
+                }
+              }
+            },
+            "waiting_period": {
+              "type": "text",
+              "title": "Waiting Period",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "None",
+                "30 days",
+                "90 days"
+              ],
+              "prompt": {
+                "ask": "Is there a waiting period for the stroke benefit?"
+              }
+            },
+            "notes": {
+              "type": "text",
+              "title": "Notes",
+              "role": "ask",
+              "inapplicable_value": "N/A",
+              "prompt": {
+                "ask": "Are there any notes or limitations for the stroke benefit?"
+              },
+              "ui": {
+                "widget": "textarea"
+              }
+            }
+          }
+        },
+        "kidney_failure": {
+          "type": "group",
+          "title": "Kidney Failure",
+          "codes": {
+            "icd10": [
+              "N18.6"
+            ]
+          },
+          "prompt": {
+            "ask": "Can you provide coverage and benefit details for the kidney failure benefit?"
+          },
+          "fields": {
+            "covered": {
+              "type": "enum",
+              "title": "Covered",
+              "role": "ask",
+              "required": true,
+              "values": [
+                "Yes",
+                "No",
+                "N/A"
+              ],
+              "prompt": {
+                "ask": "Is the kidney failure benefit covered under this plan? Please answer Yes, No, or N/A."
+              }
+            },
+            "copay": {
+              "type": "currency",
+              "title": "Copay",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "$0",
+                "None"
+              ],
+              "validation": {
+                "range": {
+                  "min": 0
+                }
+              },
+              "applicable_when": {
+                "field": "sections.covered_diseases.kidney_failure.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "What is the copay amount for this service?"
+              }
+            },
+            "coinsurance": {
+              "type": "percent",
+              "title": "Coinsurance",
+              "role": "ask",
+              "required": true,
+              "validation": {
+                "range": {
+                  "min": 0,
+                  "max": 100
+                }
+              },
+              "applicable_when": {
+                "field": "sections.covered_diseases.kidney_failure.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "What is the coinsurance percentage for this service?"
+              }
+            },
+            "prior_auth": {
+              "type": "enum",
+              "title": "Prior Authorization Required",
+              "role": "ask",
+              "required": true,
+              "values": [
+                "Yes",
+                "No",
+                "N/A"
+              ],
+              "special_values": [
+                "Prior auth department"
+              ],
+              "tags": [
+                "prior_auth"
+              ],
+              "applicable_when": {
+                "field": "sections.covered_diseases.kidney_failure.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+              }
+            },
+            "notes": {
+              "type": "text",
+              "title": "Notes",
+              "role": "ask",
+              "inapplicable_value": "N/A",
+              "prompt": {
+                "ask": "Are there any notes or limitations for the kidney failure benefit?"
+              },
+              "ui": {
+                "widget": "textarea"
+              }
+            }
+          }
+        }
+      }
+    },
+    "exclusions_limitations": {
+      "title": "Exclusions & Limitations",
+      "fields": {
+        "pre_existing_exclusion": {
+          "type": "enum",
+          "title": "Pre-Existing Condition Exclusion",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Yes",
+            "No"
+          ],
+          "prompt": {
+            "ask": "Does this policy exclude pre-existing conditions?"
+          }
+        },
+        "exclusion_lookback": {
+          "type": "text",
+          "title": "Exclusion Lookback Period",
+          "role": "ask",
+          "required": {
+            "when": {
+              "field": "sections.exclusions_limitations.pre_existing_exclusion",
+              "op": "eq",
+              "value": "Yes"
+            }
+          },
+          "special_values": [
+            "6 months",
+            "12 months",
+            "24 months"
+          ],
+          "applicable_when": {
+            "field": "sections.exclusions_limitations.pre_existing_exclusion",
+            "op": "eq",
+            "value": "Yes"
+          },
+          "prompt": {
+            "ask": "What is the lookback period for the pre-existing condition exclusion?"
+          }
+        }
+      }
+    },
+    "representative_details": {
+      "title": "Insurance Representative",
+      "fields": {
+        "rep_name": {
+          "type": "text",
+          "title": "Representative Name",
+          "role": "ask",
+          "required": true,
+          "prompt": {
+            "ask": "May I have your first name and last name initial?"
+          }
+        },
+        "call_reference_number": {
+          "type": "text",
+          "title": "Call Reference Number",
+          "role": "ask",
+          "required": true,
+          "prompt": {
+            "ask": "May I have a call reference number for this call?"
+          }
+        }
+      }
+    },
+    "form_information": {
+      "title": "Additional Form Information",
+      "role": "ui_only",
+      "fields": {
+        "practice": {
+          "type": "text",
+          "title": "Practice",
+          "role": "input"
+        },
+        "form_type": {
+          "type": "text",
+          "title": "Form Type",
+          "role": "input"
+        }
+      }
+    }
+  },
+  "tasks": [
+    {
+      "task_key": "policy_basics",
+      "title": "Policy Basics",
+      "outro": "Perfect, that covers the policy basics. One moment please.",
+      "sections": [
+        "policy_details",
+        "coverage_summary"
+      ]
+    },
+    {
+      "task_key": "disease_coverage",
+      "title": "Disease Coverage",
+      "intro": "Now I'd like to verify the covered disease benefits.",
+      "outro": "Thank you, that covers the disease benefits. Just a moment.",
+      "sections": [
+        "covered_diseases"
+      ]
+    },
+    {
+      "task_key": "limitations",
+      "title": "Exclusions & Limitations",
+      "intro": "Just a few questions about exclusions and limitations.",
+      "sections": [
+        "exclusions_limitations"
+      ]
+    },
+    {
+      "task_key": "wrap_up",
+      "title": "Wrap Up",
+      "sections": [
+        "representative_details"
+      ]
+    }
+  ],
+  "contradictions": [
+    {
+      "rule_key": "mandate_requires_disease_coverage",
+      "when": {
+        "all": [
+          {
+            "field": "sections.coverage_summary.state_mandate",
+            "op": "eq",
+            "value": "Yes"
+          },
+          {
+            "field": "sections.coverage_summary.disease_coverage_active",
+            "op": "eq",
+            "value": "No"
+          }
+        ]
+      },
+      "fields": [
+        "sections.coverage_summary.disease_coverage_active",
+        "sections.coverage_summary.state_mandate"
+      ],
+      "reason": "If the state mandates disease-specific benefits, disease coverage must be active on the policy.",
+      "clarify": "Earlier you mentioned there is a state mandate for disease coverage, but disease-specific coverage is showing as not active — with a mandate, the coverage should be active. Could you double-check whether disease-specific coverage is active on this policy?"
+    }
+  ]
+}

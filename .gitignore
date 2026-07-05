@@ -38,3 +38,6 @@
 # Terraform state
 **/.terraform/
 **/*.tfstate*
+
+# playwright-cli session artifacts (screenshots/snapshots)
+.playwright-cli/
