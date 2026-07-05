@@ -362,6 +362,157 @@ async def test_create_role_accepts_description(
     assert created.json()["data"]["description"] == "Sees billing"
 
 
+async def test_patch_role_updates_fields_and_permissions(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    perms = await client.get("/api/v1/permissions", headers=_auth(rbac_world.admin_token))
+    users_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "users:read")
+    calls_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "calls:read")
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "PATCH_ME", "permission_ids": [users_read]},
+    )
+    role_id = created.json()["data"]["id"]
+
+    patched = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "PATCHED", "description": "now different", "permission_ids": [calls_read]},
+    )
+    assert patched.status_code == 200, patched.text
+    data = patched.json()["data"]
+    assert data["name"] == "PATCHED"
+    assert data["description"] == "now different"
+    assert [p["code"] for p in data["permissions"]] == ["calls:read"]
+
+    # Omitted fields stay unchanged (None = leave alone).
+    partial = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"description": "only this"},
+    )
+    assert partial.json()["data"]["name"] == "PATCHED"
+    assert partial.json()["data"]["description"] == "only this"
+
+
+async def test_patch_system_role_is_forbidden(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+    resp = await client.patch(
+        f"/api/v1/roles/{supervisor_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "HIJACKED"},
+    )
+    assert resp.status_code == 403  # explicit ownership check, not a silent 0-row update
+
+
+async def test_patch_role_rejects_platform_permission(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "NO_PLATFORM_VIA_PATCH", "permission_ids": []},
+    )
+    role_id = created.json()["data"]["id"]
+    async with admin_sessionmaker() as session:
+        platform_perm_id = await session.scalar(
+            text("SELECT id FROM permission WHERE code = 'platform:elevations:read'")
+        )
+    resp = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"permission_ids": [str(platform_perm_id)]},
+    )
+    assert resp.status_code == 403
+
+
+async def test_patch_role_unknown_permission_is_400_and_dup_name_409(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    a = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "PATCH_A", "permission_ids": []},
+    )
+    await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "PATCH_B", "permission_ids": []},
+    )
+    a_id = a.json()["data"]["id"]
+
+    bad_perm = await client.patch(
+        f"/api/v1/roles/{a_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"permission_ids": [str(uuid4())]},
+    )
+    assert bad_perm.status_code == 400
+
+    dup = await client.patch(
+        f"/api/v1/roles/{a_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "PATCH_B"},
+    )
+    assert dup.status_code == 409  # unique (tenant_id, name)
+
+
+async def test_patch_role_invalidates_holder_permission_cache(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # End-to-end proof of the cache rule: norole gains users:read via a custom
+    # role, then loses it the moment PATCH strips the permission — no TTL wait.
+    perms = await client.get("/api/v1/permissions", headers=_auth(rbac_world.admin_token))
+    users_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "users:read")
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "TEMP_USER_READERS", "permission_ids": [users_read]},
+    )
+    role_id = created.json()["data"]["id"]
+    async with admin_sessionmaker() as session:
+        norole_id = await session.scalar(
+            text(
+                "SELECT id FROM app_user WHERE email = 'norole@test.example' AND tenant_id = :t"
+            ).bindparams(t=rbac_world.tenant_id)
+        )
+
+    denied = await client.get("/api/v1/users", headers=_auth(rbac_world.norole_token))
+    assert denied.status_code == 403  # baseline: no permission (and it is now cached)
+
+    assign = await client.post(
+        f"/api/v1/users/{norole_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": role_id},
+    )
+    assert assign.status_code == 200, assign.text
+    allowed = await client.get("/api/v1/users", headers=_auth(rbac_world.norole_token))
+    assert allowed.status_code == 200  # assign invalidated norole's cache
+
+    stripped = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"permission_ids": []},
+    )
+    assert stripped.status_code == 200, stripped.text
+    denied_again = await client.get("/api/v1/users", headers=_auth(rbac_world.norole_token))
+    assert denied_again.status_code == 403  # PATCH invalidated every holder's cache
+
+    # Cleanup so later tests see norole with no roles.
+    await client.request(
+        "DELETE",
+        f"/api/v1/users/{norole_id}/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+    )
+
+
 # --- providers ---------------------------------------------------------------
 
 

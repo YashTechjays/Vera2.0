@@ -56,6 +56,15 @@ class CreateRoleRequest(BaseModel):
     permission_ids: list[UUID] = Field(default_factory=list)
 
 
+class UpdateRoleRequest(BaseModel):
+    """PATCH semantics: a field left as None is not changed; `permission_ids`
+    (when present) REPLACES the role's whole permission set."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    permission_ids: list[UUID] | None = None
+
+
 class AssignRoleRequest(BaseModel):
     role_id: UUID
 
@@ -147,6 +156,92 @@ async def get_role(
     return ok(_to_detail(role, await _role_permissions(session, role_id)))
 
 
+@router.patch(
+    "/roles/{role_id}",
+    response_model=ResponseModel[RoleDetailResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.BAD_REQUEST,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.VALIDATION_ERROR,
+    ),
+)
+async def update_role(
+    role_id: UUID,
+    body: UpdateRoleRequest,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: AuthAudit,
+    resolver: Resolver,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[RoleDetailResponse]:
+    role = (await session.execute(select(Role).where(Role.id == role_id))).scalar_one_or_none()
+    if role is None:
+        raise NotFoundError(message="no such role")
+    # Explicit ownership check (spec): don't rely on RLS's silent 0-row update.
+    # `tenant_id IS NULL` here means "global system role", not "platform caller".
+    if role.tenant_id is None:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="system roles cannot be modified"
+        )
+
+    changed: list[str] = []
+    if body.name is not None and body.name != role.name:
+        role.name = body.name
+        changed.append("name")
+    if body.description is not None and body.description != role.description:
+        role.description = body.description
+        changed.append("description")
+
+    if body.permission_ids is not None:
+        permissions = await _resolve_grantable_permissions(session, body.permission_ids)
+        links = (
+            (await session.execute(select(RolePermission).where(RolePermission.role_id == role_id)))
+            .scalars()
+            .all()
+        )
+        if {link.permission_id for link in links} != {p.id for p in permissions}:
+            for link in links:
+                await session.delete(link)
+            for permission in permissions:
+                session.add(
+                    RolePermission(
+                        tenant_id=tenant_id, role_id=role_id, permission_id=permission.id
+                    )
+                )
+            changed.append("permissions")
+
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise _conflict_or_raise(exc, "a role with that name already exists") from exc
+
+    if "permissions" in changed:
+        # The role's grants changed under live users — drop every holder's cached
+        # permission set or they keep the old access until the cache TTL expires.
+        holders = (
+            (await session.execute(select(UserRole.app_user_id).where(UserRole.role_id == role_id)))
+            .scalars()
+            .all()
+        )
+        for holder_id in holders:
+            await resolver.invalidate(tenant_id, holder_id)
+
+    if changed:
+        await emit_auth_event(
+            audit,
+            tenant_id=tenant_id,
+            event=AuthEvent.ROLE_UPDATED,
+            ip=client_ip(request),
+            user_id=_caller.user_id,
+            meta={"role_id": str(role_id), "changed": changed},
+        )
+    return ok(_to_detail(role, await _role_permissions(session, role_id)))
+
+
 @router.get(
     "/permissions",
     response_model=ResponseModel[list[PermissionResponse]],
@@ -185,21 +280,9 @@ async def create_role(
     audit: AuthAudit,
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[RoleResponse]:
-    # Resolve permission codes; reject any unknown id (permission is a global catalog).
-    permissions = (
-        (await session.execute(select(Permission).where(Permission.id.in_(body.permission_ids))))
-        .scalars()
-        .all()
-    )
-    if len(permissions) != len(set(body.permission_ids)):
-        raise BadRequestError(message="unknown permission id")
-    # A tenant role may never carry a platform-tier permission (defense in depth:
-    # also blocked at assignment, but stop it from entering the role at all).
-    if any(is_platform_permission(p.code) for p in permissions):
-        raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN,
-            message="cannot grant a platform-tier permission to a tenant role",
-        )
+    # Resolve permission ids and enforce the tenant-role grant guard (defense in depth:
+    # platform-tier perms are also blocked at assignment, but stop them from entering here).
+    permissions = await _resolve_grantable_permissions(session, body.permission_ids)
 
     role = Role(tenant_id=tenant_id, name=body.name, description=body.description)
     session.add(role)
@@ -336,6 +419,27 @@ async def _user_in_tenant(session: AsyncSession, user_id: UUID) -> bool:
 async def _role_visible(session: AsyncSession, role_id: UUID) -> bool:
     row = (await session.execute(select(Role.id).where(Role.id == role_id))).scalar_one_or_none()
     return row is not None
+
+
+async def _resolve_grantable_permissions(
+    session: AsyncSession, permission_ids: Sequence[UUID]
+) -> list[Permission]:
+    """Resolve ids against the global permission catalog, rejecting any unknown id
+    (400) or platform-tier code (403 — a tenant role may never carry one). Shared by
+    create_role and update_role so both apply the identical grant guard."""
+    permissions = (
+        (await session.execute(select(Permission).where(Permission.id.in_(permission_ids))))
+        .scalars()
+        .all()
+    )
+    if len(permissions) != len(set(permission_ids)):
+        raise BadRequestError(message="unknown permission id")
+    if any(is_platform_permission(p.code) for p in permissions):
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN,
+            message="cannot grant a platform-tier permission to a tenant role",
+        )
+    return list(permissions)
 
 
 def _conflict_or_raise(exc: IntegrityError, message: str) -> CustomAPIException:
