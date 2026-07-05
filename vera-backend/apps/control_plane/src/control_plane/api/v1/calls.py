@@ -7,6 +7,7 @@ manage permission once the RBAC catalog is extended.
 """
 
 import contextlib
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Request
@@ -32,6 +33,8 @@ from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["calls"])
 
@@ -64,6 +67,7 @@ def _summary(call: Call, patient_name: str | None) -> CallSummary:
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.VALIDATION_ERROR,
     ),
 )
 async def start_call(
@@ -74,24 +78,48 @@ async def start_call(
     _caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[CallSummary]:
     form = (
-        await session.execute(select(PatientForm).where(PatientForm.id == body.form_id))
+        await session.execute(
+            select(PatientForm).where(PatientForm.id == body.form_id).with_for_update()
+        )
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
+
+    tenant = (
+        await session.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one()  # RLS on `tenant` keys on id → only the caller's own row
+
+    # A manual call takes the form to IN_CALL through the state machine BEFORE
+    # the Call/room exist: the status callback then has a legal edge to a
+    # terminal status, the dispatcher won't treat the form as queue-eligible
+    # (no double dispatch), and the form counts against the tenant's concurrency
+    # slots. The IN_QUEUE hop is a synthetic pass-through (no enqueued_at, never
+    # dispatcher-visible — both transitions commit atomically) and a no-op when
+    # the form is already queued. Illegal states (e.g. already IN_CALL or
+    # COMPLETED) are rejected here instead of creating a stray call.
+    sm = FormStateMachine()
+    try:
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
+        sm.transition(form, FormStatus.IN_CALL, tenant_max_retries=tenant.max_retries)
+    except InvalidTransitionError as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message=f"cannot start a call for this form: {exc}",
+        ) from exc
 
     call = Call(tenant_id=tenant_id, form_id=form.id, current_status=CallStatus.INITIATED)
     session.add(call)
     await session.flush()  # populates call.id (UUIDv7)
 
     room_name = room_name_for_call(tenant_id, call.id)
-    persona = (
-        await session.execute(select(Tenant.persona_tweak).where(Tenant.id == tenant_id))
-    ).scalar_one_or_none()  # RLS on `tenant` keys on id → only the caller's own row
     # persona_tweak is admin-authored, non-PHI config; safe to serialize into metadata.
-    tweak = PersonaTweak.model_validate(persona) if persona is not None else PersonaTweak()
+    tweak = (
+        PersonaTweak.model_validate(tenant.persona_tweak)
+        if tenant.persona_tweak
+        else PersonaTweak()
+    )
     metadata = tweak.model_dump(exclude_none=True)
     await livekit.create_call_room(room_name, metadata=metadata)
-    form.status = FormStatus.IN_QUEUE
     session.add(
         CallEvent(
             tenant_id=tenant_id,
@@ -237,18 +265,29 @@ async def update_call_status(
     sm = FormStateMachine()
     previous_form_status = form.status
 
-    if body.status == CallStatus.COMPLETED:
-        sm.transition(form, FormStatus.COMPLETED, tenant_max_retries=tenant.max_retries)
-    elif body.status in _TERMINAL_FAILURE_STATUSES:
-        sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
-        # Auto-retry if retries remain; silently stay CALL_FAILED if exhausted.
-        # Record retry lineage — the next call (created by dispatcher) will
-        # link back to this one. For now we just mark the form as re-queued;
-        # the dispatcher creates the Call + CallLineage on its next pass.
-        with contextlib.suppress(InvalidTransitionError):
-            sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
-            # Caller owns enqueued_at — use the DB clock to avoid cross-node skew.
-            form.enqueued_at = func.now()
+    # An illegal form edge must not 500 the callback: the call's terminal status
+    # is still recorded above even if the form can't take the transition (e.g. a
+    # second call on the same form already moved it). Log and continue.
+    try:
+        if body.status == CallStatus.COMPLETED:
+            sm.transition(form, FormStatus.COMPLETED, tenant_max_retries=tenant.max_retries)
+        elif body.status in _TERMINAL_FAILURE_STATUSES:
+            sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
+            # Auto-retry if retries remain; silently stay CALL_FAILED if exhausted.
+            # The dispatcher creates the retry call on its next pass.
+            with contextlib.suppress(InvalidTransitionError):
+                sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
+                # Caller owns enqueued_at — use the DB clock to avoid cross-node skew.
+                form.enqueued_at = func.now()
+    except InvalidTransitionError:
+        logger.warning(
+            "call callback: form %s cannot transition from '%s' on call %s status '%s'; "
+            "call status recorded, form left unchanged",
+            form.id,
+            previous_form_status,
+            call_id,
+            body.status.value,
+        )
 
     await session.flush()
 

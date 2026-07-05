@@ -24,6 +24,18 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _purge_form(session: AsyncSession, form_id: UUID) -> None:
+    """Delete a form and its dispatch artifacts (call_event → call → patient_form),
+    in FK order. Caller owns the transaction."""
+    await session.execute(
+        text(
+            "DELETE FROM call_event WHERE call_id IN (SELECT id FROM call WHERE form_id = :fid)"
+        ).bindparams(fid=form_id)
+    )
+    await session.execute(text("DELETE FROM call WHERE form_id = :fid").bindparams(fid=form_id))
+    await session.execute(text("DELETE FROM patient_form WHERE id = :fid").bindparams(fid=form_id))
+
+
 @pytest.fixture
 async def queue_form_id(
     database_url: str,
@@ -88,18 +100,7 @@ async def queue_form_id(
         yield patient_form_id
 
         async with sessionmaker() as session, session.begin():
-            await session.execute(
-                text(
-                    "DELETE FROM call_event WHERE call_id IN "
-                    "(SELECT id FROM call WHERE form_id = :fid)"
-                ).bindparams(fid=patient_form_id)
-            )
-            await session.execute(
-                text("DELETE FROM call WHERE form_id = :fid").bindparams(fid=patient_form_id)
-            )
-            await session.execute(
-                text("DELETE FROM patient_form WHERE id = :fid").bindparams(fid=patient_form_id)
-            )
+            await _purge_form(session, patient_form_id)
             if created_schema:
                 await session.execute(
                     text("DELETE FROM schema_version WHERE id = :sid").bindparams(
@@ -190,3 +191,105 @@ async def test_enqueue_blocked_transition_returns_422(
         json={"status": "completed"},
     )
     assert resp.status_code == 422, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Manual (voice-lab) call vs queue machinery interplay.
+# POST /calls must put the form IN_CALL: the callback needs a legal edge to a
+# terminal status, the dispatcher must not treat the form as queue-eligible,
+# and the form must count against the tenant's concurrency slots.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manual_call_then_completed_callback(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    queue_form_id: UUID,
+) -> None:
+    """A voice-lab call's terminal callback must succeed (not 500) and complete
+    the form: POST /calls puts the form IN_CALL, giving COMPLETED a legal edge."""
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(queue_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = created.json()["data"]["id"]
+
+    async with admin_sessionmaker() as session:
+        status = (
+            await session.execute(
+                text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
+                    fid=queue_form_id
+                )
+            )
+        ).scalar_one()
+    assert status == "in_call"  # not "in_queue" — the call is live
+
+    resp = await client.post(
+        f"/api/v1/calls/{call_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_manual_call_form_not_redispatched(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    queue_form_id: UUID,
+) -> None:
+    """A form with a live manual call must not be picked up by the dispatcher
+    when another enqueue fires it — exactly one call per form."""
+    # Manual call on form X.
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(queue_form_id)},
+    )
+    assert created.status_code == 200, created.text
+
+    # Second form Y in the same tenant (same schema chain as X).
+    form_y_id = uuid7()
+    async with admin_sessionmaker() as session, session.begin():
+        schema_version_id = (
+            await session.execute(
+                text("SELECT schema_version_id FROM patient_form WHERE id = :fid").bindparams(
+                    fid=queue_form_id
+                )
+            )
+        ).scalar_one()
+        session.add(
+            PatientForm(
+                id=form_y_id,
+                tenant_id=rbac_world.tenant_id,
+                schema_version_id=schema_version_id,
+                patient_name="Second Queue Patient",
+            )
+        )
+    try:
+        # Enqueue Y — fires the dispatcher, which must skip X (IN_CALL, not queued).
+        resp = await client.put(
+            f"/api/v1/patient-forms/{form_y_id}/status",
+            headers=_auth(rbac_world.admin_token),
+            json={"status": "in_queue"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        async with admin_sessionmaker() as session:
+            x_calls = (
+                await session.execute(
+                    text("SELECT count(*) FROM call WHERE form_id = :fid").bindparams(
+                        fid=queue_form_id
+                    )
+                )
+            ).scalar_one()
+        assert x_calls == 1  # no second (dispatcher-created) call for X
+    finally:
+        async with admin_sessionmaker() as session, session.begin():
+            await _purge_form(session, form_y_id)

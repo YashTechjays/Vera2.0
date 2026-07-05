@@ -12,6 +12,8 @@ Also:
 - Replaces the partial index ix_patient_form_queued so it sorts on enqueued_at
   (was scheduled_at) — the column the dispatcher uses for FIFO ordering.
 - Widens the ck_patient_form_status_valid CHECK constraint to include 'expired'.
+- Adds uq_call_active_form: at most one live (non-terminal) call per form — DB
+  backstop against a manual call and a dispatcher call landing on the same form.
 """
 
 from collections.abc import Sequence
@@ -61,8 +63,16 @@ def upgrade() -> None:
         "'exception_review', 'completed', 'call_failed', 'expired')",
     )
 
+    # --- call: at most one live (non-terminal) call per form ---
+    # IF NOT EXISTS: 0001 already builds this on a fresh DB (it's in the model).
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_call_active_form ON call (form_id) "
+        "WHERE current_status NOT IN ('completed', 'failed', 'no_answer', 'busy')"
+    )
+
 
 def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS uq_call_active_form")
     op.drop_constraint("status_valid", "patient_form", type_="check")
     op.create_check_constraint(
         "status_valid",
