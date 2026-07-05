@@ -698,7 +698,7 @@ def _financial_sections() -> dict[str, Section]:
             },
         ),
         "embryo_cryo_storage": Section(
-            title="Embryo Cryo Storage",
+            title="Embryo Cryo Storage (CPT 89342)",
             applicable_when=eq(
                 "sections.infertility_treatment.embryo_cryopreservation.cpt_89342.covered", "Yes"
             ),
@@ -814,13 +814,10 @@ def _admin_sections() -> dict[str, Section]:
             ask_groups=[
                 AskGroup(
                     fields=[
+                        "sections.third_party_administrator.tpa_exists",
                         "sections.third_party_administrator.tpa_name",
-                        "sections.third_party_administrator.tpa_member_id",
                     ],
-                    ask=(
-                        "What is the name of the third party administrator, and could you also "
-                        "provide this patient's member ID with the TPA?"
-                    ),
+                    ask="Is there a Third Party Administrator, and if so, what is their name?",
                 )
             ],
             fields={
@@ -833,16 +830,6 @@ def _admin_sections() -> dict[str, Section]:
                     "TPA Name",
                     "What is the name of the third party administrator?",
                     required=True,
-                    applicable_when=eq("sections.third_party_administrator.tpa_exists", "Yes"),
-                ),
-                "tpa_member_id": text_ask(
-                    "TPA Member ID",
-                    "Would you be able to provide this patient's member ID with the TPA?",
-                    applicable_when=eq("sections.third_party_administrator.tpa_exists", "Yes"),
-                ),
-                "tpa_rep_name": text_ask(
-                    "TPA Representative Name",
-                    "Could you provide the TPA representative name?",
                     applicable_when=eq("sections.third_party_administrator.tpa_exists", "Yes"),
                 ),
             },

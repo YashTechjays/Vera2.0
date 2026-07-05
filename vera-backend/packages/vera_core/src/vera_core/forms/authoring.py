@@ -91,7 +91,7 @@ def service_fields(
         ),
         "copay": Leaf(
             type="currency",
-            title="Copay",
+            title="Copay ($)",
             role="ask",
             required=True,
             special_values=["$0", "None"],
@@ -102,7 +102,7 @@ def service_fields(
         ),
         "coinsurance": Leaf(
             type="percent",
-            title="Coinsurance",
+            title="Coinsurance (%)",
             role="ask",
             required=True,
             inapplicable_value=inapplicable.get("coinsurance"),

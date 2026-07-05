@@ -314,7 +314,7 @@
                 },
                 "copay": {
                   "type": "currency",
-                  "title": "Copay",
+                  "title": "Copay ($)",
                   "role": "ask",
                   "required": true,
                   "special_values": [
@@ -338,7 +338,7 @@
                 },
                 "coinsurance": {
                   "type": "percent",
-                  "title": "Coinsurance",
+                  "title": "Coinsurance (%)",
                   "role": "ask",
                   "required": true,
                   "validation": {
@@ -414,7 +414,7 @@
                 },
                 "copay": {
                   "type": "currency",
-                  "title": "Copay",
+                  "title": "Copay ($)",
                   "role": "ask",
                   "required": true,
                   "special_values": [
@@ -438,7 +438,7 @@
                 },
                 "coinsurance": {
                   "type": "percent",
-                  "title": "Coinsurance",
+                  "title": "Coinsurance (%)",
                   "role": "ask",
                   "required": true,
                   "validation": {
@@ -554,7 +554,7 @@
                 },
                 "copay": {
                   "type": "currency",
-                  "title": "Copay",
+                  "title": "Copay ($)",
                   "role": "ask",
                   "required": true,
                   "special_values": [
@@ -578,7 +578,7 @@
                 },
                 "coinsurance": {
                   "type": "percent",
-                  "title": "Coinsurance",
+                  "title": "Coinsurance (%)",
                   "role": "ask",
                   "required": true,
                   "validation": {
@@ -694,7 +694,7 @@
                 },
                 "copay": {
                   "type": "currency",
-                  "title": "Copay",
+                  "title": "Copay ($)",
                   "role": "ask",
                   "required": true,
                   "special_values": [
@@ -718,7 +718,7 @@
                 },
                 "coinsurance": {
                   "type": "percent",
-                  "title": "Coinsurance",
+                  "title": "Coinsurance (%)",
                   "role": "ask",
                   "required": true,
                   "validation": {
@@ -821,7 +821,7 @@
             },
             "copay": {
               "type": "currency",
-              "title": "Copay",
+              "title": "Copay ($)",
               "role": "ask",
               "required": true,
               "special_values": [
@@ -844,7 +844,7 @@
             },
             "coinsurance": {
               "type": "percent",
-              "title": "Coinsurance",
+              "title": "Coinsurance (%)",
               "role": "ask",
               "required": true,
               "validation": {
