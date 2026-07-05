@@ -96,9 +96,16 @@ class Range(_Model):
         return self
 
 
+# Tokens legal in `date_format` (closed set — extend deliberately): month/day
+# with or without a leading zero, 4- or 2-digit year, `/` `-` `.` separators.
+DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY|YY)(?:[-/.](?:MM?|DD?|YYYY|YY))*$")
+
+
 class Validation(_Model):
     pattern: str | None = None
     range: Range | None = None
+    # Display/entry format for `type: date` values (e.g. "M/D/YYYY").
+    date_format: str | None = None
 
     @model_validator(mode="after")
     def _pattern_compiles(self) -> Validation:
@@ -107,6 +114,10 @@ class Validation(_Model):
                 re.compile(self.pattern)
             except re.error as exc:
                 raise ValueError(f"invalid pattern regex: {exc}") from exc
+        if self.date_format is not None and not DATE_FORMAT_RE.match(self.date_format):
+            raise ValueError(
+                "date_format must combine M/MM, D/DD, YYYY/YY tokens with -/. separators"
+            )
         return self
 
 
@@ -168,6 +179,8 @@ class Leaf(_Model):
                 raise ValueError("validation.pattern not allowed on enum fields")
             if self.validation.range is not None and self.type not in RANGE_TYPES:
                 raise ValueError(f"validation.range only on {sorted(RANGE_TYPES)}")
+            if self.validation.date_format is not None and self.type != "date":
+                raise ValueError("validation.date_format only on date fields")
         if self.prompt is not None:
             if self.prompt.confirm is not None and self.role != "confirm":
                 raise ValueError("prompt.confirm on non-confirm role")
@@ -253,6 +266,9 @@ class Task(_Model):
     title: str
     intro: str | None = None
     outro: str | None = None
+    # Task-level agent instructions; the prompt compiler folds this into the
+    # task's composite prompt ahead of the schema-derived question list.
+    prompt: str | None = None
     sections: list[str]
     applicable_when: Condition | None = None
 

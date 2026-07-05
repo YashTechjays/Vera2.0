@@ -1,6 +1,6 @@
 {
   "dsl_version": "2.1",
-  "name": "IBV Form Standard",
+  "name": "Infertility",
   "insurance_type": "infertility_treatment",
   "description": "Standard infertility benefits verification (IBV) form. Drives UI rendering, per-task voice-agent prompts, and transcript extraction into field_answer rows.",
   "system_fields": {
@@ -211,7 +211,10 @@
           "type": "date",
           "title": "Patient Date of Birth",
           "role": "context",
-          "required": true
+          "required": true,
+          "validation": {
+            "date_format": "M/D/YYYY"
+          }
         },
         "patient_gender": {
           "type": "enum",
@@ -253,6 +256,9 @@
             }
           },
           "default": "N/A",
+          "validation": {
+            "date_format": "M/D/YYYY"
+          },
           "applicable_when": {
             "ref": "family_coverage"
           },
@@ -301,7 +307,10 @@
           "type": "date",
           "title": "Appointment Date",
           "role": "context",
-          "required": true
+          "required": true,
+          "validation": {
+            "date_format": "M/D/YYYY"
+          }
         }
       }
     },
@@ -319,7 +328,10 @@
         "verified_at": {
           "type": "date",
           "title": "Verified At",
-          "role": "input"
+          "role": "input",
+          "validation": {
+            "date_format": "M/D/YYYY"
+          }
         },
         "callback_number": {
           "type": "phone",
@@ -556,6 +568,9 @@
           "title": "Renewal Date",
           "role": "ask",
           "required": true,
+          "validation": {
+            "date_format": "M/D/YYYY"
+          },
           "applicable_when": {
             "field": "sections.benefit_coverage.benefit_year_type",
             "op": "eq",
@@ -570,6 +585,9 @@
           "title": "Plan Effective Date",
           "role": "ask",
           "required": true,
+          "validation": {
+            "date_format": "M/D/YYYY"
+          },
           "derive": {
             "when": {
               "field": "sections.benefit_coverage.benefit_year_type",
@@ -5000,6 +5018,7 @@
       "task_key": "insurance_basics",
       "title": "Insurance Basics",
       "outro": "Perfect, that covers the plan basics. Give me just a moment to note all of that down.",
+      "prompt": "Verify the member's plan identity and network status. Confirm the spouse's identity only when the policy is a family plan, and record answers exactly as the representative states them.",
       "sections": [
         "insurance_information",
         "benefit_coverage"
@@ -5010,6 +5029,7 @@
       "title": "Coverage Verification",
       "intro": "Now I'd like to verify some coverage details.",
       "outro": "Thank you, that's really helpful. One moment while I organize these coverage details.",
+      "prompt": "Work through infertility treatment, diagnostic testing and general coverage. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered.",
       "sections": [
         "infertility_treatment",
         "diagnostic_testing",
@@ -5021,6 +5041,7 @@
       "title": "Financial Details",
       "intro": "Now let me ask about some financial details.",
       "outro": "Got it — thank you for walking me through those numbers. One moment please.",
+      "prompt": "Collect deductibles, out-of-pocket maximums and lifetime maximums. Skip met/remaining amounts when a total is $0, None or unlimited, and read money values back for confirmation when they sound ambiguous.",
       "sections": [
         "deductibles",
         "out_of_pocket",
@@ -5033,6 +5054,7 @@
       "title": "Male Partner Coverage",
       "intro": "Now I'd like to ask about male partner fertility coverage.",
       "outro": "Thanks, that covers the male partner benefits. Just a moment.",
+      "prompt": "Only reached for family plans with a male spouse. Establish whether male partner fertility services are covered before asking any per-service question.",
       "sections": [
         "male_partner_coverage"
       ]
@@ -5042,6 +5064,7 @@
       "title": "Administrative Details",
       "intro": "Just a few more questions about administrative details.",
       "outro": "Perfect, I have all the administrative details I need. One second please.",
+      "prompt": "Close out enrollment, authorization and third-party administration details. Ask the existence gate first and skip the contact questions when the entity does not exist.",
       "sections": [
         "enrollment",
         "authorization_department",
@@ -5054,6 +5077,7 @@
     {
       "task_key": "wrap_up",
       "title": "Wrap Up",
+      "prompt": "Always run last, even on early termination: capture the representative's name and a call reference number before ending the call politely.",
       "sections": [
         "insurance_representative"
       ]

@@ -8,6 +8,7 @@ the compiled JSON is the runtime artifact.
 from __future__ import annotations
 
 from vera_core.forms.authoring import (
+    DATE_VALIDATION,
     YES_NO,
     YES_NO_NA,
     ask,
@@ -163,7 +164,11 @@ def _context_sections() -> dict[str, Section]:
                     type="text", title="Patient Name", role="context", required=True
                 ),
                 "patient_dob": Leaf(
-                    type="date", title="Patient Date of Birth", role="context", required=True
+                    type="date",
+                    title="Patient Date of Birth",
+                    role="context",
+                    required=True,
+                    validation=DATE_VALIDATION,
                 ),
                 "patient_gender": Leaf(
                     type="enum",
@@ -190,6 +195,7 @@ def _context_sections() -> dict[str, Section]:
                 ),
                 "spouse_partner_dob": Leaf(
                     type="date",
+                    validation=DATE_VALIDATION,
                     title="Spouse / Partner Date of Birth",
                     role="confirm",
                     default="N/A",
@@ -227,7 +233,11 @@ def _context_sections() -> dict[str, Section]:
                     required=True,
                 ),
                 "appointment_date": Leaf(
-                    type="date", title="Appointment Date", role="context", required=True
+                    type="date",
+                    title="Appointment Date",
+                    role="context",
+                    required=True,
+                    validation=DATE_VALIDATION,
                 ),
             },
         ),
@@ -245,7 +255,9 @@ def _context_sections() -> dict[str, Section]:
                     role="context",
                     description="Human supervisor named in the call introduction.",
                 ),
-                "verified_at": Leaf(type="date", title="Verified At", role="input"),
+                "verified_at": Leaf(
+                    type="date", title="Verified At", role="input", validation=DATE_VALIDATION
+                ),
                 "callback_number": Leaf(
                     type="phone",
                     title="Callback Number",
@@ -390,6 +402,7 @@ def _benefit_coverage() -> Section:
             ),
             "plan_effective_date": Leaf(
                 type="date",
+                validation=DATE_VALIDATION,
                 title="Plan Effective Date",
                 role="ask",
                 required=True,
@@ -968,7 +981,7 @@ def build_ibv_standard() -> FormSchemaDoc:
 
     return FormSchemaDoc(
         dsl_version="2.1",
-        name="IBV Form Standard",
+        name="Infertility",
         insurance_type="infertility_treatment",
         description=(
             "Standard infertility benefits verification (IBV) form. Drives UI rendering, "
@@ -1016,6 +1029,11 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="insurance_basics",
                 title="Insurance Basics",
+                prompt=(
+                    "Verify the member's plan identity and network status. Confirm the "
+                    "spouse's identity only when the policy is a family plan, and record "
+                    "answers exactly as the representative states them."
+                ),
                 outro=(
                     "Perfect, that covers the plan basics. Give me just a moment to note all "
                     "of that down."
@@ -1025,6 +1043,12 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="coverage",
                 title="Coverage Verification",
+                prompt=(
+                    "Work through infertility treatment, diagnostic testing and general "
+                    "coverage. Ask per service panel, fan answers out to the CPT codes the "
+                    "representative confirms, and skip sub-questions for services that are "
+                    "not covered."
+                ),
                 intro="Now I'd like to verify some coverage details.",
                 outro=(
                     "Thank you, that's really helpful. One moment while I organize these "
@@ -1035,6 +1059,11 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="financial",
                 title="Financial Details",
+                prompt=(
+                    "Collect deductibles, out-of-pocket maximums and lifetime maximums. "
+                    "Skip met/remaining amounts when a total is $0, None or unlimited, and "
+                    "read money values back for confirmation when they sound ambiguous."
+                ),
                 intro="Now let me ask about some financial details.",
                 outro="Got it — thank you for walking me through those numbers. One moment please.",
                 sections=[
@@ -1047,6 +1076,11 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="male_partner",
                 title="Male Partner Coverage",
+                prompt=(
+                    "Only reached for family plans with a male spouse. Establish whether "
+                    "male partner fertility services are covered before asking any "
+                    "per-service question."
+                ),
                 intro="Now I'd like to ask about male partner fertility coverage.",
                 outro="Thanks, that covers the male partner benefits. Just a moment.",
                 sections=["male_partner_coverage"],
@@ -1054,6 +1088,11 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="closing_admin",
                 title="Administrative Details",
+                prompt=(
+                    "Close out enrollment, authorization and third-party administration "
+                    "details. Ask the existence gate first and skip the contact questions "
+                    "when the entity does not exist."
+                ),
                 intro="Just a few more questions about administrative details.",
                 outro="Perfect, I have all the administrative details I need. One second please.",
                 sections=[
@@ -1065,7 +1104,16 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "insurance_reference_information",
                 ],
             ),
-            Task(task_key="wrap_up", title="Wrap Up", sections=["insurance_representative"]),
+            Task(
+                task_key="wrap_up",
+                title="Wrap Up",
+                prompt=(
+                    "Always run last, even on early termination: capture the "
+                    "representative's name and a call reference number before ending the "
+                    "call politely."
+                ),
+                sections=["insurance_representative"],
+            ),
         ],
         flow_rules=[
             FlowRule(

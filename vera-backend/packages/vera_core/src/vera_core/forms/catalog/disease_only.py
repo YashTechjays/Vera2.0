@@ -10,6 +10,7 @@ the dynamic renderer can be validated against something other than the IBV form.
 from __future__ import annotations
 
 from vera_core.forms.authoring import (
+    DATE_VALIDATION,
     YES_NO,
     ask,
     cpt_group,
@@ -84,7 +85,11 @@ def _context_sections() -> dict[str, Section]:
                     type="text", title="Patient Name", role="context", required=True
                 ),
                 "patient_dob": Leaf(
-                    type="date", title="Patient Date of Birth", role="context", required=True
+                    type="date",
+                    title="Patient Date of Birth",
+                    role="context",
+                    required=True,
+                    validation=DATE_VALIDATION,
                 ),
                 "patient_gender": Leaf(
                     type="enum",
@@ -107,7 +112,9 @@ def _context_sections() -> dict[str, Section]:
                     role="context",
                     description="Human supervisor named in the call introduction.",
                 ),
-                "verified_at": Leaf(type="date", title="Verified At", role="input"),
+                "verified_at": Leaf(
+                    type="date", title="Verified At", role="input", validation=DATE_VALIDATION
+                ),
                 "callback_number": Leaf(
                     type="phone",
                     title="Callback Number",
@@ -186,6 +193,7 @@ def _coverage_summary() -> Section:
             ),
             "renewal_date": Leaf(
                 type="date",
+                validation=DATE_VALIDATION,
                 title="Renewal Date",
                 role="ask",
                 required=True,
@@ -364,12 +372,21 @@ def build_disease_only() -> FormSchemaDoc:
             Task(
                 task_key="policy_basics",
                 title="Policy Basics",
+                prompt=(
+                    "Verify the disease-only policy identity and overall coverage status "
+                    "before anything else; the rest of the call depends on these answers."
+                ),
                 outro="Perfect, that covers the policy basics. One moment please.",
                 sections=["policy_details", "coverage_summary"],
             ),
             Task(
                 task_key="disease_coverage",
                 title="Disease Coverage",
+                prompt=(
+                    "Go disease by disease. Establish coverage first, then benefits per "
+                    "covered condition; skip sub-questions for conditions that are not "
+                    "covered."
+                ),
                 intro="Now I'd like to verify the covered disease benefits.",
                 outro="Thank you, that covers the disease benefits. Just a moment.",
                 sections=["covered_diseases"],
@@ -377,10 +394,22 @@ def build_disease_only() -> FormSchemaDoc:
             Task(
                 task_key="limitations",
                 title="Exclusions & Limitations",
+                prompt=(
+                    "Capture exclusions and lookback limitations verbatim - these drive "
+                    "claim denials, so do not paraphrase."
+                ),
                 intro="Just a few questions about exclusions and limitations.",
                 sections=["exclusions_limitations"],
             ),
-            Task(task_key="wrap_up", title="Wrap Up", sections=["representative_details"]),
+            Task(
+                task_key="wrap_up",
+                title="Wrap Up",
+                prompt=(
+                    "Always run last: capture the representative's name and a call "
+                    "reference number before ending the call politely."
+                ),
+                sections=["representative_details"],
+            ),
         ],
         contradictions=[
             Contradiction(

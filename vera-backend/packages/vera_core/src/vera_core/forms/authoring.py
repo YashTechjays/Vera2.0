@@ -31,6 +31,10 @@ from vera_core.forms.dsl import (
 YES_NO = ["Yes", "No"]
 YES_NO_NA = ["Yes", "No", "N/A"]
 
+# Every date field currently shares one entry/display format (product decision);
+# `text_ask(type_="date")` applies it automatically, raw Leaf sites use the constant.
+DATE_VALIDATION = Validation(date_format="M/D/YYYY")
+
 PRIOR_AUTH_ASK = "Is prior authorization required for this service? Please answer Yes, No, or N/A."
 COPAY_ASK = "What is the copay amount for this service?"
 COINSURANCE_ASK = "What is the coinsurance percentage for this service?"
@@ -277,4 +281,5 @@ def text_ask(
         applicable_when=applicable_when,
         description=description,
         prompt=ask(ask_text, hints),
+        validation=DATE_VALIDATION if type_ == "date" else None,
     )
