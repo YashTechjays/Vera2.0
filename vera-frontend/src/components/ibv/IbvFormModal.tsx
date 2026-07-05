@@ -21,6 +21,7 @@ import { SchemaForm } from "./SchemaForm"
 
 export function IbvFormModal() {
   const {
+    schema,
     modalOpen,
     closeForm,
     dirty,
@@ -53,10 +54,13 @@ export function IbvFormModal() {
               {humanizeSegment(insuranceType)}
             </p>
           )}
-          <DialogTitle>{patientName ? `IBV — ${patientName}` : "IBV Data Entry Form"}</DialogTitle>
+          {/* Title from the fetched schema document — never a hardcoded form name. */}
+          <DialogTitle>
+            {[schema?.name, patientName].filter(Boolean).join(" — ") ||
+              "Patient Form"}
+          </DialogTitle>
           <DialogDescription>
-            Insurance Benefit Verification — review captured values and resolve
-            disputes.
+            Review captured values and resolve disputes.
           </DialogDescription>
         </DialogHeader>
 
