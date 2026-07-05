@@ -55,4 +55,14 @@ describe("SchemaForm", () => {
     // male_partner_coverage is inapplicable with no values → disabled controls
     expect(html).toContain("disabled")
   })
+
+  it("renders the dynamic color legend and the usage tints", () => {
+    expect(html).toContain("Color Legend")
+    expect(html).toContain("System field")
+    expect(html).toContain("Voice-agent context")
+    expect(html).toContain("Collected on the call")
+    expect(html).toContain("UI only")
+    expect(html).toContain("Context section")
+    expect(html).toContain("bg-violet-100") // system-field label tint in use
+  })
 })

@@ -7,7 +7,8 @@ import {
   DisputeBadge,
 } from "./DisputeControls"
 import { badgeValue, confidenceHighlightClass } from "@/lib/ibv/disputes"
-import { isApplicable, isRequired } from "@/lib/ibv/schema"
+import { fieldUsageOf, isApplicable, isRequired } from "@/lib/ibv/schema"
+import { USAGE_META } from "./usageMeta"
 import type { Condition, LeafField } from "@/lib/ibv/types"
 
 type Props = {
@@ -41,6 +42,8 @@ export function FieldRow({ field, path, depth, gates }: Props) {
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const required = schema !== null && applicable && isRequired(schema, field, values)
+  // Voice-call participation tint on the label cell (see UsageLegend).
+  const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
   // Highlight + badge only while an unresolved dispute is present.
   const showDispute = !!dispute && !flags.applied && applicable
@@ -53,6 +56,7 @@ export function FieldRow({ field, path, depth, gates }: Props) {
       <div
         className={cn(
           "flex w-[210px] min-w-[210px] shrink-0 items-center gap-1 border-r border-b border-ibv-label-border bg-white px-1.5 py-1 text-left font-ibv text-[13.3px] font-semibold text-ibv-label-border",
+          USAGE_META[usage].labelCellClass,
           !applicable && "opacity-60"
         )}
         style={depth > 0 ? { paddingLeft: 6 + depth * 10 } : undefined}

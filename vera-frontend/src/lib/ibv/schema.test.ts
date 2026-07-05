@@ -5,6 +5,7 @@ import {
   allLeaves,
   completionPercent,
   contradictionWarnings,
+  fieldUsageOf,
   flattenSection,
   getSectionTable,
   isApplicable,
@@ -13,6 +14,7 @@ import {
   parseSchema,
   sectionEntriesOf,
   suggestionsOf,
+  systemFieldPaths,
 } from "./schema"
 import type { FormValues } from "./types"
 
@@ -257,6 +259,49 @@ describe("completionPercent", () => {
     // Some required leaves carry default "N/A" (e.g. patient_gender), so even
     // an empty form is partially complete.
     expect(completionPercent(schema, {})).toBeGreaterThan(0)
+  })
+})
+
+describe("fieldUsageOf", () => {
+  const usage = (path: string) => fieldUsageOf(schema, path, leaf(path).field)
+
+  it("resolves every system_fields binding to a real leaf", () => {
+    const paths = systemFieldPaths(schema)
+    expect(paths.size).toBeGreaterThan(0)
+    const leafPaths = new Set(allLeaves(schema).map((l) => l.path))
+    for (const p of paths) expect(leafPaths).toContain(p)
+  })
+
+  it("system binding wins over the leaf role", () => {
+    // chart_number is role input AND a system field → system
+    expect(usage("sections.patient_information.chart_number")).toBe("system")
+    expect(usage("sections.patient_information.patient_name")).toBe("system")
+  })
+
+  it("classifies bot context, UI-only and asked fields", () => {
+    expect(usage("sections.patient_information.spouse_gender")).toBe("context")
+    expect(usage("sections.form_information.practice")).toBe("noop")
+    expect(usage("sections.insurance_information.plan_type")).toBe("asked")
+    // confirm-role fields are collected on the call
+    expect(usage("sections.patient_information.spouse_partner_name")).toBe("asked")
+  })
+
+  it("treats every leaf of a ui_only SECTION as a no-op, whatever its role", () => {
+    const synthetic = parseSchema({
+      dsl_version: "2.1",
+      name: "T",
+      insurance_type: "infertility_treatment",
+      sections: {
+        s: {
+          title: "S",
+          role: "ui_only",
+          fields: { f: { type: "text", title: "F", role: "context" } },
+        },
+      },
+    })
+    expect(
+      fieldUsageOf(synthetic, "sections.s.f", synthetic.sections.s.fields.f as never)
+    ).toBe("noop")
   })
 })
 

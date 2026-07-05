@@ -1,6 +1,7 @@
 import { TriangleAlert } from "lucide-react"
 
 import { Section } from "./Section"
+import { UsageLegend } from "./UsageLegend"
 import { useIbv } from "./IbvProvider"
 import { contradictionWarnings, sectionEntriesOf } from "@/lib/ibv/schema"
 import type { FormSchema, Section as SectionModel } from "@/lib/ibv/types"
@@ -112,7 +113,7 @@ export function SchemaForm() {
         </div>
         <aside className="flex w-[340px] shrink-0 flex-col gap-2 self-start rounded-lg border-2 border-[#34B2B2] bg-white p-1.5">
           {rail.map(([key, section]) => (
-            <Section key={key} sectionKey={key} section={section} green />
+            <Section key={key} sectionKey={key} section={section} />
           ))}
         </aside>
       </div>
@@ -131,6 +132,8 @@ export function SchemaForm() {
           />
         )
       )}
+
+      <UsageLegend schema={schema} />
     </div>
   )
 }

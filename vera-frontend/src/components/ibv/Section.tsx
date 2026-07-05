@@ -53,21 +53,21 @@ function Rows({ rows }: { rows: FlatRow[] }) {
  * A collapsible section: header + (field rows | `ui.layout: "table"` matrix).
  * Table sections render their section-level leaves as plain rows above the
  * matrix. Row-level graying comes from each leaf's own gate chain (which
- * already includes the section's applicable_when).
+ * already includes the section's applicable_when). Context sections (known
+ * background the voice agent answers from, never asks) get the green header —
+ * see UsageLegend.
  */
 export function Section({
   sectionKey,
   section,
   defaultOpen = true,
-  green = false,
 }: {
   sectionKey: string
   section: SectionModel
   defaultOpen?: boolean
-  /** reference-rail style: bright green header bar (vs. the gray legend) */
-  green?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
+  const green = section.role === "context"
   const table = getSectionTable(sectionKey, section)
   const rows = table ? table.leaves : flattenSection(sectionKey, section)
 

@@ -126,6 +126,41 @@ export function suggestionsOf(field: LeafField): string[] {
   return field.type === "enum" ? [] : field.special_values ?? []
 }
 
+/**
+ * How a leaf participates in the voice call — drives the UI color coding:
+ * - `system`: bound in `system_fields` — the platform itself reads/writes it
+ *   (worklists, integrations, call setup); takes precedence over the role.
+ * - `context`: fed to the voice agent as known background (role context).
+ * - `noop`: UI-only — never in the prompt, never asked (role input/readonly).
+ * - `asked`: collected on the call (role ask/confirm).
+ */
+export type FieldUsage = "system" | "context" | "noop" | "asked"
+
+const _systemPathsBySchema = new WeakMap<FormSchema, Set<string>>()
+
+/** The field paths bound to well-known system handles (`system_fields`). */
+export function systemFieldPaths(schema: FormSchema): Set<string> {
+  let paths = _systemPathsBySchema.get(schema)
+  if (!paths) {
+    paths = new Set(Object.values(schema.system_fields ?? {}))
+    _systemPathsBySchema.set(schema, paths)
+  }
+  return paths
+}
+
+export function fieldUsageOf(
+  schema: FormSchema,
+  path: string,
+  field: LeafField
+): FieldUsage {
+  if (systemFieldPaths(schema).has(path)) return "system"
+  // A ui_only SECTION is never voice-touched, whatever its leaves' roles say.
+  if (schema.sections[path.split(".")[1]]?.role === "ui_only") return "noop"
+  if (field.role === "context") return "context"
+  if (field.role === "input" || field.role === "readonly") return "noop"
+  return "asked"
+}
+
 /** A field counts as filled when it has a value or a declared default. */
 function isFilled(leaf: FlatLeaf, values: FormValues): boolean {
   return (values[leaf.path] ?? "").trim() !== "" || leaf.field.default !== undefined
