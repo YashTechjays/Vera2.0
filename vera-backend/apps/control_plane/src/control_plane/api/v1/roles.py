@@ -150,9 +150,7 @@ async def get_role(
     session: TenantSession,
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[RoleDetailResponse]:
-    role = (await session.execute(select(Role).where(Role.id == role_id))).scalar_one_or_none()
-    if role is None:  # unknown id, or another tenant's role hidden by RLS
-        raise NotFoundError(message="no such role")
+    role = await _load_role(session, role_id)
     return ok(_to_detail(role, await _role_permissions(session, role_id)))
 
 
@@ -178,9 +176,7 @@ async def update_role(
     resolver: Resolver,
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[RoleDetailResponse]:
-    role = (await session.execute(select(Role).where(Role.id == role_id))).scalar_one_or_none()
-    if role is None:
-        raise NotFoundError(message="no such role")
+    role = await _load_role(session, role_id)
     # Explicit ownership check (spec): don't rely on RLS's silent 0-row update.
     # `tenant_id IS NULL` here means "global system role", not "platform caller".
     if role.tenant_id is None:
@@ -409,6 +405,56 @@ async def revoke_role(
     return ok(None, message="Role revoked.")
 
 
+@router.delete(
+    "/roles/{role_id}",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def delete_role(
+    role_id: UUID,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: AuthAudit,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[None]:
+    role = await _load_role(session, role_id)
+    if role.tenant_id is None:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="system roles cannot be deleted"
+        )
+    # DECISION: never cascade a delete over live grants. The admin revokes per
+    # user first (each revoke is audited + cache-invalidating), so by the time
+    # this runs there is no holder cache to invalidate.
+    holder_count = (
+        await session.execute(
+            select(func.count()).select_from(UserRole).where(UserRole.role_id == role_id)
+        )
+    ).scalar_one()
+    if holder_count:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message=f"{holder_count} user(s) still hold this role — remove it from them first",
+            data={"holder_count": holder_count},
+        )
+
+    await session.delete(role)  # FK cascade clears role_permission links
+    await emit_auth_event(
+        audit,
+        tenant_id=tenant_id,
+        event=AuthEvent.ROLE_DELETED,
+        ip=client_ip(request),
+        user_id=_caller.user_id,
+        meta={"role_id": str(role_id), "name": role.name},
+    )
+    return ok(None, message="Role deleted.")
+
+
 async def _user_in_tenant(session: AsyncSession, user_id: UUID) -> bool:
     row = (
         await session.execute(select(AppUser.id).where(AppUser.id == user_id))
@@ -419,6 +465,15 @@ async def _user_in_tenant(session: AsyncSession, user_id: UUID) -> bool:
 async def _role_visible(session: AsyncSession, role_id: UUID) -> bool:
     row = (await session.execute(select(Role.id).where(Role.id == role_id))).scalar_one_or_none()
     return row is not None
+
+
+async def _load_role(session: AsyncSession, role_id: UUID) -> Role:
+    """Load a role visible in the current tenant context, or 404. An unknown id — or
+    another tenant's role hidden by RLS — resolves to no row and is rejected."""
+    role = (await session.execute(select(Role).where(Role.id == role_id))).scalar_one_or_none()
+    if role is None:
+        raise NotFoundError(message="no such role")
+    return role
 
 
 async def _resolve_grantable_permissions(

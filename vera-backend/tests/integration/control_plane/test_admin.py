@@ -513,6 +513,63 @@ async def test_patch_role_invalidates_holder_permission_cache(
     )
 
 
+async def test_delete_role_blocked_while_held_then_succeeds(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "DELETE_ME", "permission_ids": []},
+    )
+    role_id = created.json()["data"]["id"]
+    async with admin_sessionmaker() as session:
+        norole_id = await session.scalar(
+            text(
+                "SELECT id FROM app_user WHERE email = 'norole@test.example' AND tenant_id = :t"
+            ).bindparams(t=rbac_world.tenant_id)
+        )
+    await client.post(
+        f"/api/v1/users/{norole_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": role_id},
+    )
+
+    blocked = await client.request(
+        "DELETE", f"/api/v1/roles/{role_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert blocked.status_code == 409  # DECISION: no silent cascade
+    assert blocked.json()["data"]["holder_count"] == 1
+
+    await client.request(
+        "DELETE",
+        f"/api/v1/users/{norole_id}/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+    )
+    deleted = await client.request(
+        "DELETE", f"/api/v1/roles/{role_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert deleted.status_code == 200, deleted.text
+    listing = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    assert "DELETE_ME" not in {r["name"] for r in listing.json()["data"]}
+
+
+async def test_delete_system_role_forbidden_and_unknown_404(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+    forbidden = await client.request(
+        "DELETE", f"/api/v1/roles/{supervisor_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert forbidden.status_code == 403
+    missing = await client.request(
+        "DELETE", f"/api/v1/roles/{uuid4()}", headers=_auth(rbac_world.admin_token)
+    )
+    assert missing.status_code == 404
+
+
 # --- providers ---------------------------------------------------------------
 
 
