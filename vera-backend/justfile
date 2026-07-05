@@ -67,6 +67,12 @@ seed-user email password:
 seed-schemas:
     uv run python scripts/seed.py --schemas
 
+# Seed/replace one synthetic infertility patient form for local dev/demo review.
+# status: ready_for_processing (curated demo fill, default) | exception_review
+# (full a-to-z fill + a few disputed fields so the review UI has something to show).
+test_seed_patient_data status="ready_for_processing":
+    uv run python scripts/seed_patient_data.py --status {{status}}
+
 # Seed ONLY the baseline prompts (bind to each schema's published version)
 seed-prompts:
     uv run python scripts/seed.py --prompts
