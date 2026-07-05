@@ -88,11 +88,14 @@ async def cleanup_forms(
 ) -> AsyncGenerator[None]:
     yield
     async with admin_sessionmaker() as s, s.begin():
-        await s.execute(
-            text("DELETE FROM patient_form WHERE tenant_id IN (:a, :b)").bindparams(
-                a=rbac_world.tenant_id, b=rbac_world.other_tenant_id
+        # Queuing a form now starts a call (call.form_id → patient_form is RESTRICT), so
+        # delete calls first (call_event cascades off call) before the forms they pin.
+        for table in ("call", "patient_form"):
+            await s.execute(
+                text(f"DELETE FROM {table} WHERE tenant_id IN (:a, :b)").bindparams(
+                    a=rbac_world.tenant_id, b=rbac_world.other_tenant_id
+                )
             )
-        )
 
 
 async def _make_form_with_dispute(

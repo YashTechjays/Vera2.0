@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
+import { LiveCallRoom } from "./LiveCallRoom"
 import type { LiveCall } from "@/lib/mock-data"
 
 type TabKey = "info" | "transcript"
@@ -55,7 +56,12 @@ export function InterveneModal({
         {/* Header */}
         <div className="border-b border-border p-4">
           <div className="flex items-start justify-between gap-4">
-            <DialogTitle className="text-lg font-semibold">Overview</DialogTitle>
+            <div>
+              <DialogTitle className="text-lg font-semibold">Overview</DialogTitle>
+              {call?.id && (
+                <p className="mt-0.5 font-mono text-xs text-muted-foreground">Call {call.id}</p>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => onOpenChange(false)}
@@ -134,10 +140,16 @@ export function InterveneModal({
                   Copy
                 </Button>
               </div>
-              <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
-                <MessageSquare className="size-10 opacity-30" />
-                <span className="text-sm">Connecting to call…</span>
-              </div>
+              {call?.id ? (
+                <div className="flex min-h-[240px] flex-1 flex-col rounded-lg border border-border">
+                  <LiveCallRoom key={call.id} callId={call.id} />
+                </div>
+              ) : (
+                <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
+                  <MessageSquare className="size-10 opacity-30" />
+                  <span className="text-sm">No call selected</span>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -1,0 +1,103 @@
+import { useEffect, useState } from "react"
+import { Loader2, Radio } from "lucide-react"
+import {
+  LiveKitRoom,
+  RoomAudioRenderer,
+  useConnectionState,
+  useParticipants,
+} from "@livekit/components-react"
+import { ConnectionState } from "livekit-client"
+
+import { ApiError } from "@/lib/api/client"
+import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
+
+const CONNECTION_LABEL: Record<ConnectionState, string> = {
+  [ConnectionState.Disconnected]: "Disconnected",
+  [ConnectionState.Connecting]: "Connecting…",
+  [ConnectionState.Connected]: "Connected",
+  [ConnectionState.Reconnecting]: "Reconnecting…",
+  [ConnectionState.SignalReconnecting]: "Reconnecting…",
+}
+
+function RoomState() {
+  const state = useConnectionState()
+  const participants = useParticipants()
+  const connected = state === ConnectionState.Connected
+  return (
+    <div className="flex flex-1 flex-col gap-3 p-4 text-sm">
+      <div className="flex items-center gap-2">
+        <Radio className={connected ? "size-4 text-emerald-600" : "size-4 text-muted-foreground"} />
+        <span className="font-medium">{CONNECTION_LABEL[state]}</span>
+      </div>
+      <div>
+        <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Participants ({participants.length})
+        </p>
+        {participants.length === 0 ? (
+          <p className="text-muted-foreground">Waiting for participants…</p>
+        ) : (
+          <ul className="space-y-1 text-muted-foreground">
+            {participants.map((p) => (
+              <li key={p.sid} className="font-mono text-xs">
+                {p.identity}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Joins a call's LiveKit room via a server-minted token and shows the live
+ * connection + participants. Drop-in for a modal's "live" panel; unmounting it
+ * (closing the modal) disconnects the participant.
+ */
+export function LiveCallRoom({ callId }: { callId: string }) {
+  const [join, setJoin] = useState<JoinTokenResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    getJoinToken(callId)
+      .then((res) => {
+        if (!cancelled) setJoin(res)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof ApiError ? e.message : "Could not join the call.")
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [callId])
+
+  if (error) {
+    return <div className="flex flex-1 items-center justify-center p-6 text-sm text-destructive">{error}</div>
+  }
+  if (loading || !join) {
+    return (
+      <div className="flex flex-1 items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" /> Connecting…
+      </div>
+    )
+  }
+  return (
+    <LiveKitRoom
+      serverUrl={join.url}
+      token={join.token}
+      connect
+      audio
+      video={false}
+      onError={(e) => setError(e.message)}
+      className="flex flex-1 flex-col"
+    >
+      <RoomState />
+      <RoomAudioRenderer />
+    </LiveKitRoom>
+  )
+}

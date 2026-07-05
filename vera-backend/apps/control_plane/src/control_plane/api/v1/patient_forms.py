@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import TenantId, TenantSession
+from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -51,14 +51,25 @@ from vera_core.forms.review import (
     unwrap_value,
 )
 from vera_core.models import (
+    Call,
+    CallEvent,
     DisputeAction,
     FieldAnswer,
     FormSchema,
     PatientForm,
     SchemaVersion,
+    Tenant,
 )
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import AnswerSource, DisputeActionType, FormStatus
+from vera_core.models.enums import (
+    AnswerSource,
+    CallEventType,
+    CallStatus,
+    DisputeActionType,
+    FormStatus,
+)
+from vera_core.observability.correlation import room_name_for_call
+from vera_core.schemas import PersonaTweak
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -708,6 +719,7 @@ async def update_patient_form_status(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    livekit: LiveKit,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -755,6 +767,34 @@ async def update_patient_form_status(
 
     form.status = target.value
     await session.flush()
+
+    # Moving a form INTO the queue starts its verification call: create the Call +
+    # LiveKit room and dispatch the agent (the same primitive as POST /calls), with the
+    # caller as the owner. This is the ONLY call-start trigger — there is no manual button.
+    if target == FormStatus.IN_QUEUE:
+        call = Call(
+            tenant_id=tenant_id,
+            form_id=form.id,
+            current_status=CallStatus.INITIATED,
+            initiated_by_id=caller.user_id,
+        )
+        session.add(call)
+        await session.flush()  # populate call.id (UUIDv7)
+        persona = (
+            await session.execute(select(Tenant.persona_tweak).where(Tenant.id == tenant_id))
+        ).scalar_one_or_none()
+        tweak = PersonaTweak.model_validate(persona) if persona is not None else PersonaTweak()
+        await livekit.create_call_room(
+            room_name_for_call(tenant_id, call.id), metadata=tweak.model_dump(exclude_none=True)
+        )
+        session.add(
+            CallEvent(
+                tenant_id=tenant_id,
+                call_id=call.id,
+                event_type=CallEventType.STATUS,
+                event_value=CallStatus.INITIATED,
+            )
+        )
 
     # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
     await get_audit(request).emit(
