@@ -58,6 +58,12 @@ class AssignRoleRequest(BaseModel):
     role_id: UUID
 
 
+class PermissionResponse(BaseModel):
+    id: UUID
+    code: str
+    description: str
+
+
 def _to_response(row: Role) -> RoleResponse:
     return RoleResponse(
         id=row.id, name=row.name, description=row.description, is_system=row.tenant_id is None
@@ -80,6 +86,32 @@ async def list_roles(
     # Catalog RLS returns the global system roles plus this tenant's custom roles.
     rows = (await session.execute(select(Role).order_by(Role.name))).scalars().all()
     return ok([_to_response(r) for r in rows])
+
+
+@router.get(
+    "/permissions",
+    response_model=ResponseModel[list[PermissionResponse]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_permissions(
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[PermissionResponse]]:
+    # The permission catalog is global (no tenant_id, no RLS) and code-defined —
+    # tenants get a read-only view. Platform-tier codes are never shown to a
+    # tenant: they can't be granted here, so they must not appear as options.
+    rows = (await session.execute(select(Permission).order_by(Permission.code))).scalars().all()
+    return ok(
+        [
+            PermissionResponse(id=p.id, code=p.code, description=p.description)
+            for p in rows
+            if not is_platform_permission(p.code)
+        ]
+    )
 
 
 @router.post(

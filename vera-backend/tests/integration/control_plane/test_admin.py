@@ -289,6 +289,25 @@ async def test_create_role_rejects_platform_permission(
     assert resp.status_code == 403
 
 
+async def test_list_permissions_hides_platform_tier(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get("/api/v1/permissions", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["data"]
+    codes = {p["code"] for p in rows}
+    assert "roles:manage" in codes  # tenant-tier codes are present
+    assert not any(c.startswith("platform:") for c in codes)  # platform tier hidden
+    assert all(set(p) == {"id", "code", "description"} for p in rows)
+
+
+async def test_list_permissions_requires_roles_manage(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get("/api/v1/permissions", headers=_auth(rbac_world.norole_token))
+    assert resp.status_code == 403
+
+
 # --- providers ---------------------------------------------------------------
 
 
