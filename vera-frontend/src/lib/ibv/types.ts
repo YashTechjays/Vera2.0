@@ -1,79 +1,139 @@
-// Types for the IBV v1-parity schema (src/lib/ibv/ibv-schema.json). We model only
-// the rendering subset. Bot-prompt metadata (prompt, verbatim_prompt, prompt_role,
-// phase_order, policies) exists in the JSON but is ignored by the form UI — except
-// field-level `rules`, which feed conditional-required validation.
+// Typed model of the form-schema DSL v2.1 (spec §4:
+// docs/superpowers/specs/2026-07-02-form-schema-dsl-v2-design.md). We model the
+// UI-rendering subset; voice-only constructs (`prompt`, `ask_groups`, `tasks`,
+// `flow_rules`, `derive`, `confirm_in_task`, `tags`, `codes.speak_cpt`) exist in
+// the JSON but are intentionally absent here — the cast in schema.ts drops them.
 
-export type FieldWidget = "text" | "textarea" | "radio"
+export type ConditionOp = "eq" | "ne" | "in" | "not_in"
 
-export type RuleCondition = {
-  comparison: string
-  value: string
+/** `value` is a string for eq/ne and a string[] for in/not_in. */
+export type FieldCondition = {
   field: string
+  op: ConditionOp
+  value: string | string[]
 }
 
-export type FieldRule = {
-  effect: string
-  match?: string
-  conditions?: RuleCondition[]
-  summary?: string
+export type Condition =
+  | FieldCondition
+  | { all: Condition[] }
+  | { any: Condition[] }
+  | { not: Condition }
+  /** resolves into the document's `shared_conditions` */
+  | { ref: string }
+
+export type LeafType =
+  | "text"
+  | "enum"
+  | "date"
+  | "currency"
+  | "percent"
+  | "integer"
+  | "phone"
+
+/** Explicit on every compiled leaf. Only `readonly` is display-only in the UI. */
+export type FieldRole = "ask" | "confirm" | "context" | "readonly" | "input"
+
+/** collect (default) | context | ui_only — all editable in the UI. */
+export type SectionRole = "collect" | "context" | "ui_only"
+
+export type Requirement = boolean | { when: Condition }
+
+export type Codes = { cpt?: string[]; icd10?: string[]; speak_cpt?: boolean }
+
+export type Validation = {
+  /** regex for text-family values (NPI, tax ID) */
+  pattern?: string
+  /** numeric bounds for currency/percent/integer */
+  range?: { min?: number; max?: number }
 }
 
-export type IbvField = {
-  type: "string" | "object"
+export type LeafField = {
+  type: LeafType
   title: string
-  description?: string
-  ui?: { widget?: FieldWidget }
-  required_state?: "required" | "optional"
-  enum?: string[]
-  constraint_ref?: string
-  confirm_only?: boolean
-  confirm_value?: unknown
-  /** narrative guidance ("prose") is not a data field — not rendered */
-  prompt_role?: string
-  /** bot prompt; ignored by the UI */
-  verbatim_prompt?: string
-  /** ICD-10 reference code on a CPT matrix group */
-  icd10?: string
-  /** conditional-required rules (effect "make this required") */
-  rules?: FieldRule[]
-  // present when type === "object"
-  properties?: Record<string, IbvField>
-  required?: string[]
-}
-
-export type IbvSection = {
-  section_key: string
-  title: string
-  description?: string
-  properties: Record<string, IbvField>
-  required?: string[]
-  /** override for the matrix table's first-column header */
-  row_header?: string
-}
-
-export type ConstraintDef = {
-  category?: string
+  role: FieldRole
+  /** default false */
+  required?: Requirement
+  /** enum only — the option vocabulary */
   values?: string[]
+  /** extra verbatim-legal answers; on text fields also the combobox suggestions */
+  special_values?: string[]
+  /** value the form assumes when nothing was recorded (shown as placeholder) */
+  default?: string
+  validation?: Validation
+  applicable_when?: Condition
+  /** what a field skipped as inapplicable displays */
+  inapplicable_value?: string
+  codes?: Codes
+  ui?: { widget?: "textarea" }
   description?: string
 }
 
-export type IbvSchema = {
-  name: string
-  constraint_library: Record<string, ConstraintDef>
-  sections: IbvSection[]
+export type GroupField = {
+  type: "group"
+  title: string
+  fields: Record<string, Field>
+  applicable_when?: Condition
+  /** completion semantics: all (default) | any */
+  integrity?: "all" | "any"
+  codes?: Codes
+  description?: string
 }
 
-/** A resolved leaf or group field with its full dotted path, ready to render. */
-export type FlatField = {
-  /** dotted path, e.g. "patient_information.patient_name" */
+export type Field = LeafField | GroupField
+
+/** Either/or sets — optional UI nicety (badge members); members are full paths. */
+export type Alternative = { members: string[]; ask?: string }
+
+export type Section = {
+  title: string
+  /** default collect */
+  role?: SectionRole
+  description?: string
+  applicable_when?: Condition
+  codes?: Codes
+  alternatives?: Alternative[]
+  ui?: { layout?: "table" }
+  fields: Record<string, Field>
+}
+
+/** Cross-field consistency rule; the UI shows a warning banner while `when` holds. */
+export type Contradiction = {
+  rule_key: string
+  when: Condition
+  fields: string[]
+  reason: string
+  clarify?: string
+}
+
+export type FormSchema = {
+  dsl_version: string
+  name: string
+  insurance_type: string
+  description?: string
+  /** well-known system handles → field paths */
+  system_fields?: Record<string, string>
+  shared_conditions?: Record<string, Condition>
+  /** object keyed by section_key; key order = UI order */
+  sections: Record<string, Section>
+  contradictions?: Contradiction[]
+}
+
+/**
+ * Form values keyed by root-anchored field path
+ * (`sections.<section_key>.<field>...` — identical to `field_answer.field_path`).
+ */
+export type FormValues = Record<string, string>
+
+/** A leaf with its full path and applicability gate chain (own + ancestors). */
+export type FlatLeaf = {
   path: string
-  field: IbvField
+  sectionKey: string
+  field: LeafField
   /** nesting depth (0 = direct section child) */
   depth: number
+  /** every applicable_when from the section down to the leaf itself */
+  gates: Condition[]
 }
-
-/** Form values for a single person, keyed by dotted field path. */
-export type FormValues = Record<string, string>
 
 export type InsuredPerson = {
   id: string

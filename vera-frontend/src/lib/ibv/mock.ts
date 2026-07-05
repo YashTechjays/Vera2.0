@@ -1,7 +1,16 @@
+import rawDemoSchema from "./ibv-schema.json"
 import { mockDisputes, type DisputeMap } from "./disputes"
-import { allLeafFields, resolveOptions } from "./schema"
+import { allLeaves, optionsOf, parseSchema } from "./schema"
 import type { FormValues, InsuredPerson } from "./types"
 import type { SavePayload } from "./disputes"
+
+/**
+ * Dev fixture ONLY (demo form + tests): a copy of the compiled
+ * `vera-backend/data/form_schemas/ibv_form_standard_v2.json`. Real forms never
+ * use it — they fetch the exact document their `schema_version_id` pins from
+ * the backend (see IbvProvider).
+ */
+export const demoSchema = parseSchema(rawDemoSchema)
 
 /** Mock insured members. Swap for backend `GET /case/:id/people` later. */
 export const mockPeople: InsuredPerson[] = [
@@ -16,48 +25,52 @@ export const disputesByPerson: Record<string, DisputeMap> = {
   [mockPeople[0].id]: mockDisputes,
 }
 
-/** Realistic overrides for prominent fields, keyed by dotted path. */
+/** Realistic overrides for prominent fields, keyed by root-anchored path. */
 const OVERRIDES: FormValues = {
-  "patient_information.chart_number": "CH-4503",
-  "patient_information.patient_name": "Noah Davis",
-  "patient_information.patient_dob": "02/15/1990",
-  "patient_information.patient_gender": "Male",
-  "patient_information.spouse_partner_name": "Mia Davis",
-  "patient_information.spouse_partner_dob": "07/09/1991",
-  "patient_information.spouse_gender": "Female",
-  "appointment_information.appointment_type": "New Patient",
-  "appointment_information.appointment_date": "06/21/2026",
-  "verification_information.verified_by": "Alex Morgan",
-  "verification_information.verified_at": "06/16/2026",
-  "verification_information.callback_number": "+1 555 0203",
-  "hospital_information.name": "Demo Health Partners",
-  "hospital_information.address": "123 Demo St, Austin, TX",
-  "hospital_information.tax_id": "98-7654313",
-  "hospital_information.npi": "1234567893",
-  "insurance_information.doctor_inside_network": "Yes",
-  "insurance_information.facility_inside_network": "Yes",
-  "insurance_information.out_of_network_coverage": "N/A",
-  "insurance_information.health_plan": "Blue Cross",
-  "insurance_information.coordination_of_benefits": "Primary",
-  "insurance_information.policy_number": "POL-550411",
-  "insurance_information.group_information": "GRP-2039",
-  "insurance_information.group_name": "Umbrella Health",
-  "insurance_information.home_plan": "BCBS TX",
-  "benefit_coverage.benefit_year_type": "Calendar Year",
-  "benefit_coverage.plan_effective_date": "01/01/2026",
-  "benefit_coverage.plan_year_information": "Jan–Dec 2026",
-  "benefit_coverage.coverage_type": "Family",
-  "benefit_coverage.referrals_telehealth": "No",
-  "benefit_coverage.telehealth": "Yes",
-  "benefit_coverage.plan_fund_type": "Fully Funded",
-  "benefit_coverage.employer_support_size": "Large Group",
-  "benefit_coverage.infertility_plan_mandate": "Yes",
-  "provider_reference_information.provider_name": "Dr. Jane Smith",
-  "provider_reference_information.npi": "1982736450",
-  "provider_reference_information.location": "Austin Fertility Center",
-  "insurance_representative.insurance_rep_name": "Taylor Reed",
-  "insurance_representative.call_reference_number": "REF-99381",
-  "insurance_representative.web_portal_ref_number": "WP-22107",
+  "sections.patient_information.chart_number": "CH-4503",
+  "sections.patient_information.patient_name": "Ava Davis",
+  "sections.patient_information.patient_dob": "02/15/1990",
+  "sections.patient_information.patient_gender": "Female",
+  "sections.patient_information.spouse_partner_name": "Noah Davis",
+  "sections.patient_information.spouse_partner_dob": "07/09/1991",
+  "sections.patient_information.spouse_gender": "Male",
+  "sections.appointment_information.appointment_type": "New Patient",
+  "sections.appointment_information.appointment_date": "06/21/2026",
+  "sections.verification_information.verified_by": "Alex Morgan",
+  "sections.verification_information.verified_at": "06/16/2026",
+  "sections.verification_information.callback_number": "+1 555 0203",
+  "sections.hospital_information.hospital_name": "Demo Health Partners",
+  "sections.hospital_information.hospital_address": "123 Demo St, Austin, TX",
+  "sections.hospital_information.tax_id": "987654313",
+  "sections.hospital_information.npi": "1234567893",
+  "sections.insurance_information.doctor_inside_network": "Yes",
+  "sections.insurance_information.facility_inside_network": "Yes",
+  "sections.insurance_information.out_of_network_coverage": "No",
+  "sections.insurance_information.plan_type": "PPO",
+  "sections.insurance_information.cob_status": "Primary",
+  "sections.insurance_information.policy_number": "POL-550411",
+  "sections.insurance_information.group_number": "GRP-2039",
+  "sections.insurance_information.group_name": "Umbrella Health",
+  "sections.insurance_information.policy_situs": "TX",
+  "sections.benefit_coverage.benefit_year_type": "Calendar Year",
+  "sections.benefit_coverage.plan_effective_date": "01/01/2026",
+  "sections.benefit_coverage.renewal_date": "01/01/2027",
+  "sections.benefit_coverage.coverage_type": "Family",
+  "sections.benefit_coverage.pcp_referral_required": "No",
+  "sections.benefit_coverage.telehealth_covered": "Yes",
+  "sections.benefit_coverage.plan_fund_type": "Fully Funded",
+  "sections.benefit_coverage.employer_support_size": "Large Group",
+  "sections.benefit_coverage.infertility_plan_mandate": "Yes",
+  "sections.provider_reference_information.provider_name": "Dr. Jane Smith",
+  "sections.provider_reference_information.npi": "1982736450",
+  "sections.provider_reference_information.office_location": "Austin Fertility Center",
+  "sections.insurance_representative.rep_name": "Taylor Reed",
+  "sections.insurance_representative.call_reference_number": "REF-99381",
+  "sections.insurance_reference_information.insurance_provider_name": "Demo Health Plan",
+  "sections.insurance_reference_information.insurance_phone_number": "+1 555 0100",
+  "sections.insurance_reference_information.web_portal": "demo-portal.example.com",
+  "sections.insurance_reference_information.web_portal_reference_number": "WP-22107",
+  "sections.insurance_reference_information.employer_name": "Umbrella Corp",
 }
 
 /** Sensible per-field value when there's no explicit override. */
@@ -70,7 +83,7 @@ function defaultFor(path: string, options: string[]): string {
   if (/dob|date/.test(last)) return "01/01/2026"
   if (/copay/.test(last)) return "$30"
   if (/coinsurance/.test(last)) return "20%"
-  if (/cycle_limit/.test(last)) return "3"
+  if (/cycle|used/.test(last)) return "3"
   if (/notes/.test(last)) return "—"
   if (/npi/.test(last)) return "1234567893"
   if (/tax_id/.test(last)) return "98-7654313"
@@ -83,11 +96,11 @@ function defaultFor(path: string, options: string[]): string {
   return "Demo"
 }
 
-/** A fully-populated demo form (every leaf field), keyed by dotted path. */
+/** A fully-populated demo form (every leaf field), keyed by root-anchored path. */
 export const mockValues: FormValues = (() => {
   const out: FormValues = {}
-  for (const { path, field } of allLeafFields()) {
-    out[path] = OVERRIDES[path] ?? defaultFor(path, resolveOptions(field))
+  for (const { path, field } of allLeaves(demoSchema)) {
+    out[path] = OVERRIDES[path] ?? defaultFor(path, optionsOf(field))
   }
   return out
 })()

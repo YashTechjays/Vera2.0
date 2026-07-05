@@ -7,22 +7,29 @@ import {
   DisputeBadge,
 } from "./DisputeControls"
 import { badgeValue, confidenceHighlightClass } from "@/lib/ibv/disputes"
-import type { IbvField } from "@/lib/ibv/types"
+import { isApplicable, isRequired } from "@/lib/ibv/schema"
+import type { Condition, LeafField } from "@/lib/ibv/types"
 
 type Props = {
-  field: IbvField
+  field: LeafField
   path: string
   depth: number
+  /** applicable_when chain from the section down to this leaf */
+  gates: Condition[]
 }
 
 /**
  * One dense spreadsheet row (smart-caller-fe `.field-group`): ~180px gray label
  * cell (navy borders) + pale-blue input cell (teal borders) + inline disputes.
+ * Inapplicable rows (own or ancestor `applicable_when` false) gray out and show
+ * the field's `inapplicable_value`.
  */
-export function FieldRow({ field, path, depth }: Props) {
+export function FieldRow({ field, path, depth, gates }: Props) {
   const {
+    schema,
     values,
     setValue,
+    errors,
     disputeFor,
     flagsFor,
     applyDispute,
@@ -32,10 +39,11 @@ export function FieldRow({ field, path, depth }: Props) {
   const value = values[path] ?? ""
   const dispute = disputeFor(path)
   const flags = flagsFor(path)
-  const required = field.required_state === "required"
+  const applicable = schema !== null && isApplicable(schema, gates, values)
+  const required = schema !== null && applicable && isRequired(schema, field, values)
 
   // Highlight + badge only while an unresolved dispute is present.
-  const showDispute = !!dispute && !flags.applied
+  const showDispute = !!dispute && !flags.applied && applicable
   const highlightClass = showDispute
     ? confidenceHighlightClass(dispute!.confidence)
     : undefined
@@ -44,7 +52,8 @@ export function FieldRow({ field, path, depth }: Props) {
     <div className="flex min-h-[26px]">
       <div
         className={cn(
-          "flex w-[210px] min-w-[210px] shrink-0 items-center gap-1 border-r border-b border-ibv-label-border bg-white px-1.5 py-1 text-left font-ibv text-[13.3px] font-semibold text-ibv-label-border"
+          "flex w-[210px] min-w-[210px] shrink-0 items-center gap-1 border-r border-b border-ibv-label-border bg-white px-1.5 py-1 text-left font-ibv text-[13.3px] font-semibold text-ibv-label-border",
+          !applicable && "opacity-60"
         )}
         style={depth > 0 ? { paddingLeft: 6 + depth * 10 } : undefined}
       >
@@ -64,6 +73,9 @@ export function FieldRow({ field, path, depth }: Props) {
           path={path}
           value={value}
           onChange={(v) => setValue(path, v)}
+          disabled={!applicable}
+          placeholder={!applicable ? field.inapplicable_value : undefined}
+          invalid={!!errors[path]}
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? "150px" : undefined}
           noRightBorder

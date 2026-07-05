@@ -21,9 +21,9 @@ import {
 const d: Dispute = { previousValue: "No", currentValue: "Yes", confidence: 95 }
 
 describe("humanizeLabel", () => {
-  it("title-cases snake_case joined by ›", () => {
-    expect(humanizeLabel("insurance_information.health_plan")).toBe(
-      "Insurance Information › Health Plan"
+  it("strips the sections. root and title-cases snake_case joined by ›", () => {
+    expect(humanizeLabel("sections.insurance_information.plan_type")).toBe(
+      "Insurance Information › Plan Type"
     )
   })
 })
@@ -113,9 +113,9 @@ describe("buildSavePayload", () => {
 })
 
 describe("mockDisputes integrity", () => {
-  it("every dispute has two distinct values and a dotted path", () => {
+  it("every dispute has two distinct values and a root-anchored path", () => {
     for (const [path, dd] of Object.entries(mockDisputes)) {
-      expect(path).toMatch(/^[a-z0-9_]+(\.[a-z0-9_]+)+$/)
+      expect(path).toMatch(/^sections(\.[a-z0-9_]+)+$/)
       expect(dd.previousValue).not.toBe(dd.currentValue)
     }
   })
