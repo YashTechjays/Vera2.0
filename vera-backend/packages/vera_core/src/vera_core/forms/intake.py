@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from vera_core.forms.conditions import is_v2
+from vera_core.forms.dsl import PATH_PREFIX
+
 # Intake sections the promotion step reads structurally to lift typed columns out
 # of `intake_payload`. Everything else stays stored opaquely in `intake_payload`.
 _PATIENT_INFO = "patient_information"
@@ -46,8 +49,22 @@ def _is_empty(value: object) -> bool:
 
 
 def required_intake_fields(schema_json: dict[str, Any]) -> list[str]:
-    """The `required` field keys of the `patient_information` section (the only
-    fields a clinic must provide at intake). Data-driven from `schema_json`."""
+    """The `patient_information` field keys a clinic must provide at intake.
+    Data-driven from `schema_json`, version-gated on `dsl_version`:
+    v1 — the section's `required` list; v2 — leaves with unconditional
+    `required: true` and no declared `default` (a default counts as filled, and
+    conditional `{when}` requiredness cannot gate intake)."""
+    if is_v2(schema_json):
+        section = schema_json.get("sections", {}).get(_PATIENT_INFO, {})
+        fields = section.get("fields") or {}
+        return [
+            key
+            for key, field in fields.items()
+            if isinstance(field, dict)
+            and field.get("type") != "group"
+            and field.get("required") is True
+            and "default" not in field
+        ]
     for section in schema_json.get("sections", []):
         if section.get("section_key") == _PATIENT_INFO:
             required: list[str] = list(section.get("required", []))
@@ -56,12 +73,14 @@ def required_intake_fields(schema_json: dict[str, Any]) -> list[str]:
 
 
 def missing_required(payload: dict[str, Any], schema_json: dict[str, Any]) -> list[str]:
-    """Dotted paths of required `patient_information` fields absent/blank in
-    `payload`. Names only — never the values."""
+    """Paths of required `patient_information` fields absent/blank in `payload`
+    (root-anchored `sections.…` paths for v2 documents). Names only — never the
+    values."""
     section = payload.get(_PATIENT_INFO)
     values = section if isinstance(section, dict) else {}
+    prefix = f"{PATH_PREFIX}{_PATIENT_INFO}" if is_v2(schema_json) else _PATIENT_INFO
     return [
-        f"{_PATIENT_INFO}.{field}"
+        f"{prefix}.{field}"
         for field in required_intake_fields(schema_json)
         if _is_empty(values.get(field))
     ]

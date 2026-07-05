@@ -190,6 +190,45 @@ async def test_list_requires_forms_read(client: httpx.AsyncClient, rbac_world: R
     assert resp.status_code == 403, resp.text
 
 
+# ---- schema version lookup ----------------------------------------------------
+
+
+async def test_schema_version_returns_document(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, schema_version_id: UUID
+) -> None:
+    resp = await client.get(
+        f"/api/v1/schema-versions/{schema_version_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("cache-control") == "no-store"
+    data = resp.json()["data"]
+    assert data["id"] == str(schema_version_id)
+    assert data["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
+    assert data["document"]["dsl_version"].startswith("2.")
+    # JSON (not JSONB) storage keeps document order: dsl_version is the first key.
+    assert next(iter(data["document"])) == "dsl_version"
+
+
+async def test_schema_version_requires_forms_read(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, schema_version_id: UUID
+) -> None:
+    resp = await client.get(
+        f"/api/v1/schema-versions/{schema_version_id}", headers=_auth(rbac_world.norole_token)
+    )
+    assert resp.status_code == 403, resp.text
+    resp = await client.get(f"/api/v1/schema-versions/{schema_version_id}")
+    assert resp.status_code == 401, resp.text
+
+
+async def test_schema_version_unknown_id_is_404(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        f"/api/v1/schema-versions/{uuid4()}", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 404, resp.text
+
+
 # ---- detail -----------------------------------------------------------------
 
 
@@ -339,6 +378,40 @@ async def test_resolve_accept_via_case_whitespace_variant_is_an_accept(
         value="Blue Cross",  # the AI value, not the posted " blue cross "
         actions=["accept"],  # accept, not correct
     )
+
+
+async def test_resolve_persists_recomputed_completion(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """The recomputed completion_pct must be FLUSHED before session.refresh() —
+    refresh discards pending attribute changes, which silently dropped the update.
+    With the seeded v2 document, even an answerless form recomputes above 0
+    (required leaves with a declared default count as filled)."""
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    resp = await client.post(
+        f"/api/v1/patient-forms/{form_id}/disputes:resolve",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_data": {}, "dispute_fields": [], "reasked_fields": []},
+    )
+    assert resp.status_code == 200, resp.text
+    returned = resp.json()["data"]["completion_pct"]
+    assert returned > 0
+    async with admin_sessionmaker() as s:
+        stored = float(
+            (
+                await s.execute(select(PatientForm.completion_pct).where(PatientForm.id == form_id))
+            ).scalar_one()
+        )
+    assert stored == returned  # persisted, not just echoed from the in-memory object
 
 
 async def test_resolve_reask_does_not_change_status(

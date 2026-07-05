@@ -508,6 +508,7 @@ def _diagnostic_testing() -> Section:
     }
     return Section(
         title="Diagnostic Testing (Labs, X-ray & Ultrasound)",
+        ui=Ui(layout="table"),
         codes=Codes(icd10=["Z31.41"], speak_cpt=True),
         ask_groups=[
             AskGroup(fields=[f"{base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
@@ -689,6 +690,7 @@ def _male_partner_coverage() -> Section:
     base = "sections.male_partner_coverage"
     return Section(
         title="Male Partner Coverage",
+        ui=Ui(layout="table"),
         applicable_when=ref("male_partner_in_scope"),
         alternatives=[cost_pair(f"{base}.{key}.cpt_{code}") for key, _t, code, _a in _MALE],
         fields={

@@ -221,6 +221,13 @@ async def _seed_admin_user(session: AsyncSession, tenant_id: UUID) -> None:
     await session.flush()
 
 
+def _same_document(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Order-sensitive document equality. Plain `==` ignores key order, but a DSL
+    document's key order IS its field order (the columns are JSON, not JSONB, for
+    the same reason) — a reordered document must publish a new version."""
+    return json.dumps(a, sort_keys=False) == json.dumps(b, sort_keys=False)
+
+
 def _load_manifest(catalog_dir: Path) -> list[tuple[str, str, dict[str, Any]]]:
     """Read `<catalog_dir>/manifest.json` and return one `(insurance_type, name, doc)`
     per entry. `doc` is the parsed JSON document the manifest points to; `name` is its
@@ -262,7 +269,7 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
                 )
             )
         ).scalar_one_or_none()
-        if published is not None and published.schema_json == doc:
+        if published is not None and _same_document(published.schema_json, doc):
             summary.append(f"{insurance_type} '{name}' v{published.version} (unchanged)")
             continue
 
@@ -341,7 +348,7 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
                 )
             )
         ).scalar_one_or_none()
-        if published is not None and published.composite_json == doc:
+        if published is not None and _same_document(published.composite_json, doc):
             summary.append(f"{insurance_type} '{name}' v{published.version} (unchanged)")
             continue
 

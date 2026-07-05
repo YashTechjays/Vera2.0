@@ -2796,6 +2796,9 @@
           ]
         }
       ],
+      "ui": {
+        "layout": "table"
+      },
       "fields": {
         "cpt_58340": {
           "type": "group",
@@ -4352,6 +4355,9 @@
           ]
         }
       ],
+      "ui": {
+        "layout": "table"
+      },
       "fields": {
         "male_partner_covered": {
           "type": "enum",
