@@ -393,13 +393,6 @@ def _benefit_coverage() -> Section:
                 "Does the benefit year run on a Calendar Year or a Plan Year?",
                 ["Calendar Year", "Plan Year"],
             ),
-            "renewal_date": text_ask(
-                "Renewal Date",
-                "What is the renewal date for the plan year?",
-                type_="date",
-                required=True,
-                applicable_when=eq("sections.benefit_coverage.benefit_year_type", "Plan Year"),
-            ),
             "plan_effective_date": Leaf(
                 type="date",
                 validation=DATE_VALIDATION,
@@ -411,6 +404,17 @@ def _benefit_coverage() -> Section:
                     value="01/01/{{current_year}}",
                 ),
                 prompt=ask("What is the effective date for this coverage?"),
+            ),
+            "plan_year_information": Leaf(
+                type="text",
+                title="Plan Year Information",
+                role="ask",
+                required=True,
+                derive=Derive(
+                    when=eq("sections.benefit_coverage.benefit_year_type", "Calendar Year"),
+                    value="01/01/{{current_year}} - 12/31/{{current_year}}",
+                ),
+                prompt=ask("What are the start and end dates of the plan year?"),
             ),
             "coverage_type": enum_ask(
                 "Coverage Type",

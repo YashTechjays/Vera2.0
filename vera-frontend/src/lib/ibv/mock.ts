@@ -54,7 +54,7 @@ const OVERRIDES: FormValues = {
   "sections.insurance_information.policy_situs": "TX",
   "sections.benefit_coverage.benefit_year_type": "Calendar Year",
   "sections.benefit_coverage.plan_effective_date": "01/01/2026",
-  "sections.benefit_coverage.renewal_date": "01/01/2027",
+  "sections.benefit_coverage.plan_year_information": "01/01/2026 - 12/31/2026",
   "sections.benefit_coverage.coverage_type": "Family",
   "sections.benefit_coverage.pcp_referral_required": "No",
   "sections.benefit_coverage.telehealth_covered": "Yes",

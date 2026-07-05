@@ -78,12 +78,12 @@ class TestCompositeShape:
     def test_date_format_nuance_reaches_the_questions(self) -> None:
         coverage = task("insurance_basics")
         benefit = next(s for s in coverage["sections"] if s["section_key"] == "benefit_coverage")
-        renewal = next(
+        effective_date = next(
             q
             for q in benefit["questions"]
-            if q["field_path"] == "sections.benefit_coverage.renewal_date"
+            if q["field_path"] == "sections.benefit_coverage.plan_effective_date"
         )
-        assert renewal["validation"]["date_format"] == "M/D/YYYY"
+        assert effective_date["validation"]["date_format"] == "M/D/YYYY"
 
     def test_rules_ride_along(self) -> None:
         assert COMPOSITE["flow_rules"][0]["action"] == "terminate_call"

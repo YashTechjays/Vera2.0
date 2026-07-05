@@ -563,23 +563,6 @@
             "ask": "Does the benefit year run on a Calendar Year or a Plan Year?"
           }
         },
-        "renewal_date": {
-          "type": "date",
-          "title": "Renewal Date",
-          "role": "ask",
-          "required": true,
-          "validation": {
-            "date_format": "M/D/YYYY"
-          },
-          "applicable_when": {
-            "field": "sections.benefit_coverage.benefit_year_type",
-            "op": "eq",
-            "value": "Plan Year"
-          },
-          "prompt": {
-            "ask": "What is the renewal date for the plan year?"
-          }
-        },
         "plan_effective_date": {
           "type": "date",
           "title": "Plan Effective Date",
@@ -598,6 +581,23 @@
           },
           "prompt": {
             "ask": "What is the effective date for this coverage?"
+          }
+        },
+        "plan_year_information": {
+          "type": "text",
+          "title": "Plan Year Information",
+          "role": "ask",
+          "required": true,
+          "derive": {
+            "when": {
+              "field": "sections.benefit_coverage.benefit_year_type",
+              "op": "eq",
+              "value": "Calendar Year"
+            },
+            "value": "01/01/{{current_year}} - 12/31/{{current_year}}"
+          },
+          "prompt": {
+            "ask": "What are the start and end dates of the plan year?"
           }
         },
         "coverage_type": {
