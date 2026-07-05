@@ -308,6 +308,48 @@ async def test_list_permissions_requires_roles_manage(
     assert resp.status_code == 403
 
 
+async def test_get_role_detail_includes_permissions(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    perms = await client.get("/api/v1/permissions", headers=_auth(rbac_world.admin_token))
+    users_read = next(p for p in perms.json()["data"] if p["code"] == "users:read")
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "DETAIL_ROLE", "permission_ids": [users_read["id"]]},
+    )
+    role_id = created.json()["data"]["id"]
+
+    detail = await client.get(f"/api/v1/roles/{role_id}", headers=_auth(rbac_world.admin_token))
+    assert detail.status_code == 200, detail.text
+    data = detail.json()["data"]
+    assert data["name"] == "DETAIL_ROLE"
+    assert data["is_system"] is False
+    assert [p["code"] for p in data["permissions"]] == ["users:read"]
+
+
+async def test_get_role_detail_unknown_id_is_404(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(f"/api/v1/roles/{uuid4()}", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 404
+
+
+async def test_get_system_role_detail_hides_platform_permissions(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    super_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPER_ADMIN")
+    detail = await client.get(
+        f"/api/v1/roles/{super_admin_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert detail.status_code == 200
+    data = detail.json()["data"]
+    assert data["is_system"] is True
+    # A tenant admin may see the system role exists, but never its platform codes.
+    assert not any(p["code"].startswith("platform:") for p in data["permissions"])
+
+
 # --- providers ---------------------------------------------------------------
 
 

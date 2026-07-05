@@ -7,6 +7,7 @@ strict policy confines `user_role` to the tenant. Every assign/revoke invalidate
 the effective-permission cache for the affected user (auth/rbac.py) and is audited.
 """
 
+from collections.abc import Sequence
 from uuid import UUID
 
 from fastapi import APIRouter, Request
@@ -64,9 +65,45 @@ class PermissionResponse(BaseModel):
     description: str
 
 
+class RoleDetailResponse(RoleResponse):
+    permissions: list[PermissionResponse]
+
+
 def _to_response(row: Role) -> RoleResponse:
     return RoleResponse(
         id=row.id, name=row.name, description=row.description, is_system=row.tenant_id is None
+    )
+
+
+async def _role_permissions(session: AsyncSession, role_id: UUID) -> list[Permission]:
+    return list(
+        (
+            await session.execute(
+                select(Permission)
+                .join(RolePermission, RolePermission.permission_id == Permission.id)
+                .where(RolePermission.role_id == role_id)
+                .order_by(Permission.code)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _visible_permissions(permissions: Sequence[Permission]) -> list[PermissionResponse]:
+    # Platform-tier codes are never shown to a tenant — they can't be granted here,
+    # so they must not appear as options (GET /permissions) or on a role (detail).
+    return [
+        PermissionResponse(id=p.id, code=p.code, description=p.description)
+        for p in permissions
+        if not is_platform_permission(p.code)
+    ]
+
+
+def _to_detail(role: Role, permissions: list[Permission]) -> RoleDetailResponse:
+    return RoleDetailResponse(
+        **_to_response(role).model_dump(),
+        permissions=_visible_permissions(permissions),
     )
 
 
@@ -89,6 +126,27 @@ async def list_roles(
 
 
 @router.get(
+    "/roles/{role_id}",
+    response_model=ResponseModel[RoleDetailResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def get_role(
+    role_id: UUID,
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[RoleDetailResponse]:
+    role = (await session.execute(select(Role).where(Role.id == role_id))).scalar_one_or_none()
+    if role is None:  # unknown id, or another tenant's role hidden by RLS
+        raise NotFoundError(message="no such role")
+    return ok(_to_detail(role, await _role_permissions(session, role_id)))
+
+
+@router.get(
     "/permissions",
     response_model=ResponseModel[list[PermissionResponse]],
     responses=CustomAPIResponse.custom(
@@ -102,16 +160,9 @@ async def list_permissions(
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[list[PermissionResponse]]:
     # The permission catalog is global (no tenant_id, no RLS) and code-defined —
-    # tenants get a read-only view. Platform-tier codes are never shown to a
-    # tenant: they can't be granted here, so they must not appear as options.
+    # tenants get a read-only view.
     rows = (await session.execute(select(Permission).order_by(Permission.code))).scalars().all()
-    return ok(
-        [
-            PermissionResponse(id=p.id, code=p.code, description=p.description)
-            for p in rows
-            if not is_platform_permission(p.code)
-        ]
-    )
+    return ok(_visible_permissions(rows))
 
 
 @router.post(
