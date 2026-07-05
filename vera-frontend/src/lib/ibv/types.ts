@@ -45,6 +45,8 @@ export type Validation = {
   pattern?: string
   /** numeric bounds for currency/percent/integer */
   range?: { min?: number; max?: number }
+  /** entry/display format for date fields (e.g. "M/D/YYYY") */
+  date_format?: string
 }
 
 export type LeafField = {

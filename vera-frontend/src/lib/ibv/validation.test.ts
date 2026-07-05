@@ -81,6 +81,20 @@ describe("validateAll — pattern and range", () => {
   })
 })
 
+describe("validateAll — date format", () => {
+  const DOB = "sections.patient_information.patient_dob"
+
+  it("accepts values matching the schema's date_format (M/D/YYYY)", () => {
+    expect(validateAll(schema, { [DOB]: "2/15/1990" })[DOB]).toBeUndefined()
+    expect(validateAll(schema, { [DOB]: "02/15/1990" })[DOB]).toBeUndefined()
+  })
+
+  it("flags values in another date shape", () => {
+    expect(validateAll(schema, { [DOB]: "1990-02-15" })[DOB]).toMatch(/M\/D\/YYYY/)
+    expect(validateAll(schema, { [DOB]: "Feb 15 1990" })[DOB]).toMatch(/M\/D\/YYYY/)
+  })
+})
+
 describe("validateSection", () => {
   it("returns only errors for the given section", () => {
     const errors = validateSection(schema, "insurance_information", {})

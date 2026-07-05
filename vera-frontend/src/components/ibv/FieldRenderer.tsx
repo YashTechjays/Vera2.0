@@ -144,7 +144,9 @@ export function FieldRenderer({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        placeholder={hint ?? (field.type === "date" ? "MM/DD/YYYY" : undefined)}
+        placeholder={
+          hint ?? (field.type === "date" ? field.validation?.date_format : undefined)
+        }
         list={listId}
         style={padStyle}
         className={cn("truncate", CELL_BASE, look)}

@@ -11,6 +11,25 @@ function parseNumeric(value: string): number {
   return Number(value.replace(/[$,%\s]/g, ""))
 }
 
+// The DSL date_format token vocabulary (M/D allow 1-2 digits; MM/DD demand 2).
+const DATE_TOKEN_RE: Record<string, string> = {
+  YYYY: "\\d{4}",
+  YY: "\\d{2}",
+  MM: "\\d{2}",
+  M: "\\d{1,2}",
+  DD: "\\d{2}",
+  D: "\\d{1,2}",
+}
+
+/** Compile a DSL date_format ("M/D/YYYY") into an anchored value regex. */
+function dateFormatRegex(format: string): RegExp {
+  const source = format.replace(
+    /YYYY|YY|MM|M|DD|D|./g,
+    (token) => DATE_TOKEN_RE[token] ?? token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  )
+  return new RegExp(`^${source}$`)
+}
+
 /**
  * Values legal by declaration (spec §4.4): special_values plus the declared
  * default / inapplicable_value — they bypass pattern and range checks.
@@ -43,6 +62,11 @@ function validateLeaf(
 
   if (f.validation?.pattern && !new RegExp(f.validation.pattern).test(value)) {
     return `${f.title} is invalid`
+  }
+
+  const dateFormat = f.validation?.date_format
+  if (dateFormat && f.type === "date" && !dateFormatRegex(dateFormat).test(value)) {
+    return `${f.title} must match ${dateFormat}`
   }
 
   const range = f.validation?.range
