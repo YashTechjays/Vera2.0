@@ -1,14 +1,14 @@
-import rawDemoSchema from "./ibv-schema.json"
+import rawDemoSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import { mockDisputes, type DisputeMap } from "./disputes"
 import { allLeaves, optionsOf, parseSchema } from "./schema"
 import type { FormValues, InsuredPerson } from "./types"
 import type { SavePayload } from "./disputes"
 
 /**
- * Dev fixture ONLY (demo form + tests): a copy of the compiled
- * `vera-backend/data/form_schemas/ibv_form_standard_v2.json`. Real forms never
- * use it — they fetch the exact document their `schema_version_id` pins from
- * the backend (see IbvProvider).
+ * Dev fixture ONLY (demo form + tests): the backend's compiled artifact,
+ * imported from its source of truth (same monorepo) so no copy can drift.
+ * Real forms never use it — they fetch the exact document their
+ * `schema_version_id` pins from the backend (see IbvProvider).
  */
 export const demoSchema = parseSchema(rawDemoSchema)
 

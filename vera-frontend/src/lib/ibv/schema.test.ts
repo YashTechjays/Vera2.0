@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import rawSchema from "./ibv-schema.json"
+import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import {
   allLeaves,
   completionPercent,
@@ -18,8 +18,8 @@ import {
 } from "./schema"
 import type { FormValues } from "./types"
 
-// The bundled dev-fixture copy of the compiled v2 artifact doubles as the test
-// fixture — the same document shape the backend serves per schema_version_id.
+// The backend's compiled artifact (imported from its source of truth) is the
+// test fixture — the same document the backend serves per schema_version_id.
 const schema = parseSchema(rawSchema)
 
 const COVERAGE = "sections.benefit_coverage.coverage_type"

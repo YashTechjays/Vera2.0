@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import rawSchema from "./ibv-schema.json"
+import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import { parseSchema } from "./schema"
 import { validateAll, validateSection } from "./validation"
 

@@ -15,7 +15,7 @@ import type {
 // `schema_version_id` pins via GET /schema-versions/{id} (IbvProvider), so the
 // renderer and the backend can never disagree about the field set. Every helper
 // here therefore takes the parsed document as a parameter. The demo/mock form
-// uses a dev fixture copy (see mock.ts).
+// imports the backend's compiled artifact directly (see mock.ts).
 
 /** Parse + guard a fetched schema_version document. Throws on non-2.x docs. */
 export function parseSchema(document: unknown): FormSchema {
