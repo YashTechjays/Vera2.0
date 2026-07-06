@@ -570,6 +570,63 @@ async def test_delete_system_role_forbidden_and_unknown_404(
     assert missing.status_code == 404
 
 
+async def test_cannot_revoke_own_last_roles_manage_source(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as session:
+        admin_id = await session.scalar(
+            text(
+                "SELECT id FROM app_user WHERE email = 'admin@test.example' AND tenant_id = :t"
+            ).bindparams(t=rbac_world.tenant_id)
+        )
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    tenant_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "TENANT_ADMIN")
+    # TENANT_ADMIN is the admin persona's only role → its only roles:manage source.
+    resp = await client.request(
+        "DELETE",
+        f"/api/v1/users/{admin_id}/roles/{tenant_admin_id}",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 409
+
+
+async def test_revoking_one_of_two_roles_manage_sources_is_allowed(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as session:
+        admin_id = await session.scalar(
+            text(
+                "SELECT id FROM app_user WHERE email = 'admin@test.example' AND tenant_id = :t"
+            ).bindparams(t=rbac_world.tenant_id)
+        )
+    perms = (await client.get("/api/v1/permissions", headers=_auth(rbac_world.admin_token))).json()[
+        "data"
+    ]
+    roles_manage = next(p["id"] for p in perms if p["code"] == "roles:manage")
+    extra = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "SECOND_MANAGER", "permission_ids": [roles_manage]},
+    )
+    extra_id = extra.json()["data"]["id"]
+    await client.post(
+        f"/api/v1/users/{admin_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": extra_id},
+    )
+    # Removing the EXTRA role is fine — TENANT_ADMIN still grants roles:manage.
+    resp = await client.request(
+        "DELETE",
+        f"/api/v1/users/{admin_id}/roles/{extra_id}",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+
 # --- providers ---------------------------------------------------------------
 
 

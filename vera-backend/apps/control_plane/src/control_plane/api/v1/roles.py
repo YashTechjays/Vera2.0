@@ -31,6 +31,7 @@ from control_plane.auth.rbac import require
 from control_plane.deps import client_ip
 from control_plane.exceptions import (
     BadRequestError,
+    ConflictError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
@@ -370,6 +371,7 @@ async def assign_role(
     response_model=ResponseModel[None],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
     ),
@@ -391,6 +393,27 @@ async def revoke_role(
     ).scalar_one_or_none()
     if assignment is None:
         raise NotFoundError(message="user does not have that role")
+
+    # Self-lockout guard (settled decision): a caller may not remove their own
+    # LAST source of roles:manage — nobody in the tenant could manage roles and
+    # the only recovery is platform break-glass elevation. Self-only by design.
+    if user_id == _caller.user_id:
+        other_source = (
+            await session.execute(
+                select(Permission.id)
+                .join(RolePermission, RolePermission.permission_id == Permission.id)
+                .join(UserRole, UserRole.role_id == RolePermission.role_id)
+                .where(
+                    UserRole.app_user_id == user_id,
+                    UserRole.role_id != role_id,
+                    Permission.code == "roles:manage",
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if other_source is None:
+            raise ConflictError(message="you cannot remove your own last role-management role")
+
     await session.delete(assignment)
 
     await resolver.invalidate(tenant_id, user_id)
