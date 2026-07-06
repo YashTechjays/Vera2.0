@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 
 from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
@@ -53,7 +53,6 @@ from vera_core.forms.review import (
     unwrap_value,
 )
 from vera_core.models import (
-    Call,
     DisputeAction,
     FieldAnswer,
     FormSchema,
@@ -64,7 +63,6 @@ from vera_core.models import (
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import (
     AnswerSource,
-    CallStatus,
     DisputeActionType,
     FormStatus,
 )
@@ -859,6 +857,10 @@ async def update_patient_form_status(
     # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
     if target == FormStatus.IN_QUEUE:
         form.enqueued_at = func.now()
+        # Persist the queuer so the dispatcher can attribute call ownership
+        # (`initiated_by_id`) even when the call is created later by a different
+        # actor (freed-slot dispatch, retry-at-callback).
+        form.enqueued_by_id = caller.user_id
 
     await session.flush()
 
@@ -879,22 +881,10 @@ async def update_patient_form_status(
 
     # Fire the dispatcher if a form was just enqueued. The response acknowledges
     # the manual transition (target), not whatever the dispatcher advanced the
-    # form to afterwards — clients observe dispatch via the calls list.
+    # form to afterwards — clients observe dispatch via the calls list. The
+    # dispatcher itself attributes ownership from `form.enqueued_by_id`, set above.
     if target == FormStatus.IN_QUEUE:
         await try_dispatch(session, tenant_id, livekit, audit=audit)
-        # If the dispatcher started THIS form's call in the same pass, attribute
-        # it to the enqueueing caller: `initiated_by_id` is the ownership axis
-        # behind call visibility (private-until-published, owner-only publish/
-        # revoke). Forms dispatched later (freed slot, retry) stay system-owned.
-        await session.execute(
-            update(Call)
-            .where(
-                Call.form_id == form.id,
-                Call.current_status == CallStatus.INITIATED.value,
-                Call.initiated_by_id.is_(None),
-            )
-            .values(initiated_by_id=caller.user_id)
-        )
 
     return ok(
         PatientFormStatusResponse(id=form.id, status=target.value),

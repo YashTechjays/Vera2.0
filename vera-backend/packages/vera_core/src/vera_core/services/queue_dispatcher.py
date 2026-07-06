@@ -207,6 +207,11 @@ async def try_dispatch(
                     form_id=form.id,
                     current_status=CallStatus.INITIATED.value,
                     mode=call_mode.value,
+                    # The queuer owns the call even when dispatch happens later,
+                    # by a different actor (freed-slot pass, retry-at-callback).
+                    # Nullable: legacy queued rows enqueued before this column
+                    # existed simply produce an ownerless (unpublishable) call.
+                    initiated_by_id=form.enqueued_by_id,
                 )
                 session.add(call)
                 await session.flush()

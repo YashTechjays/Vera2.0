@@ -115,6 +115,8 @@ class RBACWorld:
     def __init__(self, tenant_id: UUID, other_tenant_id: UUID) -> None:
         self.tenant_id = tenant_id
         self.other_tenant_id = other_tenant_id
+        # Filled once the admin AppUser row is created (see rbac_world).
+        self.admin_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
@@ -204,6 +206,7 @@ async def rbac_world(
         await session.flush()
         session.add(UserRole(tenant_id=tenant_id, app_user_id=admin.id, role_id=admin_role))
         admin_id, norole_id = admin.id, norole.id
+        world.admin_id = admin_id
 
         supervisor_role = (
             await session.execute(
