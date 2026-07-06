@@ -171,14 +171,22 @@ class TestCompletionPctV2:
 
 
 class TestIntakeV2:
-    def test_required_intake_fields_skips_defaults_and_conditionals(self) -> None:
+    def test_required_intake_fields_matches_system_fields_without_a_default(self) -> None:
         fields = required_intake_fields(V2_JSON)
-        assert "patient_name" in fields
-        assert "patient_dob" in fields
-        # required but carries default "N/A" → not intake-blocking
-        assert "patient_gender" not in fields
-        # conditionally required ({when family_coverage}) → not intake-blocking
-        assert "spouse_partner_name" not in fields
+        assert "sections.patient_information.patient_name" in fields
+        assert "sections.patient_information.patient_dob" in fields
+        # carries default "N/A" → not intake-blocking even though it's a
+        # system_fields target (patient_gender).
+        assert "sections.patient_information.patient_gender" not in fields
+        # not a system_fields target at all, despite `required: true` +
+        # conditional `{when family_coverage}` — a "form filling" concern, not
+        # a creation-time one.
+        assert "sections.patient_information.spouse_partner_name" not in fields
+        # dynamic over the WHOLE document, not just `patient_information`
+        assert "sections.hospital_information.npi" in fields
+        # role=confirm, but it IS a system_fields target (member_id/policy_id)
+        # and carries no default → still required at creation.
+        assert "sections.insurance_information.policy_number" in fields
 
     def test_missing_required_reports_root_anchored_paths(self) -> None:
         missing = missing_required({"patient_information": {}}, V2_JSON)
@@ -186,5 +194,45 @@ class TestIntakeV2:
         assert all(path.startswith("sections.") for path in missing)
 
     def test_filled_v2_payload_passes(self) -> None:
-        payload = {"patient_information": {"patient_name": "Test", "patient_dob": "1990-01-01"}}
+        payload = {
+            "patient_information": {"patient_name": "Test", "patient_dob": "1990-01-01"},
+            "appointment_information": {"appointment_date": "2026-08-03"},
+            "insurance_information": {"policy_number": "POL-550411"},
+            "insurance_reference_information": {
+                "insurance_provider_name": "Demo Health Plan",
+                "insurance_phone_number": "+1 555 0100",
+            },
+            "verification_information": {"verified_by": "Dr. Reyes"},
+            "hospital_information": {
+                "hospital_name": "Demo Health Partners",
+                "hospital_address": "123 Demo St, Austin, TX",
+                "tax_id": "987654313",
+                "npi": "1234567893",
+            },
+            "provider_reference_information": {
+                "provider_name": "Dr. Jane Smith",
+                "npi": "1982736450",
+            },
+        }
         assert missing_required(payload, V2_JSON) == []
+
+    def test_missing_field_outside_patient_information_is_caught(self) -> None:
+        # Regression: `missing_required` used to only inspect `patient_information`,
+        # so system fields declared in other sections silently passed even when
+        # their section was omitted entirely.
+        payload = {
+            "patient_information": {"patient_name": "Test", "patient_dob": "1990-01-01"},
+            "appointment_information": {"appointment_date": "2026-08-03"},
+        }
+        assert set(missing_required(payload, V2_JSON)) == {
+            "sections.insurance_information.policy_number",
+            "sections.insurance_reference_information.insurance_provider_name",
+            "sections.insurance_reference_information.insurance_phone_number",
+            "sections.verification_information.verified_by",
+            "sections.hospital_information.hospital_name",
+            "sections.hospital_information.hospital_address",
+            "sections.hospital_information.tax_id",
+            "sections.hospital_information.npi",
+            "sections.provider_reference_information.provider_name",
+            "sections.provider_reference_information.npi",
+        }

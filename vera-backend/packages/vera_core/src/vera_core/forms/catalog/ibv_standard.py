@@ -1001,6 +1001,7 @@ def build_ibv_standard() -> FormSchemaDoc:
             "insurance_provider_name": "sections.insurance_reference_information.insurance_provider_name",
             "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
             "verified_by": "sections.verification_information.verified_by",
+            "form_queued_by": "sections.verification_information.verified_by",
             "callback_number": "sections.verification_information.callback_number",
             "hospital_name": "sections.hospital_information.hospital_name",
             "hospital_address": "sections.hospital_information.hospital_address",
@@ -1008,8 +1009,6 @@ def build_ibv_standard() -> FormSchemaDoc:
             "hospital_npi": "sections.hospital_information.npi",
             "doctor_name": "sections.provider_reference_information.provider_name",
             "doctor_npi": "sections.provider_reference_information.npi",
-            "form_queued_by": "sections.verification_information.verified_by",
-            "form_completed_at": "sections.verification_information.verified_at",
         },
         shared_conditions={
             "family_coverage": eq("sections.benefit_coverage.coverage_type", "Family"),

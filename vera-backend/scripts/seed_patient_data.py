@@ -43,6 +43,9 @@ _TENANT_SLUG = os.environ.get("SEED_TENANT_SLUG", "vera-health-example")
 # layered on top of `_fill_all_leaves` for EXCEPTION_REVIEW.
 _OVERRIDES: dict[str, dict[str, str]] = {
     "patient_information": {
+        # Inert: `_build_payload` overwrites this per-status with the idempotency
+        # marker (`_MARKER_CHART_NUMBER`); kept only so this demo dict reads complete.
+        "chart_number": "CH-10293",
         "patient_name": "Morgan Reyes",
         "patient_dob": "1991-04-12",
         "patient_gender": "Female",
@@ -90,6 +93,11 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     },
     "insurance_reference_information": {
         "insurance_provider_name": "Demo Health Plan",
+        "insurance_phone_number": "+1 555 0100",
+    },
+    "verification_information": {
+        "verified_by": "Dr. Reyes",
+        "callback_number": "+1 555 0199",
     },
 }
 
