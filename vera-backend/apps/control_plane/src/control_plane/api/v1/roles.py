@@ -366,6 +366,38 @@ async def assign_role(
     return ok(None, message="Role assigned.")
 
 
+@router.get(
+    "/users/{user_id}/roles",
+    response_model=ResponseModel[list[RoleResponse]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_user_roles(
+    user_id: UUID,
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[RoleResponse]]:
+    if not await _user_in_tenant(session, user_id):
+        raise NotFoundError(message="no such user in this tenant")
+    rows = (
+        (
+            await session.execute(
+                select(Role)
+                .join(UserRole, UserRole.role_id == Role.id)
+                .where(UserRole.app_user_id == user_id)
+                .order_by(Role.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ok([_to_response(r) for r in rows])
+
+
 @router.delete(
     "/users/{user_id}/roles/{role_id}",
     response_model=ResponseModel[None],

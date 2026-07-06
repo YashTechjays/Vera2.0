@@ -627,6 +627,34 @@ async def test_revoking_one_of_two_roles_manage_sources_is_allowed(
     assert resp.status_code == 200, resp.text
 
 
+async def test_list_user_roles(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "haroles@test.example", "send_email": False, "role_ids": [supervisor_id]},
+    )
+    user_id = invite.json()["data"]["user_id"]
+
+    resp = await client.get(f"/api/v1/users/{user_id}/roles", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    assert [r["name"] for r in resp.json()["data"]] == ["SUPERVISOR"]
+
+
+async def test_list_user_roles_unknown_user_404_and_norole_403(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    missing = await client.get(
+        f"/api/v1/users/{uuid4()}/roles", headers=_auth(rbac_world.admin_token)
+    )
+    assert missing.status_code == 404
+    denied = await client.get(
+        f"/api/v1/users/{uuid4()}/roles", headers=_auth(rbac_world.norole_token)
+    )
+    assert denied.status_code == 403
+
+
 # --- providers ---------------------------------------------------------------
 
 
