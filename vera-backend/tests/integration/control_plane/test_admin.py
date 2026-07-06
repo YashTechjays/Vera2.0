@@ -12,8 +12,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth.api_key import resolve_api_key
+from control_plane.auth.session import InMemorySessionStore
 from control_plane.email import InMemoryEmailSender
-from tests.integration.control_plane.conftest import RBACWorld
+from tests.integration.control_plane.conftest import RBACWorld, _mint
+from vera_core.models import AppUser
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -396,6 +398,32 @@ async def test_patch_role_updates_fields_and_permissions(
     assert partial.json()["data"]["description"] == "only this"
 
 
+async def test_patch_role_overlapping_permission_set_is_not_a_conflict(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # Regression: keeping a permission across the edit (the RoleDialog's normal
+    # flow — it always sends the full selected set) must not collide with itself
+    # under the (role_id, permission_id) unique constraint.
+    perms = await client.get("/api/v1/permissions", headers=_auth(rbac_world.admin_token))
+    users_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "users:read")
+    calls_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "calls:read")
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "OVERLAP_PATCH", "permission_ids": [users_read]},
+    )
+    role_id = created.json()["data"]["id"]
+
+    patched = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"permission_ids": [users_read, calls_read]},
+    )
+    assert patched.status_code == 200, patched.text
+    codes = {p["code"] for p in patched.json()["data"]["permissions"]}
+    assert codes == {"users:read", "calls:read"}
+
+
 async def test_patch_system_role_is_forbidden(
     client: httpx.AsyncClient, rbac_world: RBACWorld
 ) -> None:
@@ -625,6 +653,107 @@ async def test_revoking_one_of_two_roles_manage_sources_is_allowed(
         headers=_auth(rbac_world.admin_token),
     )
     assert resp.status_code == 200, resp.text
+
+
+async def _make_sole_manager(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    session_store: InMemorySessionStore,
+    *,
+    role_name: str,
+    email: str,
+) -> tuple[UUID, str]:
+    """A fresh tenant user whose ONLY role grants roles:manage — never the shared
+    `rbac_world` admin persona, whose TENANT_ADMIN source must stay intact across
+    the whole test session. Returns (role_id, the fresh user's session token)."""
+    perms = (await client.get("/api/v1/permissions", headers=_auth(rbac_world.admin_token))).json()[
+        "data"
+    ]
+    roles_manage = next(p["id"] for p in perms if p["code"] == "roles:manage")
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": role_name, "permission_ids": [roles_manage]},
+    )
+    role_id = created.json()["data"]["id"]
+
+    async with admin_sessionmaker() as session, session.begin():
+        fresh = AppUser(
+            tenant_id=rbac_world.tenant_id,
+            gcip_uid=None,
+            email=email,
+            name="Sole Manager",
+            status="active",
+        )
+        session.add(fresh)
+        await session.flush()
+        fresh_id = fresh.id
+
+    assign = await client.post(
+        f"/api/v1/users/{fresh_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": role_id},
+    )
+    assert assign.status_code == 200, assign.text
+
+    fresh_token = await _mint(
+        session_store, user_id=fresh_id, tenant_id=rbac_world.tenant_id, email=email
+    )
+    return role_id, fresh_token
+
+
+async def test_patch_role_dropping_own_last_roles_manage_source_is_blocked(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    session_store: InMemorySessionStore,
+) -> None:
+    role_id, fresh_token = await _make_sole_manager(
+        client,
+        rbac_world,
+        admin_sessionmaker,
+        session_store,
+        role_name="SOLE_MANAGER_SELF",
+        email="sole_manager_self@test.example",
+    )
+
+    resp = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(fresh_token),
+        json={"permission_ids": []},
+    )
+    assert resp.status_code == 409
+
+    detail = await client.get(f"/api/v1/roles/{role_id}", headers=_auth(rbac_world.admin_token))
+    assert [p["code"] for p in detail.json()["data"]["permissions"]] == ["roles:manage"]
+
+
+async def test_patch_role_dropping_roles_manage_by_a_different_admin_is_allowed(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    session_store: InMemorySessionStore,
+) -> None:
+    # The guard is self-only: a DIFFERENT admin (holding roles:manage via their own
+    # TENANT_ADMIN) editing someone else's role does not lock themselves out — the
+    # original holder losing access is legitimate admin de-provisioning.
+    role_id, _fresh_token = await _make_sole_manager(
+        client,
+        rbac_world,
+        admin_sessionmaker,
+        session_store,
+        role_name="SOLE_MANAGER_OTHER",
+        email="sole_manager_other@test.example",
+    )
+
+    resp = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(rbac_world.admin_token),
+        json={"permission_ids": []},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["permissions"] == []
 
 
 async def test_list_user_roles(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:

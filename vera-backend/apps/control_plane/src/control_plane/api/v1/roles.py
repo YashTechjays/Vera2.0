@@ -203,14 +203,26 @@ async def update_role(
             .scalars()
             .all()
         )
-        if {link.permission_id for link in links} != {p.id for p in permissions}:
+        current_ids = {link.permission_id for link in links}
+        target_ids = {p.id for p in permissions}
+        if current_ids != target_ids:
+            removed_ids = current_ids - target_ids
+            added_ids = target_ids - current_ids
+            if removed_ids and await _drops_callers_last_roles_manage(
+                session, _caller.user_id, role_id, removed_ids
+            ):
+                raise ConflictError(message="you cannot remove your own last role-management role")
+            # Diff, don't replace-in-place: SQLAlchemy's unit of work flushes INSERTs
+            # before DELETEs for the same table, so a kept permission would collide
+            # with itself under UniqueConstraint(role_id, permission_id) if every
+            # link were deleted and re-added. Touching only the actual delta also
+            # preserves `created_at` on links that survive the edit unchanged.
             for link in links:
-                await session.delete(link)
-            for permission in permissions:
+                if link.permission_id in removed_ids:
+                    await session.delete(link)
+            for new_id in added_ids:
                 session.add(
-                    RolePermission(
-                        tenant_id=tenant_id, role_id=role_id, permission_id=permission.id
-                    )
+                    RolePermission(tenant_id=tenant_id, role_id=role_id, permission_id=new_id)
                 )
             changed.append("permissions")
 
@@ -432,22 +444,10 @@ async def revoke_role(
     # Self-lockout guard (settled decision): a caller may not remove their own
     # LAST source of roles:manage — nobody in the tenant could manage roles and
     # the only recovery is platform break-glass elevation. Self-only by design.
-    if user_id == _caller.user_id:
-        other_source = (
-            await session.execute(
-                select(Permission.id)
-                .join(RolePermission, RolePermission.permission_id == Permission.id)
-                .join(UserRole, UserRole.role_id == RolePermission.role_id)
-                .where(
-                    UserRole.app_user_id == user_id,
-                    UserRole.role_id != role_id,
-                    Permission.code == "roles:manage",
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if other_source is None:
-            raise ConflictError(message="you cannot remove your own last role-management role")
+    if user_id == _caller.user_id and not await _has_other_roles_manage_source(
+        session, user_id, excluding_role_id=role_id
+    ):
+        raise ConflictError(message="you cannot remove your own last role-management role")
 
     await session.delete(assignment)
 
@@ -553,6 +553,49 @@ async def _resolve_grantable_permissions(
             message="cannot grant a platform-tier permission to a tenant role",
         )
     return list(permissions)
+
+
+async def _has_other_roles_manage_source(
+    session: AsyncSession, user_id: UUID, *, excluding_role_id: UUID
+) -> bool:
+    """True if `user_id` holds some role OTHER than `excluding_role_id` that grants
+    roles:manage. Shared self-lockout join for revoke_role and update_role."""
+    other_source = (
+        await session.execute(
+            select(Permission.id)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .join(UserRole, UserRole.role_id == RolePermission.role_id)
+            .where(
+                UserRole.app_user_id == user_id,
+                UserRole.role_id != excluding_role_id,
+                Permission.code == "roles:manage",
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return other_source is not None
+
+
+async def _drops_callers_last_roles_manage(
+    session: AsyncSession, caller_id: UUID, role_id: UUID, removed_permission_ids: set[UUID]
+) -> bool:
+    """Self-lockout guard for update_role: True when the edit removes roles:manage
+    from `role_id`, the caller holds that role, and has no other roles:manage source."""
+    manage_permission_id = (
+        await session.execute(select(Permission.id).where(Permission.code == "roles:manage"))
+    ).scalar_one_or_none()
+    if manage_permission_id is None or manage_permission_id not in removed_permission_ids:
+        return False
+    caller_holds_role = (
+        await session.execute(
+            select(UserRole.app_user_id).where(
+                UserRole.app_user_id == caller_id, UserRole.role_id == role_id
+            )
+        )
+    ).scalar_one_or_none()
+    if caller_holds_role is None:
+        return False
+    return not await _has_other_roles_manage_source(session, caller_id, excluding_role_id=role_id)
 
 
 def _conflict_or_raise(exc: IntegrityError, message: str) -> CustomAPIException:
