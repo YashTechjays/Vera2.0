@@ -27,7 +27,7 @@ import { RoleDialog } from "./RoleDialog"
  *  check — every endpoint underneath is gated server-side too. */
 export function RolesSection() {
   const [roles, setRoles] = useState<Role[] | null>(null)
-  const [permissions, setPermissions] = useState<Permission[]>([])
+  const [permissions, setPermissions] = useState<Permission[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<RoleDetail | null>(null)
@@ -62,8 +62,10 @@ export function RolesSection() {
       .then((p) => {
         if (!cancelled) setPermissions(p)
       })
-      .catch(() => {
-        if (!cancelled) setPermissions([])
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof ApiError ? err.message : "Could not load the permission catalog.")
+        }
       })
     return () => {
       cancelled = true
@@ -71,18 +73,23 @@ export function RolesSection() {
   }, [])
 
   const openCreate = useCallback(() => {
+    if (permissions === null) return
     setEditing(null)
     setDialogOpen(true)
-  }, [])
+  }, [permissions])
 
-  const openEdit = useCallback(async (role: Role) => {
-    try {
-      setEditing(await getRole(role.id))
-      setDialogOpen(true)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not load the role.")
-    }
-  }, [])
+  const openEdit = useCallback(
+    async (role: Role) => {
+      if (permissions === null) return
+      try {
+        setEditing(await getRole(role.id))
+        setDialogOpen(true)
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "Could not load the role.")
+      }
+    },
+    [permissions],
+  )
 
   const handleDelete = useCallback(
     async (role: Role) => {
@@ -110,7 +117,7 @@ export function RolesSection() {
             Roles bundle permissions. System roles are managed by the platform and read-only.
           </p>
         </div>
-        <Button type="button" onClick={openCreate}>
+        <Button type="button" onClick={openCreate} disabled={permissions === null}>
           Create role
         </Button>
       </div>
@@ -180,11 +187,11 @@ export function RolesSection() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         role={editing}
-        permissions={permissions}
+        permissions={permissions ?? []}
         onSaved={refresh}
       />
 
-      <PermissionsTable permissions={permissions} />
+      <PermissionsTable permissions={permissions ?? []} />
     </section>
   )
 }
