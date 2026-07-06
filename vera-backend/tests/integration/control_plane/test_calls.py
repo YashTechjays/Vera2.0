@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import RBACWorld
@@ -26,20 +26,16 @@ def _auth(token: str) -> dict[str, str]:
 
 # ---------------------------------------------------------------------------
 # seeded_form_id — a PatientForm row owned by rbac_world.tenant_id.
-# PatientForm requires a schema_version_id (FK RESTRICT) so we must seed a
-# FormSchema + SchemaVersion first using a superuser (BYPASSRLS) session.
+# PatientForm requires a schema_version_id (FK RESTRICT) so we need a
+# FormSchema + SchemaVersion first, created with a superuser (BYPASSRLS) session.
 # We build a fresh sessionmaker from `database_url` directly.
 #
-# Function-scoped (not session) on purpose: `form_schema.insurance_type` is a
-# globally UNIQUE, CHECK-constrained catalog key (only INFERTILITY_TREATMENT is
-# valid), and `tests/integration/db/test_seed_form_schemas.py` wipes + seeds that
-# same family. A session-scoped row would persist into those tests and collide on
-# the UNIQUE constraint / FK. Creating and tearing down per-test keeps the row
-# alive only for the duration of one test, so the two suites never contend.
-#
-# The fixture yields the UUID then cleans up call_event, call, patient_form,
-# schema_version, and form_schema rows so the rbac_world teardown can delete
-# the tenant without hitting the FK on patient_form.
+# `form_schema.insurance_type` is a globally UNIQUE, CHECK-constrained catalog key
+# (only INFERTILITY_TREATMENT is valid), so the schema row is find-or-create: CI
+# runs `scripts/seed.py` before pytest and already publishes that schema, and a
+# raw insert would collide on uq_form_schema_insurance_type. Teardown removes only
+# the rows this fixture actually created — the shared schema is left intact for the
+# seed / other tests / `tests/integration/db/test_seed_form_schemas.py`.
 # ---------------------------------------------------------------------------
 
 
@@ -48,34 +44,48 @@ async def seeded_form_id(
     database_url: str,
     rbac_world: RBACWorld,
 ) -> AsyncGenerator[UUID]:
-    """Insert a minimal FormSchema → SchemaVersion → PatientForm chain and
-    yield the PatientForm.id.  Cleans up on teardown so rbac_world can
-    delete the tenant without a FK violation."""
-    form_schema_id = uuid7()
-    schema_version_id = uuid7()
+    """Ensure an INFERTILITY_TREATMENT FormSchema → SchemaVersion chain exists
+    (reusing the seeded one if present), attach a PatientForm to it, and yield the
+    PatientForm.id. Cleans up on teardown so rbac_world can delete the tenant
+    without a FK violation."""
     patient_form_id = uuid7()
 
     engine = create_async_engine(database_url)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with sessionmaker() as session, session.begin():
-            session.add(
-                FormSchema(
-                    id=form_schema_id,
+            schema = (
+                await session.execute(
+                    select(FormSchema).where(
+                        FormSchema.insurance_type == InsuranceType.INFERTILITY_TREATMENT.value
+                    )
+                )
+            ).scalar_one_or_none()
+            created_schema = schema is None
+            if schema is None:
+                schema = FormSchema(
+                    id=uuid7(),
                     insurance_type=InsuranceType.INFERTILITY_TREATMENT.value,
                     name="Test Schema",
                 )
-            )
-            await session.flush()
-            session.add(
-                SchemaVersion(
-                    id=schema_version_id,
-                    schema_id=form_schema_id,
-                    version=1,
-                    schema_json={},
+                session.add(schema)
+                await session.flush()
+                schema_version = SchemaVersion(
+                    id=uuid7(), schema_id=schema.id, version=1, schema_json={}
                 )
-            )
-            await session.flush()
+                session.add(schema_version)
+                await session.flush()
+                schema_version_id = schema_version.id
+            else:
+                schema_version_id = (
+                    await session.execute(
+                        select(SchemaVersion.id)
+                        .where(SchemaVersion.schema_id == schema.id)
+                        .order_by(SchemaVersion.version.desc())
+                        .limit(1)
+                    )
+                ).scalar_one()
+            form_schema_id = schema.id
             session.add(
                 PatientForm(
                     id=patient_form_id,
@@ -88,7 +98,8 @@ async def seeded_form_id(
         yield patient_form_id
 
         # Teardown: remove all call rows referencing this form (and their events)
-        # before rbac_world deletes the tenant.
+        # before rbac_world deletes the tenant. Only drop the schema chain if this
+        # fixture created it — a seeded/shared schema must survive.
         async with sessionmaker() as session, session.begin():
             await session.execute(
                 text(
@@ -102,12 +113,15 @@ async def seeded_form_id(
             await session.execute(
                 text("DELETE FROM patient_form WHERE id = :fid").bindparams(fid=patient_form_id)
             )
-            await session.execute(
-                text("DELETE FROM schema_version WHERE id = :sid").bindparams(sid=schema_version_id)
-            )
-            await session.execute(
-                text("DELETE FROM form_schema WHERE id = :fsid").bindparams(fsid=form_schema_id)
-            )
+            if created_schema:
+                await session.execute(
+                    text("DELETE FROM schema_version WHERE id = :sid").bindparams(
+                        sid=schema_version_id
+                    )
+                )
+                await session.execute(
+                    text("DELETE FROM form_schema WHERE id = :fsid").bindparams(fsid=form_schema_id)
+                )
     finally:
         await engine.dispose()
 

@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import TenantId, TenantSession
+from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -58,9 +58,12 @@ from vera_core.models import (
     FormSchema,
     PatientForm,
     SchemaVersion,
+    Tenant,
 )
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AnswerSource, DisputeActionType, FormStatus
+from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.queue_dispatcher import try_dispatch
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -751,7 +754,7 @@ async def get_schema_version(
 # the → CALL_FAILED edges; a reviewer/operator may only (re)queue work or complete
 # a reviewed form. Any (current → target) pair absent here is rejected (422), so
 # the worker-driven states can't be set by hand.
-_ALLOWED_STATUS_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
+_MANUAL_TARGETS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
@@ -787,6 +790,7 @@ async def update_patient_form_status(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    livekit: LiveKit,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -815,7 +819,8 @@ async def update_patient_form_status(
             message="Status unchanged.",
         )
 
-    if target not in _ALLOWED_STATUS_TRANSITIONS.get(current, frozenset()):
+    # Manual-endpoint guard: only the transitions in _MANUAL_TARGETS are allowed here.
+    if target not in _MANUAL_TARGETS.get(current, frozenset()):
         raise CustomAPIException(
             DefaultExceptionCode.VALIDATION_ERROR,
             message=f"cannot change status from '{current.value}' to '{target.value}'",
@@ -832,11 +837,28 @@ async def update_patient_form_status(
                 data={"unresolved_disputes": remaining},
             )
 
-    form.status = target.value
+    # Load tenant for state machine guard (retry cap).
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
+    sm = FormStateMachine()
+    try:
+        sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+    except InvalidTransitionError as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message=str(exc),
+            data={"from": current.value, "to": target.value},
+        ) from exc
+
+    # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
+    if target == FormStatus.IN_QUEUE:
+        form.enqueued_at = func.now()
+
     await session.flush()
 
     # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
-    await get_audit(request).emit(
+    audit = get_audit(request)
+    await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
             actor_type=ActorType.USER,
@@ -848,7 +870,14 @@ async def update_patient_form_status(
             detail={"from": current.value, "to": target.value},
         )
     )
+
+    # Fire the dispatcher if a form was just enqueued. The response acknowledges
+    # the manual transition (target), not whatever the dispatcher advanced the
+    # form to afterwards — clients observe dispatch via the calls list.
+    if target == FormStatus.IN_QUEUE:
+        await try_dispatch(session, tenant_id, livekit, audit=audit)
+
     return ok(
-        PatientFormStatusResponse(id=form.id, status=form.status),
+        PatientFormStatusResponse(id=form.id, status=target.value),
         message="Status updated.",
     )

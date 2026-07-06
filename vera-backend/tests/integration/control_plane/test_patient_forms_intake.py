@@ -77,11 +77,10 @@ async def _issue_key(
             ApiKey(
                 id=key_id,
                 tenant_id=tenant_id,
-                # Unique per call: uq_api_key_tenant_name_active allows only one
-                # active key per (tenant, name), and several tests here issue keys
-                # for the same session-scoped tenant. The uuid7 tail is its random
-                # part (the head is a timestamp shared by same-second ids).
-                name=f"sheet-{key_id.hex[-8:]}",
+                # Unique per call: rbac_world is session-scoped, so a fixed name would
+                # violate uq_api_key_tenant_name_active (one active key per tenant+name)
+                # the second time a test issues a key for the shared tenant.
+                name=f"sheet-{key_id}",
                 salt=salt,
                 key_hash=apikey.hash_secret(salt, secret),
                 scope=scope,

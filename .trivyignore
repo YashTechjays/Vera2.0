@@ -1,0 +1,11 @@
+# Reviewed, accepted vulnerabilities the image scan should skip.
+# One CVE ID per line, each with a justification and a "remove when fixed" note.
+# The scanner still runs and still blocks every OTHER fixable HIGH/CRITICAL.
+
+# CVE-2026-4372 — transformers RCE (agent-worker image). Accepted risk, not "unfixed":
+#   * Fix is transformers>=5.3.0, but livekit-plugins-turn-detector caps transformers below that,
+#     so the fix isn't reachable without bumping the ML/voice plugins (behaviour risk to the agent).
+#   * The worker loads ONLY a pinned turn-detector model baked into the image (HF_HUB_OFFLINE=1) and
+#     never loads an untrusted model/config — which is what this RCE requires. Not exploitable here.
+#   Remove this line once the plugin allows transformers>=5.3.0.
+CVE-2026-4372
