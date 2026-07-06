@@ -1,4 +1,14 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+
+// nav.ts now also exports useNavContext, which pulls in the Redux store chain
+// (authSlice -> auth/storage) purely via import graph. That module touches
+// sessionStorage at import time, which isn't defined in this file's (node) test
+// environment, so stub it out the same way Sidebar.test.ts does.
+vi.mock("@/lib/auth/storage", () => ({
+  getToken: () => null,
+  setSession: vi.fn(),
+  clearSession: vi.fn(),
+}))
 
 import { defaultRouteFor, isRouteVisible, visibleNavFor } from "@/lib/nav"
 

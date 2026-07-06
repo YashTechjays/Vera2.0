@@ -52,9 +52,18 @@ function App() {
               index
               element={<RequireNavRoute to="/"><LiveMonitoring /></RequireNavRoute>}
             />
-            <Route path="data-management" element={<DataManagement />} />
-            <Route path="users" element={<Users />} />
-            <Route path="voice-lab" element={<VoiceLab />} />
+            <Route
+              path="data-management"
+              element={<RequireNavRoute to="/data-management"><DataManagement /></RequireNavRoute>}
+            />
+            <Route
+              path="users"
+              element={<RequireNavRoute to="/users"><Users /></RequireNavRoute>}
+            />
+            <Route
+              path="voice-lab"
+              element={<RequireNavRoute to="/voice-lab"><VoiceLab /></RequireNavRoute>}
+            />
             <Route
               path="call-history"
               element={<RequireNavRoute to="/call-history"><Placeholder title="Call History" /></RequireNavRoute>}

@@ -11,6 +11,8 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react"
+import { useAppSelector } from "@/store/hooks"
+import { selectIsElevated, selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
 
 export type NavItem = {
   title: string
@@ -73,4 +75,14 @@ export function isRouteVisible(to: string, ctx: NavContext): boolean {
  *  never empty for an authenticated tenant user. */
 export function defaultRouteFor(ctx: NavContext): string {
   return visibleNavFor(ctx)[0]?.to ?? "/settings"
+}
+
+/** The current user's NavContext, assembled from the auth store — the single
+ *  place Sidebar and RequireNavRoute read permissions/elevation from, so they
+ *  can never diverge on what's visible. */
+export function useNavContext(): NavContext {
+  const permissions = useAppSelector(selectPermissions)
+  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
+  const isElevated = useAppSelector(selectIsElevated)
+  return { permissions, isSuperAdmin, isElevated }
 }

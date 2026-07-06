@@ -24,22 +24,29 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
   const [copied, setCopied] = useState(false)
 
   // Load the assignable roles (global system roles + this tenant's custom roles)
-  // each time the dialog opens, so the picker reflects any role created since the
-  // last time it was shown.
+  // once per dialog lifetime (not on every open) — cheap to keep for the session,
+  // and roles rarely change while a Users page is open. Retries automatically the
+  // next time the dialog opens if the previous attempt failed (roles stays empty).
   useEffect(() => {
-    if (!open) return
+    if (!open || roles.length > 0) return
     let cancelled = false
     listRoles()
       .then((r) => {
         if (!cancelled) setRoles(r)
       })
-      .catch(() => {
-        // Non-fatal: the invite still works with no role selected.
+      .catch((err) => {
+        if (!cancelled) {
+          setError(
+            err instanceof ApiError
+              ? `Could not load roles: ${err.message}`
+              : "Could not load roles. You can still invite without selecting a role."
+          )
+        }
       })
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [open, roles.length])
 
   function copyLink() {
     if (!result) return

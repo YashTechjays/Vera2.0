@@ -1,9 +1,9 @@
 import { NavLink } from "react-router-dom"
 import { Sparkles } from "lucide-react"
-import { visibleNavFor } from "@/lib/nav"
+import { useNavContext, visibleNavFor } from "@/lib/nav"
 import { cn } from "@/lib/utils"
 import { useAppSelector } from "@/store/hooks"
-import { selectIsElevated, selectIsSuperAdmin, selectPermissions, selectUser } from "@/store/authSlice"
+import { selectUser } from "@/store/authSlice"
 
 type SidebarProps = {
   collapsed: boolean
@@ -19,11 +19,9 @@ export function initialsFor(source: string): string {
 }
 
 export function Sidebar({ collapsed }: SidebarProps) {
-  const permissions = useAppSelector(selectPermissions)
-  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
-  const isElevated = useAppSelector(selectIsElevated)
+  const ctx = useNavContext()
   const user = useAppSelector(selectUser)
-  const items = visibleNavFor({ permissions, isSuperAdmin, isElevated })
+  const items = visibleNavFor(ctx)
 
   // AppUser.name defaults to "" (e.g. some platform/password-only accounts), so
   // fall back to email as the display name; when that fallback fires, show the

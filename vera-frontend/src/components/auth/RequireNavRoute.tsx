@@ -1,17 +1,16 @@
 import type { ReactNode } from "react"
 import { Navigate } from "react-router-dom"
-import { defaultRouteFor, isRouteVisible } from "@/lib/nav"
-import { useAppSelector } from "@/store/hooks"
-import { selectIsElevated, selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
+import { useNavContext, visibleNavFor } from "@/lib/nav"
 
 /** Wraps a routed page with the same visibility rule as its sidebar entry
  *  (`nav.ts`): if the route isn't in the user's visible nav, redirect to their
- *  first visible item instead of rendering a page they have no access to. */
+ *  first visible item instead of rendering a page they have no access to.
+ *  Computes `visibleNavFor` once and derives both the check and the redirect
+ *  target from it, rather than calling it twice via isRouteVisible/defaultRouteFor. */
 export function RequireNavRoute({ to, children }: { to: string; children: ReactNode }) {
-  const permissions = useAppSelector(selectPermissions)
-  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
-  const isElevated = useAppSelector(selectIsElevated)
-  const ctx = { permissions, isSuperAdmin, isElevated }
-  if (isRouteVisible(to, ctx)) return <>{children}</>
-  return <Navigate to={defaultRouteFor(ctx)} replace />
+  const ctx = useNavContext()
+  const visible = visibleNavFor(ctx)
+  const isVisible = visible.some((item) => item.to === to)
+  if (isVisible) return <>{children}</>
+  return <Navigate to={visible[0]?.to ?? "/settings"} replace />
 }
