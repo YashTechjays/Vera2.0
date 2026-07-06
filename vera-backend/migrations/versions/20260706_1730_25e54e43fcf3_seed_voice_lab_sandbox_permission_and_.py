@@ -64,9 +64,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "DELETE FROM role_permission WHERE permission_id IN "
-        f"(SELECT id FROM permission WHERE code = '{_PERMISSION_CODE}')"
+    # Deliberately NOT reversing the data this migration seeded: by the time anyone
+    # downgrades, there is no way to distinguish the role_permission rows this
+    # migration inserted from rows added since by real product usage (e.g. a tenant
+    # admin creating a new custom role via POST /roles with voice_lab:sandbox in its
+    # initial permission_ids — that grant is indistinguishable at the row level from
+    # this migration's backfill). Blindly deleting by permission code, as an earlier
+    # version of this migration did, would silently destroy that live data with no
+    # audit trail. If this genuinely needs undoing on an environment with no real
+    # usage since (e.g. immediately after a bad deploy), do it by hand after
+    # confirming that.
+    raise RuntimeError(
+        "downgrade unsupported for seed_voice_lab_sandbox_permission_and_role: cannot "
+        "safely distinguish this migration's backfilled grants from live product data "
+        "added since (see comment above) — revert by hand if truly needed"
     )
-    op.execute(f"DELETE FROM role WHERE tenant_id IS NULL AND name = '{_ROLE_NAME}'")
-    op.execute(f"DELETE FROM permission WHERE code = '{_PERMISSION_CODE}'")
