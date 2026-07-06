@@ -23,6 +23,18 @@ TENANT_GUC = "app.tenant_id"
 # rows — never any tenant PHI row, which stays gated on a matching TENANT_GUC.
 PLATFORM_GUC = "app.platform"
 
+# A syntactically-valid sentinel for TENANT_GUC in platform-only sessions. Postgres
+# custom GUCs are registered per-connection, not per-transaction: once ANY
+# transaction on a pooled connection calls set_config(TENANT_GUC, ..., true), that
+# connection's backend remembers app.tenant_id as a known parameter for the rest of
+# its life — a LATER transaction that never sets it again no longer reads back NULL
+# from current_setting(TENANT_GUC, true); it reads back '' (the custom GUC's own
+# reset value). Every RLS policy casts that read with `::uuid`, which raises on ''
+# but not on NULL. A platform session must therefore pin TENANT_GUC to a value that
+# always casts cleanly and can never match a real tenant row, rather than leaving it
+# unset and hoping the connection was never previously touched by a tenant session.
+NIL_TENANT_ID = UUID(int=0)
+
 
 async def set_current_tenant(session: AsyncSession, tenant_id: UUID) -> None:
     """Apply SET LOCAL app.tenant_id for the session's current transaction.
@@ -55,12 +67,14 @@ async def platform_session(
 ) -> AsyncGenerator[AsyncSession]:
     """A SUPER_ADMIN's no-tenant session for global catalog/identity reads.
 
-    Sets app.platform='on' but NO tenant GUC, so platform-readable policies expose
-    the global (NULL-tenant) rows of `app_user`/`user_role`/`role`/`role_permission`
-    and nothing else: every PHI/tenant table uses the strict policy, which needs a
-    matching tenant GUC this session never sets (fail-closed → zero tenant rows).
+    Sets app.platform='on' and pins TENANT_GUC to NIL_TENANT_ID (never a real
+    tenant), so platform-readable policies expose the global (NULL-tenant) rows of
+    `app_user`/`user_role`/`role`/`role_permission` and nothing else: every
+    PHI/tenant table's strict policy compares against a tenant GUC that can never
+    match a real row (fail-closed → zero tenant rows) instead of an unset one.
     Cross-tenant PHI access requires `elevated_session` and an active grant."""
     async with sessionmaker() as session, session.begin():
+        await set_current_tenant(session, NIL_TENANT_ID)
         await set_platform(session)
         yield session
 
