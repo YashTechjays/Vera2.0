@@ -30,7 +30,7 @@ export type ProviderOption = {
 }
 
 /** GET /voice-lab/insurance-providers — active providers, readable by any operator with
- *  calls:read (tenant users included), for the call-start provider picker. */
+ *  voice_lab:sandbox, for the call-start provider picker. */
 export function listCallProviders(): Promise<ProviderOption[]> {
   return apiRequest<ProviderOption[]>("/voice-lab/insurance-providers")
 }

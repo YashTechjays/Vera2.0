@@ -205,7 +205,7 @@ export function VoiceLab() {
   const [phone, setPhone] = useState<string | undefined>(undefined)
   const [ivrNavigation, setIvrNavigation] = useState(false)
   // Provider picker for IVR-playbook selection. The list is readable by any operator with
-  // calls:read (tenant users included); the provider's active playbook is applied server-side.
+  // voice_lab:sandbox; the provider's active playbook is applied server-side.
   const [providers, setProviders] = useState<ProviderOption[]>([])
   const [providerId, setProviderId] = useState("")
   // Only flag the number field once the operator has interacted with it, so an
