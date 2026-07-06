@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld

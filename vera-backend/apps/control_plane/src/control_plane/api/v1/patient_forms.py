@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import TenantId, TenantSession
+from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -36,6 +36,7 @@ from control_plane.exceptions import (
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
+from vera_core.forms.conditions import is_v2
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     iter_leaf_answers,
@@ -47,6 +48,7 @@ from vera_core.forms.review import (
     adjudication_action,
     build_field_views,
     completion_pct,
+    completion_pct_v2,
     normalize_value,
     unwrap_value,
 )
@@ -56,9 +58,12 @@ from vera_core.models import (
     FormSchema,
     PatientForm,
     SchemaVersion,
+    Tenant,
 )
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AnswerSource, DisputeActionType, FormStatus
+from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.queue_dispatcher import try_dispatch
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -153,7 +158,12 @@ async def upload_patient_form(
         await session.flush()
 
         # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
-        answers = list(iter_leaf_answers(body.intake_payload))
+        # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
+        # payload (nested by section_key) is flattened under a `sections` root.
+        payload_root = (
+            {"sections": body.intake_payload} if is_v2(version.schema_json) else body.intake_payload
+        )
+        answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(
                 tenant_id=principal.tenant_id,
@@ -617,23 +627,33 @@ async def resolve_disputes(
     # disputes only records the human answers/actions; re-asked fields are surfaced
     # in the audit for the worker, and re-queueing is a manual status change.
     await session.flush()
-    current_paths = set(
-        (
+    current_values: dict[str, Any] = {
+        path: unwrap_value(value)
+        for path, value in (
             await session.execute(
-                select(FieldAnswer.field_path).where(
+                select(FieldAnswer.field_path, FieldAnswer.value).where(
                     FieldAnswer.form_id == form_id, FieldAnswer.is_current.is_(True)
                 )
             )
-        ).scalars()
-    )
+        ).all()
+    }
     version = (
         await session.execute(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
-    form.completion_pct = completion_pct(current_paths, version.schema_json)
-    # Reload server-updated columns (e.g. updated_at onupdate) in-greenlet so the
-    # detail build below doesn't trigger a sync lazy-load (MissingGreenlet).
+    # v2 completion needs the values (applicable_when/required.when evaluate against
+    # them); v1 only needs which paths are filled.
+    form.completion_pct = (
+        completion_pct_v2(current_values, version.schema_json)
+        if is_v2(version.schema_json)
+        else completion_pct(set(current_values), version.schema_json)
+    )
+    # Flush BEFORE refresh: refresh() reloads from the DB and DISCARDS pending
+    # attribute changes — without this flush the completion update was silently
+    # lost. The refresh then reloads server-updated columns (updated_at onupdate)
+    # in-greenlet so the detail build below doesn't sync-lazy-load (MissingGreenlet).
+    await session.flush()
     await session.refresh(form)
 
     detail = await _build_detail(session, form)
@@ -664,6 +684,68 @@ async def resolve_disputes(
 
 
 # ---------------------------------------------------------------------------
+# Schema version lookup (the document a form is pinned to)
+# ---------------------------------------------------------------------------
+
+
+class SchemaVersionDetail(BaseModel):
+    """One stored schema document. Global catalog, not PHI — the form template,
+    never patient values."""
+
+    id: UUID
+    schema_id: UUID
+    version: int
+    status: str
+    insurance_type: str
+    name: str
+    # The stored schema_version.schema_json ("schema_json" itself collides with a
+    # pydantic BaseModel method name).
+    document: dict[str, Any]
+
+
+@router.get(
+    "/schema-versions/{version_id}",
+    response_model=ResponseModel[SchemaVersionDetail],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def get_schema_version(
+    version_id: UUID,
+    response: Response,
+    session: TenantSession,
+    caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[SchemaVersionDetail]:
+    """The schema document a patient form is bound to via `schema_version_id` —
+    the frontend fetches this to render the form (never a bundled copy). Reads
+    the global catalog only (no patient data), so no PHI-access audit."""
+    response.headers["Cache-Control"] = "no-store"
+    row = (
+        await session.execute(
+            select(SchemaVersion, FormSchema)
+            .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
+            .where(SchemaVersion.id == version_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NotFoundError(message="schema version not found")
+    version, form_schema = row
+    return ok(
+        SchemaVersionDetail(
+            id=version.id,
+            schema_id=version.schema_id,
+            version=version.version,
+            status=version.status,
+            insurance_type=form_schema.insurance_type,
+            name=form_schema.name,
+            document=version.schema_json,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # Manual status change (the single endpoint that mutates status by hand)
 # ---------------------------------------------------------------------------
 
@@ -672,7 +754,7 @@ async def resolve_disputes(
 # the → CALL_FAILED edges; a reviewer/operator may only (re)queue work or complete
 # a reviewed form. Any (current → target) pair absent here is rejected (422), so
 # the worker-driven states can't be set by hand.
-_ALLOWED_STATUS_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
+_MANUAL_TARGETS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
@@ -708,6 +790,7 @@ async def update_patient_form_status(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    livekit: LiveKit,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -736,7 +819,8 @@ async def update_patient_form_status(
             message="Status unchanged.",
         )
 
-    if target not in _ALLOWED_STATUS_TRANSITIONS.get(current, frozenset()):
+    # Manual-endpoint guard: only the transitions in _MANUAL_TARGETS are allowed here.
+    if target not in _MANUAL_TARGETS.get(current, frozenset()):
         raise CustomAPIException(
             DefaultExceptionCode.VALIDATION_ERROR,
             message=f"cannot change status from '{current.value}' to '{target.value}'",
@@ -753,11 +837,28 @@ async def update_patient_form_status(
                 data={"unresolved_disputes": remaining},
             )
 
-    form.status = target.value
+    # Load tenant for state machine guard (retry cap).
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
+    sm = FormStateMachine()
+    try:
+        sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+    except InvalidTransitionError as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message=str(exc),
+            data={"from": current.value, "to": target.value},
+        ) from exc
+
+    # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
+    if target == FormStatus.IN_QUEUE:
+        form.enqueued_at = func.now()
+
     await session.flush()
 
     # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
-    await get_audit(request).emit(
+    audit = get_audit(request)
+    await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
             actor_type=ActorType.USER,
@@ -769,7 +870,14 @@ async def update_patient_form_status(
             detail={"from": current.value, "to": target.value},
         )
     )
+
+    # Fire the dispatcher if a form was just enqueued. The response acknowledges
+    # the manual transition (target), not whatever the dispatcher advanced the
+    # form to afterwards — clients observe dispatch via the calls list.
+    if target == FormStatus.IN_QUEUE:
+        await try_dispatch(session, tenant_id, livekit, audit=audit)
+
     return ok(
-        PatientFormStatusResponse(id=form.id, status=form.status),
+        PatientFormStatusResponse(id=form.id, status=target.value),
         message="Status updated.",
     )

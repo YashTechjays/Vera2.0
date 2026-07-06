@@ -133,10 +133,11 @@ async def test_upload_creates_form_and_intake_answers(
             .scalars()
             .all()
         )
+        # v2 documents record root-anchored paths (`sections.…` = field_answer.field_path).
         assert {a.field_path for a in answers} == {
-            "patient_information.patient_name",
-            "patient_information.patient_dob",
-            "patient_information.patient_gender",
+            "sections.patient_information.patient_name",
+            "sections.patient_information.patient_dob",
+            "sections.patient_information.patient_gender",
         }
         assert all(a.source == "intake" and a.is_current and a.call_id is None for a in answers)
 
@@ -205,9 +206,10 @@ async def test_missing_required_returns_422_with_paths_no_phi(
 
     assert resp.status_code == 422, resp.text
     body = resp.json()
+    # v2 required-at-intake = unconditionally required leaves without a declared
+    # default (patient_gender defaults to "N/A"), reported root-anchored.
     assert set(body["data"]["fields"]) == {
-        "patient_information.patient_dob",
-        "patient_information.patient_gender",
+        "sections.patient_information.patient_dob",
     }
     assert "Secret Patient" not in resp.text  # never echo a PHI value
 

@@ -22,6 +22,7 @@ class FormStatus(enum.StrEnum):
     EXCEPTION_REVIEW = "exception_review"
     COMPLETED = "completed"
     CALL_FAILED = "call_failed"
+    EXPIRED = "expired"
 
 
 class CallMode(enum.StrEnum):
@@ -106,11 +107,11 @@ class VersionStatus(enum.StrEnum):
 
 
 class InsuranceType(enum.StrEnum):
-    """The insurance/form family a `form_schema` belongs to. One value for now;
-    grows to carrier-level types (aetna/cigna/uhc) with a one-line addition plus a
-    CHECK-update migration."""
+    """The insurance/form family a `form_schema` belongs to. Grows to carrier-level
+    types (aetna/cigna/uhc) with a one-line addition plus a CHECK-update migration."""
 
     INFERTILITY_TREATMENT = "infertility_treatment"
+    DISEASE_ONLY = "disease_only"
 
 
 class ProviderStatus(enum.StrEnum):

@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -64,7 +64,10 @@ class SchemaVersion(Base, UUIDv7PKMixin, CreatedAtMixin):
         PG_UUID(as_uuid=True), ForeignKey("form_schema.id", ondelete="CASCADE"), nullable=False
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # JSON, not JSONB: JSONB normalizes key order, but a DSL document's key order
+    # IS its field order (spec §4.1 — "document order"); the UI renderer and the
+    # prompt compiler both walk it in order.
+    schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=VersionStatus.DRAFT)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -111,5 +114,6 @@ class PromptVersion(Base, UUIDv7PKMixin, CreatedAtMixin):
         index=True,
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    composite_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # JSON for the same key-order reason as schema_version.schema_json.
+    composite_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=VersionStatus.DRAFT)
