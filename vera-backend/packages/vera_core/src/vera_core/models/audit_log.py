@@ -47,6 +47,12 @@ class AuditEvent(enum.StrEnum):
     CALL_INTERVENE_JOIN = "call.intervene.join"
     # The owner ejected an intervener from a published call. Ids only.
     CALL_INTERVENE_REVOKE = "call.intervene.revoke"
+    # Queue dispatch: the dispatcher picked a form off the queue and initiated a
+    # call. Records form id + tenant — no PHI field values.
+    QUEUE_DISPATCH = "queue.dispatch"
+    # Queue expiry: the dispatcher marked a form expired because it exceeded the
+    # tenant's queue_expiry_hours window. Records form id + tenant only.
+    QUEUE_EXPIRED = "queue.expired"
 
 
 class AuditLog(Base, TenantScopedMixin):

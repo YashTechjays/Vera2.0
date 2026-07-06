@@ -40,5 +40,7 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     max_agents_per_va: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.95)
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    queue_expiry_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

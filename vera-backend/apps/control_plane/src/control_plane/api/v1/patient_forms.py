@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
@@ -52,7 +52,6 @@ from vera_core.forms.review import (
 )
 from vera_core.models import (
     Call,
-    CallEvent,
     DisputeAction,
     FieldAnswer,
     FormSchema,
@@ -63,13 +62,12 @@ from vera_core.models import (
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import (
     AnswerSource,
-    CallEventType,
     CallStatus,
     DisputeActionType,
     FormStatus,
 )
-from vera_core.observability.correlation import room_name_for_call
-from vera_core.schemas import PersonaTweak
+from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.queue_dispatcher import try_dispatch
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -683,7 +681,7 @@ async def resolve_disputes(
 # the → CALL_FAILED edges; a reviewer/operator may only (re)queue work or complete
 # a reviewed form. Any (current → target) pair absent here is rejected (422), so
 # the worker-driven states can't be set by hand.
-_ALLOWED_STATUS_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
+_MANUAL_TARGETS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
@@ -748,7 +746,8 @@ async def update_patient_form_status(
             message="Status unchanged.",
         )
 
-    if target not in _ALLOWED_STATUS_TRANSITIONS.get(current, frozenset()):
+    # Manual-endpoint guard: only the transitions in _MANUAL_TARGETS are allowed here.
+    if target not in _MANUAL_TARGETS.get(current, frozenset()):
         raise CustomAPIException(
             DefaultExceptionCode.VALIDATION_ERROR,
             message=f"cannot change status from '{current.value}' to '{target.value}'",
@@ -765,39 +764,28 @@ async def update_patient_form_status(
                 data={"unresolved_disputes": remaining},
             )
 
-    form.status = target.value
+    # Load tenant for state machine guard (retry cap).
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
+    sm = FormStateMachine()
+    try:
+        sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+    except InvalidTransitionError as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message=str(exc),
+            data={"from": current.value, "to": target.value},
+        ) from exc
+
+    # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
+    if target == FormStatus.IN_QUEUE:
+        form.enqueued_at = func.now()
+
     await session.flush()
 
-    # Moving a form INTO the queue starts its verification call: create the Call +
-    # LiveKit room and dispatch the agent (the same primitive as POST /calls), with the
-    # caller as the owner. This is the ONLY call-start trigger — there is no manual button.
-    if target == FormStatus.IN_QUEUE:
-        call = Call(
-            tenant_id=tenant_id,
-            form_id=form.id,
-            current_status=CallStatus.INITIATED,
-            initiated_by_id=caller.user_id,
-        )
-        session.add(call)
-        await session.flush()  # populate call.id (UUIDv7)
-        persona = (
-            await session.execute(select(Tenant.persona_tweak).where(Tenant.id == tenant_id))
-        ).scalar_one_or_none()
-        tweak = PersonaTweak.model_validate(persona) if persona is not None else PersonaTweak()
-        await livekit.create_call_room(
-            room_name_for_call(tenant_id, call.id), metadata=tweak.model_dump(exclude_none=True)
-        )
-        session.add(
-            CallEvent(
-                tenant_id=tenant_id,
-                call_id=call.id,
-                event_type=CallEventType.STATUS,
-                event_value=CallStatus.INITIATED,
-            )
-        )
-
     # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
-    await get_audit(request).emit(
+    audit = get_audit(request)
+    await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
             actor_type=ActorType.USER,
@@ -809,7 +797,27 @@ async def update_patient_form_status(
             detail={"from": current.value, "to": target.value},
         )
     )
+
+    # Fire the dispatcher if a form was just enqueued. The response acknowledges
+    # the manual transition (target), not whatever the dispatcher advanced the
+    # form to afterwards — clients observe dispatch via the calls list.
+    if target == FormStatus.IN_QUEUE:
+        await try_dispatch(session, tenant_id, livekit, audit=audit)
+        # If the dispatcher started THIS form's call in the same pass, attribute
+        # it to the enqueueing caller: `initiated_by_id` is the ownership axis
+        # behind call visibility (private-until-published, owner-only publish/
+        # revoke). Forms dispatched later (freed slot, retry) stay system-owned.
+        await session.execute(
+            update(Call)
+            .where(
+                Call.form_id == form.id,
+                Call.current_status == CallStatus.INITIATED.value,
+                Call.initiated_by_id.is_(None),
+            )
+            .values(initiated_by_id=caller.user_id)
+        )
+
     return ok(
-        PatientFormStatusResponse(id=form.id, status=form.status),
+        PatientFormStatusResponse(id=form.id, status=target.value),
         message="Status updated.",
     )

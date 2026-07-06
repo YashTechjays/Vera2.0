@@ -10,7 +10,16 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -25,6 +34,16 @@ from vera_core.db.base import (
 )
 from vera_core.models.enums import CallEventType, CallMode, CallStatus, check_in
 
+# Terminal call statuses — a call in one of these will never become live again.
+# Keep in sync with the callback's accepted statuses (api/v1/calls.py).
+TERMINAL_CALL_STATUSES = (
+    CallStatus.COMPLETED,
+    CallStatus.FAILED,
+    CallStatus.NO_ANSWER,
+    CallStatus.BUSY,
+)
+_TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in TERMINAL_CALL_STATUSES)
+
 
 class Call(Base, TenantScopedMixin):
     __tablename__ = "call"
@@ -33,6 +52,14 @@ class Call(Base, TenantScopedMixin):
         check_in("current_status", CallStatus, name="current_status_valid"),
         Index("ix_call_tenant_status", "tenant_id", "current_status"),
         Index("ix_call_form_id", "form_id"),
+        # At most ONE live (non-terminal) call per form — DB backstop against a
+        # manual call and a dispatcher call racing onto the same form.
+        Index(
+            "uq_call_active_form",
+            "form_id",
+            unique=True,
+            postgresql_where=text(f"current_status NOT IN ({_TERMINAL_SQL})"),
+        ),
         Index("ix_call_initiated_by", "initiated_by_id", "created_at"),
         Index("ix_call_provider_status", "insurance_provider_id", "current_status"),
         Index("ix_call_tenant_published", "tenant_id", "published"),
