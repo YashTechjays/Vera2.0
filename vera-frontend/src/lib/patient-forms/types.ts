@@ -107,3 +107,16 @@ export type ResolveDisputesPayload = {
   /** dotted paths the reviewer corrected and re-queued for a re-ask */
   reasked_fields: string[]
 }
+
+/** GET /schema-versions/{id} — the stored form-schema document a patient form
+ *  is pinned to (via its `schema_version_id`). Not PHI: the form template. */
+export type SchemaVersionDetail = {
+  id: string
+  schema_id: string
+  version: number
+  status: string
+  insurance_type: string
+  name: string
+  /** the raw DSL document (schema_version.schema_json); parse with `parseSchema` */
+  document: unknown
+}

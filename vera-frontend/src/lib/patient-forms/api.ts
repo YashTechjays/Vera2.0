@@ -10,6 +10,7 @@ import type {
   PatientFormStatus,
   PatientFormStatusResult,
   ResolveDisputesPayload,
+  SchemaVersionDetail,
 } from "./types"
 
 /** GET /patient-forms — paginated worklist. */
@@ -30,6 +31,13 @@ export function listPatientForms(
 export function getPatientForm(formId: string): Promise<PatientFormDetail> {
   return apiRequest<PatientFormDetail>(
     `/patient-forms/${encodeURIComponent(formId)}`,
+  )
+}
+
+/** GET /schema-versions/{id} — the schema document a form is pinned to. */
+export function getSchemaVersion(versionId: string): Promise<SchemaVersionDetail> {
+  return apiRequest<SchemaVersionDetail>(
+    `/schema-versions/${encodeURIComponent(versionId)}`,
   )
 }
 

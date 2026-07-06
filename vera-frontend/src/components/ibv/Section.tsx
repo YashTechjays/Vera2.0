@@ -9,23 +9,69 @@ import {
 } from "@/components/ui/collapsible"
 import { FieldRow } from "./FieldRow"
 import { SectionMatrix } from "./SectionMatrix"
-import { flattenSection, getSectionMatrix } from "@/lib/ibv/schema"
-import type { IbvSection } from "@/lib/ibv/types"
+import { useIbv } from "./IbvProvider"
+import {
+  applicabilityReason,
+  flattenSection,
+  getSectionTable,
+  isApplicable,
+  isGroup,
+} from "@/lib/ibv/schema"
+import type { FlatRow } from "@/lib/ibv/schema"
+import type { Section as SectionModel } from "@/lib/ibv/types"
 
-/** A collapsible section: header + (field rows | CPT matrix). */
+function Rows({ rows }: { rows: FlatRow[] }) {
+  const { schema, values } = useIbv()
+  return (
+    <div>
+      {rows.map(({ path, field, depth, gates }) => {
+        if (!isGroup(field)) {
+          return <FieldRow key={path} field={field} path={path} depth={depth} gates={gates} />
+        }
+        // A non-applicable node always yields a reason, so it also drives the graying.
+        const disabledReason =
+          schema && !isApplicable(schema, gates, values)
+            ? applicabilityReason(schema, gates, values)
+            : null
+        return (
+          <div
+            key={path}
+            title={disabledReason ?? undefined}
+            className={cn(
+              "border-b border-ibv-row bg-ibv-label-bg px-[3px] py-[2px] text-[13.3px] font-bold text-black",
+              disabledReason && "opacity-60"
+            )}
+            style={depth > 0 ? { paddingLeft: 6 + depth * 10 } : undefined}
+          >
+            {field.title}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * A collapsible section: header + (field rows | `ui.layout: "table"` matrix).
+ * Table sections render their section-level leaves as plain rows above the
+ * matrix. Row-level graying comes from each leaf's own gate chain (which
+ * already includes the section's applicable_when). Context sections (known
+ * background the voice agent answers from, never asks) get the green header —
+ * see UsageLegend.
+ */
 export function Section({
+  sectionKey,
   section,
   defaultOpen = true,
-  green = false,
 }: {
-  section: IbvSection
+  sectionKey: string
+  section: SectionModel
   defaultOpen?: boolean
-  /** reference-rail style: bright green header bar (vs. the gray legend) */
-  green?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
-  const matrix = getSectionMatrix(section)
-  const rows = matrix ? [] : flattenSection(section)
+  const green = section.role === "context"
+  const table = getSectionTable(sectionKey, section)
+  const rows = table ? table.leaves : flattenSection(sectionKey, section)
 
   return (
     <Collapsible
@@ -40,8 +86,8 @@ export function Section({
         // the last row's own border-b, so the frame omits `border-b` — otherwise
         // it would double with that row border. Matrix sections are already a
         // single collapsed-border table and keep their own header border.
-        !matrix && "border-x border-t",
-        !matrix && (green ? "border-[#1f9d57]" : "border-ibv-input-border")
+        !table && "border-x border-t",
+        !table && (green ? "border-[#1f9d57]" : "border-ibv-input-border")
       )}
     >
       <CollapsibleTrigger
@@ -49,7 +95,7 @@ export function Section({
           "relative flex w-full items-center justify-center px-6 py-0.5 text-center text-[13.3px] font-bold text-black",
           // Matrix headers own their full border; field-row headers only need a
           // bottom separator (the section frame supplies the other edges).
-          matrix ? "border" : "border-b",
+          table ? "border" : "border-b",
           green
             ? "border-[#1f9d57] bg-[#22c55e]"
             : "border-ibv-input-border bg-ibv-label-bg"
@@ -64,25 +110,19 @@ export function Section({
         />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        {matrix ? (
-          <SectionMatrix matrix={matrix} />
-        ) : (
-          <div>
-            {rows.map(({ path, field, depth }) =>
-              field.type === "object" ? (
-                <div
-                  key={path}
-                  className="border-b border-ibv-row bg-ibv-label-bg px-[3px] py-[2px] text-[13.3px] font-bold text-black"
-                  style={depth > 0 ? { paddingLeft: 6 + depth * 10 } : undefined}
-                >
-                  {field.title}
-                </div>
-              ) : (
-                <FieldRow key={path} field={field} path={path} depth={depth} />
-              )
-            )}
+        {table ? (
+          // FieldRow expects an ancestor to supply its left/right edge (it only
+          // draws its own borders between/below cells) — the outer frame skips
+          // border-x for table sections (see above), so these section-level
+          // leaves need their own wrapper for it. The matrix itself doesn't:
+          // its <table> already owns a complete collapsed-border frame.
+          <div className={cn("border-x", green ? "border-[#1f9d57]" : "border-ibv-input-border")}>
+            <Rows rows={rows} />
           </div>
+        ) : (
+          <Rows rows={rows} />
         )}
+        {table && <SectionMatrix table={table} />}
       </CollapsibleContent>
     </Collapsible>
   )

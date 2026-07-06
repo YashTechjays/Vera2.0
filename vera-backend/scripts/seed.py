@@ -26,6 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from control_plane.auth.password import hash_password
 from vera_core.config import get_settings
 from vera_core.db import create_engine, create_sessionmaker
+from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.prompting import compile_prompt_document
 from vera_core.models import (
     AppUser,
     FormSchema,
@@ -49,11 +51,10 @@ from vera_core.models.rbac_defaults import ALL_PERMISSIONS, SYSTEM_ROLES
 # top-level "name"; the document itself is stored opaquely in schema_version.schema_json.
 FORM_SCHEMA_DIR = Path(__file__).parent.parent / "data" / "form_schemas"
 
-# Baseline prompts live as JSON under data/prompts/, mapped to the schema they bind
-# to (by insurance_type) via manifest.json. prompt.name comes from each file's
-# top-level "name"; the document is stored opaquely in prompt_version.composite_json.
-# Prompt *generation from a schema* is deferred — these are loaded as-is.
-PROMPT_DIR = Path(__file__).parent.parent / "data" / "prompts"
+# Prompts are GENERATED from each published form schema (vera_core.forms.prompting):
+# composite_json = per-task nested JSON of the task-level prompt + the schema-derived
+# question lists. The legacy hand-written documents under data/prompts/ are reference
+# material only and are no longer seeded.
 
 SAMPLE_TENANT_NAME = "Vera Health (Example)"
 # The URL-facing tenant handle (`/tenants/{slug}/auth/login`). Override with
@@ -221,6 +222,13 @@ async def _seed_admin_user(session: AsyncSession, tenant_id: UUID) -> None:
     await session.flush()
 
 
+def _same_document(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Order-sensitive document equality. Plain `==` ignores key order, but a DSL
+    document's key order IS its field order (the columns are JSON, not JSONB, for
+    the same reason) — a reordered document must publish a new version."""
+    return json.dumps(a, sort_keys=False) == json.dumps(b, sort_keys=False)
+
+
 def _load_manifest(catalog_dir: Path) -> list[tuple[str, str, dict[str, Any]]]:
     """Read `<catalog_dir>/manifest.json` and return one `(insurance_type, name, doc)`
     per entry. `doc` is the parsed JSON document the manifest points to; `name` is its
@@ -262,7 +270,7 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
                 )
             )
         ).scalar_one_or_none()
-        if published is not None and published.schema_json == doc:
+        if published is not None and _same_document(published.schema_json, doc):
             summary.append(f"{insurance_type} '{name}' v{published.version} (unchanged)")
             continue
 
@@ -290,27 +298,24 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
 
 
 async def _seed_prompts(session: AsyncSession) -> list[str]:
-    """Seed the baseline prompts from data/prompts/, each bound to the published
-    schema_version of the schema it targets (manifest `insurance_type`). Mirrors
-    `_seed_form_schemas`: idempotent and keyed on `(schema_id, name)`. Re-running
-    with unchanged JSON is a no-op; changed JSON demotes the current published
+    """Generate + publish one prompt per published form schema, compiled from the
+    schema document itself (`compile_prompt_document`): per-task nested JSON of
+    the task-level prompt + question lists. Mirrors `_seed_form_schemas`:
+    idempotent and keyed on `(schema_id, name)`. Re-running with an unchanged
+    schema is a no-op; a changed schema demotes the current published prompt
     version to DRAFT and publishes a new one.
 
-    `prompt_version.schema_version_id` is NOT NULL + RESTRICT, so a prompt can only
-    be seeded once its target schema has a published version (form schemas are
-    seeded just before this). If that version is missing, the entry is skipped with
-    a warning rather than crashing the whole seed."""
+    `prompt_version.schema_version_id` is NOT NULL + RESTRICT, so a prompt is only
+    generated once its schema has a published version (form schemas are seeded
+    just before this); schemas without one are skipped with a warning."""
     summary: list[str] = []
-    for insurance_type, name, doc in _load_manifest(PROMPT_DIR):
-        # The prompt binds to the published schema_version of its target schema.
-        schema = (
-            await session.execute(
-                select(FormSchema).where(FormSchema.insurance_type == insurance_type)
-            )
-        ).scalar_one_or_none()
-        if schema is None:
-            summary.append(f"{insurance_type} '{name}' (skipped — no published schema)")
-            continue
+    schemas = (
+        (await session.execute(select(FormSchema).order_by(FormSchema.insurance_type)))
+        .scalars()
+        .all()
+    )
+    for schema in schemas:
+        insurance_type = schema.insurance_type
         published_schema = (
             await session.execute(
                 select(SchemaVersion).where(
@@ -320,8 +325,12 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
             )
         ).scalar_one_or_none()
         if published_schema is None:
-            summary.append(f"{insurance_type} '{name}' (skipped — no published schema)")
+            summary.append(f"{insurance_type} (skipped — no published schema)")
             continue
+
+        schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
+        doc = compile_prompt_document(schema_doc)
+        name = f"{schema_doc.name} Prompt"
 
         prompt = (
             await session.execute(
@@ -341,7 +350,7 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
                 )
             )
         ).scalar_one_or_none()
-        if published is not None and published.composite_json == doc:
+        if published is not None and _same_document(published.composite_json, doc):
             summary.append(f"{insurance_type} '{name}' v{published.version} (unchanged)")
             continue
 

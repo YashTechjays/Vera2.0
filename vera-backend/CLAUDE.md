@@ -5,6 +5,9 @@ non-negotiable boundary discipline for **every** change in this repo. They are
 deepened by nested `CLAUDE.md` files that load only when you touch the relevant code:
 
 - `packages/vera_core/src/vera_core/CLAUDE.md` — PHI codec, crypto, RLS, audit, observability.
+- `packages/vera_core/src/vera_core/forms/CLAUDE.md` — form-schema DSL: authoring a
+  new schema / insurance type (catalog + enum/CHECK migration + compile + seed
+  checklist), validator gotchas, and the key-order / version-gating semantics.
 - `apps/control_plane/src/control_plane/CLAUDE.md` — PHI-returning HTTP endpoints.
 
 ## Build, test & layout (`just` runs everything; see README.md for detail)
