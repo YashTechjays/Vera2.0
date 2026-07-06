@@ -23,6 +23,7 @@ from control_plane.api.v1.common import (
     TenantSession,
     emit_auth_event,
     is_platform_permission,
+    platform_tier_role_ids,
     roles_grant_platform_permission,
 )
 from control_plane.auth.identity import VerifiedIdentity
@@ -78,8 +79,13 @@ async def list_roles(
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[list[RoleResponse]]:
     # Catalog RLS returns the global system roles plus this tenant's custom roles.
+    # Platform-tier roles (e.g. SUPER_ADMIN) are excluded here: a tenant can never
+    # assign one (roles_grant_platform_permission blocks it at write time), so
+    # listing it would just be a confusing, unusable option.
     rows = (await session.execute(select(Role).order_by(Role.name))).scalars().all()
-    return ok([_to_response(r) for r in rows])
+    platform_ids = await platform_tier_role_ids(session, [r.id for r in rows])
+    visible = [r for r in rows if r.id not in platform_ids]
+    return ok([_to_response(r) for r in visible])
 
 
 @router.post(

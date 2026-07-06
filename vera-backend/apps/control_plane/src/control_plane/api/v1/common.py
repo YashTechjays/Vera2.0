@@ -104,3 +104,23 @@ async def roles_grant_platform_permission(session: AsyncSession, role_ids: Itera
         )
     ).scalar_one_or_none()
     return row is not None
+
+
+async def platform_tier_role_ids(session: AsyncSession, role_ids: Iterable[UUID]) -> set[UUID]:
+    """The subset of `role_ids` that hold a `platform:*` permission. Read-side
+    sibling to `roles_grant_platform_permission` (a single "any of these" bool for
+    a write-time guard) — this returns the actual subset, for filtering a list
+    a tenant session is about to see (e.g. GET /roles)."""
+    ids = list(role_ids)
+    if not ids:
+        return set()
+    rows = await session.execute(
+        select(RolePermission.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            RolePermission.role_id.in_(ids),
+            Permission.code.like(f"{PLATFORM_PERMISSION_PREFIX}%"),
+        )
+        .distinct()
+    )
+    return set(rows.scalars().all())

@@ -232,7 +232,7 @@ async def test_create_custom_role_appears_in_list(
     listing = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
     names = {r["name"] for r in listing.json()["data"]}
     assert "BILLING_VIEWER" in names  # custom role
-    assert "SUPER_ADMIN" in names  # global system role visible via catalog RLS
+    assert "SUPER_ADMIN" not in names  # platform-tier role, excluded from GET /roles
 
 
 async def test_virtual_assistant_role_seeded_and_visible(
@@ -282,7 +282,9 @@ async def test_assign_and_revoke_role(client: httpx.AsyncClient, rbac_world: RBA
 
 
 async def test_super_admin_role_not_tenant_assignable(
-    client: httpx.AsyncClient, rbac_world: RBACWorld
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     invite = await client.post(
         "/api/v1/users/invitations",
@@ -290,31 +292,38 @@ async def test_super_admin_role_not_tenant_assignable(
         json={"email": "noescalate@test.example", "send_email": False},
     )
     user_id = invite.json()["data"]["user_id"]
-    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
-    # SUPER_ADMIN is a global role and visible, but it carries platform perms, so a
-    # tenant must not be able to assign it (privilege escalation guard).
-    super_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPER_ADMIN")
+    # SUPER_ADMIN carries platform perms, so a tenant must not be able to assign it
+    # (privilege escalation guard) — resolved via direct SQL since GET /roles no
+    # longer surfaces platform-tier roles to a tenant session (see the test above).
+    async with admin_sessionmaker() as session:
+        super_admin_id = await session.scalar(
+            text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'SUPER_ADMIN'")
+        )
     resp = await client.post(
         f"/api/v1/users/{user_id}/roles",
         headers=_auth(rbac_world.admin_token),
-        json={"role_id": super_admin_id},
+        json={"role_id": str(super_admin_id)},
     )
     assert resp.status_code == 403
 
 
 async def test_invite_cannot_grant_platform_role(
-    client: httpx.AsyncClient, rbac_world: RBACWorld
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     # The invite seam must apply the same guard as assign_role (it bypasses it).
-    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
-    super_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPER_ADMIN")
+    async with admin_sessionmaker() as session:
+        super_admin_id = await session.scalar(
+            text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'SUPER_ADMIN'")
+        )
     resp = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
         json={
             "email": "viainvite@test.example",
             "send_email": False,
-            "role_ids": [super_admin_id],
+            "role_ids": [str(super_admin_id)],
         },
     )
     assert resp.status_code == 403
