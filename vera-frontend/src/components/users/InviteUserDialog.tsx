@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { Check, Copy } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -7,18 +7,39 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { ApiError } from "@/lib/api/client"
-import { inviteUser, type InviteUserResult } from "@/lib/auth/api"
+import { inviteUser, listRoles, type InviteUserResult, type RoleSummary } from "@/lib/auth/api"
 
 export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {}) {
   const [open, setOpen] = useState(false)
   const [email, setEmail] = useState("")
   const [name, setName] = useState("")
   const [sendEmail, setSendEmail] = useState(true)
+  const [roles, setRoles] = useState<RoleSummary[]>([])
+  const [roleId, setRoleId] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<InviteUserResult | null>(null)
   const [copied, setCopied] = useState(false)
+
+  // Load the assignable roles (global system roles + this tenant's custom roles)
+  // each time the dialog opens, so the picker reflects any role created since the
+  // last time it was shown.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    listRoles()
+      .then((r) => {
+        if (!cancelled) setRoles(r)
+      })
+      .catch(() => {
+        // Non-fatal: the invite still works with no role selected.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open])
 
   function copyLink() {
     if (!result) return
@@ -30,7 +51,12 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
     setError(null)
     setBusy(true)
     try {
-      const res = await inviteUser({ email, name, roleIds: [], sendEmail })
+      const res = await inviteUser({
+        email,
+        name,
+        roleIds: roleId ? [roleId] : [],
+        sendEmail,
+      })
       setResult(res)
       onInvited?.()
     } catch (err) {
@@ -42,7 +68,7 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
 
   function reset() {
     setOpen(false)
-    setEmail(""); setName(""); setSendEmail(true); setError(null); setResult(null); setBusy(false); setCopied(false)
+    setEmail(""); setName(""); setSendEmail(true); setRoleId(""); setError(null); setResult(null); setBusy(false); setCopied(false)
   }
 
   const submitLabel = sendEmail ? "Send invitation" : "Create invitation"
@@ -118,6 +144,21 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                 />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="invite-role">Role</Label>
+                <Select
+                  id="invite-role"
+                  value={roleId}
+                  onChange={(e) => setRoleId(e.target.value)}
+                >
+                  <option value="">No role (invite only)</option>
+                  {roles.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name}
+                    </option>
+                  ))}
+                </Select>
               </div>
               <div className="flex items-center gap-2 text-sm">
                 <Checkbox
