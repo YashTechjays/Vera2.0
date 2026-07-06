@@ -54,7 +54,16 @@ function RoomState() {
  * connection + participants. Drop-in for a modal's "live" panel; unmounting it
  * (closing the modal) disconnects the participant.
  */
-export function LiveCallRoom({ callId }: { callId: string }) {
+export function LiveCallRoom({
+  callId,
+  microphone = false,
+}: {
+  callId: string
+  /** Enable the local mic (intervene only). Watch views must leave this off —
+   *  a viewer must never be audible in the room, and requesting mic access
+   *  fails outright where getUserMedia is blocked (e.g. incognito). */
+  microphone?: boolean
+}) {
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -91,7 +100,7 @@ export function LiveCallRoom({ callId }: { callId: string }) {
       serverUrl={join.url}
       token={join.token}
       connect
-      audio
+      audio={microphone}
       video={false}
       onError={(e) => setError(e.message)}
       className="flex flex-1 flex-col"

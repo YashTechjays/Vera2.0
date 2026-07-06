@@ -142,7 +142,7 @@ export function InterveneModal({
               </div>
               {call?.id ? (
                 <div className="flex min-h-[240px] flex-1 flex-col rounded-lg border border-border">
-                  <LiveCallRoom key={call.id} callId={call.id} />
+                  <LiveCallRoom key={call.id} callId={call.id} microphone />
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
