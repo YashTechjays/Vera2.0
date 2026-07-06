@@ -1,90 +1,114 @@
-import { z } from "zod"
+import { allLeaves, isApplicable, isRequired } from "./schema"
+import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
-import { allLeafFields, schema } from "./schema"
-import type { FieldRule, FormValues, IbvField } from "./types"
-
-/** Errors keyed by dotted field path (absent = valid). */
+/** Errors keyed by root-anchored field path (absent = valid). */
 export type ValidationErrors = Record<string, string>
 
-/** A field is conditionally required if a "make this required" rule matches. */
-function conditionallyRequired(field: IbvField, values: FormValues): boolean {
-  const rules: FieldRule[] = field.rules ?? []
-  for (const rule of rules) {
-    if (!/required/i.test(rule.effect)) continue
-    const conds = rule.conditions ?? []
-    if (conds.length === 0) continue
-    const allMatch = conds.every(
-      (c) => values[conditionScope(c.field)] === c.value
-    )
-    if (allMatch) return true
-  }
-  return false
+const NUMERIC_TYPES = new Set(["currency", "percent", "integer"])
+
+/** Parse a transcribed money/percent string ("$1,500.50", "20%") to a number. */
+function parseNumeric(value: string): number {
+  return Number(value.replace(/[$,%\s]/g, ""))
 }
 
-let scopeMap: Map<string, string> | null = null
-/**
- * Resolve a rule's bare field key (e.g. "coverage_type") to its dotted path.
- * Built once from the schema's leaves; first match wins (rule keys in this
- * schema are unique by last segment — see NOTE below).
- */
-function conditionScope(fieldKey: string): string {
-  if (!scopeMap) {
-    scopeMap = new Map()
-    for (const f of allLeafFields()) {
-      const last = f.path.includes(".") ? f.path.slice(f.path.lastIndexOf(".") + 1) : f.path
-      // first match wins — do not overwrite if a later leaf shares the last segment
-      if (!scopeMap.has(last)) scopeMap.set(last, f.path)
-    }
-  }
-  return scopeMap.get(fieldKey) ?? fieldKey
+// The DSL date_format token vocabulary (M/D allow 1-2 digits; MM/DD demand 2).
+const DATE_TOKEN_RE: Record<string, string> = {
+  YYYY: "\\d{4}",
+  YY: "\\d{2}",
+  MM: "\\d{2}",
+  M: "\\d{1,2}",
+  DD: "\\d{2}",
+  D: "\\d{1,2}",
 }
-// NOTE: this maps by last path segment; safe because every rule-referenced key
-// in the current schema is unique by last segment. If a future rule references
-// a shared segment (e.g. "npi", "covered"), resolution would pick the first leaf.
 
-/**
- * Validate the whole form. Required fields (static `required_state` or matched
- * conditional rule) must be non-empty strings. Returns a path→message map.
- */
-export function validateAll(values: FormValues): ValidationErrors {
-  const shape: Record<string, z.ZodTypeAny> = {}
-  const leaves = allLeafFields()
-
-  for (const { path, field } of leaves) {
-    const required =
-      field.required_state === "required" ||
-      conditionallyRequired(field, values)
-    shape[path] = required
-      ? z.string().trim().min(1, { message: `${field.title} is required` })
-      : z.string().optional()
-  }
-
-  // zod treats dotted keys as flat keys here (we pass a flat object), so build a
-  // record schema and validate the flat values object directly.
-  const result = z.object(shape).safeParse(
-    Object.fromEntries(leaves.map(({ path }) => [path, values[path] ?? ""]))
+/** Compile a DSL date_format ("M/D/YYYY") into an anchored value regex. */
+function dateFormatRegex(format: string): RegExp {
+  const source = format.replace(
+    /YYYY|YY|MM|M|DD|D|./g,
+    (token) => DATE_TOKEN_RE[token] ?? token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   )
+  return new RegExp(`^${source}$`)
+}
 
-  const errors: ValidationErrors = {}
-  if (!result.success) {
-    for (const issue of result.error.issues) {
-      const key = String(issue.path[0])
-      if (key && !(key in errors)) errors[key] = issue.message
+/**
+ * Values legal by declaration (spec §4.4): special_values plus the declared
+ * default / inapplicable_value — they bypass pattern and range checks.
+ */
+function isDeclaredLegal(leaf: FlatLeaf, value: string): boolean {
+  const f = leaf.field
+  return (
+    (f.special_values ?? []).includes(value) ||
+    value === f.default ||
+    value === f.inapplicable_value
+  )
+}
+
+function validateLeaf(
+  schema: FormSchema,
+  leaf: FlatLeaf,
+  values: FormValues
+): string | undefined {
+  const f = leaf.field
+  const value = (values[leaf.path] ?? "").trim()
+
+  if (value === "") {
+    // A declared default counts as filled (completion/export assume it).
+    if (isRequired(schema, f, values) && f.default === undefined) {
+      return `${f.title} is required`
     }
+    return undefined
+  }
+  if (isDeclaredLegal(leaf, value)) return undefined
+
+  if (f.validation?.pattern && !new RegExp(f.validation.pattern).test(value)) {
+    return `${f.title} is invalid`
+  }
+
+  const dateFormat = f.validation?.date_format
+  if (dateFormat && f.type === "date" && !dateFormatRegex(dateFormat).test(value)) {
+    return `${f.title} must match ${dateFormat}`
+  }
+
+  const range = f.validation?.range
+  if (range && NUMERIC_TYPES.has(f.type)) {
+    const n = parseNumeric(value)
+    if (Number.isNaN(n)) return `${f.title} must be a number`
+    if (range.min !== undefined && n < range.min) {
+      return range.max !== undefined
+        ? `${f.title} must be between ${range.min} and ${range.max}`
+        : `${f.title} must be at least ${range.min}`
+    }
+    if (range.max !== undefined && n > range.max) {
+      return range.min !== undefined
+        ? `${f.title} must be between ${range.min} and ${range.max}`
+        : `${f.title} must be at most ${range.max}`
+    }
+  }
+  return undefined
+}
+
+/**
+ * Validate the whole form: requiredness (required ∧ applicable), pattern and
+ * range checks. Inapplicable fields are never flagged.
+ */
+export function validateAll(schema: FormSchema, values: FormValues): ValidationErrors {
+  const errors: ValidationErrors = {}
+  for (const leaf of allLeaves(schema)) {
+    if (!isApplicable(schema, leaf.gates, values)) continue
+    const message = validateLeaf(schema, leaf, values)
+    if (message) errors[leaf.path] = message
   }
   return errors
 }
 
-/** Validate only the required fields belonging to one section. */
+/** Validate only the fields belonging to one section. */
 export function validateSection(
+  schema: FormSchema,
   sectionKey: string,
   values: FormValues
 ): ValidationErrors {
-  const all = validateAll(values)
-  const prefix = `${sectionKey}.`
+  const prefix = `sections.${sectionKey}.`
   return Object.fromEntries(
-    Object.entries(all).filter(([p]) => p.startsWith(prefix))
+    Object.entries(validateAll(schema, values)).filter(([p]) => p.startsWith(prefix))
   )
 }
-
-export { schema as validationSchema }

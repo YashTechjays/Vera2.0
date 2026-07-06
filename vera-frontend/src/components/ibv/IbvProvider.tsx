@@ -8,7 +8,8 @@ import {
 } from "react"
 
 import { validateAll, type ValidationErrors } from "@/lib/ibv/validation"
-import { mockValues } from "@/lib/ibv/mock"
+import { parseSchema } from "@/lib/ibv/schema"
+import { demoSchema, mockValues } from "@/lib/ibv/mock"
 import {
   activeDisputeValue,
   applyAllFlags,
@@ -22,10 +23,11 @@ import {
   type DisputeFlags,
   type DisputeMap,
 } from "@/lib/ibv/disputes"
-import type { FormValues } from "@/lib/ibv/types"
+import type { FormSchema, FormValues } from "@/lib/ibv/types"
 import { ApiError } from "@/lib/api/client"
 import {
   getPatientForm,
+  getSchemaVersion,
   resolveDisputes,
   updatePatientFormStatus,
 } from "@/lib/patient-forms/api"
@@ -36,6 +38,10 @@ type SaveState = "idle" | "saving" | "saved"
 type Mode = "mock" | "api"
 
 type IbvContextValue = {
+  /** The form-schema document the open form is pinned to (fetched by its
+   *  schema_version_id; the demo form uses the bundled dev fixture). Null while
+   *  no form is open or the schema is still loading. */
+  schema: FormSchema | null
   values: FormValues
   setValue: (path: string, value: string) => void
   errors: ValidationErrors
@@ -59,6 +65,9 @@ type IbvContextValue = {
   /** A rejected status change (e.g. open disputes block completion) — shown inline. */
   statusError: string | null
   statusChanging: boolean
+  /** The open form's insurance type (e.g. "infertility_treatment"); null for the
+   *  demo/mock form. Format for display with `humanizeSegment`. */
+  insuranceType: string | null
   /** Increments after each successful save — worklists watch it to refetch. */
   savedTick: number
   modalOpen: boolean
@@ -70,6 +79,18 @@ type IbvContextValue = {
 }
 
 const IbvContext = createContext<IbvContextValue | null>(null)
+
+// schema_version rows are immutable, so fetched documents cache for the session.
+const schemaCache = new Map<string, FormSchema>()
+
+async function loadSchema(versionId: string): Promise<FormSchema> {
+  const cached = schemaCache.get(versionId)
+  if (cached) return cached
+  const detail = await getSchemaVersion(versionId)
+  const schema = parseSchema(detail.document)
+  schemaCache.set(versionId, schema)
+  return schema
+}
 
 /** Map an API form detail into the form's value + dispute maps (keyed by path). */
 function adaptDetail(detail: PatientFormDetail): {
@@ -93,12 +114,20 @@ function adaptDetail(detail: PatientFormDetail): {
   return { values, disputes }
 }
 
-export function IbvProvider({ children }: { children: ReactNode }) {
+export function IbvProvider({
+  children,
+  initialSchema = null,
+}: {
+  children: ReactNode
+  /** Pre-seeded schema for tests/stories; real forms load theirs per form. */
+  initialSchema?: FormSchema | null
+}) {
   const [modalOpen, setModalOpen] = useState(false)
   const [mode, setMode] = useState<Mode>("mock")
   const [formId, setFormId] = useState<string | null>(null)
   const [patientName, setPatientName] = useState<string | null>(null)
 
+  const [schema, setSchema] = useState<FormSchema | null>(initialSchema)
   const [values, setValues] = useState<FormValues>({})
   const [originalValues, setOriginalValues] = useState<FormValues>({})
   const [disputes, setDisputes] = useState<DisputeMap>({})
@@ -112,8 +141,12 @@ export function IbvProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<PatientFormStatus | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
   const [statusChanging, setStatusChanging] = useState(false)
+  const [insuranceType, setInsuranceType] = useState<string | null>(null)
 
-  const errors = useMemo(() => validateAll(values), [values])
+  const errors = useMemo(
+    () => (schema ? validateAll(schema, values) : {}),
+    [schema, values],
+  )
 
   const seed = useCallback(
     (vals: FormValues, disp: DisputeMap, name: string | null) => {
@@ -128,7 +161,7 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     [],
   )
 
-  // Demo path (Live Monitoring): seed from the bundled mock.
+  // Demo path (Live Monitoring): seed from the bundled mock + dev-fixture schema.
   const openForm = useCallback(() => {
     setMode("mock")
     setFormId(null)
@@ -136,6 +169,8 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     setLoading(false)
     setStatus(null)
     setStatusError(null)
+    setInsuranceType(null)
+    setSchema(demoSchema)
     seed({ ...mockValues, ...seedValues(mockDisputes) }, mockDisputes, "Demo Patient")
     setModalOpen(true)
   }, [seed])
@@ -157,14 +192,23 @@ export function IbvProvider({ children }: { children: ReactNode }) {
       setSaveState("idle")
       setStatus(null)
       setStatusError(null)
+      setInsuranceType(null)
+      setSchema(null)
       getPatientForm(id)
-        .then((detail) => {
+        .then(async (detail) => {
+          // Render against the exact document the form is pinned to — never a
+          // bundled copy (schema_version_id is the contract).
+          const loaded = await loadSchema(detail.schema_version_id)
           const { values: v, disputes: d } = adaptDetail(detail)
           seed(v, d, detail.patient_name)
+          setSchema(loaded)
           setStatus(detail.status)
+          setInsuranceType(detail.insurance_type)
         })
         .catch((err) => {
-          setError(err instanceof ApiError ? err.message : "Could not load this form.")
+          // ApiError and the parseSchema dsl_version guard both carry a
+          // human-readable, non-PHI message.
+          setError(err instanceof Error ? err.message : "Could not load this form.")
         })
         .finally(() => setLoading(false))
     },
@@ -289,6 +333,7 @@ export function IbvProvider({ children }: { children: ReactNode }) {
   }, [mode, formId, values, originalValues, disputes, flags, seed])
 
   const value: IbvContextValue = {
+    schema,
     values,
     setValue,
     errors,
@@ -309,6 +354,7 @@ export function IbvProvider({ children }: { children: ReactNode }) {
     changeStatus,
     statusError,
     statusChanging,
+    insuranceType,
     savedTick,
     modalOpen,
     openForm,

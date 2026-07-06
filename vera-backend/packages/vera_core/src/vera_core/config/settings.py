@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     # Unset → `build_livekit_gateway` raises ValueError.
     livekit_url: str | None = None
 
+    # --- IVR navigator ------------------------------------------------------
+    # Endpointing delays for the IVR-navigator turn handling (agent_worker
+    # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:
+    # lower if answers arrive late/out-of-sequence, raise if the bot answers into
+    # a mid-prompt pause. Patient by default (a machine pauses mid-readout more than
+    # a person does), well above the snappy human-cascade delays.
+    ivr_endpointing_min_delay: float = 0.8  # VERA_IVR_ENDPOINTING_MIN_DELAY
+    ivr_endpointing_max_delay: float = 1.5  # VERA_IVR_ENDPOINTING_MAX_DELAY
+
     # --- audit anchoring (WORM bucket) -------------------------------------
     # Periodic anchoring of audit_log chain heads to an object-locked GCS bucket
     # (tamper-PROOF hardening of the tamper-EVIDENT hash chain; devops-todo #10b).

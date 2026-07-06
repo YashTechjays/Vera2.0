@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils"
 import { usePermission } from "@/lib/auth/permissions"
 import {
   allowedStatusTransitions,
+  humanizeSegment,
   statusActionLabel,
   statusBadgeClass,
   statusLabel,
@@ -20,6 +21,7 @@ import { SchemaForm } from "./SchemaForm"
 
 export function IbvFormModal() {
   const {
+    schema,
     modalOpen,
     closeForm,
     dirty,
@@ -34,6 +36,7 @@ export function IbvFormModal() {
     changeStatus,
     statusError,
     statusChanging,
+    insuranceType,
   } = useIbv()
   const canWrite = usePermission("forms:write")
   const transitions = status ? allowedStatusTransitions(status) : []
@@ -45,10 +48,19 @@ export function IbvFormModal() {
         className="flex max-h-[92vh] w-[96vw] max-w-[1200px] flex-col gap-0 p-0"
       >
         <DialogHeader className="border-b border-border p-4">
-          <DialogTitle>{patientName ? `IBV — ${patientName}` : "IBV Data Entry Form"}</DialogTitle>
+          {/* Form-type eyebrow, from the loaded form's insurance type. */}
+          {insuranceType && (
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {humanizeSegment(insuranceType)}
+            </p>
+          )}
+          {/* Title from the fetched schema document — never a hardcoded form name. */}
+          <DialogTitle>
+            {[schema?.name, patientName].filter(Boolean).join(" — ") ||
+              "Patient Form"}
+          </DialogTitle>
           <DialogDescription>
-            Insurance Benefit Verification — review captured values and resolve
-            disputes.
+            Review captured values and resolve disputes.
           </DialogDescription>
         </DialogHeader>
 

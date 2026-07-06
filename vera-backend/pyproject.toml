@@ -61,6 +61,8 @@ known-first-party = ["vera_core", "control_plane", "agent_worker", "phi_codec"]
 "tests/**" = ["SIM117"]  # nested `with` reads better in test arrange blocks
 "apps/agent_worker/src/agent_worker/prompt.py" = ["E501"]  # verbatim prompt strings exceed line limit by design
 "packages/vera_core/src/vera_core/callplan/compiler.py" = ["E501"]  # verbatim prompt strings exceed line limit by design
+"apps/agent_worker/src/agent_worker/ivr_prompt.py" = ["E501"]  # verbatim prompt strings exceed line limit by design
+"packages/vera_core/src/vera_core/forms/catalog/*.py" = ["E501"]  # verbatim spoken asks exceed line limit by design
 
 # ---------------------------------------------------------------------------
 # Types

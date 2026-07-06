@@ -23,7 +23,7 @@ from livekit.agents import (
 from opentelemetry import trace
 from redis.asyncio import Redis
 
-from agent_worker.agent import VeraAgent
+from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import attach_transcript_publisher
@@ -289,7 +289,8 @@ async def entrypoint(ctx: JobContext) -> None:
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
     await session.start(
-        agent=VeraAgent(
+        agent=build_agent(
+            meta,
             boundary=boundary,
             session_id=session_id,
             instructions=instructions,

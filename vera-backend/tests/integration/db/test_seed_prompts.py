@@ -122,11 +122,20 @@ async def test_skips_when_no_published_schema(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     clean_prompts: None,
 ) -> None:
-    # No form schema seeded → nothing for the prompt to bind to. The seed must
-    # skip with a warning rather than crash, and create no prompt rows.
+    # A schema family with no PUBLISHED version → nothing for the generated
+    # prompt to bind to. The seed must skip with a warning rather than crash,
+    # and create no prompt rows for that family.
+    async with admin_sessionmaker() as session, session.begin():
+        exists = (
+            await session.execute(
+                select(FormSchema).where(FormSchema.insurance_type == INSURANCE_TYPE)
+            )
+        ).scalar_one_or_none()
+        if exists is None:
+            session.add(FormSchema(insurance_type=INSURANCE_TYPE, name="Infertility"))
     async with admin_sessionmaker() as session, session.begin():
         summary = await _seed_prompts(session)
-    assert any("skipped" in line for line in summary)
+    assert any(line.startswith(INSURANCE_TYPE) and "skipped" in line for line in summary)
     async with admin_sessionmaker() as session:
         assert await _counts(session) == (0, 0, 0)
 
