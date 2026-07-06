@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -23,6 +23,9 @@ export function UserRolesCard({ roles }: { roles: Role[] }) {
   const [addRoleId, setAddRoleId] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Mirrors selectedUserId synchronously so refreshUserRoles can drop a response
+  // that arrives after the operator has already switched users.
+  const selectedUserIdRef = useRef("")
 
   useEffect(() => {
     let cancelled = false
@@ -41,10 +44,15 @@ export function UserRolesCard({ roles }: { roles: Role[] }) {
   }, [])
 
   const refreshUserRoles = useCallback(async (userId: string) => {
+    // Bail if the operator switched users while this fetch was in flight.
+    const isStale = () => selectedUserIdRef.current !== userId
     try {
-      setUserRoles(await listUserRoles(userId))
+      const rows = await listUserRoles(userId)
+      if (isStale()) return
+      setUserRoles(rows)
       setError(null)
     } catch (err) {
+      if (isStale()) return
       setError(err instanceof ApiError ? err.message : "Could not load the user's roles.")
       setUserRoles([])
     }
@@ -56,6 +64,7 @@ export function UserRolesCard({ roles }: { roles: Role[] }) {
   // callback in refreshUserRoles still sets state from a promise, which is fine.
   const handleSelectUser = useCallback(
     (userId: string) => {
+      selectedUserIdRef.current = userId
       setSelectedUserId(userId)
       setUserRoles(null)
       setAddRoleId("")
@@ -106,7 +115,7 @@ export function UserRolesCard({ roles }: { roles: Role[] }) {
         </p>
       </div>
 
-      <RichSelect value={selectedUserId} onValueChange={handleSelectUser}>
+      <RichSelect value={selectedUserId} onValueChange={handleSelectUser} disabled={busy}>
         <RichSelectTrigger className="w-80">
           <RichSelectValue placeholder={users.length ? "Select a user" : "No users"} />
         </RichSelectTrigger>
