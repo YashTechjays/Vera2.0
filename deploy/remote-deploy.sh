@@ -116,8 +116,21 @@ if ! docker compose up -d --wait --wait-timeout 120 --force-recreate "$SERVICE";
   exit 1
 fi
 
-# Reclaim unused images older than 7 days (not just dangling ones). Each deploy leaves the
-# previous :<sha> image tagged, so a dangling-only prune never removes them; -a + an age
-# filter does. The running image is "in use" and is never touched; anything removed is still
-# in Artifact Registry, so a manual rollback just re-pulls.
-docker image prune -af --filter "until=168h"
+# Cap local image growth: keep only the 2 newest images for the service just deployed (the
+# running one + one rollback target), and drop older :<sha> tags regardless of age. An
+# age-based prune (the old `until=168h`) never bounded the COUNT, so frequent deploys filled
+# the VM disk within ~3 days, well inside the window. `docker images` lists newest-first;
+# awk dedupes IDs (a tag may point at an already-seen image); `tail -n +3` is everything past
+# the newest 2. The running image is never lost — Docker refuses to remove an image in use by
+# a running container, so even a rollback to an older image survives (the failed rmi is
+# swallowed). Removed images still live in Artifact Registry, so a deeper rollback re-pulls.
+# Best-effort (`|| true`): cleanup must never fail an already-healthy deploy.
+repo="${AR_IMAGE_BASE}/${SERVICE}"
+docker images "$repo" --format '{{.ID}}' | awk '!seen[$0]++' | tail -n +3 \
+  | xargs -r docker rmi -f >/dev/null 2>&1 || true
+
+# The per-service pass above only bounds *tagged* growth for this repo; also reclaim
+# dangling (untagged) layers left by the occasional corrupt pull or stale cache. This is
+# safe — a dangling prune never touches a tagged or in-use image — and keeps those from
+# creeping up over weeks now that the old blanket `prune -af` is gone.
+docker image prune -f >/dev/null 2>&1 || true
