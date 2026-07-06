@@ -37,6 +37,9 @@ services:
   # VERA_SMTP_* defaults point here. Captured mail is viewable at http://localhost:1080.
   sendria:
     image: msztolcman/sendria:v2.2.2.0
+    # sendria publishes an amd64-only image; pin the platform so it runs under
+    # emulation on Apple Silicon (arm64) without the host-platform-mismatch warning.
+    platform: linux/amd64
     ports:
       - "1025:1025"
       - "1080:1080"
