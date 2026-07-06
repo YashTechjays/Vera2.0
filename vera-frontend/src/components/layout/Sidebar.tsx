@@ -29,11 +29,13 @@ export function Sidebar({ collapsed }: SidebarProps) {
   // fall back to email as the display name; when that fallback fires, show the
   // account tier on the second line instead of repeating the email on both lines.
   const displayName = user?.name?.trim() || user?.email || "Signed in"
-  const secondaryLine = user?.name?.trim()
-    ? user.email
-    : user?.account_type === "platform"
-      ? "Platform operator"
-      : "Tenant member"
+  const secondaryLine = !user
+    ? ""
+    : user.name.trim()
+      ? user.email
+      : user.account_type === "platform"
+        ? "Platform operator"
+        : "Tenant member"
 
   return (
     <aside
