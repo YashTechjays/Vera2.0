@@ -17,6 +17,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.sql import func
 
 from control_plane.api.v1.common import (
     AppSettings,
@@ -152,11 +153,20 @@ async def invite_user(
         name=body.name,
         status="invited",
         account_type=AccountType.TENANT.value,
+        invited_by=caller.user_id,
     )
     session.add(user)
     await session.flush()
     for role_id in body.role_ids:
-        session.add(UserRole(tenant_id=tenant_id, app_user_id=user.id, role_id=role_id))
+        session.add(
+            UserRole(
+                tenant_id=tenant_id,
+                app_user_id=user.id,
+                role_id=role_id,
+                granted_by=caller.user_id,
+                granted_at=func.now(),
+            )
+        )
 
     token = await invites.put(
         INVITE_NS,

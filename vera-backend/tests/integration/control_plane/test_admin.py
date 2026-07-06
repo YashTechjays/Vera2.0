@@ -72,6 +72,47 @@ async def test_invite_returns_link_and_captures_email(
     assert email_sender.sent[-1].to == "newhire@test.example"
 
 
+async def test_invite_records_inviter_and_role_grant_provenance(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={
+            "email": "provenance@test.example",
+            "send_email": False,
+            "role_ids": [supervisor_id],
+        },
+    )
+    assert invite.status_code == 200, invite.text
+    user_id = invite.json()["data"]["user_id"]
+
+    async with admin_sessionmaker() as session:
+        admin_id = await session.scalar(
+            text("SELECT id FROM app_user WHERE email = 'admin@test.example'")
+        )
+        invited_by = await session.scalar(
+            text("SELECT invited_by FROM app_user WHERE id = :i").bindparams(i=UUID(user_id))
+        )
+        granted_by, granted_at = (
+            await session.execute(
+                text(
+                    "SELECT granted_by, granted_at FROM user_role"
+                    " WHERE app_user_id = :i AND role_id = :r"
+                ).bindparams(i=UUID(user_id), r=UUID(supervisor_id))
+            )
+        ).one()
+
+    assert invited_by == admin_id
+    assert granted_by == admin_id
+    assert granted_at is not None
+
+
 async def test_invite_link_only_skips_email(
     client: httpx.AsyncClient, rbac_world: RBACWorld, email_sender: InMemoryEmailSender
 ) -> None:
