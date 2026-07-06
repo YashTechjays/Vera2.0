@@ -323,3 +323,45 @@ async def test_auth_me_reflects_active_elevation(world: tuple[httpx.AsyncClient,
     elevation = after.json()["data"]["active_elevation"]
     assert elevation is not None
     assert elevation["target_tenant_id"] == str(w.tenant_id)
+
+
+async def test_elevated_operator_manages_roles_like_a_tenant_admin(
+    world: tuple[httpx.AsyncClient, World],
+) -> None:
+    # DECISION (RBAC tickets): platform admins get NO parallel role API — they
+    # elevate, then drive the same tenant endpoints under that tenant's RLS.
+    client, w = world
+
+    before = await client.get("/api/v1/roles", headers=_auth(w.super_token))
+    assert before.status_code == 403  # no active elevation → no tenant access
+
+    grant_id = (await _create(client, w, tenant=w.tenant_id)).json()["data"]["id"]
+
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(w.super_token),
+        json={"name": "ELEVATED_MADE", "description": "made under elevation", "permission_ids": []},
+    )
+    assert created.status_code == 200, created.text
+    role_id = created.json()["data"]["id"]
+
+    patched = await client.patch(
+        f"/api/v1/roles/{role_id}",
+        headers=_auth(w.super_token),
+        json={"description": "edited under elevation"},
+    )
+    assert patched.status_code == 200, patched.text
+
+    perms = await client.get("/api/v1/permissions", headers=_auth(w.super_token))
+    assert perms.status_code == 200
+    assert not any(p["code"].startswith("platform:") for p in perms.json()["data"])
+
+    deleted = await client.request(
+        "DELETE", f"/api/v1/roles/{role_id}", headers=_auth(w.super_token)
+    )
+    assert deleted.status_code == 200, deleted.text
+
+    ended = await client.post(f"{_BASE}/{grant_id}/end", headers=_auth(w.super_token))
+    assert ended.status_code == 200
+    after = await client.get("/api/v1/roles", headers=_auth(w.super_token))
+    assert after.status_code == 403  # elevation over → access gone again
