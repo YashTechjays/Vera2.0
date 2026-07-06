@@ -1,4 +1,5 @@
 # Build from vera-frontend/:
+#   ./scripts/stage-backend-schema-for-docker.sh
 #   docker build --build-arg VITE_API_BASE_URL=/api/v1 -t vera-frontend .
 #
 # The SPA is served by nginx, which also reverse-proxies /api to the
@@ -14,6 +15,12 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
+
+# src/lib/ibv/*.ts import the backend's schema JSON directly, reaching outside
+# this build context into the sibling vera-backend/. stage-backend-schema-for-
+# docker.sh (run before `docker build`) stages a copy at .docker-backend-data/;
+# put it here at the exact absolute path those relative imports resolve to.
+COPY .docker-backend-data/data /vera-backend/data
 
 # Same-origin API path by default; the pipeline overrides per environment.
 ARG VITE_API_BASE_URL=/api/v1
