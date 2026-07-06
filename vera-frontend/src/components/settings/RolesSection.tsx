@@ -30,6 +30,7 @@ export function RolesSection() {
   const [roles, setRoles] = useState<Role[] | null>(null)
   const [permissions, setPermissions] = useState<Permission[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<RoleDetail | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -60,12 +61,15 @@ export function RolesSection() {
         }
       })
     listPermissions()
-      .then((p) => {
-        if (!cancelled) setPermissions(p)
+      .then((perms) => {
+        if (!cancelled) {
+          setPermissions(perms)
+          setCatalogError(null)
+        }
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof ApiError ? err.message : "Could not load the permission catalog.")
+          setCatalogError(err instanceof ApiError ? err.message : "Could not load the permission catalog.")
         }
       })
     return () => {
@@ -126,6 +130,12 @@ export function RolesSection() {
       {error && (
         <p className="text-sm text-destructive" role="alert">
           {error}
+        </p>
+      )}
+
+      {catalogError && (
+        <p className="text-sm text-destructive" role="alert">
+          {catalogError}
         </p>
       )}
 
