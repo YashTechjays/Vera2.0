@@ -194,6 +194,14 @@ async def test_create_custom_role_appears_in_list(
     assert "SUPER_ADMIN" in names  # global system role visible via catalog RLS
 
 
+async def test_virtual_assistant_role_seeded_and_visible(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    listing = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    names = {r["name"] for r in listing.json()["data"]}
+    assert "VIRTUAL_ASSISTANT" in names
+
+
 async def test_assign_and_revoke_role(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
     invite = await client.post(
         "/api/v1/users/invitations",

@@ -102,6 +102,7 @@ class RBACWorld:
         self.admin_token = ""
         self.norole_token = ""
         self.ghost_token = ""
+        self.virtual_assistant_token = ""
 
 
 async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
@@ -168,6 +169,11 @@ async def rbac_world(
                 text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'TENANT_ADMIN'")
             )
         ).scalar_one()
+        virtual_assistant_role = (
+            await session.execute(
+                text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'VIRTUAL_ASSISTANT'")
+            )
+        ).scalar_one()
         admin = AppUser(
             tenant_id=tenant_id,
             gcip_uid=None,
@@ -182,16 +188,36 @@ async def rbac_world(
             name="No Role",
             status="active",
         )
-        session.add_all([admin, norole])
+        virtual_assistant = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="virtual_assistant@test.example",
+            name="Virtual Assistant",
+            status="active",
+        )
+        session.add_all([admin, norole, virtual_assistant])
         await session.flush()
         session.add(UserRole(tenant_id=tenant_id, app_user_id=admin.id, role_id=admin_role))
-        admin_id, norole_id = admin.id, norole.id
+        session.add(
+            UserRole(
+                tenant_id=tenant_id,
+                app_user_id=virtual_assistant.id,
+                role_id=virtual_assistant_role,
+            )
+        )
+        admin_id, norole_id, virtual_assistant_id = admin.id, norole.id, virtual_assistant.id
 
     world.admin_token = await _mint(
         session_store, user_id=admin_id, tenant_id=tenant_id, email="admin@test.example"
     )
     world.norole_token = await _mint(
         session_store, user_id=norole_id, tenant_id=tenant_id, email="norole@test.example"
+    )
+    world.virtual_assistant_token = await _mint(
+        session_store,
+        user_id=virtual_assistant_id,
+        tenant_id=tenant_id,
+        email="virtual_assistant@test.example",
     )
     # A valid session whose user_id has no app_user row -> "unknown user" deny.
     world.ghost_token = await _mint(
