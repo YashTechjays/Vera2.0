@@ -3,17 +3,38 @@ import { Sparkles } from "lucide-react"
 import { visibleNavFor } from "@/lib/nav"
 import { cn } from "@/lib/utils"
 import { useAppSelector } from "@/store/hooks"
-import { selectIsElevated, selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
+import { selectIsElevated, selectIsSuperAdmin, selectPermissions, selectUser } from "@/store/authSlice"
 
 type SidebarProps = {
   collapsed: boolean
+}
+
+/** First letters of the first two words, uppercased; the first two characters if
+ *  there's only one word (e.g. an email used as the display name fallback). */
+// eslint-disable-next-line react-refresh/only-export-components
+export function initialsFor(source: string): string {
+  const parts = source.trim().split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+  return source.slice(0, 2).toUpperCase()
 }
 
 export function Sidebar({ collapsed }: SidebarProps) {
   const permissions = useAppSelector(selectPermissions)
   const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
   const isElevated = useAppSelector(selectIsElevated)
+  const user = useAppSelector(selectUser)
   const items = visibleNavFor({ permissions, isSuperAdmin, isElevated })
+
+  // AppUser.name defaults to "" (e.g. some platform/password-only accounts), so
+  // fall back to email as the display name; when that fallback fires, show the
+  // account tier on the second line instead of repeating the email on both lines.
+  const displayName = user?.name?.trim() || user?.email || "Signed in"
+  const secondaryLine = user?.name?.trim()
+    ? user.email
+    : user?.account_type === "platform"
+      ? "Platform operator"
+      : "Tenant member"
+
   return (
     <aside
       className={cn(
@@ -65,13 +86,13 @@ export function Sidebar({ collapsed }: SidebarProps) {
           )}
         >
           <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-sidebar-primary text-xs font-semibold text-sidebar-primary-foreground">
-            AV
+            {initialsFor(displayName)}
           </div>
           {!collapsed && (
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">Agent View</p>
+              <p className="truncate text-sm font-medium">{displayName}</p>
               <p className="truncate text-xs text-sidebar-foreground/60">
-                Internal tools
+                {secondaryLine}
               </p>
             </div>
           )}
