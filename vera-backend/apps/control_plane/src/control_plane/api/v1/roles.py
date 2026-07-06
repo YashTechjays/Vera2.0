@@ -80,6 +80,13 @@ class RoleDetailResponse(RoleResponse):
     permissions: list[PermissionResponse]
 
 
+class RoleHolderResponse(BaseModel):
+    id: UUID
+    name: str
+    email: str
+    status: str
+
+
 def _to_response(row: Role) -> RoleResponse:
     return RoleResponse(
         id=row.id, name=row.name, description=row.description, is_system=row.tenant_id is None
@@ -156,6 +163,44 @@ async def get_role(
 ) -> ResponseModel[RoleDetailResponse]:
     role = await _load_role(session, role_id)
     return ok(_to_detail(role, await _role_permissions(session, role_id)))
+
+
+@router.get(
+    "/roles/{role_id}/users",
+    response_model=ResponseModel[list[RoleHolderResponse]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_role_holders(
+    role_id: UUID,
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[RoleHolderResponse]]:
+    """Who holds `role_id` — powers the Settings delete-role dialog (DELETE 409s
+    while the role is held; the UI needs to show which users to unassign first).
+    Read-only: no audit event, no cache invalidation. System roles are visible to
+    a tenant (`_load_role`), and holders come from this tenant's own `user_role`
+    rows — RLS confines the join to the caller's tenant."""
+    await _load_role(session, role_id)
+    rows = (
+        (
+            await session.execute(
+                select(AppUser)
+                .join(UserRole, UserRole.app_user_id == AppUser.id)
+                .where(UserRole.role_id == role_id)
+                .order_by(AppUser.name, AppUser.email)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ok(
+        [RoleHolderResponse(id=r.id, name=r.name, email=r.email, status=r.status) for r in rows]
+    )
 
 
 @router.patch(

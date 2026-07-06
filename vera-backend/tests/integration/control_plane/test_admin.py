@@ -784,6 +784,73 @@ async def test_list_user_roles_unknown_user_404_and_norole_403(
     assert denied.status_code == 403
 
 
+async def test_list_role_holders(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
+    created = await client.post(
+        "/api/v1/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"name": "HOLDER_TEST_ROLE", "permission_ids": []},
+    )
+    role_id = created.json()["data"]["id"]
+
+    # No holders yet.
+    empty = await client.get(
+        f"/api/v1/roles/{role_id}/users", headers=_auth(rbac_world.admin_token)
+    )
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["data"] == []
+
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={
+            "email": "holder@test.example",
+            "name": "Holder",
+            "send_email": False,
+            "role_ids": [role_id],
+        },
+    )
+    user_id = invite.json()["data"]["user_id"]
+
+    holders = await client.get(
+        f"/api/v1/roles/{role_id}/users", headers=_auth(rbac_world.admin_token)
+    )
+    assert holders.status_code == 200, holders.text
+    data = holders.json()["data"]
+    assert len(data) == 1
+    assert data[0]["id"] == user_id
+    assert data[0]["name"] == "Holder"
+    assert data[0]["email"] == "holder@test.example"
+    assert data[0]["status"] == "invited"
+
+
+async def test_list_role_holders_of_system_role(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # System roles (tenant_id IS NULL) are visible via catalog RLS, and their
+    # holders come from this tenant's own user_role rows.
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    tenant_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "TENANT_ADMIN")
+    holders = await client.get(
+        f"/api/v1/roles/{tenant_admin_id}/users", headers=_auth(rbac_world.admin_token)
+    )
+    assert holders.status_code == 200, holders.text
+    emails = {h["email"] for h in holders.json()["data"]}
+    assert "admin@test.example" in emails  # the shared rbac_world admin persona
+
+
+async def test_list_role_holders_unknown_role_404_and_norole_403(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    missing = await client.get(
+        f"/api/v1/roles/{uuid4()}/users", headers=_auth(rbac_world.admin_token)
+    )
+    assert missing.status_code == 404
+    denied = await client.get(
+        f"/api/v1/roles/{uuid4()}/users", headers=_auth(rbac_world.norole_token)
+    )
+    assert denied.status_code == 403
+
+
 # --- providers ---------------------------------------------------------------
 
 
