@@ -16,13 +16,16 @@ import "react-phone-number-input/style.css"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
 import {
   endVoiceSession,
+  listCallProviders,
   startVoiceSession,
+  type ProviderOption,
   type VoiceSessionMode,
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
@@ -201,6 +204,10 @@ export function VoiceLab() {
   // The PhoneInput yields an E.164 string (e.g. "+15551234567") or undefined.
   const [phone, setPhone] = useState<string | undefined>(undefined)
   const [ivrNavigation, setIvrNavigation] = useState(false)
+  // Provider picker for IVR-playbook selection. The list is readable by any operator with
+  // calls:read (tenant users included); the provider's active playbook is applied server-side.
+  const [providers, setProviders] = useState<ProviderOption[]>([])
+  const [providerId, setProviderId] = useState("")
   // Only flag the number field once the operator has interacted with it, so an
   // untouched empty form doesn't show a red error.
   const [touched, setTouched] = useState(false)
@@ -213,6 +220,20 @@ export function VoiceLab() {
   const phoneValid = !!phone && isValidPhoneNumber(phone)
   const showPhoneError = touched && !phoneValid
 
+  // Load selectable providers once; a failed load just leaves the picker with the generic
+  // option, so errors are non-fatal here.
+  useEffect(() => {
+    let cancelled = false
+    listCallProviders()
+      .then((rows) => {
+        if (!cancelled) setProviders(rows)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   async function start(mode: VoiceSessionMode) {
     setError(null)
     setPending(mode)
@@ -220,6 +241,7 @@ export function VoiceLab() {
       const result = await startVoiceSession({
         mode,
         enable_ivr_navigation: ivrNavigation,
+        ...(ivrNavigation && providerId ? { insurance_provider_id: providerId } : {}),
         ...(mode === "outbound" ? { phone_number: phone! } : {}),
       })
       setSession(result)
@@ -377,6 +399,27 @@ export function VoiceLab() {
                 onCheckedChange={setIvrNavigation}
               />
             </div>
+
+            {ivrNavigation && (
+              <div className="space-y-1.5 rounded-lg border p-3">
+                <Label htmlFor="ivr-provider">Insurance provider</Label>
+                <Select
+                  id="ivr-provider"
+                  value={providerId}
+                  onChange={(ev) => setProviderId(ev.target.value)}
+                >
+                  <option value="">Generic navigator (no playbook)</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-sm text-muted-foreground">
+                  Uses the provider's active playbook to specialize the navigator, if one exists.
+                </p>
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-3">
               <Button
