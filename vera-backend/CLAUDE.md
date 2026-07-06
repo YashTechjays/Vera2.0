@@ -20,6 +20,13 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   (typo, one-line rename). Use `/code-review` for correctness bugs.
 - `just up` then `just migrate` — local Postgres+Redis via docker compose, then Alembic.
   Integration tests skip without this; **RLS policies live in `migrations/`, not in models.**
+  `just up` starts only the **core** infra (postgres, redis, sendria, livekit). The heavy
+  **Langfuse** observability stack lives in the same `docker-compose.yml` but every service is
+  gated behind the **`langfuse` compose profile**, so a plain `docker compose up` / `just up`
+  never starts it. Bring it up on demand: `just langfuse-up` (= `docker compose --profile langfuse
+  up -d`, web UI at http://localhost:4000), `just langfuse-down`. Left running it balloons the
+  Docker VM until the kernel OOM-kills its ClickHouse — start it only when you actually need
+  tracing; the worker degrades gracefully (drops spans) when it's down.
   Migration `0001` materializes table DDL from `Base.metadata` at runtime — a table name may not
   appear literally in any migration; removing a model needs an explicit drop migration.
   Because `0001` runs `create_all` off the **live** models, a DB built fresh **after** a model
