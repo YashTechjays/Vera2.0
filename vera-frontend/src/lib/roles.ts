@@ -72,6 +72,19 @@ export function assignRole(userId: string, roleId: string): Promise<null> {
   })
 }
 
+export type RoleHolder = {
+  id: string
+  name: string
+  email: string
+  status: string
+}
+
+/** Who currently holds a role — powers the delete dialog's pre-flight check
+ *  (the backend refuses to delete a role while anyone still holds it). */
+export function listRoleHolders(roleId: string): Promise<RoleHolder[]> {
+  return apiRequest<RoleHolder[]>(`/roles/${encodeURIComponent(roleId)}/users`)
+}
+
 /** 409 when revoking your own last roles:manage source (self-lockout guard). */
 export function revokeRole(userId: string, roleId: string): Promise<null> {
   return apiRequest<null>(

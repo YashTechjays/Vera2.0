@@ -1,5 +1,6 @@
 import { useState } from "react"
 
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -10,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api/client"
 import {
@@ -32,9 +34,11 @@ type RoleDialogProps = {
 export function RoleDialog({ open, onOpenChange, role, permissions, onSaved }: RoleDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{role ? `Edit role: ${role.name}` : "Create role"}</DialogTitle>
+      <DialogContent showCloseButton className="flex max-h-[85vh] flex-col gap-0 p-0 sm:max-w-2xl">
+        <DialogHeader className="border-b border-border p-5 pr-12">
+          <DialogTitle className="text-base font-semibold">
+            {role ? `Edit role: ${role.name}` : "Create role"}
+          </DialogTitle>
           <DialogDescription>
             A role bundles permissions; assign it to users in the section below.
           </DialogDescription>
@@ -72,14 +76,18 @@ function RoleDialogForm({ role, permissions, onOpenChange, onSaved }: RoleDialog
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const toggle = (id: string, checked: boolean) => {
+  const setGroup = (ids: string[], checked: boolean) => {
     setSelected((cur) => {
       const next = new Set(cur)
-      if (checked) next.add(id)
-      else next.delete(id)
+      for (const id of ids) {
+        if (checked) next.add(id)
+        else next.delete(id)
+      }
       return next
     })
   }
+
+  const toggle = (id: string, checked: boolean) => setGroup([id], checked)
 
   const handleSave = async () => {
     if (!name.trim()) return
@@ -109,63 +117,107 @@ function RoleDialogForm({ role, permissions, onOpenChange, onSaved }: RoleDialog
   if (saving) saveLabel = "Saving…"
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-col gap-1">
-        <label className="text-xs text-muted-foreground" htmlFor="role-name">
-          Name
-        </label>
-        <Input
-          id="role-name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. BILLING_VIEWER"
-        />
-      </div>
-      <div className="flex flex-col gap-1">
-        <label className="text-xs text-muted-foreground" htmlFor="role-description">
-          Description
-        </label>
-        <Textarea
-          id="role-description"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="What this role is for"
-          rows={2}
-        />
-      </div>
-
-      <div className="space-y-3">
-        <p className="text-xs font-medium text-muted-foreground">Permissions</p>
-        {groupPermissionsByPrefix(permissions).map((group) => (
-          <div key={group.prefix} className="space-y-1">
-            <p className="text-xs font-semibold uppercase tracking-wide">{group.prefix}</p>
-            {group.permissions.map((p) => (
-              <label key={p.id} className="flex items-center gap-2 text-sm">
-                <Checkbox
-                  checked={selected.has(p.id)}
-                  onCheckedChange={(checked) => toggle(p.id, checked === true)}
-                />
-                <span className="font-mono text-xs">{p.code}</span>
-                <span className="truncate text-muted-foreground">{p.description}</span>
-              </label>
-            ))}
+    <>
+      <div className="flex min-h-0 flex-1 flex-col gap-4 p-5">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="role-name">Name</Label>
+            <Input
+              id="role-name"
+              autoFocus={!role}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. BILLING_VIEWER"
+            />
           </div>
-        ))}
+          <div className="space-y-1.5">
+            <Label htmlFor="role-description">Description</Label>
+            <Textarea
+              id="role-description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What this role is for"
+              rows={1}
+              className="min-h-9 resize-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <Label>Permissions</Label>
+            <Badge variant="secondary">
+              {selected.size} of {permissions.length} selected
+            </Badge>
+          </div>
+          <div className="-mr-2 min-h-0 overflow-y-auto pr-2">
+            <div className="grid items-start gap-3 sm:grid-cols-2">
+              {groupPermissionsByPrefix(permissions).map((group) => {
+                const groupIds = group.permissions.map((p) => p.id)
+                const checkedCount = groupIds.filter((id) => selected.has(id)).length
+                let groupChecked: boolean | "indeterminate" = false
+                if (checkedCount === groupIds.length) groupChecked = true
+                else if (checkedCount > 0) groupChecked = "indeterminate"
+                return (
+                  <div key={group.prefix} className="overflow-hidden rounded-lg border">
+                    <label className="flex cursor-pointer items-center justify-between gap-2 border-b bg-muted/50 px-3 py-2">
+                      <span className="text-xs font-semibold uppercase tracking-wide">
+                        {group.prefix}
+                      </span>
+                      <Checkbox
+                        aria-label={`Select all ${group.prefix} permissions`}
+                        checked={groupChecked}
+                        onCheckedChange={(checked) => setGroup(groupIds, checked === true)}
+                      />
+                    </label>
+                    <div className="divide-y">
+                      {group.permissions.map((p) => (
+                        <label
+                          key={p.id}
+                          className="flex cursor-pointer items-start gap-2.5 px-3 py-2 transition-colors hover:bg-muted/40"
+                        >
+                          <Checkbox
+                            className="mt-0.5"
+                            checked={selected.has(p.id)}
+                            onCheckedChange={(checked) => toggle(p.id, checked === true)}
+                          />
+                          <span className="flex min-w-0 flex-col gap-0.5">
+                            <span className="font-mono text-xs leading-4">{p.code}</span>
+                            {p.description && (
+                              <span className="text-xs leading-4 text-muted-foreground">
+                                {p.description}
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
       </div>
 
-      {error && (
-        <p className="text-sm text-destructive" role="alert">
+      <div className="flex items-center justify-between gap-4 border-t border-border p-4">
+        <p className="min-w-0 text-sm text-destructive" role="alert">
           {error}
         </p>
-      )}
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-          Cancel
-        </Button>
-        <Button type="button" disabled={saving || !name.trim()} onClick={handleSave}>
-          {saveLabel}
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            className="min-w-[120px]"
+            disabled={saving || !name.trim()}
+            onClick={handleSave}
+          >
+            {saveLabel}
+          </Button>
+        </div>
       </div>
-    </div>
+    </>
   )
 }

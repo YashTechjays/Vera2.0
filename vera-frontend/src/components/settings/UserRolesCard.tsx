@@ -108,13 +108,6 @@ export function UserRolesCard({ roles }: { roles: Role[] }) {
 
   return (
     <div className="space-y-3">
-      <div>
-        <h3 className="text-sm font-medium">User role assignment</h3>
-        <p className="text-sm text-muted-foreground">
-          Pick a user to see and change the roles they hold.
-        </p>
-      </div>
-
       <RichSelect value={selectedUserId} onValueChange={handleSelectUser} disabled={busy}>
         <RichSelectTrigger className="w-80">
           <RichSelectValue placeholder={users.length ? "Select a user" : "No users"} />
