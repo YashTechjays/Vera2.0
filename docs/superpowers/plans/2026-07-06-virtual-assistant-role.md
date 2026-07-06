@@ -1424,3 +1424,282 @@ git add vera-backend/packages/vera_core/src/vera_core/models/app_user.py \
         vera-backend/tests/integration/control_plane/test_admin.py
 git commit -m "feat(users): record invited_by and backfill granted_by/granted_at at invite time"
 ```
+
+---
+
+### Task 8: `GET /roles` excludes platform-tier roles from a tenant session
+
+**Added after Task 7**, prompted by a review question: the invite dialog's new role
+picker (Task 4) renders every role `GET /roles` returns — including `SUPER_ADMIN` —
+even though `invite_user`/`assign_role` already reject assigning any role that
+carries a `platform:*` permission (`roles_grant_platform_permission` in
+`api/v1/common.py`). The read side never applied that same rule, so a tenant admin
+sees an option that can never actually be assigned. Fix it at the source: a tenant
+session's `GET /roles` should never return a platform-tier role at all, for this
+consumer or any future one.
+
+**Files:**
+- Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/common.py`
+- Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/roles.py`
+- Modify: `vera-backend/tests/integration/control_plane/test_admin.py`
+
+**Interfaces:**
+- Produces: `platform_tier_role_ids(session: AsyncSession, role_ids: Iterable[UUID]) -> set[UUID]`
+  in `api/v1/common.py` — the subset of the given role ids that carry a
+  `platform:*` permission. A new, read-oriented sibling to the existing
+  `roles_grant_platform_permission` (which answers "does ANY of these role_ids
+  carry a platform permission," a single bool for a write-time guard); this one
+  answers "which of these role_ids," for filtering a list.
+- Consumes: `Permission`, `RolePermission` (already imported in `common.py`),
+  `PLATFORM_PERMISSION_PREFIX` (already defined in `common.py`).
+
+No frontend changes — `InviteUserDialog.tsx`'s `listRoles()` already just renders
+whatever `GET /roles` returns; once the backend stops returning platform-tier
+roles, the dropdown is correct with zero frontend edits. Confirmed via grep that
+`InviteUserDialog.tsx` is the only frontend consumer of `GET /roles`.
+
+- [ ] **Step 1: Add the new helper**
+
+Edit `vera-backend/apps/control_plane/src/control_plane/api/v1/common.py`. Add
+this function right after `roles_grant_platform_permission` (which ends around
+line 106 with `return row is not None`):
+
+```python
+async def platform_tier_role_ids(session: AsyncSession, role_ids: Iterable[UUID]) -> set[UUID]:
+    """The subset of `role_ids` that hold a `platform:*` permission. Read-side
+    sibling to `roles_grant_platform_permission` (a single "any of these" bool for
+    a write-time guard) — this returns the actual subset, for filtering a list
+    a tenant session is about to see (e.g. GET /roles)."""
+    ids = list(role_ids)
+    if not ids:
+        return set()
+    rows = await session.execute(
+        select(RolePermission.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            RolePermission.role_id.in_(ids),
+            Permission.code.like(f"{PLATFORM_PERMISSION_PREFIX}%"),
+        )
+        .distinct()
+    )
+    return set(rows.scalars().all())
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+Edit `vera-backend/tests/integration/control_plane/test_admin.py`.
+
+First, flip the existing assertion that currently expects `SUPER_ADMIN` to be
+visible — replace:
+
+```python
+    assert "BILLING_VIEWER" in names  # custom role
+    assert "SUPER_ADMIN" in names  # global system role visible via catalog RLS
+```
+
+with:
+
+```python
+    assert "BILLING_VIEWER" in names  # custom role
+    assert "SUPER_ADMIN" not in names  # platform-tier role, excluded from GET /roles
+```
+
+Then fix the two tests that currently resolve `SUPER_ADMIN`'s id via the
+`GET /roles` response — once Step 3 ships, that id will no longer be there to
+find. Every other test in this codebase that needs the `SUPER_ADMIN` role id
+resolves it via direct SQL instead (e.g. `test_platform_login.py:58`,
+`test_ivr_playbooks.py:82`) — follow that established idiom here too.
+
+Replace:
+
+```python
+async def test_super_admin_role_not_tenant_assignable(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "noescalate@test.example", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    # SUPER_ADMIN is a global role and visible, but it carries platform perms, so a
+    # tenant must not be able to assign it (privilege escalation guard).
+    super_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPER_ADMIN")
+    resp = await client.post(
+        f"/api/v1/users/{user_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": super_admin_id},
+    )
+    assert resp.status_code == 403
+
+
+async def test_invite_cannot_grant_platform_role(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # The invite seam must apply the same guard as assign_role (it bypasses it).
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    super_admin_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPER_ADMIN")
+    resp = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={
+            "email": "viainvite@test.example",
+            "send_email": False,
+            "role_ids": [super_admin_id],
+        },
+    )
+    assert resp.status_code == 403
+```
+
+with:
+
+```python
+async def test_super_admin_role_not_tenant_assignable(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "noescalate@test.example", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    # SUPER_ADMIN carries platform perms, so a tenant must not be able to assign it
+    # (privilege escalation guard) — resolved via direct SQL since GET /roles no
+    # longer surfaces platform-tier roles to a tenant session (see the test above).
+    async with admin_sessionmaker() as session:
+        super_admin_id = await session.scalar(
+            text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'SUPER_ADMIN'")
+        )
+    resp = await client.post(
+        f"/api/v1/users/{user_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": str(super_admin_id)},
+    )
+    assert resp.status_code == 403
+
+
+async def test_invite_cannot_grant_platform_role(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # The invite seam must apply the same guard as assign_role (it bypasses it).
+    async with admin_sessionmaker() as session:
+        super_admin_id = await session.scalar(
+            text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'SUPER_ADMIN'")
+        )
+    resp = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={
+            "email": "viainvite@test.example",
+            "send_email": False,
+            "role_ids": [str(super_admin_id)],
+        },
+    )
+    assert resp.status_code == 403
+```
+
+Run the file to confirm the new/changed assertions fail against the current
+(unfiltered) `list_roles`:
+
+```bash
+cd vera-backend && uv run pytest tests/integration/control_plane/test_admin.py -k "test_create_custom_role_appears_in_list or test_super_admin_role_not_tenant_assignable or test_invite_cannot_grant_platform_role" -v
+```
+
+Expected: `test_create_custom_role_appears_in_list` FAILS (`SUPER_ADMIN` is still in
+`names`); the other two should still PASS at this point (their id-resolution
+changed, but the endpoint itself hasn't yet — the 403 behavior they test is
+unrelated to this task and already works).
+
+- [ ] **Step 3: Filter `list_roles`**
+
+Edit `vera-backend/apps/control_plane/src/control_plane/api/v1/roles.py`.
+
+Add `platform_tier_role_ids` to the existing import from `common.py` — replace:
+
+```python
+from control_plane.api.v1.common import (
+    AuthAudit,
+    Resolver,
+    TenantId,
+    TenantSession,
+    emit_auth_event,
+    is_platform_permission,
+    roles_grant_platform_permission,
+)
+```
+
+with:
+
+```python
+from control_plane.api.v1.common import (
+    AuthAudit,
+    Resolver,
+    TenantId,
+    TenantSession,
+    emit_auth_event,
+    is_platform_permission,
+    platform_tier_role_ids,
+    roles_grant_platform_permission,
+)
+```
+
+Then replace `list_roles`'s body:
+
+```python
+async def list_roles(
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[RoleResponse]]:
+    # Catalog RLS returns the global system roles plus this tenant's custom roles.
+    rows = (await session.execute(select(Role).order_by(Role.name))).scalars().all()
+    return ok([_to_response(r) for r in rows])
+```
+
+with:
+
+```python
+async def list_roles(
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[RoleResponse]]:
+    # Catalog RLS returns the global system roles plus this tenant's custom roles.
+    # Platform-tier roles (e.g. SUPER_ADMIN) are excluded here: a tenant can never
+    # assign one (roles_grant_platform_permission blocks it at write time), so
+    # listing it would just be a confusing, unusable option.
+    rows = (await session.execute(select(Role).order_by(Role.name))).scalars().all()
+    platform_ids = await platform_tier_role_ids(session, [r.id for r in rows])
+    visible = [r for r in rows if r.id not in platform_ids]
+    return ok([_to_response(r) for r in visible])
+```
+
+- [ ] **Step 4: Run the tests again to confirm they pass**
+
+```bash
+uv run pytest tests/integration/control_plane/test_admin.py -v
+```
+
+Expected: PASS — every test in the file, including the three touched in Step 2.
+
+- [ ] **Step 5: Full backend gate**
+
+```bash
+just check
+```
+
+Expected: PASS (ruff, mypy, pytest all clean).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add vera-backend/apps/control_plane/src/control_plane/api/v1/common.py \
+        vera-backend/apps/control_plane/src/control_plane/api/v1/roles.py \
+        vera-backend/tests/integration/control_plane/test_admin.py
+git commit -m "fix(roles): exclude platform-tier roles from GET /roles for tenant sessions"
+```
