@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
     transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
+    # Compiled call-plan hand-off (control plane → worker via Redis). The TTL bounds
+    # how long an undispatched/abandoned plan (and its sealed PHI seed) lingers.
+    call_plan_ttl_seconds: int = 3600  # VERA_CALL_PLAN_TTL_SECONDS
+
     gcp_project: str | None = None
 
     # --- KMS ------------------------------------------------------------------

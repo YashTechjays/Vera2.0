@@ -76,6 +76,7 @@
     "sections": [
       {
         "section_key": "patient_information",
+        "section_role": "context",
         "title": "Patient Information",
         "description": "Contains pre-provided patient details used as contextual knowledge. Do not ask about any of these fields; use them as context only.",
         "properties": {
@@ -221,6 +222,7 @@
       },
       {
         "section_key": "appointment_information",
+        "section_role": "context",
         "title": "Appointment Information",
         "description": "Contains pre-provided appointment details to be used as context. Do not verify or question about these fields; use them only as reference.",
         "properties": {
@@ -258,6 +260,7 @@
       },
       {
         "section_key": "verification_information",
+        "section_role": "context",
         "title": "VA Information",
         "description": "Contains verification details of the patient. Use these fields as context only; do not verify or ask question about them.",
         "properties": {
@@ -301,6 +304,7 @@
       },
       {
         "section_key": "hospital_information",
+        "section_role": "context",
         "title": "Hospital Information",
         "description": "Details about the hospital associated with the patient.",
         "properties": {
@@ -355,6 +359,7 @@
       },
       {
         "section_key": "insurance_information",
+        "phase_key": "phase_2_basics",
         "title": "Insurance Information",
         "description": "Collect insurance details for the patient from the insurance representative.",
         "properties": {
@@ -575,6 +580,7 @@
       },
       {
         "section_key": "benefit_coverage",
+        "phase_key": "phase_2_basics",
         "title": "Benefit Coverage",
         "description": "Collect detailed benefit coverage information from the insurance representative. This data is used to determine the patient's plan coverage, eligibility, referral requirements, and access to services.",
         "properties": {
@@ -734,6 +740,7 @@
       },
       {
         "section_key": "infertility_treatment",
+        "phase_key": "phase_3_coverage",
         "title": "Infertility Treatment",
         "description": "\nCollect coverage for infertility services. Ask about each service separately unless the representative explicitly confirms they share benefits.\n",
         "properties": {
@@ -1243,6 +1250,7 @@
       },
       {
         "section_key": "diagnostic_labs_xray_ultrasound",
+        "phase_key": "phase_3_coverage",
         "title": "Diagnostic Testing — Labs, X-ray/Ultrasound",
         "description": "Verify coverage for Labs, X-ray, and Ultrasound. 8 CPT codes total.",
         "properties": {
@@ -1353,6 +1361,7 @@
       },
       {
         "section_key": "general_coverage",
+        "phase_key": "phase_3_coverage",
         "title": "General Coverage",
         "description": "Verify coverage for office visits, ASC professional services, and ASC facility fees.\nAsk about each separately - do NOT mix questions.\n\n**CRITICAL SEQUENCE - ASK IN THIS EXACT ORDER:**\n1. Office Visit (OV) - FIRST\n2. ASC - Professional - SECOND\n3. ASC - Facility - THIRD\n\nComplete each service fully (coverage, copay/coinsurance, prior auth) before moving to the next.",
         "properties": {
@@ -1448,6 +1457,7 @@
       },
       {
         "section_key": "infertility_limits",
+        "phase_key": "phase_4_financial",
         "title": "Infertility Limits",
         "description": "Collect lifetime maximum for infertility services.",
         "properties": {
@@ -1519,6 +1529,7 @@
       },
       {
         "section_key": "embryo_cryo_storage",
+        "phase_key": "phase_4_financial",
         "title": "Embryo Cryo Storage",
         "description": "Collect embryo cryopreservation storage time coverage information.",
         "properties": {
@@ -1535,6 +1546,7 @@
       },
       {
         "section_key": "deductibles_oop",
+        "phase_key": "phase_4_financial",
         "title": "Deductibles",
         "description": "Collect deductibles.\nAsk each question and WAIT for the answer before asking the next.",
         "properties": {
@@ -1550,6 +1562,7 @@
       },
       {
         "section_key": "male_partner_coverage",
+        "phase_key": "phase_5_male_partner",
         "title": "Male Partner Coverage",
         "description": "Collect coverage information for male partner fertility services.\nOnly ask these questions if the spouse is male.",
         "properties": {
@@ -1629,6 +1642,7 @@
       },
       {
         "section_key": "enrollment",
+        "phase_key": "phase_5_closing",
         "title": "Enrollment",
         "description": "",
         "properties": {
@@ -1700,6 +1714,7 @@
       },
       {
         "section_key": "authorization_department",
+        "phase_key": "phase_5_closing",
         "title": "Authorization Department",
         "description": "Collect authorization department information.\nThis is MANDATORY - always ask for auth department details.",
         "properties": {
@@ -1715,6 +1730,7 @@
       },
       {
         "section_key": "third_party",
+        "phase_key": "phase_5_closing",
         "title": "Third Party Administrator",
         "description": "Determine if there is a third party administrator for infertility services.\nThis is MANDATORY - you must know if there is a TPA or not.",
         "properties": {
@@ -1730,6 +1746,7 @@
       },
       {
         "section_key": "pharmacy",
+        "phase_key": "phase_5_closing",
         "title": "Pharmacy Benefit Manager",
         "description": "Collect pharmacy benefit manager information.\nThis is MANDATORY.",
         "properties": {
@@ -1745,6 +1762,7 @@
       },
       {
         "section_key": "infertility_specialty_pharmacy",
+        "phase_key": "phase_5_closing",
         "title": "Infertility Specialty Pharmacy",
         "description": "Collect Infertility Specialty Pharmacy information.\nIMPORTANT: Always use the full term \"Infertility Specialty Pharmacy\" — NEVER abbreviate to \"ISP\".",
         "properties": {
@@ -1760,6 +1778,7 @@
       },
       {
         "section_key": "insurance_representative",
+        "phase_key": "phase_5_closing",
         "title": "Insurance Representative",
         "description": "Collect insurance representative information.\nThese are CRITICAL MANDATORY fields - the call CANNOT be completed without them.\nYou MUST have ACTUAL values (not \"None\", \"Not provided\", or placeholders).",
         "properties": {
@@ -1775,6 +1794,7 @@
       },
       {
         "section_key": "provider_reference_information",
+        "section_role": "context",
         "title": "Provider Reference Information",
         "description": "This section collects reference information for the participant's healthcare provider, including name, NPI, and office location.",
         "properties": {
@@ -1830,6 +1850,7 @@
       },
       {
         "section_key": "form_information",
+        "section_role": "context",
         "title": "Additional Form Information",
         "description": "This section collects additional form-related information, including the practice name and IBV form type.",
         "properties": {
@@ -2345,7 +2366,6 @@
         "CATEGORY_SPLITTING_RULES",
         "SHARED_BENEFITS_RULES",
         "PHASE_3_VALUE_RULES",
-        "CPT_FORM_FILLING_RULES",
         "MEDICAL_SPEECH_RULES",
         "<SECTIONS>",
         "PRIOR_AUTH_DEPARTMENT_TOOL",
@@ -2399,7 +2419,6 @@
         "PHASE_5_QUESTION_TRACKING",
         "IDENTITY_GUARDRAILS",
         "FIXED_ANSWERS_GUARDRAILS",
-        "PHASE_5_BOUNDARY",
         "FORBIDDEN_ACTIONS"
       ],
       "phase_5_male_partner": [

@@ -27,7 +27,8 @@ from agent_worker.agent import VeraAgent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import attach_transcript_publisher
-from vera_core.config.settings import get_settings
+from vera_core.callplan import CallPlan, CallPlanStore
+from vera_core.config.settings import Settings, get_settings
 from vera_core.observability.correlation import (
     call_trace_attributes,
     is_listen_only_identity,
@@ -154,6 +155,23 @@ async def publish_unanswered_notice(service: TranscriptService, room_name: str) 
     await service.end(room_name)
 
 
+async def fetch_call_plan(settings: Settings, room_name: str) -> CallPlan | None:
+    """Fetch the compiled plan the control plane stashed for this room. FAIL-SAFE:
+    any problem (no plan, Redis down) returns None and the caller falls back to
+    the static persona — a generic call is better than a dead one (mirrors
+    `parse_persona_tweak`). Voice Lab / console rooms have no plan and always
+    take the fallback."""
+    redis = create_redis(settings.redis_url)
+    try:
+        store = CallPlanStore(redis, ttl_seconds=settings.call_plan_ttl_seconds)
+        return await store.get_plan(room_name)
+    except Exception:
+        logger.exception("failed to fetch call plan for %s — using static fallback", room_name)
+        return None
+    finally:
+        await redis.aclose()
+
+
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
     """Decide the correlation session id for a connected room, or None to reject it.
 
@@ -216,14 +234,22 @@ async def entrypoint(ctx: JobContext) -> None:
                     await timeout_redis.aclose()
             return
 
+    # Compiled call plan (schema-driven prompt + raw prefilled values) stashed by
+    # the control plane. Fail-safe: absent/broken plan → static persona fallback.
+    plan = await fetch_call_plan(settings, room_name)
+
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
 
-    # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
-    # plane). Fail-safe: bad/missing metadata falls back to the base persona.
-    tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
-    instructions = build_instructions(tweak)
-    greeting = resolve_greeting(tweak)
+    if plan is not None:
+        instructions = plan.flat_instructions
+        greeting = plan.greeting
+    else:
+        # Tenant persona overlay arrives as opaque dispatch metadata (set by the
+        # control plane). Fail-safe: bad/missing metadata → the base persona.
+        tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
+        instructions = build_instructions(tweak)
+        greeting = resolve_greeting(tweak)
 
     session = build_session(vad=ctx.proc.userdata.get("vad"))
 

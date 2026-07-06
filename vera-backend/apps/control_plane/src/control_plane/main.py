@@ -24,6 +24,7 @@ from vera_core.audit import (
     DatabaseAuditWriter,
     DatabaseAuthAuditWriter,
 )
+from vera_core.callplan import CallPlanStore
 from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_settings
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
@@ -47,6 +48,7 @@ def create_app(
     livekit: LiveKitGateway | None = None,
     secrets: SecretProvider | None = None,
     transcript_service: TranscriptService | None = None,
+    call_plan_store: CallPlanStore | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -102,6 +104,10 @@ def create_app(
                 )
             )
         app.state.transcript_service = _transcript_service
+        # Compiled call-plan hand-off to the agent worker.
+        app.state.call_plan_store = call_plan_store or CallPlanStore(
+            _redis(), ttl_seconds=settings.call_plan_ttl_seconds
+        )
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)

@@ -28,6 +28,7 @@ from control_plane.auth.session import SessionStore
 from control_plane.email import EmailSender
 from control_plane.idempotency import IdempotencyStore
 from vera_core.audit import AuditSink, AuthAuditSink
+from vera_core.callplan import CallPlanStore
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
@@ -91,6 +92,11 @@ def get_livekit(request: Request) -> LiveKitGateway:
 def get_transcript_service(request: Request) -> TranscriptService:
     service: TranscriptService = request.app.state.transcript_service
     return service
+
+
+def get_call_plan_store(request: Request) -> CallPlanStore:
+    store: CallPlanStore = request.app.state.call_plan_store
+    return store
 
 
 def get_auth_audit(request: Request) -> AuthAuditSink:

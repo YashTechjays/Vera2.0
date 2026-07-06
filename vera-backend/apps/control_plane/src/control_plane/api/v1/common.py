@@ -21,6 +21,7 @@ from control_plane.auth.rbac import PermissionResolver, get_resolver
 from control_plane.deps import (
     current_tenant_id,
     get_auth_audit,
+    get_call_plan_store,
     get_email_sender,
     get_invitation_store,
     get_kms,
@@ -31,6 +32,7 @@ from control_plane.deps import (
 )
 from control_plane.email import EmailSender
 from vera_core.audit import AuthAuditRecord, AuthAuditSink
+from vera_core.callplan import CallPlanStore
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.models import Permission, RolePermission
@@ -61,6 +63,7 @@ Email = Annotated[EmailSender, Depends(get_email_sender)]
 Resolver = Annotated[PermissionResolver, Depends(get_resolver)]
 LiveKit = Annotated["LiveKitGateway", Depends(get_livekit)]
 Kms = Annotated[KeyManagementService, Depends(get_kms)]
+CallPlans = Annotated[CallPlanStore, Depends(get_call_plan_store)]
 
 
 async def emit_auth_event(

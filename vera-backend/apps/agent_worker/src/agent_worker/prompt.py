@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+from vera_core.callplan import CARTESIA_MARKUP_GUIDE, DEFAULT_GREETING
 from vera_core.schemas import PersonaTweak
 
 SYSTEM_PROMPT = """You are a voice bot verifying insurance coverage for infertility services over the phone. Your responses will be spoken out loud, so keep them short, casual, and fluid, exactly like a natural human conversation.
@@ -74,19 +75,8 @@ When the verification is complete, say a brief polite closing line such as "than
 Stay focused on the verification task. Do not discuss anything outside diagnostic testing and infertility benefits. If the representative goes off topic, gently steer back."""
 
 
-GREETING = (
-    "Hi, I'm calling on behalf of a patient to verify their infertility treatment "
-    "coverage under this plan. Do you have a few minutes to go through the benefits?"
-)
-
-
-CARTESIA_MARKUP_GUIDE = """SPOKEN MARKUP (Cartesia TTS only)
-Cartesia Sonic 3.5 sounds natural from plain prose, so keep writing plain sentences — tone comes from your word choice, not markup. Tone and pacing are already set on the voice itself. Only two inline tags are supported, and they are the sole exception to the plain-sentences rule above:
-
-- <spell>...</spell> reads the contents one character at a time, which is the most reliable way to voice a code. Wrap every CPT code in it using the bare digit string, e.g. <spell>58340</spell>, instead of writing the digits out as words. For an ICD-10 code, spell each side of the decimal and say the point in prose, e.g. <spell>Z31</spell> point <spell>89</spell>.
-- <break time="200ms"/> inserts a short pause between two distinct thoughts. Use it rarely — at most once per response, and never chain two breaks.
-
-Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature and will be read aloud). Never speak a tag name out loud. Never wrap a tool call in a tag."""
+# Shared with the call-plan compiler — single source in vera_core.callplan.
+GREETING = DEFAULT_GREETING
 
 
 def build_instructions(tweak: PersonaTweak | None = None) -> str:
