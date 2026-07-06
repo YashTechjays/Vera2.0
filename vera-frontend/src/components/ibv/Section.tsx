@@ -110,7 +110,18 @@ export function Section({
         />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <Rows rows={rows} />
+        {table ? (
+          // FieldRow expects an ancestor to supply its left/right edge (it only
+          // draws its own borders between/below cells) — the outer frame skips
+          // border-x for table sections (see above), so these section-level
+          // leaves need their own wrapper for it. The matrix itself doesn't:
+          // its <table> already owns a complete collapsed-border frame.
+          <div className={cn("border-x", green ? "border-[#1f9d57]" : "border-ibv-input-border")}>
+            <Rows rows={rows} />
+          </div>
+        ) : (
+          <Rows rows={rows} />
+        )}
         {table && <SectionMatrix table={table} />}
       </CollapsibleContent>
     </Collapsible>
