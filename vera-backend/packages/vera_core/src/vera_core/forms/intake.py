@@ -15,7 +15,7 @@ from datetime import date
 from typing import Any
 
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.dsl import PATH_PREFIX
+from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc
 
 # Intake sections the promotion step reads structurally to lift typed columns out
 # of `intake_payload`. Everything else stays stored opaquely in `intake_payload`.
@@ -49,22 +49,27 @@ def _is_empty(value: object) -> bool:
 
 
 def required_intake_fields(schema_json: dict[str, Any]) -> list[str]:
-    """The `patient_information` field keys a clinic must provide at intake.
-    Data-driven from `schema_json`, version-gated on `dsl_version`:
-    v1 — the section's `required` list; v2 — leaves with unconditional
-    `required: true` and no declared `default` (a default counts as filled, and
-    conditional `{when}` requiredness cannot gate intake)."""
+    """Every field a clinic must supply at intake. Data-driven from `schema_json`,
+    version-gated on `dsl_version`:
+    v2 — root-anchored (`sections.…`) targets of the schema's own `system_fields`
+    block, deduplicated (two handles may alias the same leaf), excluding any
+    target whose leaf carries a `default` (counts as filled even if absent). A
+    `system_fields` entry is the only signal for creation-time requiredness: it's
+    the schema's declaration that downstream integrations depend on the value, so
+    intake is the only point it can be guaranteed present. The leaf's own
+    `required`/`role` govern voice collection and gap analysis ("form filling") —
+    a separate, later concern that has no bearing on what a schema needs at
+    creation.
+    v1 — the legacy `patient_information` section's `required` list only."""
     if is_v2(schema_json):
-        section = schema_json.get("sections", {}).get(_PATIENT_INFO, {})
-        fields = section.get("fields") or {}
-        return [
-            key
-            for key, field in fields.items()
-            if isinstance(field, dict)
-            and field.get("type") != "group"
-            and field.get("required") is True
-            and "default" not in field
-        ]
+        doc = FormSchemaDoc.model_validate(schema_json)
+        leaves = dict(doc.leaf_items())
+        system_fields = doc.system_fields or {}
+        required_v2: list[str] = []
+        for path in system_fields.values():
+            if leaves[path].default is None and path not in required_v2:
+                required_v2.append(path)
+        return required_v2
     for section in schema_json.get("sections", []):
         if section.get("section_key") == _PATIENT_INFO:
             required: list[str] = list(section.get("required", []))
@@ -72,15 +77,32 @@ def required_intake_fields(schema_json: dict[str, Any]) -> list[str]:
     return []
 
 
+def _resolve_path(payload: dict[str, Any], path: str) -> Any:
+    """Look up a root-anchored `sections.<key>...` path inside an intake payload
+    nested by section key (the payload itself has no `sections` root — see
+    `iter_leaf_answers`)."""
+    node: Any = payload
+    for part in path.removeprefix(PATH_PREFIX).split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
 def missing_required(payload: dict[str, Any], schema_json: dict[str, Any]) -> list[str]:
-    """Paths of required `patient_information` fields absent/blank in `payload`
+    """Paths of every `required_intake_fields` target absent/blank in `payload`
     (root-anchored `sections.…` paths for v2 documents). Names only — never the
     values."""
-    section = payload.get(_PATIENT_INFO)
-    values = section if isinstance(section, dict) else {}
-    prefix = f"{PATH_PREFIX}{_PATIENT_INFO}" if is_v2(schema_json) else _PATIENT_INFO
+    if is_v2(schema_json):
+        return [
+            path
+            for path in required_intake_fields(schema_json)
+            if _is_empty(_resolve_path(payload, path))
+        ]
+    values = payload.get(_PATIENT_INFO)
+    values = values if isinstance(values, dict) else {}
     return [
-        f"{prefix}.{field}"
+        f"{_PATIENT_INFO}.{field}"
         for field in required_intake_fields(schema_json)
         if _is_empty(values.get(field))
     ]

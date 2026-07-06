@@ -28,6 +28,84 @@ SCHEMA = {
     ]
 }
 
+# A minimal, fully valid v2 document spanning several sections — used to prove
+# required-at-intake resolution is driven entirely by the schema's own
+# `system_fields` block (dynamic per-schema, no hardcoded section/role list): a
+# `system_fields` target is required unless its leaf declares a `default`;
+# everything else — the DSL's `required`/`role`, which govern voice collection and
+# gap analysis ("form filling") — is irrelevant to what a schema needs at creation.
+V2_SCHEMA = {
+    "dsl_version": "2.1",
+    "name": "Test v2 Intake",
+    "insurance_type": "test_type",
+    "system_fields": {
+        "patient_name": "sections.patient_information.patient_name",
+        "hospital_npi": "sections.hospital_information.npi",
+        "verified_by": "sections.verification_information.verified_by",
+        # Two handles aliasing the same leaf — must not double-report it.
+        "form_queued_by": "sections.verification_information.verified_by",
+        # Carries a default — filled even if the payload omits it.
+        "callback_number": "sections.verification_information.callback_number",
+        # role=confirm — still required at intake despite not being ask/context.
+        "policy_id": "sections.insurance_information.policy_number",
+    },
+    "sections": {
+        "patient_information": {
+            "title": "Patient Information",
+            "role": "context",
+            "fields": {
+                "patient_name": {
+                    "type": "text",
+                    "title": "Patient Name",
+                    "role": "context",
+                    "required": True,
+                },
+                # `required: true` but NOT a system_fields target — must be
+                # ignored at creation ("form filling" concern, not creation).
+                "patient_dob": {
+                    "type": "date",
+                    "title": "Patient DOB",
+                    "role": "context",
+                    "required": True,
+                },
+            },
+        },
+        "hospital_information": {
+            "title": "Hospital Information",
+            "role": "context",
+            "fields": {
+                "npi": {"type": "text", "title": "Facility NPI", "role": "context"},
+            },
+        },
+        "verification_information": {
+            "title": "Verification Information",
+            "role": "context",
+            "fields": {
+                "verified_by": {"type": "text", "title": "Verified By", "role": "context"},
+                "callback_number": {
+                    "type": "phone",
+                    "title": "Callback Number",
+                    "role": "context",
+                    "default": "N/A",
+                },
+            },
+        },
+        "insurance_information": {
+            "title": "Insurance Information",
+            "fields": {
+                "policy_number": {
+                    "type": "text",
+                    "title": "Policy Number",
+                    "role": "confirm",
+                    "required": True,
+                    "prompt": {"confirm": "I have {{value}} — can you confirm?"},
+                },
+            },
+        },
+    },
+    "tasks": [{"task_key": "main", "title": "Main", "sections": ["insurance_information"]}],
+}
+
 
 class TestRequiredIntakeFields:
     def test_reads_patient_information_required(self) -> None:
@@ -68,6 +146,81 @@ class TestMissingRequired:
             }
         }
         assert missing_required(payload, SCHEMA) == ["patient_information.patient_name"]
+
+
+class TestRequiredIntakeFieldsV2:
+    def test_matches_system_fields_targets_without_a_default(self) -> None:
+        assert required_intake_fields(V2_SCHEMA) == [
+            "sections.patient_information.patient_name",
+            "sections.hospital_information.npi",
+            "sections.verification_information.verified_by",
+            "sections.insurance_information.policy_number",
+        ]
+
+    def test_excludes_fields_with_a_default(self) -> None:
+        assert "sections.verification_information.callback_number" not in required_intake_fields(
+            V2_SCHEMA
+        )
+
+    def test_excludes_required_fields_that_are_not_system_fields(self) -> None:
+        # `patient_dob` is `required: true` in the schema but not a system_fields
+        # target — that's a "form filling" concern (voice/gap-analysis), not a
+        # creation-time one.
+        assert "sections.patient_information.patient_dob" not in required_intake_fields(V2_SCHEMA)
+
+    def test_two_handles_aliasing_the_same_leaf_report_once(self) -> None:
+        # `verified_by` and `form_queued_by` both point at the same leaf.
+        required = required_intake_fields(V2_SCHEMA)
+        assert required.count("sections.verification_information.verified_by") == 1
+
+
+class TestMissingRequiredV2:
+    def test_empty_payload_lists_every_system_field_without_a_default(self) -> None:
+        assert missing_required({}, V2_SCHEMA) == [
+            "sections.patient_information.patient_name",
+            "sections.hospital_information.npi",
+            "sections.verification_information.verified_by",
+            "sections.insurance_information.policy_number",
+        ]
+
+    def test_catches_a_missing_system_field_outside_patient_information(self) -> None:
+        # Regression: `missing_required` used to only inspect `patient_information`,
+        # so a system field declared in any other section (e.g. this
+        # hospital_information system field) silently passed even when absent.
+        payload = {
+            "patient_information": {"patient_name": "Jane Doe"},
+            "verification_information": {"verified_by": "Dr. Reyes"},
+            "insurance_information": {"policy_number": "POL-1"},
+        }
+        assert missing_required(payload, V2_SCHEMA) == ["sections.hospital_information.npi"]
+
+    def test_fully_filled_yields_nothing(self) -> None:
+        payload = {
+            "patient_information": {"patient_name": "Jane Doe"},
+            "hospital_information": {"npi": "1234567890"},
+            "verification_information": {"verified_by": "Dr. Reyes"},
+            "insurance_information": {"policy_number": "POL-1"},
+        }
+        assert missing_required(payload, V2_SCHEMA) == []
+
+    def test_field_with_a_default_never_blocks_creation(self) -> None:
+        payload = {
+            "patient_information": {"patient_name": "Jane Doe"},
+            "hospital_information": {"npi": "1234567890"},
+            "verification_information": {"verified_by": "Dr. Reyes"},
+            "insurance_information": {"policy_number": "POL-1"},
+        }
+        # callback_number is absent but has a default — never reported missing.
+        assert missing_required(payload, V2_SCHEMA) == []
+
+    def test_required_field_that_is_not_a_system_field_is_ignored(self) -> None:
+        payload = {
+            "patient_information": {"patient_name": "Jane Doe"},  # patient_dob absent
+            "hospital_information": {"npi": "1234567890"},
+            "verification_information": {"verified_by": "Dr. Reyes"},
+            "insurance_information": {"policy_number": "POL-1"},
+        }
+        assert missing_required(payload, V2_SCHEMA) == []
 
 
 class TestIterLeafAnswers:
