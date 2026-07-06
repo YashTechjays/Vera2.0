@@ -6,8 +6,9 @@ No persistence: this creates an ephemeral LiveKit room, dispatches the agent, an
 appears in Live Monitoring. It is deliberately decoupled from /calls so it can be
 built and tested in parallel with the real call-initiation flow.
 
-Auth note (acknowledged stopgap): guards with `require("calls:read")`, matching the
-interim convention in `calls.py`.
+Auth note: guarded by the dedicated `voice_lab:sandbox` permission, kept separate
+from `calls:read` (which gates the real call system) so a narrow role like
+VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
 import re
@@ -73,7 +74,7 @@ class ProviderOption(BaseModel):
 )
 async def list_call_providers(
     session: TenantSession,
-    _caller: VerifiedIdentity = require("calls:read"),
+    _caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[list[ProviderOption]]:
     """Active insurance providers a tenant operator can pick when starting an IVR call. The
     insurance_provider table is GLOBAL (no RLS), so it resolves on the tenant-scoped session;
@@ -105,7 +106,7 @@ async def start_voice_session(
     livekit: LiveKit,
     session: TenantSession,
     kms: Kms,
-    caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
+    caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[VoiceSessionResponse]:
     # Synthetic call id — no DB row; the room name is still the canonical
     # call--<tenant>--<call> so worker correlation/observability work unchanged.
@@ -185,7 +186,7 @@ async def end_voice_session(
     room_name: str,
     tenant_id: TenantId,
     livekit: LiveKit,
-    _caller: VerifiedIdentity = require("calls:read"),
+    _caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[None]:
     # Deleting the room is what actually ends the session: it disconnects the agent
     # worker (its session shuts down) and any SIP callee (the outbound call hangs up).
@@ -232,7 +233,7 @@ async def stream_transcript(
         user_id, permissions = await resolver.effective_permissions(
             session, tenant_id, identity.user_id
         )
-    allowed = "calls:read" in permissions
+    allowed = "voice_lab:sandbox" in permissions
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
@@ -242,14 +243,14 @@ async def stream_transcript(
             event_type=AuditEvent.PHI_ACCESS.value,
             resource_type="transcript",
             resource_id=room_name,
-            permission_key="calls:read",
+            permission_key="voice_lab:sandbox",
             decision="allow" if allowed else "deny",
             request_id=current_request_id(request),
         )
     )
     if not allowed:
         raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN, message="missing permission calls:read"
+            DefaultExceptionCode.FORBIDDEN, message="missing permission voice_lab:sandbox"
         )
 
     async def _events() -> AsyncIterator[str]:
