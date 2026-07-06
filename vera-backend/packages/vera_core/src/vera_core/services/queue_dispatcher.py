@@ -87,6 +87,18 @@ async def try_dispatch(
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
     """
+    # 0. Serialize dispatch per tenant. The cap check below is read-then-act:
+    # under READ COMMITTED, concurrent passes (bulk enqueues, simultaneous
+    # call-end callbacks) each read the same committed active-count and each
+    # fill the "free" slots — SKIP LOCKED prevents dispatching the same form
+    # twice, but not overshooting max_agents_per_va. Transaction-scoped, so it
+    # releases at commit/rollback; different tenants never block each other.
+    # Key is namespaced so it cannot collide with the audit hash-chain locks,
+    # which key on hashtextextended(tenant_id::text, 0) (migrations 0012/0015).
+    await session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(f"queue_dispatch:{tenant_id}", 0)))
+    )
+
     # 1. Load tenant config.
     tenant = (
         await session.execute(select(Tenant).where(Tenant.id == tenant_id))
