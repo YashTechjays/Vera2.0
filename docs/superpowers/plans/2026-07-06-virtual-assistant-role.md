@@ -1170,3 +1170,257 @@ frontend dev server running):
 git add -A
 git commit -m "chore: simplify virtual_assistant role changes"
 ```
+
+---
+
+### Task 7: Invite-time onboarding traceability — `app_user.invited_by` + backfilled `granted_by`
+
+**Added after Tasks 1-6 shipped**, prompted by a review question: today there is no
+way to trace who invited a given user. `AppUser` has no `invited_by` column, and
+even `UserRole.granted_by` (the closest existing mechanism) is only set by
+`assign_role` — `invite_user`'s own initial role grants leave it `NULL`. This task
+closes both gaps. Scope is deliberately backend-only: no API response field, no
+frontend UI — just the data model, the migration, and the wiring.
+
+**Files:**
+- Modify: `vera-backend/packages/vera_core/src/vera_core/models/app_user.py`
+- Create: `vera-backend/migrations/versions/<generated>.py` (schema migration, via
+  `just makemigration` — never hand-numbered)
+- Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/users.py`
+- Modify: `vera-backend/tests/integration/control_plane/test_admin.py`
+
+**Interfaces:**
+- Produces: `AppUser.invited_by: Mapped[UUID | None]` — FK to `app_user.id`,
+  `ondelete="SET NULL"`, nullable (not every user is invited — e.g. the seeded
+  admin, or a future non-invite onboarding path).
+- Consumes: nothing new from earlier tasks; this is independent of the RBAC/Voice
+  Lab work in Tasks 1-6.
+
+- [ ] **Step 1: Add the column to the model**
+
+Edit `vera-backend/packages/vera_core/src/vera_core/models/app_user.py`. The
+current field block (after the class docstring) is:
+
+```python
+    gcip_uid: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    account_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=AccountType.TENANT.value
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+```
+
+Replace it with (adds `invited_by`, and the two imports it needs):
+
+```python
+    gcip_uid: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    account_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=AccountType.TENANT.value
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Who invited this user, for onboarding traceability. NULL for a user who
+    # wasn't invited (e.g. a seeded admin). Mirrors UserRole.granted_by's
+    # ondelete policy — losing the inviter's own account doesn't cascade.
+    invited_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+```
+
+Add the needed imports at the top of the file if not already present — check the
+existing import block first; you'll need `UUID` (from `uuid`), `ForeignKey` (from
+`sqlalchemy`), and `PG_UUID` aliased from `sqlalchemy.dialects.postgresql.UUID`
+(the exact alias pattern is already used in `vera_core/models/rbac.py` — match it):
+
+```python
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+```
+
+- [ ] **Step 2: Generate and apply the migration**
+
+```bash
+cd vera-backend && just makemigration "add app_user.invited_by for onboarding traceability"
+```
+
+This is a genuine schema change (unlike Task 2's data-only migration), so
+`alembic revision --autogenerate` should detect the new column + FK directly from
+the model diff and populate `upgrade()`/`downgrade()` itself — inspect the
+generated file to confirm it added exactly one column (`invited_by`) and one FK
+constraint on `app_user`, nothing else. If autogenerate picked up unrelated drift
+(has happened before on this repo — Task 2's implementer saw 3 unrelated index
+drops in their autogenerate output), remove anything not about `invited_by` from
+both `upgrade()` and `downgrade()`. Confirm `down_revision` chains to the actual
+current head (whatever Task 1-6's migration became, or later if more have landed
+on `dev` since) — if `alembic heads` shows more than one, run `just merge-heads`,
+never hand-edit `down_revision`.
+
+Apply it and verify the round-trip:
+
+```bash
+uv run alembic upgrade head
+uv run alembic downgrade -1
+uv run alembic upgrade head
+```
+
+All three must exit 0.
+
+- [ ] **Step 3: Write the failing test**
+
+Add to `vera-backend/tests/integration/control_plane/test_admin.py`, in the
+`# --- users / invitations ---` section, right after
+`test_invite_returns_link_and_captures_email`:
+
+```python
+async def test_invite_records_inviter_and_role_grant_provenance(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={
+            "email": "provenance@test.example",
+            "send_email": False,
+            "role_ids": [supervisor_id],
+        },
+    )
+    assert invite.status_code == 200, invite.text
+    user_id = invite.json()["data"]["user_id"]
+
+    async with admin_sessionmaker() as session:
+        invited_by = await session.scalar(
+            text("SELECT invited_by FROM app_user WHERE id = :i").bindparams(i=UUID(user_id))
+        )
+        granted_by, granted_at = (
+            await session.execute(
+                text(
+                    "SELECT granted_by, granted_at FROM user_role"
+                    " WHERE app_user_id = :i AND role_id = :r"
+                ).bindparams(i=UUID(user_id), r=UUID(supervisor_id))
+            )
+        ).one()
+
+    admin_id = await session_admin_id(session, rbac_world)  # see note below
+    assert str(invited_by) == admin_id
+    assert str(granted_by) == admin_id
+    assert granted_at is not None
+```
+
+`RBACWorld` doesn't expose the admin persona's `app_user.id` directly (only its
+session token) — rather than inventing a `session_admin_id` helper, resolve it the
+same way the fixture itself does, inline in the test:
+
+```python
+    async with admin_sessionmaker() as session:
+        admin_id = await session.scalar(
+            text("SELECT id FROM app_user WHERE email = 'admin@test.example'")
+        )
+        invited_by = await session.scalar(
+            text("SELECT invited_by FROM app_user WHERE id = :i").bindparams(i=UUID(user_id))
+        )
+        granted_by, granted_at = (
+            await session.execute(
+                text(
+                    "SELECT granted_by, granted_at FROM user_role"
+                    " WHERE app_user_id = :i AND role_id = :r"
+                ).bindparams(i=UUID(user_id), r=UUID(supervisor_id))
+            )
+        ).one()
+
+    assert invited_by == admin_id
+    assert granted_by == admin_id
+    assert granted_at is not None
+```
+
+Use this second version (drop the first draft's `session_admin_id` call — it
+doesn't exist). Run it to confirm it fails (the columns aren't set yet):
+
+```bash
+uv run pytest tests/integration/control_plane/test_admin.py -k test_invite_records_inviter_and_role_grant_provenance -v
+```
+
+Expected: FAIL — `invited_by`/`granted_by` are `NULL`, not the admin's id.
+
+- [ ] **Step 4: Wire it up in `invite_user`**
+
+Edit `vera-backend/apps/control_plane/src/control_plane/api/v1/users.py`.
+
+Replace:
+
+```python
+    user = AppUser(
+        tenant_id=tenant_id,
+        email=email,
+        name=body.name,
+        status="invited",
+        account_type=AccountType.TENANT.value,
+    )
+    session.add(user)
+    await session.flush()
+    for role_id in body.role_ids:
+        session.add(UserRole(tenant_id=tenant_id, app_user_id=user.id, role_id=role_id))
+```
+
+with:
+
+```python
+    user = AppUser(
+        tenant_id=tenant_id,
+        email=email,
+        name=body.name,
+        status="invited",
+        account_type=AccountType.TENANT.value,
+        invited_by=caller.user_id,
+    )
+    session.add(user)
+    await session.flush()
+    for role_id in body.role_ids:
+        session.add(
+            UserRole(
+                tenant_id=tenant_id,
+                app_user_id=user.id,
+                role_id=role_id,
+                granted_by=caller.user_id,
+                granted_at=func.now(),
+            )
+        )
+```
+
+`func` is already imported in this file (used elsewhere) — check the top of the
+file first; if it isn't, add `from sqlalchemy import func` (match how `roles.py`
+imports it: `from sqlalchemy.sql import func`).
+
+- [ ] **Step 5: Run the test again to confirm it passes**
+
+```bash
+cd vera-backend && uv run pytest tests/integration/control_plane/test_admin.py -v
+```
+
+Expected: PASS — including the new test and every pre-existing test in the file
+(regression check).
+
+- [ ] **Step 6: Full backend gate**
+
+```bash
+just check
+```
+
+Expected: PASS (ruff, mypy, pytest all clean).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add vera-backend/packages/vera_core/src/vera_core/models/app_user.py \
+        vera-backend/migrations/versions/ \
+        vera-backend/apps/control_plane/src/control_plane/api/v1/users.py \
+        vera-backend/tests/integration/control_plane/test_admin.py
+git commit -m "feat(users): record invited_by and backfill granted_by/granted_at at invite time"
+```
