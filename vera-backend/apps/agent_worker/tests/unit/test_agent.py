@@ -61,7 +61,9 @@ def test_vera_agent_has_end_call_tool_and_persona() -> None:
     agent = VeraAgent(boundary=PassthroughPHIBoundary(), session_id="s1")
     tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
     assert tool_names == ["end_call"]
-    assert "infertility" in agent.instructions.lower()
+    # the fallback persona is schema-agnostic behaviour (verification content now
+    # comes from the compiled call plan, not this constant)
+    assert "verifying insurance coverage" in agent.instructions.lower()
     # the chat persona greets on enter (overrides the base no-op)
     assert type(agent).on_enter is not Agent.on_enter
     # ...and carries the PHI-wall node overrides

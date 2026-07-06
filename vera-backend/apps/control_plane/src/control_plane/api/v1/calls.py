@@ -31,12 +31,16 @@ from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.callplan import (
+    DEFAULT_GREETING,
+    CallPlan,
     CallPlanStore,
-    CompileError,
     build_prefill,
-    compile_call_plan,
+    render_runtime_prompt,
 )
+from vera_core.forms.conditions import is_v2
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import iter_leaf_answers
+from vera_core.forms.prompting import compile_prompt_document
 from vera_core.forms.review import unwrap_value
 from vera_core.models import Call, CallEvent, FieldAnswer, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -214,18 +218,16 @@ async def _compile_and_stash(
     tweak: PersonaTweak,
     room_name: str,
 ) -> list[str] | None:
-    """Load the form's pinned schema version, build the DB prefill, compile the
+    """Load the form's pinned schema version, render the v2 form-schema into a
     CallPlan, pin the call→prompt lineage, and stash the plan in Redis.
 
     Returns the sorted field_paths disclosed into the plan (for the caller's PHI
-    audit) — the exact prefill set, so the audit is independent of how the
-    compiler routes those values (confirm fields vs. prose placeholders).
+    audit) — the exact prefill set.
 
-    Returns None (stashing NOTHING) when the schema cannot compile — the worker
-    then runs its static-persona fallback, mirroring its own fail-safe posture.
-    A dead POST /calls on a platform-authoring bug is worse than a generic call,
-    and legacy forms bound to a pre-DSL schema (empty schema_json) must keep
-    working."""
+    Returns None (stashing NOTHING) when the schema is not a valid v2 document —
+    the worker then runs its static-persona fallback, mirroring its own fail-safe
+    posture. A dead POST /calls on a platform-authoring bug is worse than a
+    generic call."""
     schema_version = (
         await session.execute(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
@@ -233,6 +235,26 @@ async def _compile_and_stash(
     ).scalar_one_or_none()  # global catalog (no RLS); RESTRICT FK → should exist
     if schema_version is None:
         raise ConflictError(message="the form's schema version is missing")
+
+    schema_json = schema_version.schema_json
+    if not is_v2(schema_json):
+        logger.warning(
+            "schema_version %s is not a v2 document — static fallback for %s",
+            schema_version.id,
+            room_name,
+        )
+        return None
+    try:
+        doc = FormSchemaDoc.model_validate(schema_json)
+    except ValueError:
+        logger.warning(
+            "schema_version %s failed v2 validation — static fallback for %s",
+            schema_version.id,
+            room_name,
+            exc_info=True,
+        )
+        return None
+    composite = compile_prompt_document(doc)
 
     # Published prompt version for the same schema family — the call→prompt→schema
     # lineage pin. Optional: a missing published prompt does not block the call.
@@ -248,9 +270,10 @@ async def _compile_and_stash(
     ).scalar_one_or_none()
     call.prompt_version_id = prompt_version_id
 
-    # DB-known values: the intake payload leaves, overlaid by the current
-    # field_answer rows (which include corrections and prior-call answers).
-    values: dict[str, object] = dict(iter_leaf_answers(form.intake_payload))
+    # DB-known values: the intake payload leaves (root-anchored under `sections.`
+    # for v2, matching the schema paths), overlaid by the current field_answer
+    # rows (which include corrections and prior-call answers).
+    values: dict[str, object] = dict(iter_leaf_answers({"sections": form.intake_payload}))
     rows = (
         await session.execute(
             select(FieldAnswer.field_path, FieldAnswer.value).where(
@@ -262,28 +285,16 @@ async def _compile_and_stash(
         values[field_path] = unwrap_value(value_json)
     prefill = build_prefill(values)
 
-    try:
-        plan = compile_call_plan(
-            schema_version.schema_json,
-            prefill,
-            tweak,
-            room_name=room_name,
-            tenant_id=str(call.tenant_id),
-            call_id=str(call.id),
-            schema_version_id=str(schema_version.id),
-            prompt_version_id=str(prompt_version_id) if prompt_version_id else None,
-        )
-    except CompileError:
-        # A platform-authoring problem, not a caller problem. Log (message is
-        # developer-authored, non-PHI) and start the call plan-less.
-        logger.warning(
-            "schema_version %s cannot compile into a call plan for %s — static fallback",
-            schema_version.id,
-            room_name,
-            exc_info=True,
-        )
-        return None
-
+    plan = CallPlan(
+        room_name=room_name,
+        tenant_id=str(call.tenant_id),
+        call_id=str(call.id),
+        schema_version_id=str(schema_version.id),
+        prompt_version_id=str(prompt_version_id) if prompt_version_id else None,
+        greeting=tweak.greeting or DEFAULT_GREETING,
+        flat_instructions=render_runtime_prompt(composite, prefill, tweak),
+        composite=composite,
+    )
     await call_plans.put_plan(plan)
     return sorted(prefill)
 

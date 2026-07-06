@@ -40,7 +40,6 @@ def _plan(room: str = "call--t--c") -> CallPlan:
         schema_version_id="sv",
         greeting="hi",
         flat_instructions="do things",
-        sections=[],
     )
 
 

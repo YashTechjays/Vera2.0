@@ -3,9 +3,9 @@ import logging
 import pytest
 
 from agent_worker.prompt import (
+    BASE_PERSONA,
     CARTESIA_MARKUP_GUIDE,
     GREETING,
-    SYSTEM_PROMPT,
     build_instructions,
     parse_persona_tweak,
     resolve_greeting,
@@ -13,14 +13,14 @@ from agent_worker.prompt import (
 from vera_core.schemas import PersonaTweak
 
 
-def test_prompt_is_chat_only_and_includes_cartesia_guide() -> None:
-    assert "record_service_coverage" not in SYSTEM_PROMPT
-    assert "end_call" in SYSTEM_PROMPT
-    assert "infertility" in SYSTEM_PROMPT.lower()
-    assert "diagnostic testing" in SYSTEM_PROMPT.lower()
+def test_fallback_persona_is_generic_and_includes_cartesia_guide() -> None:
+    # The fallback persona is schema-agnostic behaviour only (the verification
+    # content now comes from the compiled call plan, not this constant).
+    assert "PERSONA" in BASE_PERSONA
+    assert "end_call" in BASE_PERSONA
     assert GREETING.startswith("Hi, I'm calling on behalf of a patient")
     combined = build_instructions()
-    assert combined.startswith(SYSTEM_PROMPT)
+    assert combined.startswith(BASE_PERSONA)
     assert CARTESIA_MARKUP_GUIDE in combined
     assert "<spell>" in CARTESIA_MARKUP_GUIDE
 
@@ -32,7 +32,7 @@ def test_empty_tweak_is_no_op() -> None:
 
 def test_extra_instructions_appended_before_cartesia_guide() -> None:
     out = build_instructions(PersonaTweak(extra_instructions="Confirm member ID twice."))
-    assert out.startswith(SYSTEM_PROMPT)
+    assert out.startswith(BASE_PERSONA)
     assert "Confirm member ID twice." in out
     assert out.index("Confirm member ID twice.") < out.index(CARTESIA_MARKUP_GUIDE)
 

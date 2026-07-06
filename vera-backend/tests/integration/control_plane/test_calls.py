@@ -327,28 +327,42 @@ async def test_calls_require_auth(
 # schema into a CallPlan in Redis, keyed by room name.
 # ---------------------------------------------------------------------------
 
-# Minimal compilable schema DSL (the real one is exercised by unit tests).
+# Minimal valid v2 (dsl 2.1) document (the real IBV schema is exercised by unit tests).
 _MINI_SCHEMA: dict[str, Any] = {
-    "constraint_library": {},
-    "global_policies": [
-        {"title": "Persona", "source": "persona.py:AGENT_PERSONA", "exact_text": "test persona"}
-    ],
-    "phase_order": {"phase_1": ["AGENT_PERSONA", "<SECTIONS>"]},
-    "sections": [
-        {
-            "section_key": "patient_information",
+    "dsl_version": "2.1",
+    "name": "Mini",
+    "insurance_type": "infertility_treatment",
+    "system_fields": {"patient_name": "sections.patient_information.patient_name"},
+    "sections": {
+        "patient_information": {
             "title": "Patient Information",
-            "section_role": "context",
-            "properties": {
-                "patient_name": {"type": "string", "title": "Patient Name", "confirm_only": True}
+            "role": "context",
+            "fields": {
+                "patient_name": {"type": "text", "title": "Patient Name", "role": "context"}
             },
         },
-        {
-            "section_key": "s1",
-            "title": "Section One",
-            "phase_key": "phase_1",
-            "properties": {"f1": {"type": "string", "title": "Field One"}},
+        "coverage": {
+            "title": "Coverage",
+            "role": "collect",
+            "fields": {
+                "covered": {
+                    "type": "enum",
+                    "title": "Covered",
+                    "role": "ask",
+                    "required": True,
+                    "values": ["Yes", "No"],
+                    "prompt": {"ask": "Is treatment covered under this plan?"},
+                }
+            },
         },
+    },
+    "tasks": [
+        {
+            "task_key": "main",
+            "title": "Main",
+            "prompt": "Verify coverage.",
+            "sections": ["coverage"],
+        }
     ],
 }
 
@@ -442,13 +456,14 @@ async def test_start_call_stashes_plan_with_raw_prefill(
         assert raw_plan is not None, "compiled plan missing from Redis"
         plan = CallPlan.model_validate_json(raw_plan)
         assert plan.room_name == room_name
-        assert "test persona" in plan.flat_instructions
-        # Tokenization removed: the plan carries the RAW confirm value (dev
-        # simplification — synthetic-data-only, adr/devops-todo.md #8).
-        confirm = next(
-            f for s in plan.sections for f in s.fields if f.field_path.endswith("patient_name")
-        )
-        assert confirm.mode == "confirm" and confirm.confirm_value == "Plan Test Patient"
+        # The v2 schema is rendered into flat_instructions: the task's question and
+        # the raw prefilled context value both land (tokenization removed —
+        # synthetic-data-only, adr/devops-todo.md #8).
+        assert "Is treatment covered under this plan?" in plan.flat_instructions
+        assert "Plan Test Patient" in plan.flat_instructions
+        # The structured composite is carried for later per-task-agent milestones.
+        assert plan.composite.get("dsl_version") == "2.1"
+        assert [t["task_key"] for t in plan.composite["tasks"]] == ["main"]
         # There is no separate sealed-seed key anymore.
         assert await redis.get(f"vera:phiseed:{room_name}") is None
     finally:
