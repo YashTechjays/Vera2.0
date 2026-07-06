@@ -87,6 +87,9 @@ def _to_response(row: Role) -> RoleResponse:
 
 
 async def _role_permissions(session: AsyncSession, role_id: UUID) -> list[Permission]:
+    """All permissions granted to `role_id`, UNFILTERED — platform-tier codes included.
+    Callers must pass this through `_visible_permissions`/`_to_detail` before rendering,
+    never return it directly."""
     return list(
         (
             await session.execute(

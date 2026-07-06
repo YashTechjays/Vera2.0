@@ -11,10 +11,10 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from scripts.seed import _seed_permissions, _seed_system_roles
-from vera_core.db import set_current_tenant, set_platform, uuid7
+from vera_core.db import platform_session, set_current_tenant, set_platform, tenant_session, uuid7
 from vera_core.models import AppUser, Tenant, UserRole
 
 
@@ -135,6 +135,31 @@ async def test_platform_session_resolves_super_admin_grant(
             ).scalars()
         )
     assert "calls:read" in codes and "audit:read" in codes  # SUPER_ADMIN holds all perms
+
+
+async def test_platform_session_survives_prior_tenant_session_on_same_connection(
+    rls_database_url: str, world: PlatformWorld
+) -> None:
+    """Regression for the GUC-contamination bug (e7bb96c): once a pooled connection's
+    backend has registered `app.tenant_id` (via a prior tenant_session), a later
+    platform_session on that SAME connection must still resolve — it must not hit the
+    `''::uuid` cast error a bare "GUC left unset" platform session would raise on a
+    contaminated connection. `pool_size=1, max_overflow=0` forces both sessions onto
+    the one physical connection, so this only passes because platform_session pins
+    TENANT_GUC to NIL_TENANT_ID instead of leaving it unset."""
+    engine = create_async_engine(rls_database_url, pool_size=1, max_overflow=0)
+    try:
+        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with tenant_session(sessionmaker, world.tenant_id) as s:
+            await s.execute(text("SELECT 1 FROM app_user"))  # registers app.tenant_id on the conn
+
+        async with platform_session(sessionmaker) as s:
+            ids = set((await s.execute(text("SELECT id FROM app_user"))).scalars())
+        assert world.platform_user_id in ids  # platform-readable NULL-tenant row still resolves
+        assert world.tenant_user_id not in ids
+    finally:
+        await engine.dispose()
 
 
 # --- SECURITY DEFINER: elevation lifecycle --------------------------------

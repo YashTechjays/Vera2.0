@@ -33,6 +33,12 @@ PLATFORM_GUC = "app.platform"
 # but not on NULL. A platform session must therefore pin TENANT_GUC to a value that
 # always casts cleanly and can never match a real tenant row, rather than leaving it
 # unset and hoping the connection was never previously touched by a tenant session.
+#
+# Pinning the sentinel also changes strict WITH CHECK semantics from "always deny" (an
+# unset/NULL GUC can never equal any tenant_id) to "deny unless a row's tenant column
+# literally equals the nil UUID" — closed off by FK anchoring on every tenant_id column,
+# since no real tenant row can ever have id = NIL_TENANT_ID; `tenant.id` itself is the
+# one tenant_id-shaped column with no FK anchor, so it must never be seeded with this value.
 NIL_TENANT_ID = UUID(int=0)
 
 
@@ -106,6 +112,11 @@ def rls_policy_ddl(table: str, *, tenant_column: str = "tenant_id") -> list[str]
     connection that never called set_current_tenant sees zero rows (fail
     closed). FORCE makes the policy apply to the table owner too, which is
     what the app role is on Cloud SQL.
+
+    Caveat: on a pooled connection previously touched by a tenant session, the GUC is
+    no longer unset but '' (its reset value), and `::uuid` raises rather than reading
+    NULL — still fail-closed, but as an error, not zero rows. `platform_session` avoids
+    this by pinning the GUC to `NIL_TENANT_ID` instead of leaving it unset.
     """
     policy = f"{table}_tenant_isolation"
     using = f"{tenant_column} = current_setting('{TENANT_GUC}', true)::uuid"
@@ -152,8 +163,9 @@ def platform_readable_rls_policy_ddl(table: str, *, tenant_column: str = "tenant
 
       * a tenant session (flag unset) sees ONLY `tenant_id = GUC` — NULL rows stay
         invisible to it, preserving the NullableTenantColumnMixin fail-closed rule;
-      * a platform session (`platform_session`: flag on, no tenant GUC) sees ONLY
-        the NULL-tenant rows;
+      * a platform session (`platform_session`: flag on, tenant GUC pinned to
+        `NIL_TENANT_ID` rather than left unset — see that sentinel's docstring) sees
+        ONLY the NULL-tenant rows;
       * an `elevated_session` (flag on + tenant GUC) sees both — the operator's own
         global grant and the target tenant's rows.
 
