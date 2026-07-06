@@ -2,6 +2,7 @@ import { lazy, useEffect } from "react"
 import { BrowserRouter, Routes, Route } from "react-router-dom"
 import { AppShell } from "@/components/layout/AppShell"
 import { RequireAuth } from "@/components/auth/RequireAuth"
+import { RequireNavRoute } from "@/components/auth/RequireNavRoute"
 import { useAppDispatch } from "@/store/hooks"
 import { fetchMe } from "@/store/authSlice"
 import { getToken } from "@/lib/auth/storage"
@@ -47,12 +48,21 @@ function App() {
               page (e.g. Voice Lab) shows a spinner in the content area while the
               sidebar/topbar stay mounted. */}
           <Route element={<AppShell />}>
-            <Route index element={<LiveMonitoring />} />
+            <Route
+              index
+              element={<RequireNavRoute to="/"><LiveMonitoring /></RequireNavRoute>}
+            />
             <Route path="data-management" element={<DataManagement />} />
             <Route path="users" element={<Users />} />
             <Route path="voice-lab" element={<VoiceLab />} />
-            <Route path="call-history" element={<Placeholder title="Call History" />} />
-            <Route path="analytics" element={<Placeholder title="Analytics" />} />
+            <Route
+              path="call-history"
+              element={<RequireNavRoute to="/call-history"><Placeholder title="Call History" /></RequireNavRoute>}
+            />
+            <Route
+              path="analytics"
+              element={<RequireNavRoute to="/analytics"><Placeholder title="Analytics" /></RequireNavRoute>}
+            />
             <Route path="tenant-access" element={<TenantAccess />} />
             {/* Super-admin-only prompt editor. */}
             <Route path="agent-prompt" element={<AgentPrompt />} />
