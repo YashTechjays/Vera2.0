@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -49,6 +49,9 @@ export function RolesSection() {
   const [deleting, setDeleting] = useState(false)
   const [holders, setHolders] = useState<RoleHolder[] | null>(null)
   const [removingHolderId, setRemovingHolderId] = useState<string | null>(null)
+  // Which role the open delete dialog belongs to — guards stale holder fetches
+  // (same pattern as UserRolesCard.selectedUserIdRef).
+  const confirmDeleteIdRef = useRef<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -115,12 +118,17 @@ export function RolesSection() {
     setDeleteError(null)
     setHolders(null)
     setConfirmDelete(role)
+    confirmDeleteIdRef.current = role.id
     // Pre-flight: who still holds this role? The backend refuses deletion while
     // anyone does, so surface the holders up front instead of a dead-end 409.
     listRoleHolders(role.id)
-      .then(setHolders)
+      .then((rows) => {
+        if (confirmDeleteIdRef.current === role.id) setHolders(rows)
+      })
       .catch((err) => {
-        setHolders([])
+        if (confirmDeleteIdRef.current !== role.id) return
+        // Leave holders null: Delete stays disabled until a check SUCCEEDS —
+        // "couldn't verify" must never read as "verified empty".
         setDeleteError(
           err instanceof ApiError ? err.message : "Could not check who holds this role.",
         )
@@ -129,6 +137,7 @@ export function RolesSection() {
 
   const closeDeleteDialog = useCallback(() => {
     if (deleting) return
+    confirmDeleteIdRef.current = null
     setConfirmDelete(null)
     setDeleteError(null)
     setHolders(null)
@@ -290,7 +299,7 @@ export function RolesSection() {
           </DialogHeader>
 
           <div className="space-y-2 px-5 pb-4">
-            {holders === null && (
+            {holders === null && !deleteError && (
               <p className="text-sm text-muted-foreground">Checking who holds this role…</p>
             )}
             {holders?.length === 0 && !deleteError && (
