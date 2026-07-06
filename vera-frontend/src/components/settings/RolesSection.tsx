@@ -22,6 +22,7 @@ import {
 } from "@/lib/roles"
 import { PermissionsTable } from "./PermissionsTable"
 import { RoleDialog } from "./RoleDialog"
+import { UserRolesCard } from "./UserRolesCard"
 
 /** Roles & Permissions settings section. Mount only behind a `roles:manage`
  *  check — every endpoint underneath is gated server-side too. */
@@ -192,6 +193,8 @@ export function RolesSection() {
       />
 
       <PermissionsTable permissions={permissions ?? []} />
+
+      <UserRolesCard roles={roles ?? []} />
     </section>
   )
 }
