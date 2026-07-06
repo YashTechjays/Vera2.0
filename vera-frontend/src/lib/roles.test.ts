@@ -26,4 +26,9 @@ describe("groupPermissionsByPrefix", () => {
     const groups = groupPermissionsByPrefix([perm("1", "standalone")])
     expect(groups).toEqual([{ prefix: "standalone", permissions: [perm("1", "standalone")] }])
   })
+
+  it("groups a multi-colon code under its first segment only", () => {
+    const groups = groupPermissionsByPrefix([perm("1", "a:b:c")])
+    expect(groups).toEqual([{ prefix: "a", permissions: [perm("1", "a:b:c")] }])
+  })
 })

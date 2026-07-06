@@ -162,6 +162,7 @@ export function RolesSection() {
                         type="button"
                         size="sm"
                         variant="outline"
+                        disabled={permissions === null}
                         onClick={() => void openEdit(role)}
                       >
                         Edit

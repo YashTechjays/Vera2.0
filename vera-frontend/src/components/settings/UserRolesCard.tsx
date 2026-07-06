@@ -158,7 +158,7 @@ export function UserRolesCard({ roles }: { roles: Role[] }) {
           </div>
 
           <div className="flex items-center gap-2">
-            <RichSelect value={addRoleId} onValueChange={setAddRoleId}>
+            <RichSelect value={addRoleId} onValueChange={setAddRoleId} disabled={busy}>
               <RichSelectTrigger className="w-72">
                 <RichSelectValue placeholder="Add a role…" />
               </RichSelectTrigger>
