@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
 from vera_core.db import uuid7
-from vera_core.models import AuditLog, Call, PatientForm
+from vera_core.models import AuditLog, Call, InsuranceProvider, PatientForm
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 from vera_core.observability.correlation import parse_room_name
@@ -204,6 +204,86 @@ async def test_create_call_unknown_form_returns_404(
         json={"form_id": str(uuid4())},
     )
     assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_create_call_unknown_provider_returns_404(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+) -> None:
+    # Checked before flush so an unknown id is a 404, not an FK violation → 500.
+    resp = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id), "insurance_provider_id": str(uuid4())},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_create_call_inactive_provider_returns_404(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # An inactive provider must not start a call (nor let its playbook steer one) — the
+    # existence check requires status = active, so it 404s like an unknown id.
+    provider_id = uuid7()
+    async with admin_sessionmaker() as s, s.begin():
+        s.add(
+            InsuranceProvider(id=provider_id, name=f"Inactive {provider_id.hex}", status="inactive")
+        )
+    try:
+        resp = await client.post(
+            "/api/v1/calls",
+            headers=_auth(rbac_world.admin_token),
+            json={"form_id": str(seeded_form_id), "insurance_provider_id": str(provider_id)},
+        )
+        assert resp.status_code == 404, resp.text
+    finally:
+        async with admin_sessionmaker() as s, s.begin():
+            await s.execute(
+                text("DELETE FROM insurance_provider WHERE id = :i").bindparams(i=provider_id)
+            )
+
+
+@pytest.mark.asyncio
+async def test_create_call_nests_persona_tweak_in_dispatch_metadata(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The tweak rides under its own metadata key so sibling keys (enable_ivr_navigation, …)
+    never trip the worker's extra="forbid" PersonaTweak validation and silently drop it."""
+    async with admin_sessionmaker() as s, s.begin():
+        await s.execute(
+            text("UPDATE tenant SET persona_tweak = CAST(:p AS jsonb) WHERE id = :t").bindparams(
+                p='{"greeting": "Hello from Acme."}', t=rbac_world.tenant_id
+            )
+        )
+    try:
+        resp = await client.post(
+            "/api/v1/calls",
+            headers=_auth(rbac_world.admin_token),
+            json={"form_id": str(seeded_form_id), "enable_ivr_navigation": True},
+        )
+        assert resp.status_code == 200, resp.text
+        meta = fake_livekit.dispatch_metadata[-1]
+        assert meta is not None
+        assert meta["persona_tweak"] == {"greeting": "Hello from Acme."}
+        assert meta["enable_ivr_navigation"] is True
+    finally:
+        # persona_tweak is JSONB NOT NULL; the untouched default is the empty object.
+        async with admin_sessionmaker() as s, s.begin():
+            await s.execute(
+                text(
+                    "UPDATE tenant SET persona_tweak = CAST('{}' AS jsonb) WHERE id = :t"
+                ).bindparams(t=rbac_world.tenant_id)
+            )
 
 
 @pytest.mark.asyncio

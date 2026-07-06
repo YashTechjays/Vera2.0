@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from vera_core.forms.conditions import is_applicable, is_required, leaf_gates
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.models.enums import AnswerSource, DisputeActionType
 
 
@@ -91,6 +93,29 @@ def completion_pct(filled_paths: Collection[str], schema_json: Mapping[str, Any]
         return 0.0
     filled = sum(1 for path in required if path in filled_paths)
     return round(filled / len(required) * 100, 2)
+
+
+def completion_pct_v2(values: Mapping[str, Any], schema_json: Mapping[str, Any]) -> float:
+    """DSL 2.x completion (0-100, 2 dp): required ∧ applicable leaves, evaluated
+    against the current answer values (`applicable_when` chains from the section
+    down, `required: bool | {when}`). A leaf with a declared `default` counts as
+    filled — display/export assume it (spec §4.4). Mirrors the frontend's
+    `completionPercent`."""
+    doc = FormSchemaDoc.model_validate(schema_json)
+    shared = doc.shared_conditions or {}
+    relevant = [
+        (path, leaf)
+        for path, leaf, gates in leaf_gates(doc)
+        if is_applicable(gates, values, shared) and is_required(leaf, values, shared)
+    ]
+    if not relevant:
+        return 100.0
+    filled = sum(
+        1
+        for path, leaf in relevant
+        if leaf.default is not None or str(values.get(path) or "").strip() != ""
+    )
+    return round(filled / len(relevant) * 100, 2)
 
 
 def adjudication_action(new_value: Any, current_value: Any, prior_values: Collection[Any]) -> str:

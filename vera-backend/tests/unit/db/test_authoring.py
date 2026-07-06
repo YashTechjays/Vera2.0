@@ -13,13 +13,15 @@ PROMPT_DIR = Path(__file__).parents[3] / "data" / "prompts"
 
 
 def test_insurance_type_values() -> None:
-    assert [t.value for t in InsuranceType] == ["infertility_treatment"]
+    assert [t.value for t in InsuranceType] == ["infertility_treatment", "disease_only"]
 
 
 def test_check_in_renders_insurance_type_check() -> None:
     constraint = check_in("insurance_type", InsuranceType)
     assert constraint.name == "insurance_type_valid"
-    assert str(constraint.sqltext) == "insurance_type IN ('infertility_treatment')"
+    assert str(constraint.sqltext) == (
+        "insurance_type IN ('infertility_treatment', 'disease_only')"
+    )
 
 
 def test_form_schema_has_check_and_unique() -> None:

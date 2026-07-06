@@ -5,6 +5,7 @@ import {
   BarChart3,
   Database,
   KeyRound,
+  ListTree,
   Mic,
   Settings,
   Users,
@@ -29,6 +30,7 @@ export const navItems: NavItem[] = [
   { title: "Analytics", to: "/analytics", icon: BarChart3 },
   { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, superAdminOnly: true },
   { title: "Agent Prompt", to: "/agent-prompt", icon: Bot, superAdminOnly: true },
+  { title: "IVR Playbooks", to: "/ivr-playbooks", icon: ListTree, superAdminOnly: true },
   { title: "Users", to: "/users", icon: Users, permission: "users:read" },
   { title: "Settings", to: "/settings", icon: Settings },
 ]

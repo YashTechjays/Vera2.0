@@ -9,6 +9,7 @@ for the IVR phase that reverts to the snappy human default at the handoff.
 
 import functools
 import logging
+import re
 from collections.abc import AsyncIterable, AsyncIterator
 
 from livekit import rtc
@@ -26,6 +27,7 @@ from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
 from vera_core.phi import PHIBoundaryProtocol
+from vera_core.schemas import IvrPlaybookConfig
 
 logger = logging.getLogger("agent_worker")
 
@@ -34,16 +36,25 @@ logger = logging.getLogger("agent_worker")
 _IVR_MAX_TURNS = 60
 
 
+# Matches the silence sentinel ([[SILENT]]) AND the label the model sometimes emits by mistake
+# ("SILENCE_TOKEN:", from the prompt's silence contract) — case-insensitive, tolerant of a stray
+# colon/whitespace. The label alternative is word-boundaried so it can only strip the standalone
+# label, never splice a word that merely contains it (e.g. "SILENCE_TOKENS"). Stripping both keeps
+# a "stay silent" turn from reaching TTS when the model's rendering of the sentinel drifts.
+_SILENCE_RE = re.compile(rf"{re.escape(SILENCE_TOKEN)}|\bSILENCE_TOKEN\b\s*:?", re.IGNORECASE)
+
+
 async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
     """Drop the navigator's silence sentinel from an LLM text stream.
 
-    The prompt tells the model to emit exactly ``SILENCE_TOKEN`` when the right action is to
-    stay quiet — the common case. Without this, the default tts_node would synthesize the
-    literal "[[SILENT]]" into the live call. Navigator utterances are short, so buffer the
-    whole turn, remove the sentinel, and emit the remainder — nothing at all on a silent turn.
+    The prompt tells the model to emit exactly ``[[SILENT]]`` when the right action is to stay
+    quiet — the common case. Without this, the default tts_node would synthesize that token (or
+    the near-miss ``SILENCE_TOKEN:`` the model sometimes emits instead) into the live call.
+    Navigator utterances are short, so buffer the whole turn, strip the sentinel/label, and emit
+    the remainder — nothing at all on a silent turn.
     """
     buffered = "".join([chunk async for chunk in text])
-    cleaned = buffered.replace(SILENCE_TOKEN, "")
+    cleaned = _SILENCE_RE.sub("", buffered)
     if cleaned.strip():
         yield cleaned
 
@@ -92,6 +103,7 @@ class IvrNavigatorAgent(Agent):
         boundary: PHIBoundaryProtocol,
         session_id: str,
         *,
+        playbook: IvrPlaybookConfig | None = None,
         verification_instructions: str | None = None,
         verification_greeting: str | None = None,
     ) -> None:
@@ -112,8 +124,9 @@ class IvrNavigatorAgent(Agent):
         self._final_turn_used = False  # spent the one grace turn granted at the cap
         # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
+        # A per-provider playbook (when present) specializes the generic navigator prompt.
         super().__init__(
-            instructions=build_ivr_instructions(),
+            instructions=build_ivr_instructions(playbook),
             tools=[],
             turn_handling=ivr_turn_handling(),
         )

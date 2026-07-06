@@ -27,12 +27,13 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
-from vera_core.models import Call, CallEvent, PatientForm, Tenant
+from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallEventType, CallStatus, FormStatus
+from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import (
     CallSummary,
@@ -101,6 +102,19 @@ async def start_call(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
+    if body.insurance_provider_id is not None:
+        # Require an ACTIVE provider here: an unknown id would otherwise FK-violate → 500 at
+        # flush, and an inactive provider must not start a call (nor let its playbook steer one).
+        provider_active = (
+            await session.execute(
+                select(InsuranceProvider.id).where(
+                    InsuranceProvider.id == body.insurance_provider_id,
+                    InsuranceProvider.status == ProviderStatus.ACTIVE,
+                )
+            )
+        ).scalar_one_or_none()
+        if provider_active is None:
+            raise NotFoundError(message="unknown or inactive insurance provider")
 
     tenant = (
         await session.execute(select(Tenant).where(Tenant.id == tenant_id))
@@ -129,18 +143,28 @@ async def start_call(
         form_id=form.id,
         current_status=CallStatus.INITIATED,
         initiated_by_id=caller.user_id,
+        insurance_provider_id=body.insurance_provider_id,
     )
     session.add(call)
     await session.flush()  # populates call.id (UUIDv7)
 
     room_name = room_name_for_call(tenant_id, call.id)
     # persona_tweak is admin-authored, non-PHI config; safe to serialize into metadata.
+    # Nested under its own key so sibling dispatch keys never trip the worker's
+    # extra="forbid" PersonaTweak validation (see agent_worker.prompt.parse_persona_tweak).
     tweak = (
         PersonaTweak.model_validate(tenant.persona_tweak)
         if tenant.persona_tweak
         else PersonaTweak()
     )
-    metadata = tweak.model_dump(exclude_none=True)
+    metadata: dict[str, object] = {}
+    if tweak_fields := tweak.model_dump(exclude_none=True):
+        metadata["persona_tweak"] = tweak_fields
+    # When navigating the payer IVR, specialize the navigator with the provider's active playbook
+    # (non-PHI overlay) if one exists; otherwise it runs generic. Off preserves today's behavior.
+    if body.enable_ivr_navigation:
+        metadata["enable_ivr_navigation"] = True
+        await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
     await livekit.create_call_room(room_name, metadata=metadata)
     session.add(
         CallEvent(

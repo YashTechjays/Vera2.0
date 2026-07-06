@@ -11,6 +11,12 @@ call_data, so no raw PHI enters the prompt (PHI wall).
 
 from __future__ import annotations
 
+import html
+from collections.abc import Mapping
+from typing import Any
+
+from vera_core.schemas import IvrPlaybookConfig
+
 # The sentinel the model emits when the correct action is silence. It must never be spoken,
 # so the navigator's tts/transcription nodes strip it (see agent_worker.ivr_agent). Keep this
 # in sync with the literal token in the prompt below — test_ivr_prompt guards against drift.
@@ -28,9 +34,8 @@ Your only outputs are: (a) a response-rule answer, (b) a press_keypad call, (c) 
 
 <silence_contract priority="absolute">
 Your output is spoken live into the call — it is NOT a place to think, narrate, greet, or explain.
-When the correct action is silence, output exactly the token and nothing else:
-SILENCE_TOKEN: [[SILENT]]
-- To be silent, emit only [[SILENT]] — no characters before or after.
+When the correct action is silence, output exactly and only this token: [[SILENT]]
+- To be silent, emit only [[SILENT]] — nothing before or after it: no label, no colon, no explanation, just the bracketed token exactly as written.
 - NEVER fill a silent turn with a greeting, an introduction, an offer to help, or a description of your decision ("I'll stay silent", "this is an announcement"). All of it would be spoken aloud and corrupt the call.
 - When you DO answer, output only the literal words/digits to speak — no preamble, no reasoning.
 Every turn is exactly one of the five outputs listed in role_lock.
@@ -127,7 +132,7 @@ Match on INTENT; "e.g." phrasings are examples, not exact strings. Wording and k
 <rule intent="Confirms menu choice — 'you said covered services, right?'" say="Yes"/>
 <rule intent="Coverage LINE — options are insurance PRODUCTS (medical / dental / vision / pharmacy / behavioral health), whenever asked, before OR after IDs" say="Medical"/>
 <rule intent="Provider identifier — NPI, provider ID, or Tax ID (or 'NPI or Tax ID')" say="1234567890 / 1234567890 / 1234567890 per what is asked (NPI if either offered)"/>
-<rule intent="Patient member ID (per ID-entry rule)" say="WGA200236789"/>
+<rule intent="Patient member ID (per ID-entry rule)" say="200236789"/>
 <rule intent="Member-ID letter sub-flow / 'does it start with [letter]?'" say="Per provider_subflows"/>
 <rule intent="First characters of member ID / last name (often phonetic)" say="{requested chars, phonetic if asked}"/>
 <rule intent="Patient date of birth (often '4-digit year'/'8 digits')" say="{date_of_birth}"/>
@@ -176,8 +181,64 @@ THIS HANDOFF IS FINAL: there is no way back to IVR navigation once you call tran
 """
 
 
-def build_ivr_instructions() -> str:
-    """Generic IVR-navigator instructions. The navigator reasons over plain transcript
-    text and drives TTS with plain words, so — unlike the chat persona — it needs no
-    Cartesia readback markup guide."""
-    return IVR_NAVIGATOR_SYSTEM_PROMPT
+# <config> knobs a playbook may override. Each maps to a config key the response-rule table
+# already reads ("Per callback_vs_hold", "{rep_keyword}", …); a playbook restates the ones it
+# sets so they supersede the generic defaults. Derived from the schema (model_fields preserves
+# declaration order = emit order) so a knob added there is emitted without touching this file;
+# extra_rules is free text rendered separately, not a <config> key.
+_PLAYBOOK_CONFIG_KEYS: tuple[str, ...] = tuple(
+    k for k in IvrPlaybookConfig.model_fields if k != "extra_rules"
+)
+
+
+def _render_playbook_overrides(playbook: IvrPlaybookConfig) -> str | None:
+    """Render a per-provider playbook as high-priority override sections appended after the
+    base navigator prompt. Only fields the playbook actually sets are emitted: each restates a
+    <config> key with the provider's value (superseding the generic default), and extra_rules
+    is appended as provider-specific guidance. Returns None when the playbook sets nothing."""
+    # Escape markup in knob values so a value like "</rep_keyword>…" can't break or inject
+    # <config> structure (extra_rules below is intentionally free text and left as-is).
+    config_lines = [
+        f"  <{key}>{html.escape(str(value), quote=False)}</{key}>"
+        for key in _PLAYBOOK_CONFIG_KEYS
+        if (value := getattr(playbook, key))
+    ]
+    sections: list[str] = []
+    if config_lines:
+        sections.append(
+            '<provider_playbook priority="high">\n'
+            "These provider-specific values OVERRIDE the matching defaults in the <config> "
+            "block above.\n" + "\n".join(config_lines) + "\n</provider_playbook>"
+        )
+    if playbook.extra_rules:
+        sections.append(
+            '<provider_specific_rules priority="high">\n'
+            f"{playbook.extra_rules}\n"
+            "</provider_specific_rules>"
+        )
+    return "\n\n".join(sections) if sections else None
+
+
+def build_ivr_instructions(playbook: IvrPlaybookConfig | None = None) -> str:
+    """Generic IVR-navigator instructions, optionally specialized by a per-provider playbook
+    overlay. The navigator reasons over plain transcript text and drives TTS with plain words,
+    so — unlike the chat persona — it needs no Cartesia readback markup guide. With no playbook
+    (or an empty one) the output is the generic navigator, unchanged."""
+    overrides = _render_playbook_overrides(playbook) if playbook is not None else None
+    if not overrides:
+        return IVR_NAVIGATOR_SYSTEM_PROMPT
+    return f"{IVR_NAVIGATOR_SYSTEM_PROMPT}\n\n{overrides}"
+
+
+def parse_ivr_playbook(meta: Mapping[str, Any]) -> IvrPlaybookConfig | None:
+    """Extract and parse the `ivr_playbook` overlay from dispatch metadata into an
+    IvrPlaybookConfig. Fail-safe: a missing, empty, or malformed overlay yields None so a bad
+    playbook falls back to the generic navigator instead of killing a live call (mirrors
+    parse_persona_tweak's posture)."""
+    value = meta.get("ivr_playbook")
+    if not value:
+        return None
+    try:
+        return IvrPlaybookConfig.model_validate(value)
+    except ValueError:
+        return None

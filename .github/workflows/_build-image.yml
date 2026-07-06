@@ -75,6 +75,15 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # The frontend's Docker build context is vera-frontend/ only, but its source
+      # imports the backend's schema JSON straight from the sibling vera-backend/
+      # (single source of truth, no bundled copy — see vera-frontend/Dockerfile).
+      # Stage a copy inside the build context so that import resolves.
+      - name: Stage backend schema for the frontend Docker build
+        if: inputs.component == 'frontend'
+        working-directory: vera-frontend
+        run: ./scripts/stage-backend-schema-for-docker.sh
+
       - id: auth
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:

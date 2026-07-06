@@ -107,11 +107,28 @@ class VersionStatus(enum.StrEnum):
 
 
 class InsuranceType(enum.StrEnum):
-    """The insurance/form family a `form_schema` belongs to. One value for now;
-    grows to carrier-level types (aetna/cigna/uhc) with a one-line addition plus a
-    CHECK-update migration."""
+    """The insurance/form family a `form_schema` belongs to. Grows to carrier-level
+    types (aetna/cigna/uhc) with a one-line addition plus a CHECK-update migration."""
 
     INFERTILITY_TREATMENT = "infertility_treatment"
+    DISEASE_ONLY = "disease_only"
+
+
+class ProviderStatus(enum.StrEnum):
+    """insurance_provider lifecycle. Only ACTIVE providers are offered in the call-start
+    picker and may steer a live IVR call; a free-text status silently dropped a provider
+    from every `status == 'active'` lookup, hence the single catalog."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+
+
+class PlaybookStatus(enum.StrEnum):
+    """ivr_playbook lifecycle. At most one ACTIVE playbook per provider drives runtime
+    selection; the partial unique index and demote-then-promote both key on ACTIVE."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
 
 
 class EvalScope(enum.StrEnum):
