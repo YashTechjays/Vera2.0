@@ -1703,3 +1703,190 @@ git add vera-backend/apps/control_plane/src/control_plane/api/v1/common.py \
         vera-backend/tests/integration/control_plane/test_admin.py
 git commit -m "fix(roles): exclude platform-tier roles from GET /roles for tenant sessions"
 ```
+
+---
+
+### Task 9: Sidebar footer shows the real logged-in user, not static placeholder text
+
+**Added after Task 8**, an unrelated bug the user spotted while testing: the
+sidebar footer (`Sidebar.tsx`) hardcodes `"AV"` / `"Agent View"` / `"Internal
+tools"` — static placeholder text, never wired to the actual session. The app
+already has the real user in Redux (`selectUser`, populated from `/auth/me`) —
+`Topbar.tsx` was checked and has no such placeholder (it's search/notifications/
+logout only), so this is scoped to `Sidebar.tsx` alone.
+
+**Files:**
+- Modify: `vera-frontend/src/components/layout/Sidebar.tsx`
+- Create: `vera-frontend/src/components/layout/Sidebar.test.ts`
+
+**Interfaces:**
+- Produces: `initialsFor(source: string): string`, exported from `Sidebar.tsx` — a
+  pure helper (first letters of the first two words, or the first two characters
+  if there's only one word), extracted so it can be logic-tested without
+  component-rendering infra (this repo has no RTL/jsdom).
+- Consumes: `selectUser` (already exported from `@/store/authSlice`, returns
+  `MeResponse | null` with `.name`, `.email`, `.account_type`).
+
+- [ ] **Step 1: Write the failing test**
+
+Create `vera-frontend/src/components/layout/Sidebar.test.ts`:
+
+```typescript
+import { describe, expect, it } from "vitest"
+
+import { initialsFor } from "@/components/layout/Sidebar"
+
+describe("initialsFor", () => {
+  it("uses the first letter of the first two words for a full name", () => {
+    expect(initialsFor("Jane Doe")).toBe("JD")
+  })
+
+  it("falls back to the first two characters for a single word", () => {
+    expect(initialsFor("jane@example.com")).toBe("JA")
+  })
+
+  it("uppercases the result", () => {
+    expect(initialsFor("jane doe")).toBe("JD")
+  })
+})
+```
+
+Run it to confirm it fails (the function doesn't exist yet):
+
+```bash
+cd vera-frontend && npx vitest run src/components/layout/Sidebar.test.ts
+```
+
+Expected: FAIL — `initialsFor` is not exported from `Sidebar.tsx`.
+
+- [ ] **Step 2: Wire the real user into the sidebar**
+
+Edit `vera-frontend/src/components/layout/Sidebar.tsx` in full:
+
+```tsx
+import { NavLink } from "react-router-dom"
+import { Sparkles } from "lucide-react"
+import { visibleNavFor } from "@/lib/nav"
+import { cn } from "@/lib/utils"
+import { useAppSelector } from "@/store/hooks"
+import { selectIsElevated, selectIsSuperAdmin, selectPermissions, selectUser } from "@/store/authSlice"
+
+type SidebarProps = {
+  collapsed: boolean
+}
+
+/** First letters of the first two words, uppercased; the first two characters if
+ *  there's only one word (e.g. an email used as the display name fallback). */
+export function initialsFor(source: string): string {
+  const parts = source.trim().split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+  return source.slice(0, 2).toUpperCase()
+}
+
+export function Sidebar({ collapsed }: SidebarProps) {
+  const permissions = useAppSelector(selectPermissions)
+  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
+  const isElevated = useAppSelector(selectIsElevated)
+  const user = useAppSelector(selectUser)
+  const items = visibleNavFor({ permissions, isSuperAdmin, isElevated })
+
+  // AppUser.name defaults to "" (e.g. some platform/password-only accounts), so
+  // fall back to email as the display name; when that fallback fires, show the
+  // account tier on the second line instead of repeating the email on both lines.
+  const displayName = user?.name?.trim() || user?.email || "Signed in"
+  const secondaryLine = user?.name?.trim()
+    ? user.email
+    : user?.account_type === "platform"
+      ? "Platform operator"
+      : "Tenant member"
+
+  return (
+    <aside
+      className={cn(
+        "flex h-screen shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground transition-[width] duration-200",
+        collapsed ? "w-16" : "w-64"
+      )}
+    >
+      {/* Brand */}
+      <div className="flex h-14 items-center gap-2 border-b px-4">
+        <Sparkles className="size-6 shrink-0 text-sidebar-primary" />
+        {!collapsed && (
+          <span className="truncate text-2xl font-bold tracking-tight">
+            Vera AI
+          </span>
+        )}
+      </div>
+
+      {/* Nav */}
+      <nav className="flex flex-1 flex-col gap-1 p-2">
+        {items.map(({ title, to, icon: Icon }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={to === "/"}
+            title={collapsed ? title : undefined}
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                isActive
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70",
+                collapsed && "justify-center px-0"
+              )
+            }
+          >
+            <Icon className="size-5 shrink-0" />
+            {!collapsed && <span className="truncate">{title}</span>}
+          </NavLink>
+        ))}
+      </nav>
+
+      {/* Footer */}
+      <div className="border-t p-3">
+        <div
+          className={cn(
+            "flex items-center gap-3",
+            collapsed && "justify-center"
+          )}
+        >
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-sidebar-primary text-xs font-semibold text-sidebar-primary-foreground">
+            {initialsFor(displayName)}
+          </div>
+          {!collapsed && (
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{displayName}</p>
+              <p className="truncate text-xs text-sidebar-foreground/60">
+                {secondaryLine}
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </aside>
+  )
+}
+```
+
+- [ ] **Step 3: Run the test again to confirm it passes**
+
+```bash
+npx vitest run src/components/layout/Sidebar.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Full frontend gate**
+
+```bash
+npx tsc --noEmit && npx eslint . && npx vitest run
+```
+
+Expected: PASS — tsc/eslint clean, full suite green (including the new test file).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add vera-frontend/src/components/layout/Sidebar.tsx vera-frontend/src/components/layout/Sidebar.test.ts
+git commit -m "fix(sidebar): show the real logged-in user instead of static placeholder text"
+```
