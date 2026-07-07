@@ -83,3 +83,13 @@ async def test_handler_failure_leaves_entry_unacked() -> None:
     livekit.fail_metadata = True
     await _consumer(redis, livekit)._process("5-0", _event_fields())
     assert redis.acked == []  # left pending for XAUTOCLAIM to retry
+
+
+@pytest.mark.asyncio
+async def test_unknown_event_type_is_acked_and_skipped() -> None:
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    consumer = _consumer(redis, livekit)
+    consumer._handlers = {}  # remove all handlers so call.failed has no handler
+    await consumer._process("6-0", _event_fields())
+    assert livekit.calls == []  # no teardown
+    assert redis.acked == ["6-0"]  # entry is acked despite no handler
