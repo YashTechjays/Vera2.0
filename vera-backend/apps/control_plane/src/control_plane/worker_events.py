@@ -14,6 +14,7 @@ from typing import cast
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from control_plane.livekit_gateway import LiveKitGateway
 from vera_core.events import (
@@ -79,13 +80,20 @@ class WorkerEventConsumer:
                 await asyncio.sleep(1.0)
 
     async def _read_once(self) -> None:
-        resp = await self._redis.xreadgroup(
-            WORKER_EVENTS_GROUP,
-            self._consumer,
-            {WORKER_EVENTS_STREAM: ">"},
-            count=16,
-            block=self._block_ms,
-        )
+        try:
+            resp = await self._redis.xreadgroup(
+                WORKER_EVENTS_GROUP,
+                self._consumer,
+                {WORKER_EVENTS_STREAM: ">"},
+                count=16,
+                block=self._block_ms,
+            )
+        except RedisTimeoutError:
+            # redis-py turns an XREADGROUP BLOCK window with no new entries into a
+            # raised TimeoutError (a per-command read deadline), not an empty result.
+            # That is a normal idle tick — treat it as "no new events", NOT a Redis
+            # error (which would log a traceback + back off). Mirrors RedisTranscriptStore.
+            return
         if not resp:
             return
         streams = cast("list[tuple[str, _StreamEntries]]", resp)

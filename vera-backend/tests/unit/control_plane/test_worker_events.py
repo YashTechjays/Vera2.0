@@ -30,6 +30,9 @@ class _FakeRedis:
         # Configured per-test to mimic redis-py's decoded XREADGROUP/XAUTOCLAIM shapes.
         self.xreadgroup_response: object = None
         self.xautoclaim_response: object = ("0-0", [], [])
+        # When set, xreadgroup raises it — used to mimic redis-py turning a BLOCK
+        # window with no new entries into a raised TimeoutError.
+        self.xreadgroup_error: Exception | None = None
 
     async def xack(self, stream: str, group: str, entry_id: str) -> int:
         self.acked.append(entry_id)
@@ -43,6 +46,8 @@ class _FakeRedis:
         count: int | None = None,
         block: int | None = None,
     ) -> object:
+        if self.xreadgroup_error is not None:
+            raise self.xreadgroup_error
         return self.xreadgroup_response
 
     async def xautoclaim(
@@ -149,3 +154,19 @@ async def test_reclaim_stale_unpacks_xautoclaim_response_and_dispatches() -> Non
         ("delete", _VALID_ROOM),
     ]
     assert redis.acked == ["11-0"]
+
+
+@pytest.mark.asyncio
+async def test_read_once_treats_block_timeout_as_idle() -> None:
+    """redis-py turns an XREADGROUP BLOCK window with no new entries into a raised
+    redis.exceptions.TimeoutError. That is a normal idle tick, not an error: _read_once
+    must swallow it and return quietly (no teardown, no exception propagated to the
+    run loop's generic RedisError back-off)."""
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    redis.xreadgroup_error = RedisTimeoutError("Timeout reading from localhost:6379")
+    # Must not raise.
+    await _consumer(redis, livekit)._read_once()
+    assert livekit.calls == []
+    assert redis.acked == []
