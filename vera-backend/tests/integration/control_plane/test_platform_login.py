@@ -98,11 +98,14 @@ async def platform_world(
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            yield client, PlatformWorld(
-                user_id=user_id,
-                email=email,
-                totp_secret=totp_secret,
-                admin_sessionmaker=sessionmaker,
+            yield (
+                client,
+                PlatformWorld(
+                    user_id=user_id,
+                    email=email,
+                    totp_secret=totp_secret,
+                    admin_sessionmaker=sessionmaker,
+                ),
             )
 
     async with sessionmaker() as session, session.begin():
