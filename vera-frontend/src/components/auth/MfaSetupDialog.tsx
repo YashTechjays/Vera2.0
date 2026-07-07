@@ -61,7 +61,9 @@ export function MfaSetupDialog() {
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : reset())}>
+    // Dismissal is blocked while busy: closing mid-activate resets the UI
+    // while MFA silently activates server-side.
+    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : busy ? undefined : reset())}>
       <DialogTrigger asChild>
         <Button variant="outline">Set up two-factor authentication</Button>
       </DialogTrigger>

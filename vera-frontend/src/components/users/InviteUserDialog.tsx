@@ -82,7 +82,7 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
   const submitBusyLabel = sendEmail ? "Sending…" : "Creating…"
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : reset())}>
+    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : busy ? undefined : reset())}>
       <DialogTrigger asChild>
         <Button>Invite user</Button>
       </DialogTrigger>
