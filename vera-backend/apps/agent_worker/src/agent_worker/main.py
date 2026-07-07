@@ -25,16 +25,18 @@ from redis.asyncio import Redis
 
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.plan_run_state import PlanRunState
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import attach_transcript_publisher
-from vera_core.config.settings import get_settings
+from vera_core.call_plan import RedisCallPlanStore
+from vera_core.config.settings import Settings, get_settings
 from vera_core.observability.correlation import (
     call_trace_attributes,
     is_listen_only_identity,
     parse_room_name,
 )
 from vera_core.observability.otel import configure_observability
-from vera_core.phi import build_phi_boundary
+from vera_core.phi import PHIBoundaryProtocol, build_phi_boundary
 from vera_core.redis import create_redis
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
@@ -177,6 +179,30 @@ def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = _build_vad()
 
 
+async def _load_plan_state(
+    room_name: str,
+    session_id: str,
+    boundary: PHIBoundaryProtocol,
+    settings: Settings,
+) -> PlanRunState | None:
+    """Read this call's compiled plan (non-PHI) from Redis and wrap it in the shared run
+    state. Fail-safe: returns None on any error so a missing/bad plan never kills the call
+    (the worker then runs the static persona)."""
+    redis = create_redis(settings.redis_url)
+    try:
+        plan = await RedisCallPlanStore(redis, ttl_seconds=settings.call_plan_ttl_seconds).get(
+            room_name
+        )
+    except Exception:
+        logger.exception("failed to load call plan for %s; using static persona", room_name)
+        return None
+    finally:
+        await redis.aclose()
+    if plan is None:
+        return None
+    return PlanRunState(plan=plan, boundary=boundary, session_id=session_id)
+
+
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     room_name = ctx.room.name
@@ -218,6 +244,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
+
+    # The compiled Call Plan (non-PHI) drives the default plan agent; a missing plan
+    # (console / legacy v1 form) falls back to the static persona. Fail-safe: any read
+    # error leaves plan_state None rather than killing the call.
+    plan_state = await _load_plan_state(room_name, session_id, boundary, settings)
 
     # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
     # plane). Fail-safe: bad/missing metadata falls back to the base persona.
@@ -269,6 +300,7 @@ async def entrypoint(ctx: JobContext) -> None:
             session_id=session_id,
             instructions=instructions,
             greeting=greeting,
+            plan_state=plan_state,
         ),
         room=ctx.room,
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),

@@ -10,11 +10,14 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from vera_core.forms.conditions import (
+    Applicability,
     evaluate,
     is_applicable,
     is_required,
     is_v2,
     leaf_gates,
+    referenced_fields,
+    resolve_applicability,
 )
 from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.intake import missing_required, required_intake_fields
@@ -91,6 +94,47 @@ class TestLeafGates:
         leaf, _gates = leaf_entry("sections.patient_information.spouse_partner_name")
         assert is_required(leaf, {}, SHARED) is False
         assert is_required(leaf, {COVERAGE: "Family"}, SHARED) is True
+
+
+class TestResolveApplicability:
+    # The infertility cascade: a CPT copay gated by both the treatment-level
+    # `infertility_covered` ref and its own row's `covered` answer.
+    COPAY = "sections.infertility_treatment.intrauterine_insemination.cpt_58323.copay"
+    TX_COVERED = "sections.infertility_treatment.infertility_tx_covered"
+    ROW_COVERED = "sections.infertility_treatment.intrauterine_insemination.cpt_58323.covered"
+
+    def _gates(self) -> tuple[Any, ...]:
+        _leaf, gates = leaf_entry(self.COPAY)
+        return gates
+
+    def test_no_gates_is_applicable(self) -> None:
+        assert resolve_applicability((), {}, SHARED) is Applicability.APPLICABLE
+
+    def test_unanswered_gate_field_is_not_reachable(self) -> None:
+        assert resolve_applicability(self._gates(), {}, SHARED) is Applicability.NOT_REACHABLE_YET
+
+    def test_partially_answered_is_still_not_reachable(self) -> None:
+        # treatment covered, but this row's `covered` not yet asked → can't decide.
+        values = {self.TX_COVERED: "Yes"}
+        assert (
+            resolve_applicability(self._gates(), values, SHARED) is Applicability.NOT_REACHABLE_YET
+        )
+
+    def test_all_gates_true_is_applicable(self) -> None:
+        values = {self.TX_COVERED: "Yes", self.ROW_COVERED: "Yes"}
+        assert resolve_applicability(self._gates(), values, SHARED) is Applicability.APPLICABLE
+
+    def test_answered_but_gate_false_is_inactive(self) -> None:
+        # Cascade collapse: treatment not covered and the row auto-filled "No" →
+        # the child is INACTIVE (the walk then writes its inapplicable_value).
+        values = {self.TX_COVERED: "No", self.ROW_COVERED: "No"}
+        assert resolve_applicability(self._gates(), values, SHARED) is Applicability.INACTIVE
+
+
+class TestReferencedFields:
+    def test_collects_fields_through_refs_and_nesting(self) -> None:
+        fields = referenced_fields(SHARED["male_partner_in_scope"], SHARED)
+        assert fields == {COVERAGE, SPOUSE_GENDER}
 
 
 class TestCompletionPctV2:

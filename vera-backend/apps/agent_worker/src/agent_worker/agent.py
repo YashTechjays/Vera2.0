@@ -1,30 +1,22 @@
-"""Cascade agents.
+"""Cascade agents and the dispatch-metadata selector.
 
-VeraAgent: the infertility-verification chat persona; greets on enter and carries the
-inert PHI-wall node overrides (stt_node redact FINAL+PREFLIGHT before the LLM; tts_node
-hydrate the TTS-bound text only — both route through PHIBoundaryProtocol, today
-PassthroughPHIBoundary/no-op).
-
-The generic IVR navigator (IvrNavigatorAgent) lives in `ivr_agent.py`; once it reaches a
-live human rep it hands off to VeraAgent (a one-way swap; from then on the PHI-wall overrides
-apply). build_agent() picks the initial persona from the dispatch metadata.
+PlanTaskAgent (plan-driven, one per task) is the default verification path when the control
+plane compiled a Call Plan for this call; VeraAgent (the static persona) is the fallback
+when no plan exists (console / legacy v1). The generic IVR navigator (IvrNavigatorAgent,
+`ivr_agent.py`) navigates the payer IVR; once it reaches a live rep it hands off to the
+verification agent — the plan agent when a plan exists, else VeraAgent.
 """
 
 import logging
-from collections.abc import AsyncIterable
+from collections.abc import Callable
 
-from livekit import rtc
-from livekit.agents import (
-    Agent,
-    ModelSettings,
-    llm,
-    stt,
-)
+from livekit.agents import Agent, llm
 
 from agent_worker.ivr_agent import IvrNavigatorAgent
 from agent_worker.ivr_prompt import parse_ivr_playbook
+from agent_worker.plan_agent import PlanTaskAgent
+from agent_worker.plan_run_state import PlanRunState
 from agent_worker.prompt import build_instructions, resolve_greeting
-from agent_worker.seams import hydrate_stream, redact_event
 from vera_core.phi import PHIBoundaryProtocol
 
 logger = logging.getLogger("agent_worker")
@@ -39,6 +31,7 @@ class VeraAgent(Agent):
         instructions: str | None = None,
         greeting: str | None = None,
     ) -> None:
+        # Retained (unused today) for a future PHI seam re-add; see the removed PHIWallNodes.
         self._boundary = boundary
         self._session_id = session_id
         self._greeting = greeting if greeting is not None else resolve_greeting()
@@ -62,31 +55,25 @@ class VeraAgent(Agent):
     async def on_enter(self) -> None:
         self.session.say(self._greeting)
 
-    async def stt_node(
-        self,
-        audio: AsyncIterable[rtc.AudioFrame],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[stt.SpeechEvent | str]:
-        async for ev in Agent.default.stt_node(self, audio, model_settings):
-            if isinstance(ev, stt.SpeechEvent):
-                ev = await redact_event(self._boundary, self._session_id, ev)
-            yield ev
 
-    def transcription_node(
-        self, text: AsyncIterable[str], model_settings: ModelSettings
-    ) -> AsyncIterable[str]:
-        # Inert seam: pass-through today. Future: tap tokenized assistant
-        # segments here for the live-transcript stream. Kept deliberately so
-        # that integration is a one-line change inside this method.
-        return Agent.default.transcription_node(self, text, model_settings)
+def _first_plan_agent(plan_state: PlanRunState) -> PlanTaskAgent:
+    """The plan's entry agent — the first task in compile order (the sole place that rule lives)."""
+    return PlanTaskAgent(plan_state, plan_state.plan.tasks[0].task_key)
 
-    def tts_node(
-        self,
-        text: AsyncIterable[str],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[rtc.AudioFrame]:
-        hydrated = hydrate_stream(self._boundary, self._session_id, text)
-        return Agent.default.tts_node(self, hydrated, model_settings)
+
+def _verification_factory(
+    plan_state: PlanRunState | None,
+    boundary: PHIBoundaryProtocol,
+    session_id: str,
+    *,
+    instructions: str | None,
+    greeting: str | None,
+) -> Callable[[], Agent]:
+    """The agent an IVR navigator hands off to once a human answers: the plan's first task
+    agent when a plan exists, otherwise the static VeraAgent."""
+    if plan_state is not None:
+        return lambda: _first_plan_agent(plan_state)
+    return lambda: VeraAgent(boundary, session_id, instructions=instructions, greeting=greeting)
 
 
 def build_agent(
@@ -96,21 +83,24 @@ def build_agent(
     session_id: str,
     instructions: str | None = None,
     greeting: str | None = None,
+    plan_state: PlanRunState | None = None,
 ) -> Agent:
-    """Pick the agent persona from dispatch metadata: the IVR navigator when
-    `enable_ivr_navigation` is set (a plain agent, no phiwall, an optional per-provider
-    `ivr_playbook` overlay specializing its prompt), otherwise the chat persona (with the
-    PHI-wall overrides and any persona-tweak instructions/greeting). The flag is the sole
-    selector — a playbook without it is a producer inconsistency, logged and ignored, so it
-    can never silently override an explicit opt-out."""
+    """Pick the initial agent from dispatch metadata + whether a Call Plan was compiled.
+
+    `enable_ivr_navigation` boots the IVR navigator (which hands off to the verification
+    agent once a human answers). Otherwise, a compiled plan drives PlanTaskAgent (the
+    default); with no plan the static VeraAgent runs (console / legacy fallback)."""
     if meta.get("enable_ivr_navigation"):
         return IvrNavigatorAgent(
             boundary,
             session_id,
             playbook=parse_ivr_playbook(meta),
-            verification_instructions=instructions,
-            verification_greeting=greeting,
+            verification_factory=_verification_factory(
+                plan_state, boundary, session_id, instructions=instructions, greeting=greeting
+            ),
         )
     if meta.get("ivr_playbook") is not None:
         logger.warning("ivr_playbook present without enable_ivr_navigation; ignoring playbook")
+    if plan_state is not None:
+        return _first_plan_agent(plan_state)
     return VeraAgent(boundary, session_id, instructions=instructions, greeting=greeting)

@@ -14,10 +14,10 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import CallPlanStoreDep, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
-from control_plane.deps import get_audit
+from control_plane.deps import get_audit, get_call_plan_store
 from control_plane.exceptions import (
     CustomAPIException,
     CustomAPIResponse,
@@ -27,6 +27,7 @@ from control_plane.exceptions import (
 from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
+from vera_core.call_plan import build_and_store_call_plan
 from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
@@ -76,6 +77,7 @@ async def start_call(
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
+    call_plan_store: CallPlanStoreDep,
     _caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[CallSummary]:
     form = (
@@ -147,6 +149,11 @@ async def start_call(
     if body.enable_ivr_navigation:
         metadata["enable_ivr_navigation"] = True
         await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
+    # Freeze the pinned schema into this call's plan (non-PHI) before the worker joins.
+    # A legacy v1 form writes nothing → the worker falls back to the static agent.
+    await build_and_store_call_plan(
+        session, form=form, call_id=call.id, room_name=room_name, store=call_plan_store
+    )
     await livekit.create_call_room(room_name, metadata=metadata)
     session.add(
         CallEvent(
@@ -340,6 +347,8 @@ async def update_call_status(
     )
 
     # Fire the dispatcher — a concurrency slot just freed up.
-    await try_dispatch(session, tenant_id, livekit, audit=audit)
+    await try_dispatch(
+        session, tenant_id, livekit, audit=audit, call_plan_store=get_call_plan_store(request)
+    )
 
     return ok(_summary(call, form.patient_name))

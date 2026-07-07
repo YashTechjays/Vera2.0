@@ -64,9 +64,9 @@ def test_vera_agent_has_end_call_tool_and_persona() -> None:
     assert "infertility" in agent.instructions.lower()
     # the chat persona greets on enter (overrides the base no-op)
     assert type(agent).on_enter is not Agent.on_enter
-    # ...and carries the PHI-wall node overrides
-    assert type(agent).stt_node is not Agent.stt_node
-    assert type(agent).tts_node is not Agent.tts_node
+    # ...and is a plain agent: no PHI-wall node overrides (removed by request)
+    assert type(agent).stt_node is Agent.stt_node
+    assert type(agent).tts_node is Agent.tts_node
 
 
 def test_vera_agent_accepts_overlaid_instructions() -> None:
@@ -156,15 +156,15 @@ async def test_under_the_turn_cap_does_not_end_the_call() -> None:
 @pytest.mark.asyncio
 async def test_transfer_to_verification_hands_off_to_vera_agent() -> None:
     # When the navigator reaches a human, the handoff target is the VeraAgent verification
-    # persona — and it carries the PHI-wall overrides the navigator lacks, so the wall turns
-    # on for the rest of the call.
+    # persona, which greets the rep on enter.
     agent = _navigator()
     call = cast("Callable[[], Awaitable[Agent]]", agent.transfer_to_verification)
     handoff = await call()
     assert isinstance(handoff, VeraAgent)
     assert type(handoff).on_enter is not Agent.on_enter  # greets the rep on enter
-    assert type(handoff).stt_node is not Agent.stt_node
-    assert type(handoff).tts_node is not Agent.tts_node
+    # plain agent: no PHI-wall node overrides
+    assert type(handoff).stt_node is Agent.stt_node
+    assert type(handoff).tts_node is Agent.tts_node
 
 
 def test_ivr_turn_handling_is_patient() -> None:

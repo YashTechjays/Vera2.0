@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
+from vera_core.call_plan import CallPlanStore, build_and_store_call_plan
 from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import (
@@ -69,6 +70,7 @@ async def try_dispatch(
     livekit: Any,
     *,
     audit: AuditSink | None = None,
+    call_plan_store: CallPlanStore | None = None,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -86,6 +88,9 @@ async def try_dispatch(
     audit:
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
+    call_plan_store:
+        Optional ``CallPlanStore``. When provided, each dispatched call's schema is
+        compiled into a plan and stashed for the worker (v1 forms write nothing).
     """
     # 1. Load tenant config.
     tenant = (
@@ -212,6 +217,14 @@ async def try_dispatch(
                 await session.flush()
 
                 room_name = room_name_for_call(tenant_id, call.id)
+                if call_plan_store is not None:
+                    await build_and_store_call_plan(
+                        session,
+                        form=form,
+                        call_id=call.id,
+                        room_name=room_name,
+                        store=call_plan_store,
+                    )
                 await livekit.create_call_room(room_name, metadata=metadata)
 
                 session.add(

@@ -8,12 +8,14 @@ are PHI). Mirrors the frontend evaluator (`vera-frontend/src/lib/ibv/conditions.
 """
 
 from collections.abc import Iterator, Mapping
+from enum import Enum
 from typing import Any
 
 from vera_core.forms.dsl import (
     PATH_PREFIX,
     AllCondition,
     AnyCondition,
+    Comparison,
     Condition,
     FormField,
     FormSchemaDoc,
@@ -93,3 +95,42 @@ def is_required(leaf: Leaf, values: Values, shared: SharedConditions) -> bool:
     if isinstance(leaf.required, bool):
         return leaf.required
     return evaluate(leaf.required.when, values, shared)
+
+
+def referenced_fields(
+    cond: Condition, shared: SharedConditions, _seen: frozenset[str] = frozenset()
+) -> set[str]:
+    """Every leaf path a condition reads, following `ref`s (cycle-safe)."""
+    match cond:
+        case RefCondition(ref=ref):
+            if ref in _seen or ref not in shared:
+                return set()
+            return referenced_fields(shared[ref], shared, _seen | {ref})
+        case AllCondition(all=subs) | AnyCondition(any=subs):
+            return {f for sub in subs for f in referenced_fields(sub, shared, _seen)}
+        case NotCondition(not_=sub):
+            return referenced_fields(sub, shared, _seen)
+        case Comparison(field=field):
+            return {field}
+
+
+class Applicability(Enum):
+    """A field's runtime scope: in scope, out of scope, or not yet decidable."""
+
+    APPLICABLE = "applicable"
+    INACTIVE = "inactive"
+    NOT_REACHABLE_YET = "not_reachable_yet"
+
+
+def resolve_applicability(
+    gates: tuple[Condition, ...], values: Values, shared: SharedConditions
+) -> Applicability:
+    """Tri-state applicability of a gate chain against the current answers. A field
+    whose gates read an unanswered field is NOT_REACHABLE_YET (skip this pass); once
+    every referenced field is answered, the gates decide APPLICABLE vs INACTIVE."""
+    referenced = {f for gate in gates for f in referenced_fields(gate, shared)}
+    if any(field not in values for field in referenced):
+        return Applicability.NOT_REACHABLE_YET
+    if all(evaluate(gate, values, shared) for gate in gates):
+        return Applicability.APPLICABLE
+    return Applicability.INACTIVE

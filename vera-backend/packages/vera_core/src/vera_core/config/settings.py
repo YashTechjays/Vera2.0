@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
     transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
+    # Compiled Call Plan lifetime in Redis (rolling backstop so an abandoned plan
+    # self-clears). Read by the worker when it joins the room.
+    call_plan_ttl_seconds: int = 3600  # VERA_CALL_PLAN_TTL_SECONDS
+
     gcp_project: str | None = None
 
     # --- KMS ------------------------------------------------------------------

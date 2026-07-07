@@ -7,10 +7,9 @@ one-way swap — once a live human rep answers (from then on the PHI-wall overri
 for the IVR phase that reverts to the snappy human default at the handoff.
 """
 
-import functools
 import logging
 import re
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable
 
 from livekit import rtc
 from livekit.agents import (
@@ -104,22 +103,18 @@ class IvrNavigatorAgent(Agent):
         session_id: str,
         *,
         playbook: IvrPlaybookConfig | None = None,
-        verification_instructions: str | None = None,
-        verification_greeting: str | None = None,
+        verification_factory: Callable[[], Agent] | None = None,
     ) -> None:
-        # Deferred import breaks the agent <-> ivr_agent import cycle: agent.py imports
-        # IvrNavigatorAgent, and the navigator only needs VeraAgent at construction time.
-        from agent_worker.agent import VeraAgent
-
         # The navigator runs plain (no PHI-wall overrides); it keeps only a factory for the
-        # VeraAgent it hands off to once a human answers (see transfer_to_verification).
-        self._make_verification_agent = functools.partial(
-            VeraAgent,
-            boundary,
-            session_id,
-            instructions=verification_instructions,
-            greeting=verification_greeting,
-        )
+        # verification agent it hands off to once a human answers (see transfer_to_verification).
+        # build_agent supplies the factory (plan agent when a plan exists, else VeraAgent);
+        # the deferred import is only the standalone fallback and breaks the agent <-> ivr cycle.
+        def _default_factory() -> Agent:
+            from agent_worker.agent import VeraAgent
+
+            return VeraAgent(boundary, session_id)
+
+        self._make_verification_agent = verification_factory or _default_factory
         self._turns = 0  # IVR turns taken; the give-up backstop caps this
         self._final_turn_used = False  # spent the one grace turn granted at the cap
         # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before

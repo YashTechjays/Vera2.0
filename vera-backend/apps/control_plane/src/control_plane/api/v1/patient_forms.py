@@ -26,7 +26,7 @@ from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
-from control_plane.deps import get_audit, get_sessionmaker
+from control_plane.deps import get_audit, get_call_plan_store, get_sessionmaker
 from control_plane.exceptions import (
     CustomAPIException,
     CustomAPIResponse,
@@ -875,7 +875,9 @@ async def update_patient_form_status(
     # the manual transition (target), not whatever the dispatcher advanced the
     # form to afterwards — clients observe dispatch via the calls list.
     if target == FormStatus.IN_QUEUE:
-        await try_dispatch(session, tenant_id, livekit, audit=audit)
+        await try_dispatch(
+            session, tenant_id, livekit, audit=audit, call_plan_store=get_call_plan_store(request)
+        )
 
     return ok(
         PatientFormStatusResponse(id=form.id, status=target.value),

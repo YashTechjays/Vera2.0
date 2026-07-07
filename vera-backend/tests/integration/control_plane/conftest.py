@@ -20,6 +20,7 @@ from control_plane.email import InMemoryEmailSender
 from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
+from vera_core.call_plan import InMemoryCallPlanStore
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
@@ -92,6 +93,11 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
 @pytest.fixture(scope="session")
 def transcript_service() -> TranscriptService:
     return TranscriptService(InMemoryTranscriptStore())
+
+
+@pytest.fixture(scope="session")
+def call_plan_store() -> InMemoryCallPlanStore:
+    return InMemoryCallPlanStore()
 
 
 class RBACWorld:
@@ -244,6 +250,7 @@ async def authz_app(
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
     transcript_service: TranscriptService,
+    call_plan_store: InMemoryCallPlanStore,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
     the whole request path, including the audit writer. The session store is the
@@ -261,6 +268,7 @@ async def authz_app(
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
         transcript_service=transcript_service,
+        call_plan_store=call_plan_store,
     )
     async with app.router.lifespan_context(app):
         yield app
