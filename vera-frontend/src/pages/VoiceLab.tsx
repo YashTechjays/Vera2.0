@@ -5,6 +5,7 @@ import {
   RoomAudioRenderer,
   useConnectionState,
   useParticipants,
+  useRoomInfo,
 } from "@livekit/components-react"
 import { ConnectionState } from "livekit-client"
 // `/max` metadata so isValidPhoneNumber does real per-country validation (length +
@@ -31,6 +32,7 @@ import {
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
 import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
+import { parseCallFailure } from "@/lib/voice-lab/callFailure"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -53,15 +55,33 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.SignalReconnecting]: "Reconnecting…",
 }
 
+/** Watches LiveKit room metadata for the control plane's "call_failed" signal and
+ *  reports it once. Must render inside <LiveKitRoom>. */
+function CallFailureWatcher({ onFailure }: { onFailure: (message: string) => void }) {
+  const { metadata } = useRoomInfo()
+  const fired = useRef(false)
+  useEffect(() => {
+    if (fired.current) return
+    const message = parseCallFailure(metadata)
+    if (message) {
+      fired.current = true
+      onFailure(message)
+    }
+  }, [metadata, onFailure])
+  return null
+}
+
 /** Renders live connection + participant state. Must live inside <LiveKitRoom>
  *  so the LiveKit room context is available to its hooks. */
 function SessionPanel({
   mode,
   onEnd,
+  onDisconnected,
   actions,
 }: {
   mode: VoiceSessionMode
   onEnd: () => void
+  onDisconnected: () => void
   actions?: ReactNode
 }) {
   const state = useConnectionState()
@@ -75,9 +95,9 @@ function SessionPanel({
     // Auto-cleanup: if we were connected and the room disconnected (agent deleted it,
     // network drop, etc.), clear the session so the UI resets to the start form.
     if (wasConnected.current && state === ConnectionState.Disconnected) {
-      onEnd()
+      onDisconnected()
     }
-  }, [state, onEnd])
+  }, [state, onDisconnected])
 
   return (
     <Card>
@@ -268,6 +288,19 @@ export function VoiceLab() {
     }
   }, [session?.room_name])
 
+  // Auto-cleanup when the room disconnects (agent deleted it, network drop). Resets to the
+  // form but preserves any error already set (e.g. a call-failure message).
+  const resetSession = useCallback(() => {
+    setSession(null)
+  }, [])
+
+  // A failed outbound call: show why, then drop back to the form. The control plane has
+  // already (or is about to) delete the room server-side, so no DELETE call is needed here.
+  const failSession = useCallback((message: string) => {
+    setError(message)
+    setSession(null)
+  }, [])
+
   return (
     <div className="space-y-6">
       <div>
@@ -289,10 +322,12 @@ export function VoiceLab() {
           video={false}
           onError={(e) => setError(e.message)}
         >
+          <CallFailureWatcher onFailure={failSession} />
           <div className="space-y-6">
             <SessionPanel
               mode={session.mode}
               onEnd={endSession}
+              onDisconnected={resetSession}
               actions={
                 session.mode === "outbound" ? <VoiceLabDialpad onError={setError} /> : undefined
               }
