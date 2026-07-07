@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ApiError } from "@/lib/api/client"
+import { apiErrorMessage } from "@/lib/api/errors"
 import { RecoveryCodes } from "@/components/auth/RecoveryCodes"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { selectMfa, selectTenantSlug, enrollActivateThunk } from "@/store/authSlice"
@@ -32,7 +32,7 @@ export function MfaEnroll() {
       ).unwrap()
       setRecovery(codes)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Enrollment failed.")
+      setError(apiErrorMessage(err, "Enrollment failed."))
     } finally {
       setBusy(false)
     }

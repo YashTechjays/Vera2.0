@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { PasswordInput } from "@/components/ui/password-input"
 import { Label } from "@/components/ui/label"
-import { ApiError } from "@/lib/api/client"
+import { apiErrorMessage, apiErrorStatus } from "@/lib/api/errors"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { platformLoginThunk, selectStatus } from "@/store/authSlice"
 
@@ -62,11 +62,9 @@ export function PlatformLogin() {
       navigate("/mfa")
     } catch (err) {
       setError(
-        err instanceof ApiError && err.httpStatus === 401
+        apiErrorStatus(err) === 401
           ? "Invalid credentials."
-          : err instanceof ApiError
-            ? err.message
-            : "Something went wrong.",
+          : apiErrorMessage(err, "Something went wrong."),
       )
     } finally {
       setBusy(false)

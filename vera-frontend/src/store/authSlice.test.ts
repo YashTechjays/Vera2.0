@@ -9,6 +9,8 @@ vi.mock("@/lib/auth/storage", () => ({
 
 import { configureStore } from "@reduxjs/toolkit"
 import * as api from "@/lib/auth/api"
+import { ApiError } from "@/lib/api/client"
+import { apiErrorMessage, apiErrorStatus } from "@/lib/api/errors"
 import authReducer, {
   forceLogout,
   loginThunk,
@@ -47,6 +49,30 @@ describe("authSlice", () => {
     expect(selectIsElevated(elevatedState(null))).toBe(false)
     expect(selectIsElevated(elevatedState(new Date(Date.now() + 60_000).toISOString()))).toBe(true)
     expect(selectIsElevated(elevatedState(new Date(Date.now() - 60_000).toISOString()))).toBe(false)
+  })
+
+  it("a rejected login surfaces the real backend message, not the fallback", async () => {
+    vi.mocked(api.login).mockRejectedValue(
+      new ApiError(403, "ACCOUNT_DEACTIVATED", "Your account has been deactivated."),
+    )
+    const store = makeStore()
+    const action = await store.dispatch(
+      loginThunk({ slug: "acme", email: "a@b.co", password: "x" }),
+    )
+    expect(loginThunk.rejected.match(action)).toBe(true)
+    expect(store.getState().auth.error).toBe("Your account has been deactivated.")
+    // .unwrap() throws the payload — pages must be able to read status/message.
+    expect(apiErrorStatus(action.payload)).toBe(403)
+    expect(apiErrorMessage(action.payload, "fallback")).toBe(
+      "Your account has been deactivated.",
+    )
+  })
+
+  it("a non-API rejection falls back to the generic message", async () => {
+    vi.mocked(api.login).mockRejectedValue(new TypeError("fetch failed"))
+    const store = makeStore()
+    await store.dispatch(loginThunk({ slug: "acme", email: "a@b.co", password: "x" }))
+    expect(store.getState().auth.error).toBe("Invalid credentials.")
   })
 
   it("logs in without MFA → authenticated", async () => {

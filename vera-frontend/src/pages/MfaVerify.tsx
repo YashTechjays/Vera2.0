@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ApiError } from "@/lib/api/client"
+import { apiErrorMessage } from "@/lib/api/errors"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import {
   platformVerifyMfaThunk,
@@ -38,7 +38,7 @@ export function MfaVerify() {
       }
       navigate("/", { replace: true })
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Verification failed.")
+      setError(apiErrorMessage(err, "Verification failed."))
     } finally {
       setBusy(false)
     }
