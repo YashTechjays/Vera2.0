@@ -15,6 +15,7 @@ from typing import Final
 DEFAULT_PERMISSIONS: Final[dict[str, str]] = {
     "calls:read": "View calls and their status/results",
     "calls:write": "Create and manage verification calls",
+    "voice_lab:sandbox": "Use the Voice Lab sandbox to start and monitor test voice sessions",
     "forms:read": "View form templates and filled forms",
     "forms:write": "Create and edit form templates",
     "users:read": "View users in the tenant",
@@ -56,6 +57,7 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
         {
             "calls:read",
             "calls:write",
+            "voice_lab:sandbox",
             "forms:read",
             "forms:write",
             "users:read",
@@ -63,4 +65,5 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
             "phi:detokenize",
         }
     ),
+    "VIRTUAL_ASSISTANT": frozenset({"voice_lab:sandbox"}),
 }

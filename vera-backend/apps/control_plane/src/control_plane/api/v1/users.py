@@ -26,6 +26,7 @@ from control_plane.api.v1.common import (
     Resolver,
     TenantId,
     TenantSession,
+    build_role_grant,
     emit_auth_event,
     roles_grant_platform_permission,
 )
@@ -43,7 +44,7 @@ from control_plane.exceptions import (
 )
 from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
-from vera_core.models import AppUser, Role, UserRole
+from vera_core.models import AppUser, Role
 from vera_core.models.enums import AccountType, AuthEvent
 
 logger = logging.getLogger(__name__)
@@ -152,11 +153,19 @@ async def invite_user(
         name=body.name,
         status="invited",
         account_type=AccountType.TENANT.value,
+        invited_by=caller.user_id,
     )
     session.add(user)
     await session.flush()
     for role_id in body.role_ids:
-        session.add(UserRole(tenant_id=tenant_id, app_user_id=user.id, role_id=role_id))
+        session.add(
+            build_role_grant(
+                tenant_id=tenant_id,
+                app_user_id=user.id,
+                role_id=role_id,
+                granted_by=caller.user_id,
+            )
+        )
 
     token = await invites.put(
         INVITE_NS,

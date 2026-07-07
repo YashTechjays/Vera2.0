@@ -6,10 +6,12 @@ No persistence: this creates an ephemeral LiveKit room, dispatches the agent, an
 appears in Live Monitoring. It is deliberately decoupled from /calls so it can be
 built and tested in parallel with the real call-initiation flow.
 
-Auth note (acknowledged stopgap): guards with `require("calls:read")`, matching the
-interim convention in `calls.py`.
+Auth note: guarded by the dedicated `voice_lab:sandbox` permission, kept separate
+from `calls:read` (which gates the real call system) so a narrow role like
+VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
+import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
@@ -54,6 +56,8 @@ from vera_core.transcript import TranscriptEvent, TranscriptService
 
 router = APIRouter(tags=["voice-lab"])
 
+logger = logging.getLogger("control_plane.voice_lab")
+
 # E.164: a leading + and 1-15 digits, first digit non-zero.
 _E164 = re.compile(r"^\+[1-9]\d{1,14}$")
 
@@ -74,7 +78,7 @@ class ProviderOption(BaseModel):
 )
 async def list_call_providers(
     session: TenantSession,
-    _caller: VerifiedIdentity = require("calls:read"),
+    _caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[list[ProviderOption]]:
     """Active insurance providers a tenant operator can pick when starting an IVR call. The
     insurance_provider table is GLOBAL (no RLS), so it resolves on the tenant-scoped session;
@@ -108,7 +112,7 @@ async def start_voice_session(
     session: TenantSession,
     kms: Kms,
     call_plan_store: CallPlanStoreDep,
-    caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
+    caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[VoiceSessionResponse]:
     # Synthetic call id — no DB row; the room name is still the canonical
     # call--<tenant>--<call> so worker correlation/observability work unchanged.
@@ -171,11 +175,18 @@ async def start_voice_session(
             store=call_plan_store,
         )
     await livekit.create_call_room(room_name, metadata=metadata)
+    logger.info(
+        "voice-lab: created room + dispatched agent for room %s (outbound=%s)",
+        room_name,
+        outbound is not None,
+    )
     if outbound is not None:
         phone_number, trunk_id = outbound
         try:
             await livekit.create_sip_participant(room_name, phone_number, trunk_id)
+            logger.info("voice-lab: placed outbound SIP call into room %s", room_name)
         except OutboundDialError as e:
+            logger.warning("voice-lab: outbound dial failed for room %s: %s", room_name, e)
             # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
             # after it was stored, or the carrier refused the call). Tear down the room
             # + dispatched agent we just created so nothing is left orphaned, and return
@@ -210,7 +221,7 @@ async def end_voice_session(
     room_name: str,
     tenant_id: TenantId,
     livekit: LiveKit,
-    _caller: VerifiedIdentity = require("calls:read"),
+    _caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[None]:
     # Deleting the room is what actually ends the session: it disconnects the agent
     # worker (its session shuts down) and any SIP callee (the outbound call hangs up).
@@ -257,7 +268,7 @@ async def stream_transcript(
         user_id, permissions = await resolver.effective_permissions(
             session, tenant_id, identity.user_id
         )
-    allowed = "calls:read" in permissions
+    allowed = "voice_lab:sandbox" in permissions
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
@@ -267,14 +278,14 @@ async def stream_transcript(
             event_type=AuditEvent.PHI_ACCESS.value,
             resource_type="transcript",
             resource_id=room_name,
-            permission_key="calls:read",
+            permission_key="voice_lab:sandbox",
             decision="allow" if allowed else "deny",
             request_id=current_request_id(request),
         )
     )
     if not allowed:
         raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN, message="missing permission calls:read"
+            DefaultExceptionCode.FORBIDDEN, message="missing permission voice_lab:sandbox"
         )
 
     async def _events() -> AsyncIterator[str]:

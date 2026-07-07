@@ -495,8 +495,8 @@ async def test_voice_lab_lists_active_providers_for_tenant_user(
     rbac_world: RBACWorld,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A tenant user (calls:read) can read the provider list for the call-start picker; only
-    # active providers are offered.
+    # A tenant user (voice_lab:sandbox) can read the provider list for the call-start picker;
+    # only active providers are offered.
     active_id, inactive_id = uuid7(), uuid7()
     async with admin_sessionmaker() as s, s.begin():
         s.add(InsuranceProvider(id=active_id, name=f"Sel {active_id.hex}", status="active"))

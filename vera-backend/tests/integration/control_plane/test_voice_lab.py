@@ -394,3 +394,44 @@ async def test_voice_lab_requires_auth(client: httpx.AsyncClient) -> None:
 
     ended = await client.delete("/api/v1/voice-lab/sessions/call--x--y")
     assert ended.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_virtual_assistant_can_start_and_end_session(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    started = await client.post(
+        "/api/v1/voice-lab/sessions",
+        headers=_auth(rbac_world.virtual_assistant_token),
+        json={"mode": "browser"},
+    )
+    assert started.status_code == 200, started.text
+    room_name = started.json()["data"]["room_name"]
+
+    ended = await client.delete(
+        f"/api/v1/voice-lab/sessions/{room_name}",
+        headers=_auth(rbac_world.virtual_assistant_token),
+    )
+    assert ended.status_code == 200, ended.text
+
+
+@pytest.mark.asyncio
+async def test_norole_denied_voice_lab_session(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.post(
+        "/api/v1/voice-lab/sessions",
+        headers=_auth(rbac_world.norole_token),
+        json={"mode": "browser"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_virtual_assistant_denied_other_admin_endpoints(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get("/api/v1/users", headers=_auth(rbac_world.virtual_assistant_token))
+    assert resp.status_code == 403, resp.text

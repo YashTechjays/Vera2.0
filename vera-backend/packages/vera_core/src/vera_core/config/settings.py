@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # self-clears). Read by the worker when it joins the room.
     call_plan_ttl_seconds: int = 3600  # VERA_CALL_PLAN_TTL_SECONDS
 
+    # Worker→control-plane event bus (Redis Streams + consumer group). Stream is
+    # MAXLEN-trimmed; the consumer blocks for block_ms, reclaims entries a crashed
+    # consumer left pending after reclaim_idle_ms, and waits teardown_grace_ms after
+    # setting failure metadata before deleting the room (so the browser reads it).
+    worker_events_stream_maxlen: int = 10_000  # VERA_WORKER_EVENTS_STREAM_MAXLEN
+    worker_events_block_ms: int = 5_000  # VERA_WORKER_EVENTS_BLOCK_MS
+    worker_events_reclaim_idle_ms: int = 60_000  # VERA_WORKER_EVENTS_RECLAIM_IDLE_MS
+    call_failed_teardown_grace_ms: int = 1_500  # VERA_CALL_FAILED_TEARDOWN_GRACE_MS
+
     gcp_project: str | None = None
 
     # --- KMS ------------------------------------------------------------------
@@ -103,6 +112,14 @@ class Settings(BaseSettings):
     # LiveKit server URL (ws:// for local dev, wss:// in prod).
     # Unset → `build_livekit_gateway` raises ValueError.
     livekit_url: str | None = None
+
+    # Explicit-dispatch agent name. The control plane dispatches jobs to this name and
+    # the worker registers under it — they MUST match for a job to route. Default
+    # "vera-agent" (used by dev/prod). Override per-environment (set the SAME value on
+    # both the control plane and the worker) to isolate a worker pool that shares one
+    # LiveKit project — e.g. `VERA_LIVEKIT_AGENT_NAME=vera-agent-local` on a laptop that
+    # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
+    livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
 
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
