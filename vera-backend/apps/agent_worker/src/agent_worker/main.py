@@ -29,7 +29,7 @@ from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import attach_transcript_publisher
 from vera_core.config.settings import get_settings
-from vera_core.events import CallFailureReason
+from vera_core.events import CallFailedEvent, CallFailureReason, WorkerEventBus
 from vera_core.observability.correlation import (
     call_trace_attributes,
     is_listen_only_identity,
@@ -171,16 +171,11 @@ def session_id_for(room_name: str) -> str:
     return room_name
 
 
-async def publish_unanswered_notice(service: TranscriptService, room_name: str) -> None:
-    """Publish a user-facing transcript event when the outbound call is not answered,
-    then end the stream so the browser's TranscriptPanel shows feedback."""
-    await service.publish_turn(
-        room_name,
-        role="agent",
-        text="The outbound call was not answered or the line is unavailable. Please try again.",
-        ts=int(time.time() * 1000),
-    )
-    await service.end(room_name)
+async def _emit_call_failed(
+    bus: WorkerEventBus, room_name: str, reason: CallFailureReason, *, now_ms: int
+) -> None:
+    """Publish the call.failed event the control plane consumes to tear the room down."""
+    await bus.emit(CallFailedEvent(room_name=room_name, reason=reason, ts=now_ms))
 
 
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
@@ -226,24 +221,19 @@ async def entrypoint(ctx: JobContext) -> None:
     speaker: rtc.RemoteParticipant | None = None
     meta = json.loads(ctx.job.metadata or "{}")
     if meta.get("wait_for_speaker"):
-        speaker = await wait_for_speaker(ctx)
-        if speaker is None:
-            logger.warning("no speaker joined room %s within timeout — not starting", room_name)
-            # Publish feedback to the browser's transcript panel before exiting.
-            if meta.get("publish_transcript"):
-                timeout_redis = create_redis(settings.redis_url)
-                timeout_service = TranscriptService(
-                    RedisTranscriptStore(
-                        timeout_redis,
-                        ttl_seconds=settings.transcript_stream_ttl_seconds,
-                        end_grace_seconds=settings.transcript_end_grace_seconds,
-                    )
+        outcome = await wait_for_speaker(ctx)
+        if isinstance(outcome, CallFailed):
+            logger.warning("outbound call failed for room %s: %s", room_name, outcome.reason.value)
+            failure_redis = create_redis(settings.redis_url)
+            try:
+                bus = WorkerEventBus(failure_redis, maxlen=settings.worker_events_stream_maxlen)
+                await _emit_call_failed(
+                    bus, room_name, outcome.reason, now_ms=int(time.time() * 1000)
                 )
-                try:
-                    await publish_unanswered_notice(timeout_service, room_name)
-                finally:
-                    await timeout_redis.aclose()
+            finally:
+                await failure_redis.aclose()
             return
+        speaker = outcome.participant
 
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
