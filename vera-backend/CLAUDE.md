@@ -18,6 +18,14 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   simplification / efficiency / altitude cleanup — quality only, not bug-hunting), then
   re-run `just check`, before claiming done or committing. Skip only for truly trivial edits
   (typo, one-line rename). Use `/code-review` for correctness bugs.
+- **A change that adds or modifies a long-lived background loop** (a Redis Streams consumer,
+  a poller, a lifespan `asyncio.create_task`) MUST be verified by actually BOOTING the service
+  (`just up` then `just api` / `just worker`) and watching it idle for a couple of loop windows
+  — not by `pytest` alone. Tests with a fake that returns immediately never exercise
+  BLOCK / read-timeout / connection behavior, so they go green while the deployed loop errors
+  (this is exactly how the Redis BLOCK-timeout footgun below shipped). Booting needs no external
+  telephony — just `LOCAL_KMS_MASTER_KEY` set (and `VERA_LIVEKIT_URL` to start the worker-event
+  consumer).
 - `just up` then `just migrate` — local Postgres+Redis via docker compose, then Alembic.
   Integration tests skip without this; **RLS policies live in `migrations/`, not in models.**
   `just up` starts only the **core** infra (postgres, redis, sendria, livekit). The heavy
@@ -58,6 +66,13 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   SQLAlchemy async, `redis.asyncio`, `pytest-asyncio`). `anyio` stays **transitive-only** (pulled by
   starlette/httpx/SDKs); never add it to a `pyproject.toml` `dependencies`, never `import anyio`. For
   structured concurrency use stdlib `asyncio.TaskGroup` / `asyncio.timeout`, not anyio equivalents.
+- **`redis.asyncio` Streams BLOCK reads RAISE, they don't return empty.** `xread` / `xreadgroup`
+  with `block=<ms>` raise `redis.exceptions.TimeoutError` (which subclasses `RedisError`) when the
+  window elapses with no new entries — they do NOT return an empty result. A tailing consumer MUST
+  catch `TimeoutError as RedisTimeoutError` around the blocking read and treat it as a normal idle
+  tick; otherwise a broad `except RedisError` miscatches every idle poll as an error (traceback +
+  back-off log spam every window). Copy the canonical handling in `RedisTranscriptStore.read`
+  (`vera_core/transcript.py`) and `control_plane/worker_events.py::_read_once`.
 - uv workspace: `vera_core` (shared core) + `phi_codec` (vendored) → consumed by `control_plane`
   (FastAPI, owns Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
 - **Vendored `packages/phi_codec` is excluded from ruff & mypy** — don't lint/retype it; integrate
