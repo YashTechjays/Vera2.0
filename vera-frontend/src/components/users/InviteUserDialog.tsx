@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
 import { ApiError } from "@/lib/api/client"
+import { useCopy } from "@/lib/clipboard"
 import { inviteUser, listRoles, type InviteUserResult, type RoleSummary } from "@/lib/auth/api"
 
 export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {}) {
@@ -21,7 +22,7 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<InviteUserResult | null>(null)
-  const [copied, setCopied] = useState(false)
+  const { state: copyState, copy } = useCopy()
 
   // Load the assignable roles (global system roles + this tenant's custom roles)
   // once per dialog lifetime (not on every open) — cheap to keep for the session,
@@ -49,8 +50,7 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
   }, [open, roles.length])
 
   function copyLink() {
-    if (!result) return
-    void navigator.clipboard.writeText(result.invite_url).then(() => setCopied(true))
+    if (result) void copy(result.invite_url)
   }
 
   async function onSubmit(e: FormEvent) {
@@ -75,7 +75,7 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
 
   function reset() {
     setOpen(false)
-    setEmail(""); setName(""); setSendEmail(true); setRoleId(""); setError(null); setResult(null); setBusy(false); setCopied(false)
+    setEmail(""); setName(""); setSendEmail(true); setRoleId(""); setError(null); setResult(null); setBusy(false)
   }
 
   const submitLabel = sendEmail ? "Send invitation" : "Create invitation"
@@ -116,10 +116,10 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
                     variant="outline"
                     size="icon"
                     onClick={copyLink}
-                    aria-label={copied ? "Link copied" : "Copy invite link"}
-                    title={copied ? "Copied" : "Copy"}
+                    aria-label={copyState === "copied" ? "Link copied" : "Copy invite link"}
+                    title={copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
                   >
-                    {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                    {copyState === "copied" ? <Check className="size-4" /> : <Copy className="size-4" />}
                   </Button>
                 </div>
               </div>

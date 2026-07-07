@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
+import { useCopy } from "@/lib/clipboard"
 import {
   createApiKey,
   listApiKeyScopes,
@@ -42,7 +43,7 @@ export function ApiKeysSection() {
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [created, setCreated] = useState<CreatedApiKey | null>(null)
-  const [copied, setCopied] = useState(false)
+  const { state: copyState, copy } = useCopy()
   const [revokingId, setRevokingId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -92,7 +93,6 @@ export function ApiKeysSection() {
       setCreating(true)
       setCreateError(null)
       setCreated(null)
-      setCopied(false)
       try {
         const key = await createApiKey(name.trim(), scope)
         setCreated(key)
@@ -125,9 +125,8 @@ export function ApiKeysSection() {
   )
 
   const copyToken = useCallback(() => {
-    if (!created) return
-    void navigator.clipboard.writeText(created.token).then(() => setCopied(true))
-  }, [created])
+    if (created) void copy(created.token)
+  }, [created, copy])
 
   return (
     <section className="space-y-3">
@@ -150,7 +149,7 @@ export function ApiKeysSection() {
               {created.token}
             </code>
             <Button type="button" size="sm" onClick={copyToken}>
-              {copied ? "Copied" : "Copy token"}
+              {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy token"}
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => setCreated(null)}>
               Done

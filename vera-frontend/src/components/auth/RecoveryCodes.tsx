@@ -2,13 +2,11 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
+import { useCopy } from "@/lib/clipboard"
 
 export function RecoveryCodes({ codes, onContinue }: { codes: string[]; onContinue: () => void }) {
   const [saved, setSaved] = useState(false)
-
-  function copy() {
-    void navigator.clipboard.writeText(codes.join("\n"))
-  }
+  const { state: copyState, copy } = useCopy()
   function download() {
     const blob = new Blob([codes.join("\n")], { type: "text/plain" })
     const url = URL.createObjectURL(blob)
@@ -29,7 +27,9 @@ export function RecoveryCodes({ codes, onContinue }: { codes: string[]; onContin
         {codes.map((c, i) => <span key={i}>{c}</span>)}
       </div>
       <div className="flex gap-2">
-        <Button type="button" variant="outline" size="sm" onClick={copy}>Copy</Button>
+        <Button type="button" variant="outline" size="sm" onClick={() => copy(codes.join("\n"))}>
+          {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
+        </Button>
         <Button type="button" variant="outline" size="sm" onClick={download}>Download</Button>
       </div>
       <div className="flex items-center gap-2 text-sm">
