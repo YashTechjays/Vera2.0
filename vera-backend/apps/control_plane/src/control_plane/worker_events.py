@@ -152,7 +152,10 @@ class WorkerEventConsumer:
         await self._redis.xack(WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, entry_id)
 
     async def _handle_call_failed(self, event: WorkerEvent) -> None:
-        assert isinstance(event, CallFailedEvent)
+        # Narrow without `assert` (stripped under `python -O`); handlers are keyed by
+        # event.type, so this only guards against a future mis-registration.
+        if not isinstance(event, CallFailedEvent):
+            return
         if parse_room_name(event.room_name) is None:
             logger.warning("call.failed for non-vera room %s; ignoring", event.room_name)
             return

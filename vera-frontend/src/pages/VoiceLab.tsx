@@ -288,11 +288,23 @@ export function VoiceLab() {
     }
   }, [session?.room_name])
 
-  // Auto-cleanup when the room disconnects (agent deleted it, network drop). Resets to the
-  // form but preserves any error already set (e.g. a call-failure message).
-  const resetSession = useCallback(() => {
+  // Auto-cleanup when the room disconnects (agent deleted it, or a browser network drop).
+  // Reset to the form, then best-effort DELETE the room: a genuine network drop won't have
+  // torn it down server-side, so skipping this would orphan the agent session + any live
+  // outbound SIP leg. For a call-failure or normal end the room is already gone → DELETE is a
+  // harmless no-op. We deliberately do NOT clear `error`, so a call-failure banner set just
+  // before the disconnect survives.
+  const resetSession = useCallback(async () => {
+    const roomName = session?.room_name
     setSession(null)
-  }, [])
+    if (roomName) {
+      try {
+        await endVoiceSession(roomName)
+      } catch {
+        // best-effort: the room may already be gone (agent/close path deleted it first)
+      }
+    }
+  }, [session?.room_name])
 
   // A failed outbound call: show why, then drop back to the form. The control plane has
   // already (or is about to) delete the room server-side, so no DELETE call is needed here.
