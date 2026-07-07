@@ -26,7 +26,7 @@ from redis.asyncio import Redis
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
-from agent_worker.transcript_publisher import attach_transcript_publisher
+from agent_worker.transcript_publisher import ReorderingEmitter, attach_transcript_publisher
 from vera_core.config.settings import get_settings
 from vera_core.observability.correlation import (
     call_trace_attributes,
@@ -230,6 +230,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
     transcript_redis: Redis | None = None
     transcript_service: TranscriptService | None = None
+    transcript_emitter: ReorderingEmitter | None = None
     if meta.get("publish_transcript"):
         transcript_redis = create_redis(settings.redis_url)
         transcript_service = TranscriptService(
@@ -239,9 +240,16 @@ async def entrypoint(ctx: JobContext) -> None:
                 end_grace_seconds=settings.transcript_end_grace_seconds,
             )
         )
-        attach_transcript_publisher(session, transcript_service, room_name)
+        transcript_emitter = attach_transcript_publisher(session, transcript_service, room_name)
 
     async def _on_shutdown() -> None:
+        # Order is load-bearing: flush held turns BEFORE end(). end() appends the sentinel
+        # that stops readers, so a turn flushed after it would be stranded behind the sentinel.
+        if transcript_emitter is not None:
+            try:
+                await transcript_emitter.aclose()
+            except Exception:  # best-effort; never block shutdown
+                logger.exception("failed to flush transcript for %s", room_name)
         if transcript_service is not None:
             try:
                 await transcript_service.end(room_name)
