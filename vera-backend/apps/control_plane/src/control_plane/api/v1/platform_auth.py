@@ -30,6 +30,7 @@ from control_plane.api.v1.auth import (
     _load_password_creds,
     _password_identity_row,
     _unauthorized,
+    raise_for_inactive,
 )
 from control_plane.api.v1.common import AppSettings, AuthAudit, emit_auth_event
 from control_plane.auth import mfa
@@ -55,6 +56,7 @@ KMS = Annotated[KeyManagementService, Depends(get_kms)]
     response_model=ResponseModel[LoginResponse],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.VALIDATION_ERROR,
     ),
 )
@@ -93,6 +95,16 @@ async def platform_login(
             audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=user_id
         )
         raise _unauthorized()
+    if creds.status != "active":
+        await emit_auth_event(
+            audit,
+            tenant_id=None,
+            event=AuthEvent.LOGIN_FAILURE,
+            ip=ip,
+            user_id=creds.user_id,
+            meta={"reason": f"account_{creds.status}"},
+        )
+        raise_for_inactive(creds)
 
     base = SessionData(
         user_id=creds.user_id,

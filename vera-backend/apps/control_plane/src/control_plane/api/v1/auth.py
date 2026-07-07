@@ -213,13 +213,33 @@ class _PasswordCreds:
     hashed_password: str | None
     mfa_enabled: bool
     account_type: str
+    status: str
+
+
+DEACTIVATED_MESSAGE = "Your account has been deactivated. Please contact your administrator."
+
+
+def raise_for_inactive(creds: _PasswordCreds) -> None:
+    """403 for a deactivated account, uniform 401 for any other non-active status.
+
+    MUST be called only AFTER the password has verified: the caller proved
+    credential ownership, so naming the reason discloses nothing to outsiders.
+    Wrong passwords must keep the uniform 401 (no account-status enumeration).
+    """
+    if creds.status == "active":
+        return
+    if creds.status == "deactivated":
+        raise CustomAPIException(DefaultExceptionCode.FORBIDDEN, message=DEACTIVATED_MESSAGE)
+    raise _unauthorized()
 
 
 async def _load_password_creds(
     session: AsyncSession, email: str, *, account_type: str | None = None
 ) -> _PasswordCreds | None:
-    """Resolve an active user's password credentials within the current session.
+    """Resolve a user's password credentials within the current session.
     Returns plain values (no lazy ORM attributes) so they survive the session.
+    Includes `status` unfiltered — callers gate on it AFTER verifying the
+    password (see `raise_for_inactive`).
     `account_type` pins the plane (e.g. 'platform') so a stray row from the other
     plane can never authenticate here; left unset for tenant login (RLS already
     confines the session to one tenant)."""
@@ -229,6 +249,7 @@ async def _load_password_creds(
                 AppUser.id,
                 AppUser.email,
                 AppUser.account_type,
+                AppUser.status,
                 UserIdentity.hashed_password,
                 UserIdentity.mfa_enabled,
             )
@@ -236,7 +257,6 @@ async def _load_password_creds(
             .where(
                 UserIdentity.provider_type == ProviderKind.PASSWORD.value,
                 UserIdentity.email == email,
-                AppUser.status == "active",
                 *([AppUser.account_type == account_type] if account_type is not None else []),
             )
         )
@@ -249,6 +269,7 @@ async def _load_password_creds(
         hashed_password=row.hashed_password,
         mfa_enabled=row.mfa_enabled,
         account_type=row.account_type,
+        status=row.status,
     )
 
 
@@ -271,6 +292,7 @@ async def _stamp_last_login(
     response_model=ResponseModel[LoginResponse],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.VALIDATION_ERROR,
     ),
 )
@@ -324,6 +346,16 @@ async def login(
             audit, tenant_id=tenant_id, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=user_id
         )
         raise _unauthorized()
+    if creds.status != "active":
+        await _audit(
+            audit,
+            tenant_id=tenant_id,
+            event=AuthEvent.LOGIN_FAILURE,
+            ip=ip,
+            user_id=creds.user_id,
+            reason=f"account_{creds.status}",
+        )
+        raise_for_inactive(creds)
 
     base = SessionData(
         user_id=creds.user_id,
