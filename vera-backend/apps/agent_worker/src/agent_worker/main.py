@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 
 from livekit import rtc
 from livekit.agents import (
@@ -28,6 +29,7 @@ from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import attach_transcript_publisher
 from vera_core.config.settings import get_settings
+from vera_core.events import CallFailureReason
 from vera_core.observability.correlation import (
     call_trace_attributes,
     is_listen_only_identity,
@@ -64,56 +66,83 @@ def _is_ready_speaker(participant: rtc.Participant) -> bool:
     return True
 
 
-async def wait_for_speaker(
-    ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_S
-) -> rtc.RemoteParticipant | None:
-    """Block until a ready, non-monitor remote participant is present, or the timeout.
+@dataclass(frozen=True)
+class SpeakerReady:
+    """A ready, non-monitor participant is present — the agent may start/greet."""
 
-    Returns that participant once the browser caller has joined or the SIP callee has
-    answered, or None on timeout. The caller pins the agent's audio input to the
-    returned participant so it listens to the speaker and not the listen-only monitor.
+    participant: rtc.RemoteParticipant
 
-    Subscribe to events BEFORE checking existing participants so that a participant
-    who joins in the gap between the two steps is never missed (the event fires into
-    an already-listening handler and resolves the future immediately).
+
+@dataclass(frozen=True)
+class CallFailed:
+    """The outbound call did not connect (busy/declined/no-answer/trunk error)."""
+
+    reason: CallFailureReason
+
+
+type WaitResult = SpeakerReady | CallFailed
+
+# SIP disconnect reason (int enum) → user-facing failure class. Anything not listed
+# (incl. None and SIP_TRUNK_FAILURE) is an opaque failure.
+_SIP_FAILURE_REASONS: dict[int, CallFailureReason] = {
+    rtc.DisconnectReason.USER_REJECTED: CallFailureReason.BUSY_OR_DECLINED,
+    rtc.DisconnectReason.USER_UNAVAILABLE: CallFailureReason.NO_ANSWER,
+}
+
+
+def classify_sip_disconnect(reason: int | None) -> CallFailureReason:
+    if reason is None:
+        return CallFailureReason.FAILED
+    return _SIP_FAILURE_REASONS.get(reason, CallFailureReason.FAILED)
+
+
+async def wait_for_speaker(ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_S) -> WaitResult:
+    """Block until the call is ready to run or has failed.
+
+    Returns SpeakerReady once the browser caller joins or the SIP callee answers
+    (sip.callStatus == "active"). Returns CallFailed if the SIP callee drops before
+    answering (busy/declined/trunk error) or nobody becomes ready within timeout_s
+    (treated as no-answer). Subscribe to events BEFORE scanning existing participants
+    so a join/attr/disconnect in the gap is never missed.
     """
     loop = asyncio.get_running_loop()
-    arrived: asyncio.Future[rtc.RemoteParticipant] = loop.create_future()
+    result: asyncio.Future[WaitResult] = loop.create_future()
 
-    def _resolve(participant: rtc.Participant) -> None:
-        if arrived.done() or not _is_ready_speaker(participant):
+    def _resolve_ready(participant: rtc.Participant) -> None:
+        if result.done() or not _is_ready_speaker(participant):
             return
-        # Look up the RemoteParticipant (filters out the agent's own local participant,
-        # which never appears in remote_participants).
         remote = ctx.room.remote_participants.get(participant.identity)
         if remote is not None:
-            arrived.set_result(remote)
+            result.set_result(SpeakerReady(remote))
 
     def _on_connected(participant: rtc.RemoteParticipant) -> None:
-        _resolve(participant)
+        _resolve_ready(participant)
 
     def _on_attributes_changed(_changed: dict[str, str], participant: rtc.Participant) -> None:
-        # The SIP callee's ring → active transition arrives here, not as a new join.
-        _resolve(participant)
+        _resolve_ready(participant)
 
-    # Subscribe FIRST — closing the race window where a join event could fire
-    # between the existing-participant scan and the event registration.
+    def _on_disconnected(participant: rtc.RemoteParticipant) -> None:
+        # A SIP callee dropping before it answered means the outbound call failed.
+        if result.done() or participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            return
+        result.set_result(CallFailed(classify_sip_disconnect(participant.disconnect_reason)))
+
     ctx.room.on("participant_connected", _on_connected)
     ctx.room.on("participant_attributes_changed", _on_attributes_changed)
+    ctx.room.on("participant_disconnected", _on_disconnected)
     try:
-        # Now check participants who arrived before we subscribed.
         for p in ctx.room.remote_participants.values():
-            _resolve(p)
-        if arrived.done():
-            return arrived.result()
-
+            _resolve_ready(p)
+        if result.done():
+            return result.result()
         async with asyncio.timeout(timeout_s):
-            return await arrived
+            return await result
     except TimeoutError:
-        return None
+        return CallFailed(CallFailureReason.NO_ANSWER)
     finally:
         ctx.room.off("participant_connected", _on_connected)
         ctx.room.off("participant_attributes_changed", _on_attributes_changed)
+        ctx.room.off("participant_disconnected", _on_disconnected)
 
 
 def build_room_input_options(speaker_identity: str | NotGiven) -> RoomInputOptions:
