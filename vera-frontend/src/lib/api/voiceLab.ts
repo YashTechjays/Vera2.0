@@ -14,6 +14,9 @@ export type StartVoiceSessionPayload = {
   enable_ivr_navigation?: boolean
   /** When navigating, the provider whose active playbook specializes the navigator (else generic). */
   insurance_provider_id?: string
+  /** Opaque patient-form id — the call plan is compiled from that form's pinned schema.
+   *  Unset → the generic published schema for the insurance type. */
+  form_id?: string
 }
 
 export type VoiceSessionResponse = {

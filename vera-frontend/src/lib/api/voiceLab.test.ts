@@ -48,6 +48,15 @@ describe("startVoiceSession", () => {
     })
   })
 
+  it("includes the form_id in the body when a patient form is selected", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(response)
+    await startVoiceSession({ mode: "browser", form_id: "019f3a66-0000-7000-8000-000000000001" })
+    expect(apiRequest).toHaveBeenCalledWith("/voice-lab/sessions", {
+      method: "POST",
+      body: { mode: "browser", form_id: "019f3a66-0000-7000-8000-000000000001" },
+    })
+  })
+
   it("posts an outbound session with the phone number", async () => {
     vi.mocked(apiRequest).mockResolvedValue({ ...response, mode: "outbound" })
     await startVoiceSession({ mode: "outbound", phone_number: "+15551234567" })

@@ -30,6 +30,8 @@ import {
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
+import { listPatientForms } from "@/lib/patient-forms/api"
+import type { PatientFormSummary } from "@/lib/patient-forms/types"
 import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
@@ -208,6 +210,10 @@ export function VoiceLab() {
   // calls:read (tenant users included); the provider's active playbook is applied server-side.
   const [providers, setProviders] = useState<ProviderOption[]>([])
   const [providerId, setProviderId] = useState("")
+  // Patient-form picker: the plan is compiled from the selected form's pinned schema (empty
+  // → the generic published schema). `patient_name` is PHI — held in session state only.
+  const [forms, setForms] = useState<PatientFormSummary[]>([])
+  const [formId, setFormId] = useState("")
   // Only flag the number field once the operator has interacted with it, so an
   // untouched empty form doesn't show a red error.
   const [touched, setTouched] = useState(false)
@@ -234,6 +240,20 @@ export function VoiceLab() {
     }
   }, [])
 
+  // Load selectable patient forms once; a failed load just leaves the picker with the generic
+  // option (errors non-fatal, like the provider picker).
+  useEffect(() => {
+    let cancelled = false
+    listPatientForms({ page: 1, page_size: 100 })
+      .then((res) => {
+        if (!cancelled) setForms(res.items)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   async function start(mode: VoiceSessionMode) {
     setError(null)
     setPending(mode)
@@ -242,6 +262,7 @@ export function VoiceLab() {
         mode,
         enable_ivr_navigation: ivrNavigation,
         ...(ivrNavigation && providerId ? { insurance_provider_id: providerId } : {}),
+        ...(formId ? { form_id: formId } : {}),
         ...(mode === "outbound" ? { phone_number: phone! } : {}),
       })
       setSession(result)
@@ -314,6 +335,26 @@ export function VoiceLab() {
                   Dial a phone number and listen to the Vera agent live over SIP.
                 </p>
               </div>
+            </div>
+
+            <div className="space-y-1.5 rounded-lg border p-3">
+              <Label htmlFor="patient-form">Patient form</Label>
+              <Select
+                id="patient-form"
+                value={formId}
+                onChange={(ev) => setFormId(ev.target.value)}
+              >
+                <option value="">Generic (published schema)</option>
+                {forms.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.patient_name ?? f.id} — {f.status}
+                  </option>
+                ))}
+              </Select>
+              <p className="text-sm text-muted-foreground">
+                Compiles the call plan from this patient's form. Leave as Generic to use the
+                published schema for the insurance type.
+              </p>
             </div>
 
             <div className="space-y-2">
