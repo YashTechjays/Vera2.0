@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
 from vera_core.db import uuid7
-from vera_core.models import AuditLog, Call, InsuranceProvider, PatientForm
+from vera_core.models import AppUser, AuditLog, Call, InsuranceProvider, PatientForm
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 from vera_core.observability.correlation import parse_room_name
@@ -588,8 +588,21 @@ async def test_owner_revokes_intervener_access(
     )
     assert forbidden.status_code == 403, forbidden.text
 
-    # Owner revokes a target; LiveKit removal is invoked and audited.
-    target = uuid4()
+    # A published call is joinable by the supervisor before the revoke.
+    ok_join = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert ok_join.status_code == 200, ok_join.text
+
+    # Owner revokes the supervisor; LiveKit removal is invoked and audited.
+    target = (
+        await admin_session.execute(
+            select(AppUser.id).where(
+                AppUser.email == "supervisor@test.example",
+                AppUser.tenant_id == rbac_world.tenant_id,
+            )
+        )
+    ).scalar_one()
     revoked = await client.post(
         f"/api/v1/calls/{call_id}/revoke-access",
         headers=_auth(rbac_world.admin_token),
@@ -605,9 +618,14 @@ async def test_owner_revokes_intervener_access(
     )
     assert len(result.scalars().all()) == 1
 
-    # The call is still published.
+    # The revocation is durable: no fresh join token, even though still published.
+    denied = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert denied.status_code == 404, denied.text
     row = (await admin_session.execute(select(Call).where(Call.id == UUID(call_id)))).scalar_one()
     assert row.published is True
+    assert row.revoked_user_ids == [str(target)]
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ Mirrors the build_kms factory shape.
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import aiohttp
 from livekit import api
@@ -168,11 +169,14 @@ class LiveKitGateway:
             )
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
+        # Short TTL: the token is used immediately; the SDK default (~6h) would
+        # let a revoked user's old token keep working.
         grants = api.VideoGrants(room_join=True, room=room_name)
         return (
             api.AccessToken(self._api_key, self._api_secret)
             .with_identity(identity)
             .with_grants(grants)
+            .with_ttl(timedelta(minutes=5))
             .to_jwt()
         )
 

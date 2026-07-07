@@ -201,9 +201,10 @@ async def join_token(
     if call is None:
         raise NotFoundError(message="call not found")
     if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
-        # Ownerless (pre-ownership dispatcher) calls are joinable tenant-wide,
-        # matching their list_calls visibility.
-        if call.initiated_by_id is not None and not call.published:
+        # Ownerless calls are joinable tenant-wide; revoked users get the same
+        # 404 as a private call (no enumeration).
+        revoked = str(caller.user_id) in call.revoked_user_ids
+        if revoked or (call.initiated_by_id is not None and not call.published):
             raise NotFoundError(message="call not found")  # don't reveal a private call
         await audit.emit(
             AuditRecord(
@@ -365,15 +366,19 @@ async def revoke_access(
     audit: Audit,
     caller: VerifiedIdentity = require("calls:publish"),
 ) -> ResponseModel[None]:
+    # Row lock: concurrent revokes must not overwrite each other's list append.
     call = (
-        await session.execute(select(Call).where(Call.id == call_id))
-    ).scalar_one_or_none()  # RLS scopes to the caller's tenant
+        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
+    ).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
     if call.initiated_by_id != caller.user_id:
         raise CustomAPIException(
             DefaultExceptionCode.FORBIDDEN, message="only the owner can revoke access"
         )
+    target = str(body.target_user_id)
+    if target not in call.revoked_user_ids:
+        call.revoked_user_ids = [*call.revoked_user_ids, target]
     room_name = room_name_for_call(tenant_id, call.id)
     await livekit.remove_participant(room_name, _supervisor_identity(body.target_user_id))
     await audit.emit(
