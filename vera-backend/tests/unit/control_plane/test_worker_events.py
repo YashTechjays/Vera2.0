@@ -27,10 +27,34 @@ class _FakeLiveKit:
 class _FakeRedis:
     def __init__(self) -> None:
         self.acked: list[str] = []
+        # Configured per-test to mimic redis-py's decoded XREADGROUP/XAUTOCLAIM shapes.
+        self.xreadgroup_response: object = None
+        self.xautoclaim_response: object = ("0-0", [], [])
 
     async def xack(self, stream: str, group: str, entry_id: str) -> int:
         self.acked.append(entry_id)
         return 1
+
+    async def xreadgroup(
+        self,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        count: int | None = None,
+        block: int | None = None,
+    ) -> object:
+        return self.xreadgroup_response
+
+    async def xautoclaim(
+        self,
+        name: str,
+        groupname: str,
+        consumername: str,
+        min_idle_time: int,
+        start_id: str = "0-0",
+        count: int | None = None,
+    ) -> object:
+        return self.xautoclaim_response
 
 
 def _consumer(redis: _FakeRedis, livekit: _FakeLiveKit) -> WorkerEventConsumer:
@@ -93,3 +117,35 @@ async def test_unknown_event_type_is_acked_and_skipped() -> None:
     await consumer._process("6-0", _event_fields())
     assert livekit.calls == []  # no teardown
     assert redis.acked == ["6-0"]  # entry is acked despite no handler
+
+
+@pytest.mark.asyncio
+async def test_read_once_unpacks_xreadgroup_response_and_dispatches() -> None:
+    """Drives `_read_once` with a realistic decoded XREADGROUP shape (decode_responses=True,
+    no `justid`): `[[stream_name, [(entry_id, fields), ...]]]`.
+    """
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    redis.xreadgroup_response = [
+        ["vera:worker-events", [("10-0", _event_fields())]],
+    ]
+    await _consumer(redis, livekit)._read_once()
+    assert livekit.calls == [
+        ("meta", (_VALID_ROOM, {"status": "call_failed", "reason": "no_answer"})),
+        ("delete", _VALID_ROOM),
+    ]
+    assert redis.acked == ["10-0"]
+
+
+@pytest.mark.asyncio
+async def test_reclaim_stale_unpacks_xautoclaim_response_and_dispatches() -> None:
+    """Drives `_reclaim_stale` with a realistic decoded XAUTOCLAIM shape:
+    `(cursor, [(entry_id, fields), ...], deleted_ids)`.
+    """
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    redis.xautoclaim_response = ("0-0", [("11-0", _event_fields())], [])
+    await _consumer(redis, livekit)._reclaim_stale()
+    assert livekit.calls == [
+        ("meta", (_VALID_ROOM, {"status": "call_failed", "reason": "no_answer"})),
+        ("delete", _VALID_ROOM),
+    ]
+    assert redis.acked == ["11-0"]

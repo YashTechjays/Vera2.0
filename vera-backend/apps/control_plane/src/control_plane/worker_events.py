@@ -57,10 +57,19 @@ class WorkerEventConsumer:
         self._handlers: dict[str, EventHandler] = {"call.failed": self._handle_call_failed}
 
     async def run(self) -> None:
-        """Ensure the group exists, then loop: reclaim stragglers, read new, dispatch."""
-        await self._bus.ensure_group()
+        """Ensure the group exists, then loop: reclaim stragglers, read new, dispatch.
+
+        Group bootstrap lives inside the loop (guarded by `group_ready`) rather than
+        before it, so a Redis blip at process startup is retried via the same
+        back-off as steady-state errors instead of raising out of `run()` and
+        killing the background task permanently.
+        """
+        group_ready = False
         while True:
             try:
+                if not group_ready:
+                    await self._bus.ensure_group()
+                    group_ready = True
                 await self._reclaim_stale()
                 await self._read_once()
             except asyncio.CancelledError:
@@ -84,6 +93,8 @@ class WorkerEventConsumer:
         await self._dispatch(entries)
 
     async def _reclaim_stale(self) -> None:
+        # Re-scans from the start of the stream (`start_id="0-0"`) on every call rather
+        # than walking the returned cursor — fine given the low event volume here.
         result = await self._redis.xautoclaim(
             WORKER_EVENTS_STREAM,
             WORKER_EVENTS_GROUP,

@@ -63,6 +63,9 @@ class WorkerEventBus:
 
     async def ensure_group(self) -> None:
         try:
+            # id="0" (not "$"): the group starts at the beginning of the stream, so
+            # events published before the group first exists are still delivered
+            # (at-least-once across bootstrap) instead of being silently dropped.
             await self._redis.xgroup_create(
                 WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, id="0", mkstream=True
             )

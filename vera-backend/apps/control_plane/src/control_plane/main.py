@@ -1,6 +1,7 @@
 """Application factory and entrypoint for the Vera control plane."""
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
@@ -32,6 +33,18 @@ from vera_core.db import create_engine, create_sessionmaker
 from vera_core.observability.otel import configure_observability
 from vera_core.redis import create_redis
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
+
+logger = logging.getLogger("control_plane.main")
+
+
+def _log_consumer_exit(task: asyncio.Task[None]) -> None:
+    """Surface an unexpected exit of the worker-event consumer background task.
+
+    `run()` only returns via cancellation (shutdown) or an uncaught exception; without
+    this callback the latter would die silently ("Task exception was never retrieved").
+    """
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("worker-event consumer exited unexpectedly", exc_info=task.exception())
 
 
 def create_app(
@@ -128,6 +141,7 @@ def create_app(
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
             )
             worker_event_task = asyncio.create_task(consumer.run())
+            worker_event_task.add_done_callback(_log_consumer_exit)
 
         configure_observability(settings)
         yield
