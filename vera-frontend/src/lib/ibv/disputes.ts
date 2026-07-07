@@ -92,9 +92,10 @@ export function seedValues(disputes: DisputeMap): FormValues {
   return out
 }
 
-/** "insurance_information.health_plan" -> "Insurance Information › Health Plan" */
+/** "sections.insurance_information.plan_type" -> "Insurance Information › Plan Type" */
 export function humanizeLabel(path: string): string {
   return path
+    .replace(/^sections\./, "")
     .split(".")
     .filter(Boolean)
     .map((seg) => seg.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()))
@@ -155,42 +156,42 @@ export function confidenceChipClass(score?: number): string {
  *    <80 → red (very-low), no confidence → navy (base).
  */
 export const mockDisputes: DisputeMap = {
-  "patient_information.patient_name": {
-    previousValue: "Noah D.",
-    currentValue: "Noah Davis",
+  "sections.patient_information.patient_name": {
+    previousValue: "Ava D.",
+    currentValue: "Ava Davis",
     confidence: 100,
     evidence: "Full legal name confirmed against the member record.",
     reasoning: "Captured the complete name from the eligibility record.",
   },
-  "insurance_information.health_plan": {
-    previousValue: "BCBS TX",
-    currentValue: "Blue Cross",
+  "sections.insurance_information.plan_type": {
+    previousValue: "POS",
+    currentValue: "PPO",
     confidence: 95,
-    evidence: "Carrier portal listed the plan name.",
-    reasoning: "Plan name updated from the carrier portal during the call.",
+    evidence: "Rep confirmed the plan type during the call.",
+    reasoning: "Plan type corrected from the carrier portal during the call.",
   },
-  "general_coverage.office_visits.cpt_1.covered": {
+  "sections.general_coverage.office_visits.cpt_99211.covered": {
     previousValue: "No",
     currentValue: "Yes",
     confidence: 92,
     evidence: "Confirmed covered for CPT 99211.",
     reasoning: "Office visit is a covered benefit.",
   },
-  "insurance_information.policy_number": {
+  "sections.insurance_information.policy_number": {
     previousValue: "POL-550410",
     currentValue: "POL-550411",
     confidence: 85,
     evidence: "Rep read the number back.",
     reasoning: "Final digit corrected when the rep read it back.",
   },
-  "benefit_coverage.coverage_type": {
+  "sections.benefit_coverage.coverage_type": {
     previousValue: "Individual",
     currentValue: "Family",
     confidence: 72,
     evidence: "Rep confirmed dependents on the plan.",
     reasoning: "Rep confirmed the plan is family coverage.",
   },
-  "insurance_information.group_name": {
+  "sections.insurance_information.group_name": {
     previousValue: "Umbrella Hlth",
     currentValue: "Umbrella Health",
     evidence: "Spelled out by the representative.",

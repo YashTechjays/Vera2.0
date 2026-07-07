@@ -13,6 +13,8 @@ RUN mkdir -p apps/control_plane/src/control_plane && touch apps/control_plane/sr
 RUN uv sync --frozen --no-dev --package agent-worker
 
 FROM python:3.12-slim-bookworm
+# Patch base-image OS packages to the latest security fixes (the image scan blocks on fixable CVEs).
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10001 vera
 WORKDIR /app
 COPY --from=builder --chown=vera:vera /app /app

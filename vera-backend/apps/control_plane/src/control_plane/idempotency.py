@@ -33,6 +33,10 @@ from control_plane.exceptions import CustomAPIException, ExceptionCode
 IDEM_NS = "idem"
 _LOCKED = "1"
 
+# Platform (tenant-less) callers namespace their locks under the nil UUID; uuid7 never
+# generates it, so it cannot collide with a real tenant's namespace.
+PLATFORM_IDEM_SCOPE = UUID(int=0)
+
 
 def _key(tenant_id: UUID, user_id: UUID, key: str) -> str:
     return f"vera:{IDEM_NS}:{tenant_id}:{user_id}:{key}"

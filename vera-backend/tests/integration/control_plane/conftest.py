@@ -43,6 +43,7 @@ class FakeLiveKit(LiveKitGateway):
         self.dispatch_metadata: list[dict[str, object] | None] = []
         self.sip_calls: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
+        self.room_metadata: list[tuple[str, dict[str, object]]] = []
         self._url = "ws://fake:7880"
         # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
@@ -69,6 +70,9 @@ class FakeLiveKit(LiveKitGateway):
 
     async def delete_room(self, room_name: str) -> None:
         self.deleted.append(room_name)
+
+    async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
+        self.room_metadata.append((room_name, metadata))
 
     def mint_join_token(self, room_name: str, identity: str) -> str:
         return f"faketoken:{room_name}:{identity}"
@@ -102,6 +106,7 @@ class RBACWorld:
         self.admin_token = ""
         self.norole_token = ""
         self.ghost_token = ""
+        self.virtual_assistant_token = ""
 
 
 async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
@@ -168,6 +173,11 @@ async def rbac_world(
                 text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'TENANT_ADMIN'")
             )
         ).scalar_one()
+        virtual_assistant_role = (
+            await session.execute(
+                text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'VIRTUAL_ASSISTANT'")
+            )
+        ).scalar_one()
         admin = AppUser(
             tenant_id=tenant_id,
             gcip_uid=None,
@@ -182,16 +192,36 @@ async def rbac_world(
             name="No Role",
             status="active",
         )
-        session.add_all([admin, norole])
+        virtual_assistant = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="virtual_assistant@test.example",
+            name="Virtual Assistant",
+            status="active",
+        )
+        session.add_all([admin, norole, virtual_assistant])
         await session.flush()
         session.add(UserRole(tenant_id=tenant_id, app_user_id=admin.id, role_id=admin_role))
-        admin_id, norole_id = admin.id, norole.id
+        session.add(
+            UserRole(
+                tenant_id=tenant_id,
+                app_user_id=virtual_assistant.id,
+                role_id=virtual_assistant_role,
+            )
+        )
+        admin_id, norole_id, virtual_assistant_id = admin.id, norole.id, virtual_assistant.id
 
     world.admin_token = await _mint(
         session_store, user_id=admin_id, tenant_id=tenant_id, email="admin@test.example"
     )
     world.norole_token = await _mint(
         session_store, user_id=norole_id, tenant_id=tenant_id, email="norole@test.example"
+    )
+    world.virtual_assistant_token = await _mint(
+        session_store,
+        user_id=virtual_assistant_id,
+        tenant_id=tenant_id,
+        email="virtual_assistant@test.example",
     )
     # A valid session whose user_id has no app_user row -> "unknown user" deny.
     world.ghost_token = await _mint(

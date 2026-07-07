@@ -7,8 +7,11 @@ and wires up the LLM pipeline.
 from __future__ import annotations
 
 import json
+import logging
 
 from vera_core.schemas import PersonaTweak
+
+logger = logging.getLogger("agent_worker")
 
 SYSTEM_PROMPT = """You are a voice bot verifying insurance coverage for infertility services over the phone. Your responses will be spoken out loud, so keep them short, casual, and fluid, exactly like a natural human conversation.
 
@@ -107,12 +110,25 @@ def resolve_greeting(tweak: PersonaTweak | None = None) -> str:
 
 
 def parse_persona_tweak(metadata: str | None) -> PersonaTweak:
-    """Parse LiveKit dispatch metadata into a PersonaTweak. Fail-safe: any missing,
-    empty, or malformed metadata yields the no-op tweak so a bad config never kills
-    a live call (mirrors the cascade's fail-safe posture, not the strict PHI seams)."""
+    """Parse the tenant persona tweak out of LiveKit dispatch metadata.
+
+    The tweak now rides under its own `persona_tweak` key so unrelated dispatch keys
+    (enable_ivr_navigation, ivr_playbook, wait_for_speaker, …) never trip its extra="forbid"
+    validation. Control plane and worker deploy as separate images, so for one release this
+    also accepts the legacy flat shape (the whole dict IS the tweak) — logging a warning — so
+    a rollout in either order doesn't silently drop the persona. Fail-safe: any missing, empty,
+    or malformed metadata yields the no-op tweak so a bad config never kills a live call
+    (mirrors the cascade's fail-safe posture, not the strict PHI seams)."""
     if not metadata:
         return PersonaTweak()
     try:
-        return PersonaTweak.model_validate(json.loads(metadata))
+        payload = json.loads(metadata)
+        if isinstance(payload, dict) and "persona_tweak" in payload:
+            return PersonaTweak.model_validate(payload.get("persona_tweak") or {})
+        # Legacy flat shape from a not-yet-updated control plane — accept for one release.
+        tweak = PersonaTweak.model_validate(payload)
+        if tweak != PersonaTweak():
+            logger.warning("persona tweak arrived in legacy flat metadata shape; update producer")
+        return tweak
     except (json.JSONDecodeError, ValueError):
         return PersonaTweak()

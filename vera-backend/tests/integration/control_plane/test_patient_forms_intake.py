@@ -23,7 +23,24 @@ INTAKE_PAYLOAD = {
         "patient_name": "Jane Doe",
         "patient_dob": "1990-04-12",
         "patient_gender": "Female",
-    }
+    },
+    "appointment_information": {"appointment_date": "2026-08-03"},
+    "insurance_information": {"policy_number": "POL-550411"},
+    "insurance_reference_information": {
+        "insurance_provider_name": "Demo Health Plan",
+        "insurance_phone_number": "+1 555 0100",
+    },
+    "verification_information": {"verified_by": "Dr. Reyes"},
+    "hospital_information": {
+        "hospital_name": "Demo Health Partners",
+        "hospital_address": "123 Demo St, Austin, TX",
+        "tax_id": "987654313",
+        "npi": "1234567893",
+    },
+    "provider_reference_information": {
+        "provider_name": "Dr. Jane Smith",
+        "npi": "1982736450",
+    },
 }
 
 
@@ -77,7 +94,10 @@ async def _issue_key(
             ApiKey(
                 id=key_id,
                 tenant_id=tenant_id,
-                name="sheet",
+                # Unique per call: rbac_world is session-scoped, so a fixed name would
+                # violate uq_api_key_tenant_name_active (one active key per tenant+name)
+                # the second time a test issues a key for the shared tenant.
+                name=f"sheet-{key_id}",
                 salt=salt,
                 key_hash=apikey.hash_secret(salt, secret),
                 scope=scope,
@@ -130,10 +150,22 @@ async def test_upload_creates_form_and_intake_answers(
             .scalars()
             .all()
         )
+        # v2 documents record root-anchored paths (`sections.…` = field_answer.field_path).
         assert {a.field_path for a in answers} == {
-            "patient_information.patient_name",
-            "patient_information.patient_dob",
-            "patient_information.patient_gender",
+            "sections.patient_information.patient_name",
+            "sections.patient_information.patient_dob",
+            "sections.patient_information.patient_gender",
+            "sections.appointment_information.appointment_date",
+            "sections.insurance_information.policy_number",
+            "sections.insurance_reference_information.insurance_provider_name",
+            "sections.insurance_reference_information.insurance_phone_number",
+            "sections.verification_information.verified_by",
+            "sections.hospital_information.hospital_name",
+            "sections.hospital_information.hospital_address",
+            "sections.hospital_information.tax_id",
+            "sections.hospital_information.npi",
+            "sections.provider_reference_information.provider_name",
+            "sections.provider_reference_information.npi",
         }
         assert all(a.source == "intake" and a.is_current and a.call_id is None for a in answers)
 
@@ -151,9 +183,12 @@ async def test_upload_promotes_worklist_columns(
 
     payload = {
         **INTAKE_PAYLOAD,
-        "appointment_information": {"appointment_type": "New Patient"},
-        "insurance_information": {"policy_number": "POL-550411"},
+        "appointment_information": {
+            **INTAKE_PAYLOAD["appointment_information"],
+            "appointment_type": "New Patient",
+        },
         "insurance_reference_information": {
+            **INTAKE_PAYLOAD["insurance_reference_information"],
             "insurance": "Blue Cross",
             "phone_number": "+1 555 0100",
         },
@@ -202,11 +237,74 @@ async def test_missing_required_returns_422_with_paths_no_phi(
 
     assert resp.status_code == 422, resp.text
     body = resp.json()
+    # v2 required-at-intake = the schema's `system_fields` targets without a
+    # declared default (patient_gender defaults to "N/A"), reported root-anchored,
+    # across every section — not just `patient_information`.
     assert set(body["data"]["fields"]) == {
-        "patient_information.patient_dob",
-        "patient_information.patient_gender",
+        "sections.patient_information.patient_dob",
+        "sections.appointment_information.appointment_date",
+        "sections.insurance_information.policy_number",
+        "sections.insurance_reference_information.insurance_provider_name",
+        "sections.insurance_reference_information.insurance_phone_number",
+        "sections.verification_information.verified_by",
+        "sections.hospital_information.hospital_name",
+        "sections.hospital_information.hospital_address",
+        "sections.hospital_information.tax_id",
+        "sections.hospital_information.npi",
+        "sections.provider_reference_information.provider_name",
+        "sections.provider_reference_information.npi",
     }
     assert "Secret Patient" not in resp.text  # never echo a PHI value
+
+
+async def test_missing_required_field_outside_patient_information_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """Regression: `missing_required` used to only inspect `patient_information`, so
+    a `system_fields` target declared in any other section — e.g. `hospital_npi` /
+    `doctor_name` — silently passed even when its section was omitted entirely from
+    the intake payload. A fully-filled `patient_information` must no longer be
+    enough to create the form."""
+    form_type_id, version_id = ibv_schema
+    token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
+
+    resp = await client.post(
+        "/api/v1/patient-forms",
+        json={
+            "form_type_id": str(form_type_id),
+            "schema_version_id": str(version_id),
+            "intake_payload": {
+                "patient_information": {
+                    "patient_name": "Jane Doe",
+                    "patient_dob": "1990-04-12",
+                    "patient_gender": "Female",
+                },
+                "appointment_information": {"appointment_date": "2026-08-03"},
+                # insurance_information / insurance_reference_information /
+                # verification_information / hospital_information /
+                # provider_reference_information all omitted.
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert set(resp.json()["data"]["fields"]) == {
+        "sections.insurance_information.policy_number",
+        "sections.insurance_reference_information.insurance_provider_name",
+        "sections.insurance_reference_information.insurance_phone_number",
+        "sections.verification_information.verified_by",
+        "sections.hospital_information.hospital_name",
+        "sections.hospital_information.hospital_address",
+        "sections.hospital_information.tax_id",
+        "sections.hospital_information.npi",
+        "sections.provider_reference_information.provider_name",
+        "sections.provider_reference_information.npi",
+    }
 
 
 async def test_unknown_schema_version_returns_404(

@@ -31,12 +31,22 @@ test *args:
 # Full local gate — what CI runs
 check: lint typecheck test
 
-# Local infra (Postgres + Redis)
+# Core local infra (Postgres + Redis + sendria + livekit). The Langfuse stack is
+# behind the "langfuse" compose profile, so it is NOT started here.
 up:
     docker compose up -d --wait
 
 down:
     docker compose down
+
+# Langfuse v3 observability stack — opt-in, heavy. Gated behind the "langfuse"
+# compose profile so it never rides along with `just up`. Web UI: http://localhost:4000
+langfuse-up:
+    docker compose --profile langfuse up -d
+
+# `down` needs the profile too, else the langfuse containers are treated as orphans.
+langfuse-down:
+    docker compose --profile langfuse down
 
 # Database
 migrate:
@@ -50,6 +60,11 @@ makemigration message:
 merge-heads message="merge heads":
     uv run alembic merge heads -m "{{message}}"
 
+# Recompile data/form_schemas/*.json from the vera_core.forms.catalog author sources.
+# The freshness test in tests/unit/forms/test_schema_dsl.py fails when artifacts drift.
+compile-schemas:
+    uv run python scripts/compile_schemas.py
+
 # Seed the shared sample admin (admin@veratechsolutions.example / dev-password-change-me)
 seed:
     uv run python scripts/seed.py
@@ -61,6 +76,12 @@ seed-user email password:
 # Seed ONLY the baseline form schemas (IBV Form Standard DSL)
 seed-schemas:
     uv run python scripts/seed.py --schemas
+
+# Seed/replace one synthetic infertility patient form for local dev/demo review.
+# status: ready_for_processing (curated demo fill, default) | exception_review
+# (full a-to-z fill + a few disputed fields so the review UI has something to show).
+test_seed_patient_data status="ready_for_processing":
+    uv run python scripts/seed_patient_data.py --status {{status}}
 
 # Seed ONLY the baseline prompts (bind to each schema's published version)
 seed-prompts:

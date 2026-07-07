@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import func
 
 from control_plane.auth.invitations import InvitationStore
 from control_plane.auth.rbac import PermissionResolver, get_resolver
@@ -33,7 +34,7 @@ from control_plane.email import EmailSender
 from vera_core.audit import AuthAuditRecord, AuthAuditSink
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
-from vera_core.models import Permission, RolePermission
+from vera_core.models import Permission, RolePermission, UserRole
 from vera_core.models.enums import AuthEvent
 
 if TYPE_CHECKING:
@@ -85,22 +86,46 @@ async def emit_auth_event(
     )
 
 
-async def roles_grant_platform_permission(session: AsyncSession, role_ids: Iterable[UUID]) -> bool:
-    """True if ANY of `role_ids` holds a `platform:*` permission — such roles are
+async def platform_tier_role_ids(session: AsyncSession, role_ids: Iterable[UUID]) -> set[UUID]:
+    """The subset of `role_ids` that hold a `platform:*` permission — such roles are
     platform-tier (e.g. the global SUPER_ADMIN) and must not be granted at the
-    tenant level. One query; used by both `assign_role` and `invite_user`."""
+    tenant level, nor listed as an option to a tenant session. The single query
+    both `roles_grant_platform_permission` (a write-time yes/no guard) and
+    `list_roles` (a read-time filter) build on."""
     ids = list(role_ids)
     if not ids:
-        return False
-    row = (
-        await session.execute(
-            select(Permission.id)
-            .join(RolePermission, RolePermission.permission_id == Permission.id)
-            .where(
-                RolePermission.role_id.in_(ids),
-                Permission.code.like(f"{PLATFORM_PERMISSION_PREFIX}%"),
-            )
-            .limit(1)
+        return set()
+    rows = await session.execute(
+        select(RolePermission.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            RolePermission.role_id.in_(ids),
+            Permission.code.like(f"{PLATFORM_PERMISSION_PREFIX}%"),
         )
-    ).scalar_one_or_none()
-    return row is not None
+    )
+    # scalars().all() over the (role_id, permission_id) join can repeat a role_id
+    # once per matching platform permission it holds; set() dedupes, making a
+    # SQL-side DISTINCT redundant.
+    return set(rows.scalars().all())
+
+
+async def roles_grant_platform_permission(session: AsyncSession, role_ids: Iterable[UUID]) -> bool:
+    """True if ANY of `role_ids` holds a `platform:*` permission. Used by both
+    `assign_role` and `invite_user` to block granting a platform-tier role at the
+    tenant level."""
+    return bool(await platform_tier_role_ids(session, role_ids))
+
+
+def build_role_grant(
+    *, tenant_id: UUID, app_user_id: UUID, role_id: UUID, granted_by: UUID
+) -> UserRole:
+    """Construct a UserRole grant row with provenance fields set. The single place
+    `invite_user` and `assign_role` build a grant, so the two paths can't drift on
+    which fields get populated (caller still does `session.add(...)`)."""
+    return UserRole(
+        tenant_id=tenant_id,
+        app_user_id=app_user_id,
+        role_id=role_id,
+        granted_by=granted_by,
+        granted_at=func.now(),
+    )

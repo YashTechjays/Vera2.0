@@ -41,10 +41,12 @@ class LiveKitGateway:
         url: str,
         api_key: str,
         api_secret: str,
+        agent_name: str = AGENT_NAME,
     ) -> None:
         self._url = url
         self._api_key = api_key
         self._api_secret = api_secret
+        self._agent_name = agent_name
 
     @property
     def url(self) -> str:
@@ -69,7 +71,7 @@ class LiveKitGateway:
             # (e.g. {"wait_for_speaker": true}); None → "" → existing callers unchanged.
             await lk.agent_dispatch.create_dispatch(
                 api.CreateAgentDispatchRequest(
-                    agent_name=AGENT_NAME,
+                    agent_name=self._agent_name,
                     room=room_name,
                     metadata=json.dumps(metadata) if metadata else "",
                 )
@@ -140,6 +142,16 @@ class LiveKitGateway:
                     return  # room already gone — agent's close path deleted it first
                 raise
 
+    async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
+        """Set room-level metadata (JSON-encoded). LiveKit pushes it to every
+        participant as a RoomMetadataChanged event, so the browser can read
+        session status (e.g. a failed outbound call) before the room is torn down.
+        """
+        async with self._client() as lk:
+            await lk.room.update_room_metadata(
+                api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
+            )
+
     def mint_join_token(self, room_name: str, identity: str) -> str:
         grants = api.VideoGrants(room_join=True, room=room_name)
         return (
@@ -157,4 +169,5 @@ def build_livekit_gateway(settings: Settings, secrets: SecretProvider) -> LiveKi
         url=settings.livekit_url,
         api_key=secrets.get("LIVEKIT_API_KEY"),
         api_secret=secrets.get("LIVEKIT_API_SECRET"),
+        agent_name=settings.livekit_agent_name,
     )
