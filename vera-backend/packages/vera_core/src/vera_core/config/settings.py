@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
     transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
+    # Worker→control-plane event bus (Redis Streams + consumer group). Stream is
+    # MAXLEN-trimmed; the consumer blocks for block_ms, reclaims entries a crashed
+    # consumer left pending after reclaim_idle_ms, and waits teardown_grace_ms after
+    # setting failure metadata before deleting the room (so the browser reads it).
+    worker_events_stream_maxlen: int = 10_000  # VERA_WORKER_EVENTS_STREAM_MAXLEN
+    worker_events_block_ms: int = 5_000  # VERA_WORKER_EVENTS_BLOCK_MS
+    worker_events_reclaim_idle_ms: int = 60_000  # VERA_WORKER_EVENTS_RECLAIM_IDLE_MS
+    call_failed_teardown_grace_ms: int = 1_500  # VERA_CALL_FAILED_TEARDOWN_GRACE_MS
+
     gcp_project: str | None = None
 
     # --- KMS ------------------------------------------------------------------
