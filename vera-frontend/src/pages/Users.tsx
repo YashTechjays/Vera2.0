@@ -136,7 +136,7 @@ export function Users() {
               <TableHead>Email</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Last login</TableHead>
-              {canManage && <TableHead className="text-right">Actions</TableHead>}
+              {canManage && <TableHead>Actions</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -165,12 +165,14 @@ export function Users() {
                 </TableCell>
                 <TableCell className="text-muted-foreground">{formatDate(u.last_login_at)}</TableCell>
                 {canManage && (
-                  <TableCell className="text-right">
+                  <TableCell>
                     {u.status !== "deactivated" && (
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-destructive hover:text-destructive"
+                        // -ml-2.5 cancels the ghost button's own padding so its
+                        // label starts flush with the "Actions" header text.
+                        className="-ml-2.5 text-destructive hover:text-destructive"
                         onClick={() => askDeactivate(u)}
                       >
                         Deactivate
