@@ -31,6 +31,7 @@ export function IbvFormModal() {
     pendingDisputeCount,
     loading,
     error,
+    saveError,
     patientName,
     status,
     changeStatus,
@@ -108,6 +109,11 @@ export function IbvFormModal() {
           {error && (
             <p className="text-sm text-destructive" role="alert">
               {error}
+            </p>
+          )}
+          {saveError && (
+            <p className="mb-2 text-sm text-destructive" role="alert">
+              {saveError}
             </p>
           )}
           {!loading && !error && <SchemaForm />}

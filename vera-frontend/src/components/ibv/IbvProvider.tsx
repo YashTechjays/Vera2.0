@@ -57,6 +57,8 @@ type IbvContextValue = {
   save: () => Promise<void>
   loading: boolean
   error: string | null
+  /** Save failures live apart from load failures so the form stays mounted. */
+  saveError: string | null
   patientName: string | null
   /** Current lifecycle status of the open form (null for the demo/mock form). */
   status: PatientFormStatus | null
@@ -137,6 +139,7 @@ export function IbvProvider({
   const [saveState, setSaveState] = useState<SaveState>("idle")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [savedTick, setSavedTick] = useState(0)
   const [status, setStatus] = useState<PatientFormStatus | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
@@ -156,6 +159,7 @@ export function IbvProvider({
       setFlagsState({})
       setDirty(false)
       setSaveState("idle")
+      setSaveError(null)
       setPatientName(name)
     },
     [],
@@ -294,6 +298,7 @@ export function IbvProvider({
 
   const save = useCallback(async () => {
     setSaveState("saving")
+    setSaveError(null)
     if (mode === "mock" || !formId) {
       await new Promise((r) => setTimeout(r, 400))
       setDirty(false)
@@ -327,7 +332,8 @@ export function IbvProvider({
       setSaveState("saved")
       setSavedTick((t) => t + 1)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save changes.")
+      // Save failures must not unmount the form — the user's edits stay intact.
+      setSaveError(err instanceof ApiError ? err.message : "Could not save changes.")
       setSaveState("idle")
     }
   }, [mode, formId, values, originalValues, disputes, flags, seed])
@@ -349,6 +355,7 @@ export function IbvProvider({
     save,
     loading,
     error,
+    saveError,
     patientName,
     status,
     changeStatus,
