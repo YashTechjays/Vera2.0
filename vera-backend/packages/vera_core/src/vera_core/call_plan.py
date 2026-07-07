@@ -6,7 +6,7 @@ plan carries no prefilled PHI (see `forms.planning`), so it is safe in Redis alo
 tokens/reference-ids everything else caches — never raw values.
 """
 
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.planning import CallPlan, compile_call_plan
-from vera_core.models import PatientForm, SchemaVersion
+from vera_core.models import FormSchema, PatientForm, SchemaVersion
+from vera_core.models.enums import VersionStatus
 
 CALL_PLAN_KEY_PREFIX = "vera:callplan:"
 
@@ -62,22 +63,17 @@ class InMemoryCallPlanStore:
         return self._plans.get(room_name)
 
 
-async def build_and_store_call_plan(
+async def _compile_and_store(
     session: AsyncSession,
+    schema_json: dict[str, Any] | None,
     *,
-    form: PatientForm,
     call_id: UUID,
     room_name: str,
     store: CallPlanStore,
 ) -> bool:
-    """Compile the form's pinned schema into a plan and stash it for the worker. Returns
-    False (no plan written) for a legacy v1 schema — the worker then falls back to the
+    """Compile a schema document into a plan and stash it for the worker. Returns False (no
+    plan written) for a missing or legacy v1 schema — the worker then falls back to the
     static agent. The current year comes from the DB clock (never the app clock)."""
-    schema_json = (
-        await session.execute(
-            select(SchemaVersion.schema_json).where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one_or_none()
     if schema_json is None or not is_v2(schema_json):
         return False
     year = (await session.execute(select(func.extract("year", func.now())))).scalar_one()
@@ -89,3 +85,47 @@ async def build_and_store_call_plan(
     )
     await store.put(room_name, plan)
     return True
+
+
+async def build_and_store_call_plan(
+    session: AsyncSession,
+    *,
+    form: PatientForm,
+    call_id: UUID,
+    room_name: str,
+    store: CallPlanStore,
+) -> bool:
+    """Compile the form's pinned schema version into a plan and stash it for the worker."""
+    schema_json = (
+        await session.execute(
+            select(SchemaVersion.schema_json).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one_or_none()
+    return await _compile_and_store(
+        session, schema_json, call_id=call_id, room_name=room_name, store=store
+    )
+
+
+async def build_and_store_call_plan_for_type(
+    session: AsyncSession,
+    *,
+    insurance_type: str,
+    call_id: UUID,
+    room_name: str,
+    store: CallPlanStore,
+) -> bool:
+    """Compile the currently-published schema for an insurance type (no form needed) — the
+    Voice Lab path, so a QA session drives the plan agent instead of the static fallback."""
+    schema_json = (
+        await session.execute(
+            select(SchemaVersion.schema_json)
+            .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
+            .where(
+                FormSchema.insurance_type == insurance_type,
+                SchemaVersion.status == VersionStatus.PUBLISHED,
+            )
+        )
+    ).scalar_one_or_none()
+    return await _compile_and_store(
+        session, schema_json, call_id=call_id, room_name=room_name, store=store
+    )

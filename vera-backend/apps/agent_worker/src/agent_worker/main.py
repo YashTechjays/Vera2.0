@@ -199,7 +199,9 @@ async def _load_plan_state(
     finally:
         await redis.aclose()
     if plan is None:
+        logger.info("no call plan for %s; running the static agent", room_name)
         return None
+    logger.info("call plan loaded for %s: %d tasks", room_name, len(plan.tasks))
     return PlanRunState(plan=plan, boundary=boundary, session_id=session_id)
 
 

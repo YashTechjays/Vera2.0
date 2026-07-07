@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import CallPlanStoreDep, Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import current_identity, get_audit, get_sessionmaker, get_transcript_service
@@ -37,10 +37,11 @@ from control_plane.livekit_gateway import OutboundDialError
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord, AuditSink
+from vera_core.call_plan import build_and_store_call_plan, build_and_store_call_plan_for_type
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
 from vera_core.integrations.credentials import get_integration_credentials
-from vera_core.models import InsuranceProvider
+from vera_core.models import InsuranceProvider, PatientForm
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.observability.correlation import (
     CALLER_IDENTITY_PREFIX,
@@ -94,6 +95,7 @@ async def list_call_providers(
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
         DefaultExceptionCode.CONFLICT,
         DefaultExceptionCode.VALIDATION_ERROR,
         DefaultExceptionCode.BAD_GATEWAY,
@@ -105,11 +107,13 @@ async def start_voice_session(
     livekit: LiveKit,
     session: TenantSession,
     kms: Kms,
+    call_plan_store: CallPlanStoreDep,
     caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[VoiceSessionResponse]:
     # Synthetic call id — no DB row; the room name is still the canonical
     # call--<tenant>--<call> so worker correlation/observability work unchanged.
-    room_name = room_name_for_call(tenant_id, uuid7())
+    call_id = uuid7()
+    room_name = room_name_for_call(tenant_id, call_id)
 
     # The browser always joins to hear the conversation. In browser mode it also
     # publishes the mic (caller-); in outbound mode it is listen-only (monitor-),
@@ -145,6 +149,27 @@ async def start_voice_session(
     # otherwise the worker falls back to the generic navigator (no ivr_playbook key).
     if body.enable_ivr_navigation:
         await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
+    # Compile a plan (non-PHI) so the worker runs the plan-driven agent instead of the static
+    # fallback. A selected patient form uses its pinned schema; otherwise the published schema
+    # for the insurance type. Either way, a missing/legacy schema returns False and the session
+    # runs the static agent unchanged.
+    if body.form_id is not None:
+        form = (
+            await session.execute(select(PatientForm).where(PatientForm.id == body.form_id))
+        ).scalar_one_or_none()
+        if form is None:
+            raise NotFoundError(message="patient form not found")
+        await build_and_store_call_plan(
+            session, form=form, call_id=call_id, room_name=room_name, store=call_plan_store
+        )
+    else:
+        await build_and_store_call_plan_for_type(
+            session,
+            insurance_type="infertility_treatment",
+            call_id=call_id,
+            room_name=room_name,
+            store=call_plan_store,
+        )
     await livekit.create_call_room(room_name, metadata=metadata)
     if outbound is not None:
         phone_number, trunk_id = outbound

@@ -44,6 +44,9 @@ class StartVoiceSessionRequest(BaseModel):
     # Optional provider to test a specific playbook: with enable_ivr_navigation ON, its active
     # playbook (if any) specializes the navigator; else the navigator runs generic.
     insurance_provider_id: UUID | None = None
+    # Optional patient form to run the call for: its pinned schema is compiled into the plan
+    # (opaque UUID, non-PHI). Unset → the generic published schema for the insurance type.
+    form_id: UUID | None = None
 
 
 class VoiceSessionResponse(BaseModel):
