@@ -109,6 +109,14 @@ class Settings(BaseSettings):
     # Unset → `build_livekit_gateway` raises ValueError.
     livekit_url: str | None = None
 
+    # Explicit-dispatch agent name. The control plane dispatches jobs to this name and
+    # the worker registers under it — they MUST match for a job to route. Default
+    # "vera-agent" (used by dev/prod). Override per-environment (set the SAME value on
+    # both the control plane and the worker) to isolate a worker pool that shares one
+    # LiveKit project — e.g. `VERA_LIVEKIT_AGENT_NAME=vera-agent-local` on a laptop that
+    # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
+    livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
+
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
     # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:

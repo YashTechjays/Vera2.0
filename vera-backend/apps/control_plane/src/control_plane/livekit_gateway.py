@@ -41,10 +41,12 @@ class LiveKitGateway:
         url: str,
         api_key: str,
         api_secret: str,
+        agent_name: str = AGENT_NAME,
     ) -> None:
         self._url = url
         self._api_key = api_key
         self._api_secret = api_secret
+        self._agent_name = agent_name
 
     @property
     def url(self) -> str:
@@ -69,7 +71,7 @@ class LiveKitGateway:
             # (e.g. {"wait_for_speaker": true}); None → "" → existing callers unchanged.
             await lk.agent_dispatch.create_dispatch(
                 api.CreateAgentDispatchRequest(
-                    agent_name=AGENT_NAME,
+                    agent_name=self._agent_name,
                     room=room_name,
                     metadata=json.dumps(metadata) if metadata else "",
                 )
@@ -167,4 +169,5 @@ def build_livekit_gateway(settings: Settings, secrets: SecretProvider) -> LiveKi
         url=settings.livekit_url,
         api_key=secrets.get("LIVEKIT_API_KEY"),
         api_secret=secrets.get("LIVEKIT_API_SECRET"),
+        agent_name=settings.livekit_agent_name,
     )

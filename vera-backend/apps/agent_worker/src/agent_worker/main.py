@@ -42,8 +42,6 @@ from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("agent_worker")
 
-AGENT_NAME = "vera-agent"
-
 # Bound the wait so a never-answered outbound call doesn't pin a worker forever.
 _SPEAKER_TIMEOUT_S = 60.0
 
@@ -320,7 +318,14 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 def build_worker_options() -> WorkerOptions:
-    return WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, agent_name=AGENT_NAME)
+    # agent_name must match the control plane's dispatch name. Configurable via
+    # VERA_LIVEKIT_AGENT_NAME (default "vera-agent") so a laptop sharing a LiveKit
+    # project with a deployed worker can isolate its own dispatch pool.
+    return WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        prewarm_fnc=prewarm,
+        agent_name=get_settings().livekit_agent_name,
+    )
 
 
 if __name__ == "__main__":
