@@ -24,11 +24,11 @@ import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
 
-type TabKey = "active" | "critical" | "completed"
+type TabKey = "active" | "critical"
+// No Completed tab: GET /calls only carries live calls; history is a follow-up.
 const TABS: { key: TabKey; label: string }[] = [
   { key: "active", label: "Active" },
   { key: "critical", label: "Critical" },
-  { key: "completed", label: "Completed" },
 ]
 
 function categoryOf(status: string): CallCategory {
@@ -125,7 +125,6 @@ export function LiveMonitoring() {
 
   const rows = useMemo(() => {
     if (tab === "critical") return calls.filter((c) => categoryOf(c.status) === "critical")
-    if (tab === "completed") return calls.filter((c) => categoryOf(c.status) === "completed")
     return calls
   }, [tab, calls])
 
