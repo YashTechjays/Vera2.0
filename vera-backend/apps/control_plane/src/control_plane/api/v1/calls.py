@@ -268,7 +268,15 @@ async def publish_call(
                 request_id=current_request_id(request),
             )
         )
-    return ok(_summary(call, None, caller.user_id))
+    # Return the same row shape as list_calls (patient_name included): the client
+    # swaps its table row with this payload, so a None name would blank the
+    # Patient cell until the next poll.
+    patient_name = (
+        await session.execute(
+            select(PatientForm.patient_name).where(PatientForm.id == call.form_id)
+        )
+    ).scalar_one_or_none()
+    return ok(_summary(call, patient_name, caller.user_id))
 
 
 @router.get(

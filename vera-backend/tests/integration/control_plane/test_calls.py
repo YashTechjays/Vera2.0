@@ -435,6 +435,9 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     )
     assert pub.status_code == 200, pub.text
     assert pub.json()["data"]["published"] is True
+    # The response must carry the same row shape as list_calls — a None
+    # patient_name here blanks the Patient cell in the UI until the next poll.
+    assert pub.json()["data"]["patient_name"] == "Test Patient"
 
     # Exactly one publish audit row exists.
     assert len(await publish_audit_rows()) == 1
