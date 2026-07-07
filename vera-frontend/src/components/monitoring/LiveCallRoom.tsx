@@ -67,10 +67,11 @@ export function LiveCallRoom({
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [micFailed, setMicFailed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    getJoinToken(callId)
+    getJoinToken(callId, microphone)
       .then((res) => {
         if (!cancelled) setJoin(res)
       })
@@ -83,7 +84,7 @@ export function LiveCallRoom({
     return () => {
       cancelled = true
     }
-  }, [callId])
+  }, [callId, microphone])
 
   if (error) {
     return <div className="flex flex-1 items-center justify-center p-6 text-sm text-destructive">{error}</div>
@@ -100,11 +101,18 @@ export function LiveCallRoom({
       serverUrl={join.url}
       token={join.token}
       connect
-      audio={microphone}
+      audio={microphone && !micFailed}
       video={false}
+      // A blocked mic must not kill the panel — fall back to listen-only.
+      onMediaDeviceFailure={() => setMicFailed(true)}
       onError={(e) => setError(e.message)}
       className="flex flex-1 flex-col"
     >
+      {micFailed && (
+        <p className="px-4 pt-3 text-xs text-amber-600">
+          Microphone unavailable — listening only.
+        </p>
+      )}
       <RoomState />
       <RoomAudioRenderer />
     </LiveKitRoom>

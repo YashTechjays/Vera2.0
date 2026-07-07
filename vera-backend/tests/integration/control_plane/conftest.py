@@ -46,6 +46,7 @@ class FakeLiveKit(LiveKitGateway):
         self.deleted: list[str] = []
         self.removed: list[tuple[str, str]] = []
         self.room_metadata: list[tuple[str, dict[str, object]]] = []
+        self.minted: list[tuple[str, str, bool]] = []
         self._url = "ws://fake:7880"
         # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
@@ -90,7 +91,8 @@ class FakeLiveKit(LiveKitGateway):
     async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
         self.room_metadata.append((room_name, metadata))
 
-    def mint_join_token(self, room_name: str, identity: str) -> str:
+    def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
+        self.minted.append((room_name, identity, can_publish))
         return f"faketoken:{room_name}:{identity}"
 
 

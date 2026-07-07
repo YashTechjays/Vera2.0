@@ -45,10 +45,11 @@ export function publishCall(callId: string): Promise<CallSummary> {
   })
 }
 
-/** GET /calls/{id}/join-token — mint a listen+talk token to join the room
- *  (non-owners only for a published call). */
-export function getJoinToken(callId: string): Promise<JoinTokenResponse> {
-  return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token`)
+/** GET /calls/{id}/join-token — listen-only by default; intervene mints a
+ *  token that may publish audio (non-owners only for a published call). */
+export function getJoinToken(callId: string, intervene = false): Promise<JoinTokenResponse> {
+  const query = intervene ? "?intervene=true" : ""
+  return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
 }
 
 /** POST /calls/{id}/revoke-access — owner ejects an intervener from the room. */

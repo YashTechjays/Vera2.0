@@ -173,6 +173,7 @@ async def test_join_token_returns_room_scoped_token(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
 ) -> None:
     created = await client.post(
         "/api/v1/calls",
@@ -191,6 +192,15 @@ async def test_join_token_returns_room_scoped_token(
     body = tok.json()["data"]
     assert body["room_name"] == room
     assert body["token"].startswith("faketoken:")
+    # Watch-only by default: the token must not allow publishing audio.
+    assert fake_livekit.minted[-1][2] is False
+
+    talk = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert talk.status_code == 200, talk.text
+    assert fake_livekit.minted[-1][2] is True
 
 
 @pytest.mark.asyncio

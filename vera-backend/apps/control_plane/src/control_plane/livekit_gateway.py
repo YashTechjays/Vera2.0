@@ -168,10 +168,11 @@ class LiveKitGateway:
                 api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
             )
 
-    def mint_join_token(self, room_name: str, identity: str) -> str:
+    def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
         # Short TTL: the token is used immediately; the SDK default (~6h) would
-        # let a revoked user's old token keep working.
-        grants = api.VideoGrants(room_join=True, room=room_name)
+        # let a revoked user's old token keep working. can_publish=False makes
+        # watch-only viewers server-side mute — the client can't override it.
+        grants = api.VideoGrants(room_join=True, room=room_name, can_publish=can_publish)
         return (
             api.AccessToken(self._api_key, self._api_secret)
             .with_identity(identity)

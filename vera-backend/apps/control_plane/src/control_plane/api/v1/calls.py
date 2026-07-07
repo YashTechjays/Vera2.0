@@ -193,6 +193,7 @@ async def join_token(
     session: TenantSession,
     livekit: LiveKit,
     audit: Audit,
+    intervene: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
     call = (
@@ -223,7 +224,8 @@ async def join_token(
         )
     room_name = room_name_for_call(tenant_id, call.id)
     identity = _supervisor_identity(caller.user_id)
-    token = livekit.mint_join_token(room_name=room_name, identity=identity)
+    # Watch-only tokens are server-side mute; only ?intervene=true may publish.
+    token = livekit.mint_join_token(room_name=room_name, identity=identity, can_publish=intervene)
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 
 

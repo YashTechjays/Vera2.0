@@ -71,11 +71,17 @@ describe("calls API client", () => {
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/publish", { method: "POST" })
   })
 
-  it("gets a join token with GET /calls/{id}/join-token", async () => {
+  it("gets a listen-only join token by default", async () => {
     vi.mocked(apiRequest).mockResolvedValue(joinToken)
     const out = await getJoinToken("c1")
     expect(out).toEqual(joinToken)
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token")
+  })
+
+  it("requests a publishable token for intervene", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(joinToken)
+    await getJoinToken("c1", true)
+    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token?intervene=true")
   })
 
   it("revokes access with the target user id in the body", async () => {
