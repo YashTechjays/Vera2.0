@@ -201,7 +201,9 @@ async def join_token(
     if call is None:
         raise NotFoundError(message="call not found")
     if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
-        if not call.published:
+        # Ownerless (pre-ownership dispatcher) calls are joinable tenant-wide,
+        # matching their list_calls visibility.
+        if call.initiated_by_id is not None and not call.published:
             raise NotFoundError(message="call not found")  # don't reveal a private call
         await audit.emit(
             AuditRecord(
@@ -215,7 +217,7 @@ async def join_token(
                 permission_key="calls:read",
                 decision="allow",
                 request_id=current_request_id(request),
-                detail={"owner_id": str(call.initiated_by_id)},
+                detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
             )
         )
     room_name = room_name_for_call(tenant_id, call.id)
@@ -268,8 +270,7 @@ async def publish_call(
                 request_id=current_request_id(request),
             )
         )
-    # Return the same row shape as list_calls (patient_name included): the client
-    # swaps its table row with this payload, so a None name would blank the
+    # Same row shape as list_calls — a None patient_name blanks the UI's
     # Patient cell until the next poll.
     patient_name = (
         await session.execute(
@@ -297,7 +298,15 @@ async def list_calls(
             select(Call, PatientForm.patient_name)
             .join(PatientForm, PatientForm.id == Call.form_id)
             .where(Call.current_status.in_(list(_ACTIVE_STATUSES)))
-            .where(or_(Call.initiated_by_id == caller.user_id, Call.published.is_(True)))
+            # Ownerless (pre-ownership dispatcher) calls are tenant-visible —
+            # hidden, they'd have no monitoring and no owner to ever publish them.
+            .where(
+                or_(
+                    Call.initiated_by_id == caller.user_id,
+                    Call.published.is_(True),
+                    Call.initiated_by_id.is_(None),
+                )
+            )
             .order_by(Call.created_at.desc())
         )
     ).all()

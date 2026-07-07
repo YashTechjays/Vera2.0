@@ -395,6 +395,47 @@ async def test_list_scopes_to_owner_or_published(
 
 
 @pytest.mark.asyncio
+async def test_ownerless_call_is_tenant_visible_and_joinable(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    """A call with no owner (legacy dispatcher row) must not become invisible:
+    it is tenant-visible and joinable like a published call, but unpublishable
+    (there is no owner to publish it)."""
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = created.json()["data"]["id"]
+
+    # Simulate a pre-ownership dispatcher call: strip the owner in the DB.
+    await admin_session.execute(
+        update(Call).where(Call.id == UUID(call_id)).values(initiated_by_id=None)
+    )
+    await admin_session.commit()
+
+    listed = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
+    row = next((c for c in listed.json()["data"] if c["id"] == call_id), None)
+    assert row is not None
+    assert row["is_owner"] is False
+    assert row["published"] is False
+
+    join = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert join.status_code == 200, join.text
+
+    pub = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert pub.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_publish_is_owner_only_idempotent_and_audited(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -435,8 +476,7 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     )
     assert pub.status_code == 200, pub.text
     assert pub.json()["data"]["published"] is True
-    # The response must carry the same row shape as list_calls — a None
-    # patient_name here blanks the Patient cell in the UI until the next poll.
+    # Same row shape as list_calls — None would blank the UI's Patient cell.
     assert pub.json()["data"]["patient_name"] == "Test Patient"
 
     # Exactly one publish audit row exists.
