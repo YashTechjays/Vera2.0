@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { ArrowUp, Check } from "lucide-react"
+import { AlertCircle, ArrowUp, Check, CheckCircle2, Phone, PhoneCall } from "lucide-react"
 
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -19,7 +19,7 @@ import { listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
 import { ApiError } from "@/lib/api/client"
 import { CallOverviewModal } from "@/components/monitoring/CallOverviewModal"
 import { InterveneModal } from "@/components/monitoring/InterveneModal"
-import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
+import { type CallCategory, type LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
@@ -143,6 +143,22 @@ export function LiveMonitoring() {
     if (tab === "critical") return calls.filter((c) => categoryOf(c.status) === "critical")
     return calls
   }, [tab, calls])
+
+  const stats = useMemo(() => {
+    const byCategory = (cat: CallCategory) =>
+      calls.filter((c) => categoryOf(c.status) === cat).length
+    return [
+      { label: "Live Calls", value: String(calls.length), icon: Phone },
+      { label: "Active", value: String(byCategory("active")), icon: PhoneCall },
+      { label: "Processing", value: String(byCategory("processing")), icon: CheckCircle2 },
+      {
+        label: "Critical Alerts",
+        value: String(byCategory("critical")),
+        icon: AlertCircle,
+        tone: "critical" as const,
+      },
+    ]
+  }, [calls])
 
   async function onPublish(call: CallSummary) {
     setPublishing(call.id)
