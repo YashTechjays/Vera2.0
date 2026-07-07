@@ -68,6 +68,7 @@ def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSumma
     return CallSummary(
         id=call.id,
         tenant_id=call.tenant_id,
+        form_id=call.form_id,
         status=call.current_status,
         room_name=room_name_for_call(call.tenant_id, call.id),
         patient_name=patient_name,

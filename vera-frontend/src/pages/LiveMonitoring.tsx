@@ -97,7 +97,7 @@ function CallIndicator({ category }: { category: CallCategory }) {
 }
 
 export function LiveMonitoring() {
-  const { openForm } = useIbv()
+  const { openFormById } = useIbv()
   const canPublish = usePermission("calls:publish")
   // PHI (patient_name) stays in component state so it's discarded on unmount.
   const [calls, setCalls] = useState<CallSummary[]>([])
@@ -106,6 +106,7 @@ export function LiveMonitoring() {
   const [now, setNow] = useState(() => Date.now())
   const [publishing, setPublishing] = useState<string | null>(null)
   const [modalCall, setModalCall] = useState<LiveCall | null>(null)
+  const [selectedCall, setSelectedCall] = useState<CallSummary | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
   const [interveneOpen, setInterveneOpen] = useState(false)
 
@@ -173,6 +174,7 @@ export function LiveMonitoring() {
   }
 
   function openOverview(call: CallSummary) {
+    setSelectedCall(call)
     setModalCall(toLiveCall(call, now))
     setOverviewOpen(true)
   }
@@ -314,7 +316,9 @@ export function LiveMonitoring() {
         call={modalCall}
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
-        onExpand={() => openForm()}
+        onExpand={() => {
+          if (selectedCall) openFormById(selectedCall.form_id)
+        }}
         onIntervene={() => {
           setOverviewOpen(false)
           setInterveneOpen(true)

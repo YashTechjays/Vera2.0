@@ -8,6 +8,7 @@ import { apiRequest } from "@/lib/api/client"
 export type CallSummary = {
   id: string
   tenant_id: string
+  form_id: string
   /** current_status — e.g. "initiated" | "active" | "critical" | … (backend enum). */
   status: string
   room_name: string

@@ -8,6 +8,7 @@ def test_call_summary_grown_fields() -> None:
     s = CallSummary(
         id=uuid4(),
         tenant_id=uuid4(),
+        form_id=uuid4(),
         status="active",
         room_name="call--t--c",
         patient_name="Jane Doe",

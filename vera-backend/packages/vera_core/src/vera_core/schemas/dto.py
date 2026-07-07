@@ -12,6 +12,7 @@ class CallSummary(BaseModel):
 
     id: UUID
     tenant_id: UUID
+    form_id: UUID
     status: str
     room_name: str
     patient_name: str | None = None
