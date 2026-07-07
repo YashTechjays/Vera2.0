@@ -196,7 +196,13 @@ class TranscriptService:
 
     def consume(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
         """Replay from the start, then tail until the stream ends. The single shared
-        consume method — the SSE endpoint frames over it, the finalizer drains it."""
+        consume method — the SSE endpoint frames over it, the finalizer drains it.
+
+        Producer contract: turns are published in chronological order (`event.ts`
+        non-decreasing) even across a barge-in, so the stream a consumer reads is already
+        correct — append/persist in this order as-is, no re-sort by `ts` needed. (The stream
+        is append-only, so the producer enforces order before each write; a consumer cannot
+        reorder after the fact anyway.)"""
         return self._store.read(room_name)
 
     async def collect(self, room_name: str) -> list[TranscriptEvent]:
