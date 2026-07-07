@@ -1,5 +1,9 @@
 """patient_form enqueued_by for call ownership
 
+Revision ID: 62947d8a3be7
+Revises: 0eacf358cad7
+Create Date: 2026-07-06 15:34:23.375912
+
 `enqueued_by_id` persists the user who queued a form so the dispatcher can
 attribute `call.initiated_by_id` to them even when the call is actually
 created later by a different actor (freed-slot dispatch, retry-at-callback).
@@ -12,10 +16,6 @@ has no `ADD CONSTRAINT IF NOT EXISTS`, so the FK is wrapped in a DO block that
 swallows `duplicate_object` (also a no-op on fresh DBs). The FK name matches
 the model's `NAMING_CONVENTION`
 (`fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s`).
-
-Revision ID: 62947d8a3be7
-Revises: 0eacf358cad7
-Create Date: 2026-07-06 15:34:23.375912
 
 """
 
