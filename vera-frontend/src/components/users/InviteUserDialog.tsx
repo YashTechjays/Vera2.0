@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
 import { ApiError } from "@/lib/api/client"
 import { inviteUser, listRoles, type InviteUserResult, type RoleSummary } from "@/lib/auth/api"
+import { copyText } from "@/lib/clipboard"
 
 export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {}) {
   const [open, setOpen] = useState(false)
@@ -48,9 +49,16 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
     }
   }, [open, roles.length])
 
-  function copyLink() {
+  // Revert the "copied" tick to the copy icon after a moment.
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 2000)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  async function copyLink() {
     if (!result) return
-    void navigator.clipboard.writeText(result.invite_url).then(() => setCopied(true))
+    setCopied(await copyText(result.invite_url))
   }
 
   async function onSubmit(e: FormEvent) {
