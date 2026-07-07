@@ -11,14 +11,13 @@ from `calls:read` (which gates the real call system) so a narrow role like
 VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
-import asyncio
 import logging
 import re
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -36,10 +35,9 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.ivr_selection import add_active_playbook_metadata
-from control_plane.livekit_gateway import LiveKitGateway, OutboundDialError
+from control_plane.livekit_gateway import OutboundDialError
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
-from control_plane.worker_events import classify_dial_failure, teardown_call_failed
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
@@ -58,48 +56,6 @@ from vera_core.transcript import TranscriptEvent, TranscriptService
 router = APIRouter(tags=["voice-lab"])
 
 logger = logging.getLogger("control_plane.voice_lab")
-
-
-def _log_task_exception(task: asyncio.Task[None]) -> None:
-    if not task.cancelled() and task.exception() is not None:
-        logger.error("voice-lab background task failed", exc_info=task.exception())
-
-
-def _spawn_tracked(app: FastAPI, coro: Coroutine[Any, Any, None]) -> None:
-    """Run a fire-and-forget coroutine tracked on app.state so it isn't GC'd mid-flight
-    and is cancelled on shutdown; log (never swallow) any exception it raises."""
-    tasks: set[asyncio.Task[None]] = app.state.background_tasks
-    task = asyncio.create_task(coro)
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
-    task.add_done_callback(_log_task_exception)
-
-
-async def _watch_outbound_dial(
-    livekit: LiveKitGateway,
-    room_name: str,
-    phone_number: str,
-    trunk_id: str,
-    *,
-    dial_timeout_s: float,
-    teardown_grace_ms: int,
-) -> None:
-    """Place the outbound call and wait for its outcome. On a busy / declined / no-answer /
-    bad-trunk failure, reflect the reason to the browser (room metadata) and tear the room
-    down. Runs in the background so the HTTP response returns immediately, yet the dialer —
-    not a late-joining worker — is the one that reliably observes the failure."""
-    try:
-        await livekit.create_sip_participant(
-            room_name, phone_number, trunk_id, wait_until_answered=True, dial_timeout=dial_timeout_s
-        )
-        logger.info("voice-lab: outbound call answered for room %s", room_name)
-    except OutboundDialError as e:
-        reason = classify_dial_failure(e)
-        logger.warning(
-            "voice-lab: outbound call failed for room %s (%s): %s", room_name, reason.value, e
-        )
-        await teardown_call_failed(livekit, room_name, reason, teardown_grace_ms=teardown_grace_ms)
-
 
 # E.164: a leading + and 1-15 digits, first digit non-zero.
 _E164 = re.compile(r"^\+[1-9]\d{1,14}$")
@@ -144,11 +100,11 @@ async def list_call_providers(
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.CONFLICT,
         DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.BAD_GATEWAY,
     ),
 )
 async def start_voice_session(
     body: StartVoiceSessionRequest,
-    request: Request,
     tenant_id: TenantId,
     livekit: LiveKit,
     session: TenantSession,
@@ -201,24 +157,20 @@ async def start_voice_session(
     )
     if outbound is not None:
         phone_number, trunk_id = outbound
-        settings = request.app.state.settings
-        # Place + watch the call in the BACKGROUND: create_sip_participant(wait_until_answered)
-        # blocks until answered or failed, so we must not hold the HTTP response on it. On
-        # failure the watcher reflects the reason to the browser (room metadata) and deletes
-        # the room. The dialer observing its own call closes the worker cold-start race (a
-        # busy/decline that drops before a just-started worker subscribes would be missed).
-        _spawn_tracked(
-            request.app,
-            _watch_outbound_dial(
-                livekit,
-                room_name,
-                phone_number,
-                trunk_id,
-                dial_timeout_s=settings.outbound_dial_timeout_s,
-                teardown_grace_ms=settings.call_failed_teardown_grace_ms,
-            ),
-        )
-        logger.info("voice-lab: watching outbound dial for room %s (background)", room_name)
+        try:
+            await livekit.create_sip_participant(room_name, phone_number, trunk_id)
+            logger.info("voice-lab: placed outbound SIP call into room %s", room_name)
+        except OutboundDialError as e:
+            logger.warning("voice-lab: outbound dial failed for room %s: %s", room_name, e)
+            # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
+            # after it was stored, or the carrier refused the call). Tear down the room
+            # + dispatched agent we just created so nothing is left orphaned, and return
+            # a clean upstream error instead of letting it surface as a raw 500.
+            await livekit.delete_room(room_name)
+            raise CustomAPIException(
+                DefaultExceptionCode.BAD_GATEWAY,
+                message="could not place the outbound call — the telephony provider rejected it",
+            ) from e
 
     token = livekit.mint_join_token(room_name=room_name, identity=browser_identity)
     return ok(

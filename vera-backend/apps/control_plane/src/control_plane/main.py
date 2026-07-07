@@ -124,9 +124,6 @@ def create_app(
             host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from
         )
         app.state.invitation_store = invitation_store or RedisInvitationStore(_redis())
-        # Fire-and-forget background tasks (e.g. the Voice Lab outbound-dial watcher) live
-        # here so they aren't GC'd mid-flight and are cancelled on shutdown.
-        app.state.background_tasks = set()
 
         # Worker→control-plane event consumer. Needs a real LiveKit gateway (to tear
         # rooms down) and a dedicated Redis client (a blocking XREADGROUP pins a
@@ -148,10 +145,6 @@ def create_app(
 
         configure_observability(settings)
         yield
-        for task in list(app.state.background_tasks):
-            task.cancel()
-        if app.state.background_tasks:
-            await asyncio.gather(*app.state.background_tasks, return_exceptions=True)
         if worker_event_task is not None:
             worker_event_task.cancel()
             with suppress(asyncio.CancelledError):

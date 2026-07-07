@@ -4,27 +4,10 @@ from uuid import uuid4
 
 import pytest
 
-from control_plane.livekit_gateway import OutboundDialError
-from control_plane.worker_events import WorkerEventConsumer, classify_dial_failure
+from control_plane.worker_events import WorkerEventConsumer
 from vera_core.events import CallFailedEvent, CallFailureReason
 
 _VALID_ROOM = f"call--{uuid4()}--{uuid4()}"
-
-
-@pytest.mark.parametrize(
-    ("err", "expected"),
-    [
-        (OutboundDialError("x", sip_status=486), CallFailureReason.BUSY_OR_DECLINED),
-        (OutboundDialError("x", sip_status=603), CallFailureReason.BUSY_OR_DECLINED),
-        (OutboundDialError("x", sip_status=408), CallFailureReason.NO_ANSWER),
-        (OutboundDialError("x", sip_status=480), CallFailureReason.NO_ANSWER),
-        (OutboundDialError("x", timed_out=True), CallFailureReason.NO_ANSWER),
-        (OutboundDialError("x", sip_status=500), CallFailureReason.FAILED),
-        (OutboundDialError("x"), CallFailureReason.FAILED),  # no info → failed
-    ],
-)
-def test_classify_dial_failure(err: OutboundDialError, expected: CallFailureReason) -> None:
-    assert classify_dial_failure(err) == expected
 
 
 class _FakeLiveKit:

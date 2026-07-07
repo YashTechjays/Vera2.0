@@ -49,8 +49,6 @@ class FakeLiveKit(LiveKitGateway):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
-        self.dial_error_sip_status: int | None = None  # sip_status on the raised error
-        self.sip_wait_until_answered: list[bool] = []  # records the flag per dial
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -64,20 +62,11 @@ class FakeLiveKit(LiveKitGateway):
         return trunk_id in self.known_trunks
 
     async def create_sip_participant(
-        self,
-        room_name: str,
-        phone_number: str,
-        trunk_id: str,
-        *,
-        wait_until_answered: bool = False,
-        dial_timeout: float | None = None,
+        self, room_name: str, phone_number: str, trunk_id: str
     ) -> None:
-        self.sip_calls.append((room_name, phone_number, trunk_id))
-        self.sip_wait_until_answered.append(wait_until_answered)
         if self.dial_error:
-            raise OutboundDialError(
-                "fake provider rejected the call", sip_status=self.dial_error_sip_status
-            )
+            raise OutboundDialError("fake provider rejected the call")
+        self.sip_calls.append((room_name, phone_number, trunk_id))
 
     async def delete_room(self, room_name: str) -> None:
         self.deleted.append(room_name)
@@ -101,7 +90,6 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.known_trunks = set()
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
-    fake_livekit.dial_error_sip_status = None
     yield
 
 

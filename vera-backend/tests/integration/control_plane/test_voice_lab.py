@@ -5,11 +5,8 @@ injected by the authz_app fixture records room/dispatch/SIP calls so we assert o
 the seam without a real LiveKit server.
 """
 
-import asyncio
-
 import httpx
 import pytest
-from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -125,21 +122,13 @@ async def test_outbound_with_invalid_phone_returns_422(
     assert resp.status_code == 422, resp.text
 
 
-async def _drain_background_tasks(app: FastAPI) -> None:
-    """Run the fire-and-forget outbound-dial watcher(s) the handler spawned to completion."""
-    await asyncio.gather(*list(app.state.background_tasks), return_exceptions=True)
-
-
 @pytest.mark.asyncio
-async def test_outbound_places_sip_call_and_waits_for_answer(
+async def test_outbound_with_trunk_and_valid_phone_places_sip_call(
     client: httpx.AsyncClient,
-    authz_app: FastAPI,
     rbac_world: RBACWorld,
     fake_livekit: FakeLiveKit,
     trunk_configured: None,
 ) -> None:
-    # The dial happens in a background task with wait_until_answered=True (the control plane
-    # watches the outcome), so the HTTP response returns immediately with the monitor token.
     before = len(fake_livekit.sip_calls)
     resp = await client.post(
         "/api/v1/voice-lab/sessions",
@@ -151,41 +140,28 @@ async def test_outbound_places_sip_call_and_waits_for_answer(
     assert body["mode"] == "outbound"
     # listen-only monitor identity for the browser
     assert body["token"].startswith(f"faketoken:{body['room_name']}:monitor-")
-
-    await _drain_background_tasks(authz_app)
     assert fake_livekit.sip_calls[before] == (body["room_name"], "+15551234567", _TRUNK_VALUE)
-    assert fake_livekit.sip_wait_until_answered[before] is True  # blocking dial to catch failure
 
 
 @pytest.mark.asyncio
-async def test_outbound_dial_failure_sets_call_failed_metadata_and_tears_down_room(
+async def test_outbound_dial_failure_returns_502_and_tears_down_room(
     client: httpx.AsyncClient,
-    authz_app: FastAPI,
     rbac_world: RBACWorld,
     fake_livekit: FakeLiveKit,
     trunk_configured: None,
 ) -> None:
-    # A busy line (SIP 486) surfaces AFTER the response returns: the background watcher
-    # classifies it, sets call_failed room metadata for the browser, and deletes the room —
-    # no 502 (the browser already has its token and hears the reason via metadata).
+    # The trunk is stored (passed save-time validation) but the dial fails at the
+    # provider seam — e.g. the trunk was deleted afterwards. Expect a clean 502, not a
+    # 500, and the room we created must be torn down so no agent is left orphaned.
     fake_livekit.dial_error = True
-    fake_livekit.dial_error_sip_status = 486
     before_deleted = len(fake_livekit.deleted)
-    before_meta = len(fake_livekit.room_metadata)
     resp = await client.post(
         "/api/v1/voice-lab/sessions",
         headers=_auth(rbac_world.admin_token),
         json={"mode": "outbound", "phone_number": "+15551234567"},
     )
-    assert resp.status_code == 200, resp.text
-    room_name = resp.json()["data"]["room_name"]
-
-    await _drain_background_tasks(authz_app)
-    assert fake_livekit.room_metadata[before_meta] == (
-        room_name,
-        {"status": "call_failed", "reason": "busy_or_declined"},
-    )
-    assert fake_livekit.deleted[before_deleted] == room_name
+    assert resp.status_code == 502, resp.text
+    assert len(fake_livekit.deleted) == before_deleted + 1
 
 
 @pytest.mark.asyncio
