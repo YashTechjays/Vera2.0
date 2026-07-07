@@ -15,9 +15,8 @@ import {
 import { cn } from "@/lib/utils"
 import { useIbv } from "@/components/ibv/IbvProvider"
 import { usePermission } from "@/lib/auth/permissions"
-import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { fetchCalls, publishCall, selectActiveCalls, selectCallsError } from "@/store/callsSlice"
-import type { CallSummary } from "@/lib/api/calls"
+import { listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
+import { ApiError } from "@/lib/api/client"
 import { CallOverviewModal } from "@/components/monitoring/CallOverviewModal"
 import { InterveneModal } from "@/components/monitoring/InterveneModal"
 import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
@@ -99,10 +98,10 @@ function CallIndicator({ category }: { category: CallCategory }) {
 
 export function LiveMonitoring() {
   const { openForm } = useIbv()
-  const dispatch = useAppDispatch()
-  const calls = useAppSelector(selectActiveCalls)
-  const error = useAppSelector(selectCallsError)
   const canPublish = usePermission("calls:publish")
+  // PHI (patient_name) stays in component state so it's discarded on unmount.
+  const [calls, setCalls] = useState<CallSummary[]>([])
+  const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<TabKey>("active")
   const [now, setNow] = useState(() => Date.now())
   const [publishing, setPublishing] = useState<string | null>(null)
@@ -112,12 +111,27 @@ export function LiveMonitoring() {
 
   // Load + poll (skip while the tab is hidden).
   useEffect(() => {
-    dispatch(fetchCalls())
+    let cancelled = false
+    async function load() {
+      try {
+        const items = await listCalls()
+        if (!cancelled) {
+          setCalls(items)
+          setError(null)
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load calls.")
+      }
+    }
+    void load()
     const id = setInterval(() => {
-      if (document.visibilityState === "visible") dispatch(fetchCalls())
+      if (document.visibilityState === "visible") void load()
     }, POLL_MS)
-    return () => clearInterval(id)
-  }, [dispatch])
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [])
 
   // Tick so Duration advances between polls.
   useEffect(() => {
@@ -133,9 +147,10 @@ export function LiveMonitoring() {
   async function onPublish(call: CallSummary) {
     setPublishing(call.id)
     try {
-      await dispatch(publishCall(call.id)).unwrap()
-    } catch {
-      // Surfaced via the slice error banner.
+      const updated = await publishCall(call.id)
+      setCalls((cs) => cs.map((c) => (c.id === updated.id ? updated : c)))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not publish the call.")
     } finally {
       setPublishing(null)
     }
