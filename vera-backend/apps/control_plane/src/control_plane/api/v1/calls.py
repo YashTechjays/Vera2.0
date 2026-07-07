@@ -13,7 +13,7 @@ import contextlib
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
@@ -238,11 +238,13 @@ async def join_token(
 async def publish_call(
     call_id: UUID,
     request: Request,
+    response: Response,
     tenant_id: TenantId,
     session: TenantSession,
     audit: Audit,
     caller: VerifiedIdentity = require("calls:publish"),
 ) -> ResponseModel[CallSummary]:
+    response.headers["Cache-Control"] = "no-store"
     # RLS scopes to the caller's tenant; the row lock serializes concurrent publishes.
     call = (
         await session.execute(select(Call).where(Call.id == call_id).with_for_update())
@@ -277,6 +279,19 @@ async def publish_call(
             select(PatientForm.patient_name).where(PatientForm.id == call.form_id)
         )
     ).scalar_one_or_none()
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type="call",
+            resource_id=str(call.id),
+            request_id=current_request_id(request),
+            detail={"fields": ["patient_name"]},
+        )
+    )
     return ok(_summary(call, patient_name, caller.user_id))
 
 
@@ -289,10 +304,14 @@ async def publish_call(
     ),
 )
 async def list_calls(
-    _tenant_id: TenantId,
+    request: Request,
+    response: Response,
+    tenant_id: TenantId,
     session: TenantSession,
+    audit: Audit,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[list[CallSummary]]:
+    response.headers["Cache-Control"] = "no-store"
     rows = (
         await session.execute(
             select(Call, PatientForm.patient_name)
@@ -310,6 +329,20 @@ async def list_calls(
             .order_by(Call.created_at.desc())
         )
     ).all()
+    # PHI disclosure (patient_name) — audit field names, mirroring list_patient_forms.
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type="call",
+            resource_id="list",
+            request_id=current_request_id(request),
+            detail={"fields": ["patient_name"]},
+        )
+    )
     return ok([_summary(c, name, caller.user_id) for c, name in rows])
 
 

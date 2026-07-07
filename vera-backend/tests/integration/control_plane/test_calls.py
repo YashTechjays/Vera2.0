@@ -395,6 +395,34 @@ async def test_list_scopes_to_owner_or_published(
 
 
 @pytest.mark.asyncio
+async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_session: AsyncSession,
+) -> None:
+    resp = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["Cache-Control"] == "no-store"
+
+    row = (
+        (
+            await admin_session.execute(
+                select(AuditLog).where(
+                    AuditLog.event_type == "phi.access",
+                    AuditLog.resource_type == "call",
+                    AuditLog.resource_id == "list",
+                    AuditLog.actor_user_id == rbac_world.admin_id,
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    assert row is not None
+    assert row.detail == {"fields": ["patient_name"]}
+
+
+@pytest.mark.asyncio
 async def test_ownerless_call_is_tenant_visible_and_joinable(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
