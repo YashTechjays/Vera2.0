@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
     livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
 
+    # How long the control plane waits (in a background task) for an outbound SIP call to
+    # be answered or fail, via create_sip_participant(wait_until_answered=True). Must exceed
+    # LiveKit's own outbound ringing timeout so the definitive SIP outcome (486 busy, etc.)
+    # arrives before this client deadline; if THIS fires first it's treated as no-answer.
+    outbound_dial_timeout_s: float = 90.0  # VERA_OUTBOUND_DIAL_TIMEOUT_S
+
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
     # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:

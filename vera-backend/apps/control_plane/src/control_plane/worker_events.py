@@ -16,11 +16,12 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from control_plane.livekit_gateway import LiveKitGateway
+from control_plane.livekit_gateway import LiveKitGateway, OutboundDialError
 from vera_core.events import (
     WORKER_EVENTS_GROUP,
     WORKER_EVENTS_STREAM,
     CallFailedEvent,
+    CallFailureReason,
     WorkerEvent,
     WorkerEventBus,
     parse_worker_event,
@@ -30,6 +31,42 @@ from vera_core.observability.correlation import parse_room_name
 logger = logging.getLogger("control_plane.worker_events")
 
 type EventHandler = Callable[[WorkerEvent], Awaitable[None]]
+
+# SIP response codes → failure reason (best-effort; anything else falls through to FAILED).
+_BUSY_DECLINED_SIP = frozenset({486, 600, 603})  # Busy Here / Busy Everywhere / Decline
+_NO_ANSWER_SIP = frozenset({408, 480, 487, 504})  # Timeout / Unavailable / Terminated
+
+
+def classify_dial_failure(err: OutboundDialError) -> CallFailureReason:
+    """Map an outbound-dial failure to a user-facing reason. Best-effort: a recognized SIP
+    code refines busy-vs-no-answer, a client-deadline timeout is no-answer, else FAILED."""
+    if err.timed_out:
+        return CallFailureReason.NO_ANSWER
+    if err.sip_status in _BUSY_DECLINED_SIP:
+        return CallFailureReason.BUSY_OR_DECLINED
+    if err.sip_status in _NO_ANSWER_SIP:
+        return CallFailureReason.NO_ANSWER
+    return CallFailureReason.FAILED
+
+
+async def teardown_call_failed(
+    livekit: LiveKitGateway,
+    room_name: str,
+    reason: CallFailureReason,
+    *,
+    teardown_grace_ms: int,
+) -> None:
+    """Reflect the failure to the browser via room metadata, then delete the room.
+    Idempotent — shared by the worker-event consumer and the control-plane dial watcher."""
+    logger.info(
+        "call failed room=%s reason=%s: setting metadata + deleting room", room_name, reason.value
+    )
+    await livekit.set_room_metadata(room_name, {"status": "call_failed", "reason": reason.value})
+    # Let the RoomMetadataChanged frame reach the browser before we tear the room down.
+    if teardown_grace_ms:
+        await asyncio.sleep(teardown_grace_ms / 1000)
+    await livekit.delete_room(room_name)
+
 
 # The redis-py stubs type XREADGROUP/XAUTOCLAIM responses as broad unions (they
 # also cover bytes-mode and other subcommands); with `decode_responses=True` and
@@ -156,15 +193,6 @@ class WorkerEventConsumer:
         if parse_room_name(event.room_name) is None:
             logger.warning("call.failed for non-vera room %s; ignoring", event.room_name)
             return
-        logger.info(
-            "call.failed room=%s reason=%s: setting metadata + deleting room",
-            event.room_name,
-            event.reason.value,
+        await teardown_call_failed(
+            self._livekit, event.room_name, event.reason, teardown_grace_ms=self._teardown_grace_ms
         )
-        await self._livekit.set_room_metadata(
-            event.room_name, {"status": "call_failed", "reason": event.reason.value}
-        )
-        # Let the RoomMetadataChanged frame reach the browser before we tear the room down.
-        if self._teardown_grace_ms:
-            await asyncio.sleep(self._teardown_grace_ms / 1000)
-        await self._livekit.delete_room(event.room_name)

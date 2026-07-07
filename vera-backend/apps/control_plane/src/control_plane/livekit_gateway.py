@@ -4,6 +4,7 @@ Mirrors the build_kms factory shape.
 """
 
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -31,8 +32,28 @@ class LiveKitUnavailable(Exception):
 
 class OutboundDialError(Exception):
     """Placing an outbound SIP call failed at the LiveKit / telephony seam — a
-    bad/deleted trunk, the provider rejecting the call, or LiveKit being unreachable.
-    The router translates this into a clean upstream-error response, never a raw 500."""
+    bad/deleted trunk, the callee being busy/declining/not answering, or LiveKit being
+    unreachable. Carries the SIP response code (e.g. 486) when the failure was a SIP
+    response, and `timed_out=True` when our own client deadline elapsed first, so the
+    caller can classify busy/declined/no-answer."""
+
+    def __init__(
+        self, message: str, *, sip_status: int | None = None, timed_out: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.sip_status = sip_status
+        self.timed_out = timed_out
+
+
+# A SIP status line embeds a 3-digit 4xx/5xx/6xx response code; pull the first one out of
+# the Twirp error text/metadata (best-effort — used only to refine the failure reason).
+_SIP_CODE_RE = re.compile(r"\b([4-6]\d{2})\b")
+
+
+def _extract_sip_status(err: TwirpError) -> int | None:
+    haystack = err.message + " " + " ".join(err.metadata.values())
+    match = _SIP_CODE_RE.search(haystack)
+    return int(match.group(1)) if match else None
 
 
 class LiveKitGateway:
@@ -96,7 +117,13 @@ class LiveKitGateway:
         return len(resp.items) > 0
 
     async def create_sip_participant(
-        self, room_name: str, phone_number: str, trunk_id: str
+        self,
+        room_name: str,
+        phone_number: str,
+        trunk_id: str,
+        *,
+        wait_until_answered: bool = False,
+        dial_timeout: float | None = None,
     ) -> None:
         """Dial an outbound phone number into the room via the tenant's SIP trunk.
 
@@ -104,9 +131,13 @@ class LiveKitGateway:
         any listening monitor hear them once they answer. `trunk_id` is resolved per
         tenant from the integrations table by the caller (fail-closed before this).
 
-        Raises OutboundDialError if LiveKit/the provider rejects the dial (e.g. the
-        trunk was deleted after it was stored, or the carrier refuses the call) so the
-        router returns a clean upstream error instead of an uncaught 500.
+        With `wait_until_answered=True` this blocks until the call is answered or reaches
+        a terminal failure (busy/declined/no-answer), and `timeout` bounds that wait — use
+        it in a background task to detect the outcome the dialer would otherwise never see.
+
+        Raises OutboundDialError if the dial fails — a bad/deleted trunk, the carrier
+        refusing the call, the callee busy/declining/not answering, or LiveKit being
+        unreachable. The error carries `sip_status` / `timed_out` for classification.
         """
         if not trunk_id:
             # Unreachable from the router (it resolves + checks the trunk first), but if
@@ -122,10 +153,16 @@ class LiveKitGateway:
                         room_name=room_name,
                         participant_identity=SIP_CALLEE_IDENTITY,
                         participant_name="Outbound callee",
-                        wait_until_answered=False,
-                    )
+                        wait_until_answered=wait_until_answered,
+                    ),
+                    timeout=dial_timeout,
                 )
-        except _LIVEKIT_TRANSPORT_ERRORS as e:
+        except TwirpError as e:
+            raise OutboundDialError(str(e), sip_status=_extract_sip_status(e)) from e
+        except TimeoutError as e:
+            # Our client deadline elapsed before LiveKit resolved the ring — treat as no-answer.
+            raise OutboundDialError(str(e) or "outbound dial timed out", timed_out=True) from e
+        except aiohttp.ClientError as e:
             raise OutboundDialError(str(e)) from e
 
     async def delete_room(self, room_name: str) -> None:
