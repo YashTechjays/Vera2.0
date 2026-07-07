@@ -140,6 +140,16 @@ class LiveKitGateway:
                     return  # room already gone — agent's close path deleted it first
                 raise
 
+    async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
+        """Set room-level metadata (JSON-encoded). LiveKit pushes it to every
+        participant as a RoomMetadataChanged event, so the browser can read
+        session status (e.g. a failed outbound call) before the room is torn down.
+        """
+        async with self._client() as lk:
+            await lk.room.update_room_metadata(
+                api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
+            )
+
     def mint_join_token(self, room_name: str, identity: str) -> str:
         grants = api.VideoGrants(room_join=True, room=room_name)
         return (
