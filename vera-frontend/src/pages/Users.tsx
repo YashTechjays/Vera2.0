@@ -64,6 +64,13 @@ export function Users() {
     }
   }, [canRead])
 
+  // Auto-dismiss the success notice after a few seconds.
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), 5000)
+    return () => clearTimeout(timer)
+  }, [notice])
+
   function askDeactivate(user: UserSummary) {
     setNotice(null)
     setDialogError(null)
