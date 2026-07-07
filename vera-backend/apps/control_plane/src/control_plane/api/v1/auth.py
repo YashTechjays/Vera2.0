@@ -42,7 +42,11 @@ from control_plane.api.v1.common import (
 from control_plane.auth import elevation, mfa
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import INVITE_MFA_NS, INVITE_NS
-from control_plane.auth.password import MAX_PASSWORD_BYTES, hash_password, verify_password
+from control_plane.auth.password import (
+    MAX_PASSWORD_BYTES,
+    hash_password,
+    verify_password_or_dummy,
+)
 from control_plane.auth.providers import resolve_login_provider
 from control_plane.auth.session import MFA_ENROLL_NS, MFA_NS, SessionData, SessionStore
 from control_plane.auth.tenant_slug import normalize_slug, resolve_tenant_id
@@ -314,11 +318,13 @@ async def login(
         # exist; that FK would fail), so this 401 is intentionally un-audited.
         # Every failure past this point has a confirmed-real tenant + provider.
         raise _unauthorized()
-    if (
-        creds is None
-        or creds.hashed_password is None
-        or not verify_password(body.password, creds.hashed_password)
-    ):
+    # Constant-time: always run one bcrypt verify, even for an unknown email or a
+    # user with no password hash (dummy verify → False). Every failure branch below
+    # costs the same, so response time can't reveal whether the email is registered.
+    password_ok = verify_password_or_dummy(
+        body.password, creds.hashed_password if creds is not None else None
+    )
+    if creds is None or not password_ok:
         user_id = creds.user_id if creds is not None else None
         await _audit(
             audit, tenant_id=tenant_id, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=user_id
@@ -490,14 +496,26 @@ async def mfa_enroll_activate(
     ),
 )
 async def logout(
-    _identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    identity: Annotated[VerifiedIdentity, Depends(current_identity)],
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    request: Request,
     store: Store,
+    audit: AuthAudit,
 ) -> ResponseModel[None]:
-    # Token-scoped self-op: `current_identity` proves a live session (expired → 401);
-    # the slug is irrelevant. delete_session reaps both the `sess` and `sess_abs` keys.
+    # Token-scoped self-op: `current_identity` proves a live session (expired → 401),
+    # so only real logouts are audited; the slug is irrelevant. delete_session reaps
+    # both the `sess` and `sess_abs` keys. A platform operator's tenant_id is None, so
+    # emit via emit_auth_event (accepts None → the log_auth_event definer path), not the
+    # UUID-only _audit helper.
     if credentials is not None:
         await store.delete_session(credentials.credentials)
+    await emit_auth_event(
+        audit,
+        tenant_id=identity.tenant_id,
+        event=AuthEvent.LOGOUT,
+        ip=client_ip(request),
+        user_id=identity.user_id,
+    )
     return ok(None, message="Logged out.")
 
 

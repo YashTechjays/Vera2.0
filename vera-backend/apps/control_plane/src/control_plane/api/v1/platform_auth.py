@@ -33,7 +33,7 @@ from control_plane.api.v1.auth import (
 )
 from control_plane.api.v1.common import AppSettings, AuthAudit, emit_auth_event
 from control_plane.auth import mfa
-from control_plane.auth.password import MAX_PASSWORD_BYTES, verify_password
+from control_plane.auth.password import MAX_PASSWORD_BYTES, verify_password_or_dummy
 from control_plane.auth.providers import resolve_platform_login_provider
 from control_plane.auth.session import MFA_NS, SessionData, SessionStore
 from control_plane.deps import client_ip, get_kms, get_session_store, get_sessionmaker
@@ -83,11 +83,13 @@ async def platform_login(
     if provider is None:
         # Password login disabled globally — uniform 401, un-audited (no operator to scope to).
         raise _unauthorized()
-    if (
-        creds is None
-        or creds.hashed_password is None
-        or not verify_password(body.password, creds.hashed_password)
-    ):
+    # Constant-time: always run one bcrypt verify, even for an unknown email or a
+    # user with no password hash (dummy verify → False). Every failure branch below
+    # costs the same, so response time can't reveal whether an operator email exists.
+    password_ok = verify_password_or_dummy(
+        body.password, creds.hashed_password if creds is not None else None
+    )
+    if creds is None or not password_ok:
         user_id = creds.user_id if creds is not None else None
         await emit_auth_event(
             audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=user_id

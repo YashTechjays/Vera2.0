@@ -176,6 +176,9 @@ class AuthEvent(enum.StrEnum):
     # recorded here instead (ADR-0006). Tenant-route authz stays in audit_log.
     AUTHZ_ALLOW = "authz_allow"
     AUTHZ_DENY = "authz_deny"
+    # Token-scoped self-logout (/auth/logout). Tenant users write a tenant-scoped
+    # row; platform operators (tenant_id IS NULL) go through log_auth_event.
+    LOGOUT = "logout"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

@@ -12,7 +12,7 @@ import httpx
 import pyotp
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.auth.password import hash_password
 from control_plane.auth.permission_cache import InMemoryPermissionCache
@@ -23,7 +23,7 @@ from vera_core.config import Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.models import AppUser, SsoProvider, Tenant, UserIdentity, UserRole
-from vera_core.models.enums import ProviderKind
+from vera_core.models.enums import AuthEvent, ProviderKind
 
 PASSWORD = "correct horse battery staple"
 
@@ -33,6 +33,7 @@ class LoginWorld:
     tenant_id: UUID
     slug: str
     email: str
+    admin_sessionmaker: async_sessionmaker[AsyncSession]
 
 
 @pytest.fixture
@@ -93,7 +94,15 @@ async def login_world(
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            yield client, LoginWorld(tenant_id=tenant_id, slug=slug, email=email)
+            yield (
+                client,
+                LoginWorld(
+                    tenant_id=tenant_id,
+                    slug=slug,
+                    email=email,
+                    admin_sessionmaker=sessionmaker,
+                ),
+            )
 
     async with sessionmaker() as session, session.begin():
         for table in (
@@ -450,3 +459,36 @@ async def test_enforce_mfa_first_login_rejects_bad_code(
     ).json()["data"]
     assert relogin["mfa"] == "enroll"
     assert relogin["session_token"] is None
+
+
+async def test_logout_is_audited(
+    login_world: tuple[httpx.AsyncClient, LoginWorld],
+) -> None:
+    client, world = login_world
+    token = (
+        await client.post(
+            f"{_base(world)}/auth/login", json={"email": world.email, "password": PASSWORD}
+        )
+    ).json()["data"]["session_token"]
+
+    resp = await client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+
+    # A logout row landed in the tenant's auth trail, attributed to the user + IP.
+    # Read as superuser (WORM RLS is SELECT-only for the app role).
+    async with world.admin_sessionmaker() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT app_user_id, ip_address FROM auth_audit_log"
+                    " WHERE tenant_id = :t AND event_type = :e"
+                ).bindparams(t=world.tenant_id, e=AuthEvent.LOGOUT.value)
+            )
+        ).one()
+        user_id = (
+            await session.execute(
+                text("SELECT id FROM app_user WHERE email = :em").bindparams(em=world.email)
+            )
+        ).scalar_one()
+    assert row.app_user_id == user_id
+    assert row.ip_address is not None
