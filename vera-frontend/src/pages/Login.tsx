@@ -9,8 +9,9 @@ import { apiErrorMessage, apiErrorStatus } from "@/lib/api/errors"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { loginThunk, selectStatus } from "@/store/authSlice"
 
-const DEV_EMAIL = import.meta.env.VITE_DEV_EMAIL ?? ""
-const DEV_PASSWORD = import.meta.env.VITE_DEV_PASSWORD ?? ""
+// DEV-gated: prefilled credentials must never reach a production bundle.
+const DEV_EMAIL = import.meta.env.DEV ? (import.meta.env.VITE_DEV_EMAIL ?? "") : ""
+const DEV_PASSWORD = import.meta.env.DEV ? (import.meta.env.VITE_DEV_PASSWORD ?? "") : ""
 // Prefill the workspace for local dev convenience; the user can change it.
 const DEFAULT_SLUG = import.meta.env.VITE_DEFAULT_TENANT_SLUG ?? ""
 
