@@ -1,7 +1,9 @@
 """Application factory and entrypoint for the Vera control plane."""
 
+import asyncio
+import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +20,7 @@ from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
 from control_plane.request_context import RequestIdMiddleware
+from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import (
     AuditSink,
     AuthAuditSink,
@@ -30,6 +33,18 @@ from vera_core.db import create_engine, create_sessionmaker
 from vera_core.observability.otel import configure_observability
 from vera_core.redis import create_redis
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
+
+logger = logging.getLogger("control_plane.main")
+
+
+def _log_consumer_exit(task: asyncio.Task[None]) -> None:
+    """Surface an unexpected exit of the worker-event consumer background task.
+
+    `run()` only returns via cancellation (shutdown) or an uncaught exception; without
+    this callback the latter would die silently ("Task exception was never retrieved").
+    """
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("worker-event consumer exited unexpectedly", exc_info=task.exception())
 
 
 def create_app(
@@ -109,8 +124,33 @@ def create_app(
             host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from
         )
         app.state.invitation_store = invitation_store or RedisInvitationStore(_redis())
+
+        # Worker→control-plane event consumer. Needs a real LiveKit gateway (to tear
+        # rooms down) and a dedicated Redis client (a blocking XREADGROUP pins a
+        # connection — same reason the transcript stream gets its own client). Not
+        # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
+        worker_events_redis: Redis | None = None
+        worker_event_task: asyncio.Task[None] | None = None
+        if settings.livekit_url is not None and app.state.livekit is not None:
+            worker_events_redis = create_redis(settings.redis_url)
+            consumer = WorkerEventConsumer(
+                worker_events_redis,
+                app.state.livekit,
+                block_ms=settings.worker_events_block_ms,
+                reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
+                teardown_grace_ms=settings.call_failed_teardown_grace_ms,
+            )
+            worker_event_task = asyncio.create_task(consumer.run())
+            worker_event_task.add_done_callback(_log_consumer_exit)
+
         configure_observability(settings)
         yield
+        if worker_event_task is not None:
+            worker_event_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker_event_task
+        if worker_events_redis is not None:
+            await worker_events_redis.aclose()
         if redis is not None:
             await redis.aclose()
         if transcript_redis is not None:

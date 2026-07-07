@@ -44,3 +44,76 @@ def test_build_livekit_gateway_constructs_gateway() -> None:
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "devkey", "LIVEKIT_API_SECRET": "devsecret"})
     gw = build_livekit_gateway(settings, secrets)
     assert gw.url == "ws://localhost:7880"
+
+
+def test_set_room_metadata_serializes_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """set_room_metadata JSON-encodes the dict into an UpdateRoomMetadataRequest."""
+    import json
+
+    from livekit import api
+
+    from control_plane.livekit_gateway import LiveKitGateway
+
+    captured: dict[str, object] = {}
+
+    class _FakeRoomService:
+        async def update_room_metadata(self, req: api.UpdateRoomMetadataRequest) -> None:
+            captured["room"] = req.room
+            captured["metadata"] = req.metadata
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    asyncio.run(
+        gw.set_room_metadata("call--t--c", {"status": "call_failed", "reason": "no_answer"})
+    )
+    assert captured["room"] == "call--t--c"
+    assert json.loads(str(captured["metadata"])) == {"status": "call_failed", "reason": "no_answer"}
+
+
+def test_configured_agent_name_flows_to_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VERA_LIVEKIT_AGENT_NAME threads through build_livekit_gateway → create_dispatch,
+    so a laptop sharing a LiveKit project can isolate its dispatch pool from a deployed worker."""
+    from livekit import api
+
+    captured: dict[str, object] = {}
+
+    class _FakeRoomService:
+        async def create_room(self, req: api.CreateRoomRequest) -> None:
+            return None
+
+    class _FakeDispatchService:
+        async def create_dispatch(self, req: api.CreateAgentDispatchRequest) -> None:
+            captured["agent_name"] = req.agent_name
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+        agent_dispatch = _FakeDispatchService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    settings = Settings(livekit_url="ws://x", livekit_agent_name="vera-agent-local")
+    secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})
+    gw = build_livekit_gateway(settings, secrets)
+
+    import asyncio
+
+    asyncio.run(gw.create_call_room("call--t--c"))
+    assert captured["agent_name"] == "vera-agent-local"
+
+
+def test_default_agent_name_stays_vera_agent() -> None:
+    """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected."""
+    settings = Settings(livekit_url="ws://x")
+    secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})
+    assert build_livekit_gateway(settings, secrets)._agent_name == "vera-agent"

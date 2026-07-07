@@ -14,13 +14,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import func
 
 from control_plane.api.v1.common import (
+    PLATFORM_PERMISSION_PREFIX,
     AuthAudit,
     Resolver,
     TenantId,
     TenantSession,
+    build_role_grant,
     emit_auth_event,
     is_platform_permission,
     roles_grant_platform_permission,
@@ -78,7 +79,25 @@ async def list_roles(
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[list[RoleResponse]]:
     # Catalog RLS returns the global system roles plus this tenant's custom roles.
-    rows = (await session.execute(select(Role).order_by(Role.name))).scalars().all()
+    # Platform-tier roles (e.g. SUPER_ADMIN) are excluded via an anti-join against
+    # role_permission/permission: a tenant can never assign one
+    # (roles_grant_platform_permission blocks it at write time), so listing it
+    # would just be a confusing, unusable option. One query, not a fetch-then-filter
+    # round trip.
+    platform_tier_roles = (
+        select(RolePermission.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(Permission.code.like(f"{PLATFORM_PERMISSION_PREFIX}%"))
+    )
+    rows = (
+        (
+            await session.execute(
+                select(Role).where(Role.id.not_in(platform_tier_roles)).order_by(Role.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return ok([_to_response(r) for r in rows])
 
 
@@ -177,12 +196,11 @@ async def assign_role(
         )
 
     session.add(
-        UserRole(
+        build_role_grant(
             tenant_id=tenant_id,
             app_user_id=user_id,
             role_id=body.role_id,
             granted_by=_caller.user_id,
-            granted_at=func.now(),
         )
     )
     try:

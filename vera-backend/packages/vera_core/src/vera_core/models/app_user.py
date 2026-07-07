@@ -1,6 +1,8 @@
 from datetime import datetime
+from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, Index, String
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from vera_core.db.base import Base, NullableTenantColumnMixin, TimestampMixin, UUIDv7PKMixin
@@ -46,3 +48,9 @@ class AppUser(Base, UUIDv7PKMixin, TimestampMixin, NullableTenantColumnMixin):
         String(16), nullable=False, default=AccountType.TENANT.value
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Who invited this user, for onboarding traceability. NULL for a user who
+    # wasn't invited (e.g. a seeded admin). Mirrors UserRole.granted_by's
+    # ondelete policy — losing the inviter's own account doesn't cascade.
+    invited_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
