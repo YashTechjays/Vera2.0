@@ -116,6 +116,13 @@ async def wait_for_speaker(ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_
             result.set_result(SpeakerReady(remote))
 
     def _on_connected(participant: rtc.RemoteParticipant) -> None:
+        logger.info(
+            "wait_for_speaker[%s]: participant_connected identity=%s kind=%s sip.callStatus=%s",
+            ctx.room.name,
+            participant.identity,
+            participant.kind,
+            participant.attributes.get(_SIP_CALL_STATUS_ATTR),
+        )
         _resolve_ready(participant)
 
     def _on_attributes_changed(_changed: dict[str, str], participant: rtc.Participant) -> None:
@@ -123,6 +130,13 @@ async def wait_for_speaker(ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_
 
     def _on_disconnected(participant: rtc.RemoteParticipant) -> None:
         # A SIP callee dropping before it answered means the outbound call failed.
+        logger.info(
+            "wait_for_speaker[%s]: participant_disconnected identity=%s kind=%s reason=%s",
+            ctx.room.name,
+            participant.identity,
+            participant.kind,
+            participant.disconnect_reason,
+        )
         if result.done() or participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
             return
         result.set_result(CallFailed(classify_sip_disconnect(participant.disconnect_reason)))
@@ -131,6 +145,14 @@ async def wait_for_speaker(ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_
     ctx.room.on("participant_attributes_changed", _on_attributes_changed)
     ctx.room.on("participant_disconnected", _on_disconnected)
     try:
+        logger.info(
+            "wait_for_speaker[%s]: participants at scan = %s",
+            ctx.room.name,
+            {
+                p.identity: (str(p.kind), p.attributes.get(_SIP_CALL_STATUS_ATTR))
+                for p in ctx.room.remote_participants.values()
+            },
+        )
         for p in ctx.room.remote_participants.values():
             _resolve_ready(p)
         if result.done():
@@ -221,7 +243,9 @@ async def entrypoint(ctx: JobContext) -> None:
     speaker: rtc.RemoteParticipant | None = None
     meta = json.loads(ctx.job.metadata or "{}")
     if meta.get("wait_for_speaker"):
+        logger.info("wait_for_speaker: entering for room %s (meta=%s)", room_name, meta)
         outcome = await wait_for_speaker(ctx)
+        logger.info("wait_for_speaker: outcome for room %s = %s", room_name, type(outcome).__name__)
         if isinstance(outcome, CallFailed):
             logger.warning("outbound call failed for room %s: %s", room_name, outcome.reason.value)
             failure_redis = create_redis(settings.redis_url)

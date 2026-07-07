@@ -11,6 +11,7 @@ from `calls:read` (which gates the real call system) so a narrow role like
 VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
+import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
@@ -53,6 +54,8 @@ from vera_core.schemas import StartVoiceSessionRequest, VoiceSessionResponse
 from vera_core.transcript import TranscriptEvent, TranscriptService
 
 router = APIRouter(tags=["voice-lab"])
+
+logger = logging.getLogger("control_plane.voice_lab")
 
 # E.164: a leading + and 1-15 digits, first digit non-zero.
 _E164 = re.compile(r"^\+[1-9]\d{1,14}$")
@@ -147,11 +150,18 @@ async def start_voice_session(
     if body.enable_ivr_navigation:
         await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
     await livekit.create_call_room(room_name, metadata=metadata)
+    logger.info(
+        "voice-lab: created room + dispatched agent for room %s (outbound=%s)",
+        room_name,
+        outbound is not None,
+    )
     if outbound is not None:
         phone_number, trunk_id = outbound
         try:
             await livekit.create_sip_participant(room_name, phone_number, trunk_id)
+            logger.info("voice-lab: placed outbound SIP call into room %s", room_name)
         except OutboundDialError as e:
+            logger.warning("voice-lab: outbound dial failed for room %s: %s", room_name, e)
             # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
             # after it was stored, or the carrier refused the call). Tear down the room
             # + dispatched agent we just created so nothing is left orphaned, and return

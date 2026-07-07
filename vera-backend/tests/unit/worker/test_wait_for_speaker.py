@@ -45,7 +45,8 @@ class _FakeParticipant:
 
 
 class _FakeRoom:
-    def __init__(self, *participants: _FakeParticipant) -> None:
+    def __init__(self, *participants: _FakeParticipant, name: str = "call--t--c") -> None:
+        self.name = name
         self.remote_participants = {p.identity: p for p in participants}
         self._handlers: dict[str, list[Any]] = {}
 

@@ -130,6 +130,12 @@ class WorkerEventConsumer:
             logger.exception("dropping unparseable worker event %s", entry_id)
             await self._ack(entry_id)  # poison entry — drop so it can't wedge the group
             return
+        logger.info(
+            "consumed worker event %s type=%s room=%s",
+            entry_id,
+            event.type,
+            getattr(event, "room_name", "?"),
+        )
         handler = self._handlers.get(event.type)
         if handler is None:
             logger.warning("no handler for worker event type %s; dropping", event.type)
@@ -150,6 +156,11 @@ class WorkerEventConsumer:
         if parse_room_name(event.room_name) is None:
             logger.warning("call.failed for non-vera room %s; ignoring", event.room_name)
             return
+        logger.info(
+            "call.failed room=%s reason=%s: setting metadata + deleting room",
+            event.room_name,
+            event.reason.value,
+        )
         await self._livekit.set_room_metadata(
             event.room_name, {"status": "call_failed", "reason": event.reason.value}
         )
