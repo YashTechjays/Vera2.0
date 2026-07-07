@@ -38,10 +38,17 @@ class _FakeRedis:
         self.group_calls: list[tuple[str, str]] = []
         self.busygroup = False
 
-    async def xadd(self, stream, fields, *, maxlen=None, approximate=False):
+    async def xadd(
+        self,
+        stream: str,
+        fields: dict[str, str],
+        *,
+        maxlen: int | None = None,
+        approximate: bool = False,
+    ) -> None:
         self.added.append((stream, fields, maxlen, approximate))
 
-    async def xgroup_create(self, stream, group, *, id, mkstream):
+    async def xgroup_create(self, stream: str, group: str, *, id: str, mkstream: bool) -> None:
         from redis.exceptions import ResponseError
 
         self.group_calls.append((stream, group))
