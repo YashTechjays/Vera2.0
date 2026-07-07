@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 import { useIbv } from "@/components/ibv/IbvProvider"
+import { usePermission } from "@/lib/auth/permissions"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { fetchCalls, publishCall, selectActiveCalls, selectCallsError } from "@/store/callsSlice"
 import type { CallSummary } from "@/lib/api/calls"
@@ -101,6 +102,7 @@ export function LiveMonitoring() {
   const dispatch = useAppDispatch()
   const calls = useAppSelector(selectActiveCalls)
   const error = useAppSelector(selectCallsError)
+  const canPublish = usePermission("calls:publish")
   const [tab, setTab] = useState<TabKey>("active")
   const [now, setNow] = useState(() => Date.now())
   const [publishing, setPublishing] = useState<string | null>(null)
@@ -246,7 +248,9 @@ export function LiveMonitoring() {
                     {/* One-way: only the owner can flip it, and only on → publish. */}
                     <Switch
                       checked={call.published}
-                      disabled={call.published || !call.is_owner || publishing === call.id}
+                      disabled={
+                        call.published || !call.is_owner || !canPublish || publishing === call.id
+                      }
                       onCheckedChange={(v) => {
                         if (v) void onPublish(call)
                       }}
