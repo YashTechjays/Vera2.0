@@ -186,30 +186,48 @@ applicability, flow rules, and contradictions, so wording is uniform everywhere.
 `PromptDocument` (pydantic, in `vera_core.forms.prompting`) with two blocks of
 **deliberately different semantics**:
 
-- `session` — **literal content, consumed as-is**: persona, goal, and base
-  instructions applicable to every task in the session. All three required
-  non-empty strings. Nothing underneath is overridden; this block IS the source.
-  Field intents:
-  - `persona` — who the agent is: name, temperament, speech pacing, how it refers
-    to itself (Vera 1.0 `AGENT_PERSONA` territory);
-  - `goal` — what the call is for: the objective the LLM falls back on when the
-    conversation drifts;
-  - `base_instructions` — global behavior rules for every task: turn-taking,
-    value-recording discipline, hold/background-noise handling, role enforcement,
-    anti-repetition (Vera 1.0 conversation/value-recording rule blocks).
+- `session` — **literal content, consumed as-is**: a `SessionBlock` pydantic model
+  whose three required non-empty string fields each carry their intent as a
+  `Field(description=…)` in code, so future maintainers read the meaning where the
+  model lives:
+  - `persona` — who the agent is: name (VERA), voice/temperament ("calm,
+    professional, patient"), speech pacing habits, how it refers to itself,
+    pronunciation tendencies. Vera 1.0's `AGENT_PERSONA` maps here.
+  - `goal` — what the call is for: e.g. "verify infertility benefits for a patient
+    with the payer's representative, completing every applicable question
+    accurately" — the north star the LLM falls back on when the conversation
+    drifts.
+  - `base_instructions` — global behavior rules applied across every task:
+    turn-taking discipline, value-recording rules ("record exactly what the rep
+    says", "never invent an answer"), background-noise/hold handling, role
+    enforcement ("you ask the questions, don't answer benefits questions
+    yourself"), anti-repetition, never re-introducing yourself. Vera 1.0's
+    conversation/value-recording rule blocks map here.
 
-  The block is intentionally growable: future session-level knobs (pronunciation
-  guide, medical-speech pacing, escalation instructions) arrive as **optional**
-  fields on the pydantic model — old documents keep validating, no migration.
+  Nothing underneath is overridden; this block IS the source. It is intentionally
+  growable: future session-level knobs (pronunciation guide, medical-speech
+  pacing, escalation instructions) arrive as **optional** fields on the model —
+  old documents keep validating, no migration.
 - `task_overrides` — **patches**: sparse map of `task_key` → subset of
   `{intro, outro, prompt}`. Merge rule is field-level: an override field wins over
   the schema default; absent fields fall through.
 
+**Placeholder namespace (widened — amends the 2026-07-06 design §3.1):** a
+`{{token}}` in prompt text is valid when it is a `system_fields` key **or** the
+root-anchored path of a leaf with `role: "context"` (e.g.
+`{{sections.patient_information.patient_gender}}`). Paths are the DSL's one
+universal namespace, so the path form is unambiguous where bare leaf keys are not.
+`PLACEHOLDER_RE` in `dsl.py` widens from `\w+` to `[\w.]+`, and the task-text
+validator merged with the 2026-07-06 work is updated to the same rule (with its
+tests) as part of this implementation. Hydration resolves a system handle through
+its `system_fields` mapping and a context path directly to that field's answer.
+
 **Save-time validation** (API layer, against the version's pinned schema document):
 
 - unknown `task_key` in `task_overrides` → 400;
-- any `{{token}}` in session or override text not a `system_fields` key of that
-  schema → 400 (reuse `PLACEHOLDER_RE` from `dsl.py`; exact token `value` exempt);
+- any `{{token}}` in session or override text that is neither a `system_fields`
+  key nor a context-role leaf path of that schema → 400 (exact token `value`
+  exempt);
 - empty override entries (no fields set) rejected;
 - `session` block required and complete.
 
@@ -308,6 +326,9 @@ seams).
 - **Golden snapshot**: the rendered IBV `introduction` and `insurance_basics`
   prompts as committed fixture files — locks wording regressions the same way the
   compiled-schema freshness test locks the artifact.
+- **Placeholder namespace**: context-leaf path accepted, non-context leaf path
+  rejected, unknown token rejected — in both the `dsl.py` task-text validator and
+  the API save path.
 - **API integration**: draft validation (unknown task_key, bad placeholder, empty
   entry), preview merge with and without a published version.
 - **Seeder**: carry-forward on republish, task_key drop reporting, idempotency.

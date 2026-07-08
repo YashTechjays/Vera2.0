@@ -67,13 +67,19 @@ readers never consume `tasks`, so nothing renders differently.
 
 Task-level `intro` / `outro` / `prompt` may embed `{{token}}` where `token` is a key of
 the document's top-level `system_fields` map (e.g. `{{patient_name}}`,
-`{{member_id}}`, `{{hospital_npi}}`). That is the whole namespace — field paths,
-`{{value}}` (field-level confirm prompts) and `{{current_year}}` (derive templates)
-are separate, unchanged namespaces that do not apply to task text.
+`{{member_id}}`, `{{hospital_npi}}`) — or, since the 2026-07-08 amendment below, the
+root-anchored path of a `context`-role leaf. `{{value}}` (field-level confirm
+prompts) and `{{current_year}}` (derive templates) are separate, unchanged
+namespaces that do not apply to task text.
 
 **New validator rule:** every `{{token}}` occurring in any task's `intro`, `outro`, or
 `prompt` must resolve to a defined `system_fields` key. Unknown tokens are a document
 validation error (caught at compile/seed time, never at call time).
+
+> **Amended 2026-07-08** (by the prompt-compiler design §4): the namespace widens to
+> `system_fields` keys ∪ root-anchored paths of `role: "context"` leaves (e.g.
+> `{{sections.patient_information.patient_gender}}`); `PLACEHOLDER_RE` becomes
+> `\{\{([\w.]+)\}\}` and the validator accepts both forms.
 
 ### 3.2 Hydration contract (task builder, runtime)
 
