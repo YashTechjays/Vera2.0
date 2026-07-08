@@ -15,7 +15,7 @@ builder has to invent what the agent says when a task starts and ends, and the
 verification behavior (what the rep may ask to establish the call is legitimate) lives
 nowhere near the schema that knows the patient's identifiers.
 
-SmartCaller (Vera 1.0) solved this with per-phase prompt modules
+Vera 1.0 solved this with per-phase prompt modules
 (`src/pipecat_module/prompts/phases/phase_*.py`). This design ports the _task-specific_
 parts of those phases into the schema DSL and defines the placeholder contract that
 lets one schema serve every patient form.
@@ -31,7 +31,7 @@ lets one schema serve every patient form.
   at task-definition time.
 - `{{system_field_key}}` placeholders in task-level text, hydrated per patient form at
   task creation, validated at document-validation time.
-- Port the remaining task-specific SmartCaller content (wrap-up critical-fields rule,
+- Port the remaining task-specific Vera 1.0 content (wrap-up critical-fields rule,
   hold-phrase outro).
 - A document-level `stt_key_terms` vocabulary fed to the STT component to improve
   transcription of domain terms — session-wide, applying to every task.
@@ -87,7 +87,7 @@ never land in an LLM prompt. Text destined for the LLM is hydrated with the sess
 handles (facility/provider identifiers) may hydrate raw. The schema stays neutral —
 placeholders carry no PHI marking; the task builder decides token-vs-raw per seam.
 
-## 4. New `introduction` task (SmartCaller Phase 2 START)
+## 4. New `introduction` task (Vera 1.0 Phase 2 START)
 
 First entry in `tasks`, `task_key: "introduction"`, title "Introduction & Patient
 Verification", `sections: []`.
@@ -124,9 +124,9 @@ Verification", `sections: []`.
 spins up; `insurance_basics` therefore keeps no `intro` and its first ask lands
 immediately after.
 
-## 5. SmartCaller phase → task mapping (existing tasks)
+## 5. Vera 1.0 phase → task mapping (existing tasks)
 
-| SmartCaller phase      | Task                 | Change                                                                                                                                                                                                                                                                                                                                                                                          |
+| Vera 1.0 phase         | Task                 | Change                                                                                                                                                                                                                                                                                                                                                                                          |
 | ---------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Phase 1 IVR            | —                    | runtime (IVR playbooks) — unchanged                                                                                                                                                                                                                                                                                                                                                             |
 | Phase 2 START          | `introduction` (new) | §4 above                                                                                                                                                                                                                                                                                                                                                                                        |
