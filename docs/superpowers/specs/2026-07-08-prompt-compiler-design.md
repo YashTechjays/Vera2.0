@@ -189,6 +189,18 @@ applicability, flow rules, and contradictions, so wording is uniform everywhere.
 - `session` — **literal content, consumed as-is**: persona, goal, and base
   instructions applicable to every task in the session. All three required
   non-empty strings. Nothing underneath is overridden; this block IS the source.
+  Field intents:
+  - `persona` — who the agent is: name, temperament, speech pacing, how it refers
+    to itself (Vera 1.0 `AGENT_PERSONA` territory);
+  - `goal` — what the call is for: the objective the LLM falls back on when the
+    conversation drifts;
+  - `base_instructions` — global behavior rules for every task: turn-taking,
+    value-recording discipline, hold/background-noise handling, role enforcement,
+    anti-repetition (Vera 1.0 conversation/value-recording rule blocks).
+
+  The block is intentionally growable: future session-level knobs (pronunciation
+  guide, medical-speech pacing, escalation instructions) arrive as **optional**
+  fields on the pydantic model — old documents keep validating, no migration.
 - `task_overrides` — **patches**: sparse map of `task_key` → subset of
   `{intro, outro, prompt}`. Merge rule is field-level: an override field wins over
   the schema default; absent fields fall through.
