@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import platform_require
-from control_plane.deps import platform_scoped_session
+from control_plane.deps import client_ip, get_auth_audit, platform_scoped_session
 from control_plane.exceptions import (
     ConflictError,
     CustomAPIResponse,
@@ -28,10 +28,13 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import AuthAuditRecord, AuthAuditSink
 from vera_core.models import FormSchema, Prompt, PromptVersion, SchemaVersion
-from vera_core.models.enums import VersionStatus
+from vera_core.models.enums import AuthEvent, VersionStatus
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
+
+AuthAudit = Annotated[AuthAuditSink, Depends(get_auth_audit)]
 
 PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
 _READ = platform_require("platform:prompts:read")
@@ -200,8 +203,10 @@ async def get_version(
 async def create_draft(
     prompt_id: UUID,
     body: CreateDraftRequest,
+    request: Request,
     session: PlatformSession,
-    _caller: Annotated[VerifiedIdentity, _WRITE],
+    audit: AuthAudit,
+    caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
     prompt = await _require_prompt(session, prompt_id)
     published_schema_id = (
@@ -233,6 +238,15 @@ async def create_draft(
         # A concurrent create raced the (prompt_id, version) unique constraint —
         # both computed the same next version. Surface a retryable 409, not a 500.
         raise ConflictError(message="version changed concurrently, please retry") from exc
+    await audit.emit(
+        AuthAuditRecord(
+            tenant_id=None,
+            app_user_id=caller.user_id,
+            event_type=AuthEvent.PROMPT_VERSION_CREATED.value,
+            ip_address=client_ip(request),
+            meta={"prompt_id": str(prompt.id), "version": draft.version},
+        )
+    )
     return ok(_detail(draft))
 
 
@@ -249,8 +263,10 @@ async def create_draft(
 async def publish_version(
     prompt_id: UUID,
     version_id: UUID,
+    request: Request,
     session: PlatformSession,
-    _caller: Annotated[VerifiedIdentity, _WRITE],
+    audit: AuthAudit,
+    caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
     target = (
         await session.execute(
@@ -284,4 +300,17 @@ async def publish_version(
         raise ConflictError(
             message="another version was published concurrently, please retry"
         ) from exc
+    await audit.emit(
+        AuthAuditRecord(
+            tenant_id=None,
+            app_user_id=caller.user_id,
+            event_type=AuthEvent.PROMPT_VERSION_PUBLISHED.value,
+            ip_address=client_ip(request),
+            meta={
+                "prompt_id": str(prompt_id),
+                "version": target.version,
+                "demoted_version": current.version if current else None,
+            },
+        )
+    )
     return ok(_detail(target))

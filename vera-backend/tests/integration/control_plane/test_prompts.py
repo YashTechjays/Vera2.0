@@ -330,6 +330,38 @@ async def test_publish_promotes_and_demotes(
     assert len(published) == 1 and published[0]["version"] == 2
 
 
+async def test_prompt_mutations_are_audited(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, w, ids = prompts_world
+    draft = (
+        await client.post(
+            f"/api/v1/prompts/{ids.prompt_id}/versions",
+            headers=_auth(w.super_token),
+            json={"composite_json": {"prompt": "v2"}},
+        )
+    ).json()["data"]
+    pub = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/versions/{draft['id']}/publish",
+        headers=_auth(w.super_token),
+    )
+    assert pub.status_code == 200, pub.text
+
+    async with admin_sessionmaker() as s:
+        events = (
+            await s.execute(
+                text(
+                    "SELECT event_type FROM auth_audit_log"
+                    " WHERE app_user_id = :u AND event_type LIKE 'prompt_version_%'"
+                ).bindparams(u=w.super_user_id)
+            )
+        ).scalars()
+        rows = list(events)
+    assert "prompt_version_created" in rows
+    assert "prompt_version_published" in rows
+
+
 async def test_create_draft_without_published_schema_conflicts(
     prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
     admin_sessionmaker: async_sessionmaker[AsyncSession],
