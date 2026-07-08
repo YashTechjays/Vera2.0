@@ -320,10 +320,8 @@ export function RolesSection() {
                 <ul className="divide-y rounded-lg border">
                   {holders.map((h) => (
                     <li key={h.id} className="flex items-center justify-between gap-3 px-3 py-2">
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-medium">
-                          {h.name || "—"}
-                        </span>
+                      <span className="block min-w-0 truncate text-sm font-medium">
+                        {h.name || "—"}
                       </span>
                       <Button
                         type="button"
