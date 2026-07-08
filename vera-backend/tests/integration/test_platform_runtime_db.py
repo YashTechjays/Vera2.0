@@ -11,10 +11,11 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from scripts.seed import _seed_permissions, _seed_system_roles
-from vera_core.db import set_current_tenant, set_platform, uuid7
+from vera_core.db import platform_session, set_current_tenant, set_platform, tenant_session, uuid7
 from vera_core.models import AppUser, Tenant, UserRole
 
 
@@ -135,6 +136,31 @@ async def test_platform_session_resolves_super_admin_grant(
             ).scalars()
         )
     assert "calls:read" in codes and "audit:read" in codes  # SUPER_ADMIN holds all perms
+
+
+async def test_platform_session_survives_prior_tenant_session_on_same_connection(
+    rls_database_url: str, world: PlatformWorld
+) -> None:
+    """Regression for the GUC-contamination bug (e7bb96c): once a pooled connection's
+    backend has registered `app.tenant_id` (via a prior tenant_session), a later
+    platform_session on that SAME connection must still resolve — it must not hit the
+    `''::uuid` cast error a bare "GUC left unset" platform session would raise on a
+    contaminated connection. `pool_size=1, max_overflow=0` forces both sessions onto
+    the one physical connection, so this only passes because platform_session pins
+    TENANT_GUC to NIL_TENANT_ID instead of leaving it unset."""
+    engine = create_async_engine(rls_database_url, pool_size=1, max_overflow=0)
+    try:
+        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with tenant_session(sessionmaker, world.tenant_id) as s:
+            await s.execute(text("SELECT 1 FROM app_user"))  # registers app.tenant_id on the conn
+
+        async with platform_session(sessionmaker) as s:
+            ids = set((await s.execute(text("SELECT id FROM app_user"))).scalars())
+        assert world.platform_user_id in ids  # platform-readable NULL-tenant row still resolves
+        assert world.tenant_user_id not in ids
+    finally:
+        await engine.dispose()
 
 
 # --- SECURITY DEFINER: elevation lifecycle --------------------------------
@@ -311,3 +337,43 @@ async def test_elevated_session_sees_tenant_and_own_grant(
     assert grant_id in grant_ids
     assert world.tenant_user_id in app_user_ids  # tenant rows visible
     assert world.platform_user_id in app_user_ids  # own NULL-tenant row visible too
+
+
+# --- nil-tenant sentinel hardening -----------------------------------------
+
+
+async def test_tenant_nil_id_rejected_by_check(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The DB refuses a tenant row with the nil-UUID sentinel id — even from a
+    superuser (seed/fixture accidents), so platform_session's GUC pin can never
+    match a real tenant."""
+    async with admin_sessionmaker() as s:
+        with pytest.raises(IntegrityError, match="ck_tenant_id_not_nil"):
+            async with s.begin():
+                s.add(
+                    Tenant(
+                        id=UUID(int=0),
+                        slug="nil-tenant",
+                        name="Nil Tenant",
+                        status="active",
+                    )
+                )
+
+
+async def test_platform_session_cannot_write_nil_tenant_row(
+    rls_sessionmaker: async_sessionmaker[AsyncSession], world: PlatformWorld
+) -> None:
+    """Write side of the sentinel: a platform session's GUC equals the nil UUID,
+    so strict WITH CHECK would admit a nil-tenant row — the FK to tenant.id must
+    refuse it (no nil tenant can exist, enforced by ck_tenant_id_not_nil)."""
+    async with rls_sessionmaker() as s:
+        with pytest.raises((IntegrityError, ProgrammingError)):
+            async with s.begin():
+                await set_platform(s)
+                await s.execute(
+                    text(
+                        "INSERT INTO role (id, tenant_id, name, description)"
+                        " VALUES (:i, :t, 'NIL-ROLE', '')"
+                    ).bindparams(i=uuid7(), t=UUID(int=0))
+                )

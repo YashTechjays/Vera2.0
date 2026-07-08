@@ -7,16 +7,20 @@ strict policy confines `user_role` to the tenant. Every assign/revoke invalidate
 the effective-permission cache for the affected user (auth/rbac.py) and is audited.
 """
 
+import asyncio
+from collections.abc import Sequence
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.common import (
     PLATFORM_PERMISSION_PREFIX,
+    AppSettings,
     AuthAudit,
     Resolver,
     TenantId,
@@ -28,14 +32,16 @@ from control_plane.api.v1.common import (
 )
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
-from control_plane.deps import client_ip
+from control_plane.deps import client_ip, get_idempotency_store
 from control_plane.exceptions import (
     BadRequestError,
+    ConflictError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import AppUser, Permission, Role, RolePermission, UserRole
 from vera_core.models.enums import AuthEvent
@@ -52,16 +58,79 @@ class RoleResponse(BaseModel):
 
 class CreateRoleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2000)
     permission_ids: list[UUID] = Field(default_factory=list)
+
+
+class UpdateRoleRequest(BaseModel):
+    """PATCH semantics: a field left as None is not changed; `permission_ids`
+    (when present) REPLACES the role's whole permission set."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    permission_ids: list[UUID] | None = None
 
 
 class AssignRoleRequest(BaseModel):
     role_id: UUID
 
 
+class PermissionResponse(BaseModel):
+    id: UUID
+    code: str
+    description: str
+
+
+class RoleDetailResponse(RoleResponse):
+    permissions: list[PermissionResponse]
+
+
+class RoleHolderResponse(BaseModel):
+    """Minimum-necessary: id + display name only. Emails/status live behind
+    users:read (GET /users) — this endpoint is gated only by roles:manage."""
+
+    id: UUID
+    name: str
+
+
 def _to_response(row: Role) -> RoleResponse:
     return RoleResponse(
         id=row.id, name=row.name, description=row.description, is_system=row.tenant_id is None
+    )
+
+
+async def _role_permissions(session: AsyncSession, role_id: UUID) -> list[Permission]:
+    """All permissions granted to `role_id`, UNFILTERED — platform-tier codes included.
+    Callers must pass this through `_visible_permissions`/`_to_detail` before rendering,
+    never return it directly."""
+    return list(
+        (
+            await session.execute(
+                select(Permission)
+                .join(RolePermission, RolePermission.permission_id == Permission.id)
+                .where(RolePermission.role_id == role_id)
+                .order_by(Permission.code)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _visible_permissions(permissions: Sequence[Permission]) -> list[PermissionResponse]:
+    # Platform-tier codes are never shown to a tenant — they can't be granted here,
+    # so they must not appear as options (GET /permissions) or on a role (detail).
+    return [
+        PermissionResponse(id=p.id, code=p.code, description=p.description)
+        for p in permissions
+        if not is_platform_permission(p.code)
+    ]
+
+
+def _to_detail(role: Role, permissions: list[Permission]) -> RoleDetailResponse:
+    return RoleDetailResponse(
+        **_to_response(role).model_dump(),
+        permissions=_visible_permissions(permissions),
     )
 
 
@@ -101,6 +170,189 @@ async def list_roles(
     return ok([_to_response(r) for r in rows])
 
 
+@router.get(
+    "/roles/{role_id}",
+    response_model=ResponseModel[RoleDetailResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def get_role(
+    role_id: UUID,
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[RoleDetailResponse]:
+    role = await _load_role(session, role_id)
+    return ok(_to_detail(role, await _role_permissions(session, role_id)))
+
+
+@router.get(
+    "/roles/{role_id}/users",
+    response_model=ResponseModel[list[RoleHolderResponse]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_role_holders(
+    role_id: UUID,
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[RoleHolderResponse]]:
+    """Who holds `role_id` — powers the Settings delete-role dialog (DELETE 409s
+    while the role is held; the UI needs to show which users to unassign first).
+    Read-only: no audit event, no cache invalidation. System roles are visible to
+    a tenant (`_load_role`), and holders come from this tenant's own `user_role`
+    rows — RLS confines the join to the caller's tenant."""
+    await _load_role(session, role_id)
+    rows = (
+        (
+            await session.execute(
+                select(AppUser)
+                .join(UserRole, UserRole.app_user_id == AppUser.id)
+                .where(UserRole.role_id == role_id)
+                .order_by(AppUser.name, AppUser.email)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ok([RoleHolderResponse(id=r.id, name=r.name) for r in rows])
+
+
+@router.patch(
+    "/roles/{role_id}",
+    response_model=ResponseModel[RoleDetailResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.BAD_REQUEST,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.VALIDATION_ERROR,
+    ),
+)
+async def update_role(
+    role_id: UUID,
+    body: UpdateRoleRequest,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: AuthAudit,
+    resolver: Resolver,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[RoleDetailResponse]:
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        _caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
+    role = await _load_role(session, role_id)
+    # Explicit ownership check (spec): don't rely on RLS's silent 0-row update.
+    # `tenant_id IS NULL` here means "global system role", not "platform caller".
+    if role.tenant_id is None:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="system roles cannot be modified"
+        )
+
+    changed: list[str] = []
+    if body.name is not None and body.name != role.name:
+        role.name = body.name
+        changed.append("name")
+    if body.description is not None and body.description != role.description:
+        role.description = body.description
+        changed.append("description")
+
+    resolved: list[Permission] | None = None
+    if body.permission_ids is not None:
+        permissions = await _resolve_grantable_permissions(session, body.permission_ids)
+        resolved = sorted(permissions, key=lambda p: p.code)
+        links = (
+            (await session.execute(select(RolePermission).where(RolePermission.role_id == role_id)))
+            .scalars()
+            .all()
+        )
+        current_ids = {link.permission_id for link in links}
+        target_ids = {p.id for p in permissions}
+        if current_ids != target_ids:
+            removed_ids = current_ids - target_ids
+            added_ids = target_ids - current_ids
+            if removed_ids and await _drops_callers_last_roles_manage(
+                session, _caller.user_id, role_id, removed_ids
+            ):
+                raise ConflictError(message="you cannot remove your own last role-management role")
+            # Diff, don't replace-in-place: SQLAlchemy's unit of work flushes INSERTs
+            # before DELETEs for the same table, so a kept permission would collide
+            # with itself under UniqueConstraint(role_id, permission_id) if every
+            # link were deleted and re-added. Touching only the actual delta also
+            # preserves `created_at` on links that survive the edit unchanged.
+            for link in links:
+                if link.permission_id in removed_ids:
+                    await session.delete(link)
+            for new_id in added_ids:
+                session.add(
+                    RolePermission(tenant_id=tenant_id, role_id=role_id, permission_id=new_id)
+                )
+            changed.append("permissions")
+
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise _conflict_or_raise(exc, "a role with that name already exists") from exc
+
+    if "permissions" in changed:
+        # The role's grants changed under live users — drop every holder's cached
+        # permission set or they keep the old access until the cache TTL expires.
+        holders = (
+            (await session.execute(select(UserRole.app_user_id).where(UserRole.role_id == role_id)))
+            .scalars()
+            .all()
+        )
+        await asyncio.gather(*(resolver.invalidate(tenant_id, h) for h in holders))
+
+    if changed:
+        await emit_auth_event(
+            audit,
+            tenant_id=tenant_id,
+            event=AuthEvent.ROLE_UPDATED,
+            ip=client_ip(request),
+            user_id=_caller.user_id,
+            meta={"role_id": str(role_id), "changed": changed},
+        )
+    # Reuse the permissions resolved above; only a name/description-only PATCH
+    # still needs the lookup.
+    final = resolved if resolved is not None else await _role_permissions(session, role_id)
+    return ok(_to_detail(role, final))
+
+
+@router.get(
+    "/permissions",
+    response_model=ResponseModel[list[PermissionResponse]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_permissions(
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[PermissionResponse]]:
+    # The permission catalog is global (no tenant_id, no RLS) and code-defined —
+    # tenants get a read-only view.
+    rows = (await session.execute(select(Permission).order_by(Permission.code))).scalars().all()
+    return ok(_visible_permissions(rows))
+
+
 @router.post(
     "/roles",
     response_model=ResponseModel[RoleResponse],
@@ -118,25 +370,22 @@ async def create_role(
     tenant_id: TenantId,
     session: TenantSession,
     audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[RoleResponse]:
-    # Resolve permission codes; reject any unknown id (permission is a global catalog).
-    permissions = (
-        (await session.execute(select(Permission).where(Permission.id.in_(body.permission_ids))))
-        .scalars()
-        .all()
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        _caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
     )
-    if len(permissions) != len(set(body.permission_ids)):
-        raise BadRequestError(message="unknown permission id")
-    # A tenant role may never carry a platform-tier permission (defense in depth:
-    # also blocked at assignment, but stop it from entering the role at all).
-    if any(is_platform_permission(p.code) for p in permissions):
-        raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN,
-            message="cannot grant a platform-tier permission to a tenant role",
-        )
+    # Resolve permission ids and enforce the tenant-role grant guard (defense in depth:
+    # platform-tier perms are also blocked at assignment, but stop them from entering here).
+    permissions = await _resolve_grantable_permissions(session, body.permission_ids)
 
-    role = Role(tenant_id=tenant_id, name=body.name, description="")
+    role = Role(tenant_id=tenant_id, name=body.name, description=body.description)
     session.add(role)
     try:
         await session.flush()
@@ -220,11 +469,44 @@ async def assign_role(
     return ok(None, message="Role assigned.")
 
 
+@router.get(
+    "/users/{user_id}/roles",
+    response_model=ResponseModel[list[RoleResponse]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_user_roles(
+    user_id: UUID,
+    _tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[list[RoleResponse]]:
+    if not await _user_in_tenant(session, user_id):
+        raise NotFoundError(message="no such user in this tenant")
+    rows = (
+        (
+            await session.execute(
+                select(Role)
+                .join(UserRole, UserRole.role_id == Role.id)
+                .where(UserRole.app_user_id == user_id)
+                .order_by(Role.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ok([_to_response(r) for r in rows])
+
+
 @router.delete(
     "/users/{user_id}/roles/{role_id}",
     response_model=ResponseModel[None],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
     ),
@@ -246,6 +528,15 @@ async def revoke_role(
     ).scalar_one_or_none()
     if assignment is None:
         raise NotFoundError(message="user does not have that role")
+
+    # Self-lockout guard (settled decision): a caller may not remove their own
+    # LAST source of roles:manage — nobody in the tenant could manage roles and
+    # the only recovery is platform break-glass elevation. Self-only by design.
+    if user_id == _caller.user_id and not await _has_other_roles_manage_source(
+        session, user_id, excluding_role_id=role_id
+    ):
+        raise ConflictError(message="you cannot remove your own last role-management role")
+
     await session.delete(assignment)
 
     await resolver.invalidate(tenant_id, user_id)
@@ -260,6 +551,68 @@ async def revoke_role(
     return ok(None, message="Role revoked.")
 
 
+@router.delete(
+    "/roles/{role_id}",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def delete_role(
+    role_id: UUID,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    _caller: VerifiedIdentity = require("roles:manage"),
+) -> ResponseModel[None]:
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        _caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
+    role = await _load_role(session, role_id)
+    if role.tenant_id is None:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="system roles cannot be deleted"
+        )
+    # FOR UPDATE closes the count-then-delete race: a concurrent assign (FOR SHARE
+    # in _role_visible) either commits before the count below or waits behind us.
+    await session.execute(select(Role.id).where(Role.id == role_id).with_for_update())
+    # DECISION: never cascade a delete over live grants. The admin revokes per
+    # user first (each revoke is audited + cache-invalidating), so by the time
+    # this runs there is no holder cache to invalidate.
+    holder_count = (
+        await session.execute(
+            select(func.count()).select_from(UserRole).where(UserRole.role_id == role_id)
+        )
+    ).scalar_one()
+    if holder_count:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message=f"{holder_count} user(s) still hold this role — remove it from them first",
+            data={"holder_count": holder_count},
+        )
+
+    await session.delete(role)  # FK cascade clears role_permission links
+    await emit_auth_event(
+        audit,
+        tenant_id=tenant_id,
+        event=AuthEvent.ROLE_DELETED,
+        ip=client_ip(request),
+        user_id=_caller.user_id,
+        meta={"role_id": str(role_id), "name": role.name},
+    )
+    return ok(None, message="Role deleted.")
+
+
 async def _user_in_tenant(session: AsyncSession, user_id: UUID) -> bool:
     row = (
         await session.execute(select(AppUser.id).where(AppUser.id == user_id))
@@ -269,7 +622,90 @@ async def _user_in_tenant(session: AsyncSession, user_id: UUID) -> bool:
 
 async def _role_visible(session: AsyncSession, role_id: UUID) -> bool:
     row = (await session.execute(select(Role.id).where(Role.id == role_id))).scalar_one_or_none()
-    return row is not None
+    if row is None:
+        return False
+    # FOR SHARE on tenant-owned roles only: an assign holds the row so a concurrent
+    # delete_role (FOR UPDATE) waits and its holder count sees this grant. System
+    # roles can't be deleted, and locking them would trip the RLS UPDATE policy.
+    await session.execute(
+        select(Role.id)
+        .where(Role.id == role_id, Role.tenant_id.is_not(None))
+        .with_for_update(read=True)
+    )
+    return True
+
+
+async def _load_role(session: AsyncSession, role_id: UUID) -> Role:
+    """Load a role visible in the current tenant context, or 404. An unknown id — or
+    another tenant's role hidden by RLS — resolves to no row and is rejected."""
+    role = (await session.execute(select(Role).where(Role.id == role_id))).scalar_one_or_none()
+    if role is None:
+        raise NotFoundError(message="no such role")
+    return role
+
+
+async def _resolve_grantable_permissions(
+    session: AsyncSession, permission_ids: Sequence[UUID]
+) -> list[Permission]:
+    """Resolve ids against the global permission catalog, rejecting any unknown id
+    (400) or platform-tier code (403 — a tenant role may never carry one). Shared by
+    create_role and update_role so both apply the identical grant guard."""
+    permissions = (
+        (await session.execute(select(Permission).where(Permission.id.in_(permission_ids))))
+        .scalars()
+        .all()
+    )
+    if len(permissions) != len(set(permission_ids)):
+        raise BadRequestError(message="unknown permission id")
+    if any(is_platform_permission(p.code) for p in permissions):
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN,
+            message="cannot grant a platform-tier permission to a tenant role",
+        )
+    return list(permissions)
+
+
+async def _has_other_roles_manage_source(
+    session: AsyncSession, user_id: UUID, *, excluding_role_id: UUID
+) -> bool:
+    """True if `user_id` holds some role OTHER than `excluding_role_id` that grants
+    roles:manage. Shared self-lockout join for revoke_role and update_role."""
+    other_source = (
+        await session.execute(
+            select(Permission.id)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .join(UserRole, UserRole.role_id == RolePermission.role_id)
+            .where(
+                UserRole.app_user_id == user_id,
+                UserRole.role_id != excluding_role_id,
+                Permission.code == "roles:manage",
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return other_source is not None
+
+
+async def _drops_callers_last_roles_manage(
+    session: AsyncSession, caller_id: UUID, role_id: UUID, removed_permission_ids: set[UUID]
+) -> bool:
+    """Self-lockout guard for update_role: True when the edit removes roles:manage
+    from `role_id`, the caller holds that role, and has no other roles:manage source."""
+    manage_permission_id = (
+        await session.execute(select(Permission.id).where(Permission.code == "roles:manage"))
+    ).scalar_one_or_none()
+    if manage_permission_id is None or manage_permission_id not in removed_permission_ids:
+        return False
+    caller_holds_role = (
+        await session.execute(
+            select(UserRole.app_user_id).where(
+                UserRole.app_user_id == caller_id, UserRole.role_id == role_id
+            )
+        )
+    ).scalar_one_or_none()
+    if caller_holds_role is None:
+        return False
+    return not await _has_other_roles_manage_source(session, caller_id, excluding_role_id=role_id)
 
 
 def _conflict_or_raise(exc: IntegrityError, message: str) -> CustomAPIException:

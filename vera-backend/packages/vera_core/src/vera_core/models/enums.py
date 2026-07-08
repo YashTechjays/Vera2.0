@@ -162,6 +162,8 @@ class AuthEvent(enum.StrEnum):
     INVITE_ACCEPTED = "invite_accepted"
     USER_DEACTIVATED = "user_deactivated"
     ROLE_CREATED = "role_created"
+    ROLE_UPDATED = "role_updated"
+    ROLE_DELETED = "role_deleted"
     ROLE_GRANT = "role_grant"
     ROLE_REVOKE = "role_revoke"
     API_KEY_CREATED = "api_key_created"

@@ -30,6 +30,7 @@ import {
 } from "@/lib/api-keys"
 import { copyText } from "@/lib/clipboard"
 import { formatDate } from "@/lib/patient-forms/display"
+import { SettingsCard } from "./SettingsCard"
 
 /** Manage the tenant's inbound API keys: list, create (one-time token), revoke.
  *  Mount only behind an `apikeys:manage` check — the endpoints are gated server-side too. */
@@ -131,15 +132,10 @@ export function ApiKeysSection() {
   }, [created])
 
   return (
-    <section className="space-y-3">
-      <div>
-        <h2 className="text-sm font-medium">API Keys</h2>
-        <p className="text-sm text-muted-foreground">
-          Inbound keys external systems use to send data to Vera. The token is shown only once,
-          right after you create the key.
-        </p>
-      </div>
-
+    <SettingsCard
+      title="API Keys"
+      description="Inbound keys external systems use to send data to Vera. The token is shown only once, right after you create the key."
+    >
       {/* One-time token reveal — never retrievable again. */}
       {created && (
         <div className="space-y-2 rounded-lg border border-emerald-300 bg-emerald-50 p-3">
@@ -264,6 +260,6 @@ export function ApiKeysSection() {
           </TableBody>
         </Table>
       </div>
-    </section>
+    </SettingsCard>
   )
 }
