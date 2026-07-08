@@ -25,6 +25,8 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+# {{token}} placeholders in task-level text; token must be a system_fields key.
+PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 PATH_PREFIX = "sections."
 MAX_PATH_LENGTH = 255
 
@@ -262,12 +264,19 @@ class Section(_Model):
 
 
 class Task(_Model):
+    """One LiveKit AgentTask.
+
+    ``intro``/``outro`` are spoken verbatim on task entry/exit (TTS-safe text);
+    ``prompt`` is supplied directly as the agent's task instructions. All three
+    may embed ``{{system_field_key}}`` placeholders, hydrated per patient form
+    at task creation and validated against ``system_fields`` below. ``sections``
+    may be empty for ritual tasks that collect nothing.
+    """
+
     task_key: str
     title: str
     intro: str | None = None
     outro: str | None = None
-    # Task-level agent instructions; the prompt compiler folds this into the
-    # task's composite prompt ahead of the schema-derived question list.
     prompt: str | None = None
     sections: list[str]
     applicable_when: Condition | None = None
@@ -443,6 +452,14 @@ class FormSchemaDoc(_Model):
                         f"task {task.task_key}: section {skey!r} has role "
                         f"{task_section.role!r}, only collect sections belong to tasks"
                     )
+            for attr in ("intro", "outro", "prompt"):
+                text: str | None = getattr(task, attr)
+                for token in PLACEHOLDER_RE.findall(text or ""):
+                    if token not in (self.system_fields or {}):
+                        errors.append(
+                            f"task {task.task_key}.{attr}: unknown placeholder "
+                            f"{{{{{token}}}}} (not a system_fields key)"
+                        )
         if len(set(task_keys)) != len(task_keys):
             errors.append("duplicate task_key")
         for skey, section in self.sections.items():

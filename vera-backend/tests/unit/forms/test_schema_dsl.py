@@ -139,3 +139,19 @@ class TestDocumentValidation:
         ]
         with pytest.raises(ValidationError, match="re-clarified"):
             FormSchemaDoc.model_validate(doc)
+
+    def test_unknown_task_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["intro"] = "Calling about {{patient_name}}."
+        with pytest.raises(ValidationError, match="unknown placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_known_task_placeholder_accepted(self) -> None:
+        doc = minimal_doc(system_fields={"plan_type": "sections.basics.plan_type"})
+        doc["tasks"][0]["prompt"] = "Mention {{plan_type}} when asked."
+        FormSchemaDoc.model_validate(doc)
+
+    def test_unclosed_braces_are_not_placeholders(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["intro"] = "This {{ is not a placeholder."
+        FormSchemaDoc.model_validate(doc)
