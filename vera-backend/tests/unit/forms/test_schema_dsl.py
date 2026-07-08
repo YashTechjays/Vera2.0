@@ -76,6 +76,23 @@ class TestCompiledArtifacts:
             if path in set(collected)
         )
 
+    def test_ibv_call_opening_and_key_terms(self) -> None:
+        doc = SCHEMAS["infertility_treatment"][1]()
+        intro_task = doc.tasks[0]
+        assert intro_task.task_key == "introduction"
+        assert intro_task.sections == ["patient_verification"]
+        assert "{{patient_name}}" in (intro_task.intro or "")
+        assert "{{member_id}}" in (intro_task.prompt or "")
+        assert intro_task.outro == "Great, let me pull up my questions..."
+        rule_keys = [r.rule_key for r in doc.flow_rules or []]
+        assert rule_keys[0] == "patient_not_on_plan"
+        wrap_up = doc.tasks[-1]
+        assert wrap_up.task_key == "wrap_up"
+        assert wrap_up.intro is not None and wrap_up.outro is not None
+        assert doc.stt_key_terms is not None
+        assert "intrauterine insemination" in doc.stt_key_terms
+        assert len(doc.stt_key_terms) <= 100
+
 
 class TestDocumentValidation:
     def test_minimal_doc_is_valid(self) -> None:
