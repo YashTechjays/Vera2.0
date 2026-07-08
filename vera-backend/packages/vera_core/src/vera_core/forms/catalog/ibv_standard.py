@@ -1234,7 +1234,7 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="wrap_up",
                 title="Wrap Up",
-                intro=("Thanks so much for your patience — that covers everything on my list."),
+                intro="Thanks so much for your patience — that covers everything on my list.",
                 prompt=(
                     "Always run last, even on early termination: capture the "
                     "representative's name and a call reference number before "
