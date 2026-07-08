@@ -8,7 +8,12 @@ import { Label } from "@/components/ui/label"
 import { apiErrorMessage } from "@/lib/api/client"
 import { RecoveryCodes } from "@/components/auth/RecoveryCodes"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { selectMfa, selectTenantSlug, enrollActivateThunk } from "@/store/authSlice"
+import {
+  selectMfa,
+  selectTenantSlug,
+  enrollActivateThunk,
+  platformEnrollActivateThunk,
+} from "@/store/authSlice"
 
 export function MfaEnroll() {
   const dispatch = useAppDispatch()
@@ -27,8 +32,11 @@ export function MfaEnroll() {
     setError(null)
     setBusy(true)
     try {
+      // Platform operators enroll via the slug-less platform endpoint.
       const codes = await dispatch(
-        enrollActivateThunk({ slug, mfaToken: mfa!.token, code }),
+        mfa!.platform
+          ? platformEnrollActivateThunk({ mfaToken: mfa!.token, code })
+          : enrollActivateThunk({ slug, mfaToken: mfa!.token, code }),
       ).unwrap()
       setRecovery(codes)
     } catch (err) {

@@ -94,6 +94,14 @@ export function enrollActivate(slug: string, mfaToken: string, code: string) {
   })
 }
 
+export function platformEnrollActivate(mfaToken: string, code: string) {
+  return apiRequest<EnrollActivateResult>(`/platform/auth/mfa/enroll-activate`, {
+    method: "POST",
+    body: { mfa_token: mfaToken, code },
+    auth: false,
+  })
+}
+
 export function acceptInvite(slug: string, token: string, password: string) {
   return apiRequest<AcceptInviteResult>(`${tenantAuth(slug)}/invitations/accept`, {
     method: "POST",

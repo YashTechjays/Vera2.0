@@ -87,13 +87,42 @@ export const verifyMfaThunk = createAsyncThunk(
   keepApiError,
 )
 
-// --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory,
-// so login never mints a session — it always hands back a verify challenge. ---
+// --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory, so login
+// never mints a session — it hands back a verify challenge, or an enroll challenge (the
+// first-login enrollment wall) when the operator hasn't set up MFA yet. ---
 export const platformLoginThunk = createAsyncThunk(
   "auth/platformLogin",
-  async (arg: { email: string; password: string }, { dispatch }) => {
+  async (
+    arg: { email: string; password: string },
+    { dispatch },
+  ): Promise<authApi.LoginResult["mfa"]> => {
     const res = await authApi.platformLogin(arg.email, arg.password)
-    dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
+    if (res.mfa === "enroll") {
+      // First-login enrollment wall — show the QR before a session exists.
+      dispatch(
+        setMfa({
+          token: res.mfa_token ?? "",
+          step: "enroll",
+          platform: true,
+          provisioningUri: res.provisioning_uri ?? undefined,
+        }),
+      )
+    } else {
+      dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
+    }
+    return res.mfa
+  },
+  keepApiError,
+)
+
+export const platformEnrollActivateThunk = createAsyncThunk(
+  "auth/platformEnrollActivate",
+  async (arg: { mfaToken: string; code: string }, { dispatch }): Promise<string[]> => {
+    const res = await authApi.platformEnrollActivate(arg.mfaToken, arg.code)
+    // Platform session belongs to no tenant — store with an empty slug.
+    setSession(res.session_token, "")
+    await dispatch(fetchMe()).unwrap()
+    return res.recovery_codes
   },
   keepApiError,
 )
@@ -239,6 +268,14 @@ const authSlice = createSlice({
         s.mfa = null
       })
       .addCase(enrollActivateThunk.rejected, (s, a) => {
+        s.loading = false
+        s.error = apiErrorMessage(a.error, "Enrollment failed.")
+      })
+      .addCase(platformEnrollActivateThunk.fulfilled, (s) => {
+        s.loading = false
+        s.mfa = null
+      })
+      .addCase(platformEnrollActivateThunk.rejected, (s, a) => {
         s.loading = false
         s.error = apiErrorMessage(a.error, "Enrollment failed.")
       })

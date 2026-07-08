@@ -4,18 +4,23 @@ The TOTP seed is envelope-encrypted (AES-256-GCM under a per-user DEK, DEK
 wrapped by a KeyManagementService) and stored directly on the `user_identity`
 row. Recovery code bcrypt hashes are stored as a JSONB list on the same row.
 
-All three functions mutate the `UserIdentity` object in-place. The caller's
-SQLAlchemy session tracks the changes and commits them on exit from the
-`async with tenant_session(...)` block — mfa.py never opens a DB session.
+The tenant enroll()/activate()/verify() functions mutate the `UserIdentity`
+object in-place; the caller's session commits on exit from `tenant_session(...)`.
+The platform variants (enroll_platform/activate_platform) instead write through
+SECURITY DEFINER functions, because a NULL-tenant platform identity can't be
+UPDATEd by the RLS-bound app role (migration f066c667ddc1).
 
 Flow: enroll() mints and seals the seed; activate() confirms with a live code
 and hands back recovery codes ONCE; verify() gates each MFA login, consuming a
 recovery code on use.
 """
 
+import json
 import secrets
 
 import pyotp
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.auth.password import hash_password, verify_password
 from vera_core.config.kms import KeyManagementService, open_sealed, seal
@@ -47,6 +52,58 @@ async def activate(
         return None
     recovery_codes = tuple(secrets.token_hex(5) for _ in range(_RECOVERY_CODE_COUNT))
     identity.recovery_code_hashes = [hash_password(c) for c in recovery_codes]
+    return recovery_codes
+
+
+async def enroll_platform(
+    kms: KeyManagementService,
+    session: AsyncSession,
+    *,
+    identity: UserIdentity,
+    account_email: str,
+) -> str | None:
+    """Enroll MFA for a NULL-tenant PLATFORM identity. The RLS-bound app role cannot
+    UPDATE a NULL-tenant row, so the seed is written via the `platform_store_mfa_seed`
+    SECURITY DEFINER function (migration f066c667ddc1) rather than through the ORM.
+    Returns the provisioning URI, or None if the identity is already enrolled."""
+    totp_secret = pyotp.random_base32()
+    seed_ct, dek_ct, key_ref = await seal(kms, totp_secret.encode())
+    stored = (
+        await session.execute(
+            text("SELECT platform_store_mfa_seed(CAST(:id AS uuid), :seed, :dek, :ref)").bindparams(
+                id=identity.id, seed=seed_ct, dek=dek_ct, ref=key_ref
+            )
+        )
+    ).scalar_one()
+    if not stored:
+        return None
+    return pyotp.TOTP(totp_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
+
+
+async def activate_platform(
+    kms: KeyManagementService,
+    session: AsyncSession,
+    *,
+    identity: UserIdentity,
+    code: str,
+) -> tuple[str, ...] | None:
+    """Confirm a NULL-tenant platform enrollment with a live TOTP code, then flip
+    mfa_enabled + store recovery hashes via the `platform_activate_mfa` SECURITY
+    DEFINER function. Returns the recovery codes ONCE, or None on a bad code."""
+    totp_secret = await _decrypt_seed(kms, identity)
+    if totp_secret is None or not pyotp.TOTP(totp_secret).verify(code, valid_window=1):
+        return None
+    recovery_codes = tuple(secrets.token_hex(5) for _ in range(_RECOVERY_CODE_COUNT))
+    hashes = [hash_password(c) for c in recovery_codes]
+    activated = (
+        await session.execute(
+            text("SELECT platform_activate_mfa(CAST(:id AS uuid), CAST(:h AS jsonb))").bindparams(
+                id=identity.id, h=json.dumps(hashes)
+            )
+        )
+    ).scalar_one()
+    if not activated:
+        return None
     return recovery_codes
 
 

@@ -12,6 +12,7 @@ import * as api from "@/lib/auth/api"
 import authReducer, {
   forceLogout,
   loginThunk,
+  platformLoginThunk,
   fetchMe,
   selectStatus,
   selectMfa,
@@ -60,6 +61,37 @@ describe("authSlice", () => {
     ).unwrap()
     expect(mfa).toBe("none")
     expect(selectStatus(store.getState())).toBe("authenticated")
+  })
+
+  it("platform login with enroll shows the QR (enroll step + provisioning uri)", async () => {
+    vi.mocked(api.platformLogin).mockResolvedValue({
+      mfa: "enroll",
+      session_token: null,
+      mfa_token: "et",
+      provisioning_uri: "otpauth://totp/Vera:ops?secret=ABC",
+    })
+    const store = makeStore()
+    const step = await store.dispatch(
+      platformLoginThunk({ email: "ops@vera.example", password: "x" }),
+    ).unwrap()
+    expect(step).toBe("enroll")
+    const mfa = selectMfa(store.getState())
+    expect(mfa?.step).toBe("enroll")
+    expect(mfa?.platform).toBe(true)
+    expect(mfa?.provisioningUri).toBe("otpauth://totp/Vera:ops?secret=ABC")
+    expect(selectStatus(store.getState())).toBe("anonymous")
+  })
+
+  it("platform login with verify goes to the verify step", async () => {
+    vi.mocked(api.platformLogin).mockResolvedValue({
+      mfa: "verify", session_token: null, mfa_token: "mt", provisioning_uri: null,
+    })
+    const store = makeStore()
+    const step = await store.dispatch(
+      platformLoginThunk({ email: "ops@vera.example", password: "x" }),
+    ).unwrap()
+    expect(step).toBe("verify")
+    expect(selectMfa(store.getState())?.step).toBe("verify")
   })
 
   it("login with MFA verify does not authenticate", async () => {
