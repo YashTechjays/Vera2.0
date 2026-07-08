@@ -1,17 +1,19 @@
-"""call published visibility flag
+"""call publish and ownership columns
 
-Revision ID: 24cec2cac65e
-Revises: 0022
-Create Date: 2026-07-02 20:36:13.737427
+Revision ID: 9bd467c85c23
+Revises: 7fb0099d5b71
+Create Date: 2026-07-08 11:34:41.196474
 
+IF NOT EXISTS throughout: a fresh DB gets these from migration 0001's
+Base.metadata materialization; only an existing DB needs the real delta.
 """
 
 from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "24cec2cac65e"
-down_revision: str | None = "0022"
+revision: str = "9bd467c85c23"
+down_revision: str | None = "7fb0099d5b71"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
