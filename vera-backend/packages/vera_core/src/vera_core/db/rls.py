@@ -37,8 +37,9 @@ PLATFORM_GUC = "app.platform"
 # Pinning the sentinel also changes strict WITH CHECK semantics from "always deny" (an
 # unset/NULL GUC can never equal any tenant_id) to "deny unless a row's tenant column
 # literally equals the nil UUID" — closed off by FK anchoring on every tenant_id column,
-# since no real tenant row can ever have id = NIL_TENANT_ID; `tenant.id` itself is the
-# one tenant_id-shaped column with no FK anchor, so it must never be seeded with this value.
+# since no real tenant row can ever have id = NIL_TENANT_ID: the DB enforces that via
+# ck_tenant_id_not_nil on tenant.id (migration efa94eaaf3f9), so a seed/fixture accident
+# fails loudly instead of silently widening every platform session.
 NIL_TENANT_ID = UUID(int=0)
 
 
