@@ -81,12 +81,19 @@ At call initiation the task builder resolves each placeholder through
 `system_fields[token]` → field path → the form's intake `field_answer` value, falling
 back to the field's `default` (e.g. `callback_number` → `"N/A"`) when unanswered.
 
-**PHI:** hydration happens inside the trust boundary, and raw patient identifiers
-never land in an LLM prompt. Text destined for the LLM is hydrated with the session's
-`[[TYPE_N]]` PHI tokens; re-identification happens at the TTS seam
-(`vera_core.phi.hydrate_for_speech`) so the caller _speaks_ real values. Non-PHI
-handles (facility/provider identifiers) may hydrate raw. The schema stays neutral —
-placeholders carry no PHI marking; the task builder decides token-vs-raw per seam.
+**PHI (compliance decision, 2026-07-08, aligned with the security officer):** the
+LLM provider (Vertex AI Gemini) is BAA-covered with zero data retention, so raw PHI
+may flow through the **live** pipeline — placeholders hydrate with raw intake values
+at task creation, for LLM-visible instructions and TTS speech alike. Tokenization
+applies only where call content is **persisted**: structured logs, Langfuse
+traces/spans, and any stored transcript still cross `vera_core.phi` redaction before
+write. The schema stays neutral — placeholders carry no PHI marking.
+
+> Follow-up: this supersedes the STT→LLM de-identification stance written in
+> `vera-backend/CLAUDE.md` and `vera_core/CLAUDE.md` ("never put raw PHI in an LLM
+> prompt"); those files and the livekit skill's seam descriptions must be updated to
+> the persistence-only tokenization posture so future work doesn't re-introduce the
+> old wall.
 
 ## 4. New `introduction` task (Vera 1.0 Phase 2 START)
 
