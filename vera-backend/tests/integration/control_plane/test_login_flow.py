@@ -199,6 +199,56 @@ async def test_wrong_password_is_401(
     assert body["data"] is None
 
 
+async def _set_user_status(database_url: str, world: LoginWorld, status: str) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        sessionmaker = async_sessionmaker(engine)
+        async with sessionmaker() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE app_user SET status = :s WHERE tenant_id = :t AND email = :e"
+                ).bindparams(s=status, t=world.tenant_id, e=world.email)
+            )
+    finally:
+        await engine.dispose()
+
+
+async def test_deactivated_account_correct_password_gets_clear_403(
+    login_world: tuple[httpx.AsyncClient, LoginWorld],
+    database_url: str,
+) -> None:
+    """A caller who proves credential ownership may learn the account is
+    deactivated — that discloses nothing to outsiders (see the wrong-password
+    test below for the enumeration guard)."""
+    client, world = login_world
+    await _set_user_status(database_url, world, "deactivated")
+    resp = await client.post(
+        f"{_base(world)}/auth/login", json={"email": world.email, "password": PASSWORD}
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["status"] == "FAIL"
+    assert body["error_code"] == "FORBIDDEN"
+    assert body["message"] == (
+        "Your account has been deactivated. Please contact your administrator."
+    )
+
+
+async def test_deactivated_account_wrong_password_stays_uniform_401(
+    login_world: tuple[httpx.AsyncClient, LoginWorld],
+    database_url: str,
+) -> None:
+    """Without the correct password the response must stay indistinguishable
+    from any other bad login — no account-status enumeration."""
+    client, world = login_world
+    await _set_user_status(database_url, world, "deactivated")
+    resp = await client.post(
+        f"{_base(world)}/auth/login", json={"email": world.email, "password": "wrong"}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error_code"] == "UNAUTHORIZED"
+
+
 async def test_request_id_is_echoed_when_supplied(
     login_world: tuple[httpx.AsyncClient, LoginWorld],
 ) -> None:

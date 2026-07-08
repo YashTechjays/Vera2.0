@@ -2,7 +2,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 
 import * as authApi from "@/lib/auth/api"
 import type { MeResponse } from "@/lib/auth/api"
-import { apiErrorMessage, toApiErrorPayload, type ApiErrorPayload } from "@/lib/api/errors"
+import { apiErrorMessage, serializeApiError } from "@/lib/api/client"
 import { clearSession, getToken, setSession } from "@/lib/auth/storage"
 
 type Status = "loading" | "anonymous" | "authenticated"
@@ -39,24 +39,12 @@ const initialState: AuthState = {
   sessionExpiresAt: null,
 }
 
-// Rejections carry backend detail only via the rejectWithValue payload.
-function message(payload: unknown, fallback: string): string {
-  return apiErrorMessage(payload, fallback)
-}
-
-/** Convert a thrown ApiError into rejectWithValue so its data survives serialization. */
-async function runOrReject<T, R>(
-  fn: () => Promise<T>,
-  rejectWithValue: (value: ApiErrorPayload) => R,
-): Promise<T | R> {
-  try {
-    return await fn()
-  } catch (err) {
-    const payload = toApiErrorPayload(err)
-    if (payload) return rejectWithValue(payload)
-    throw err
-  }
-}
+// createAsyncThunk serializes thrown errors to plain {name, message} objects,
+// so ApiError instances (and their httpStatus) don't survive to `unwrap()`
+// callers or `rejected` reducers. Every thunk whose error surfaces in the UI
+// passes `serializeApiError` to keep the backend's message and status readable
+// via apiErrorMessage/apiErrorHttpStatus.
+const keepApiError = { serializeError: serializeApiError }
 
 export const fetchMe = createAsyncThunk("auth/fetchMe", async () => {
   const me = await authApi.getMe()
@@ -66,12 +54,12 @@ export const fetchMe = createAsyncThunk("auth/fetchMe", async () => {
   return { me, sessionExpiresAt: Date.now() + me.login_absolute_remaining_seconds * 1000 }
 })
 
-export const loginThunk = createAsyncThunk<
-  authApi.LoginResult["mfa"],
-  { slug: string; email: string; password: string },
-  { rejectValue: ApiErrorPayload }
->("auth/login", (arg, { dispatch, rejectWithValue }) =>
-  runOrReject(async () => {
+export const loginThunk = createAsyncThunk(
+  "auth/login",
+  async (
+    arg: { slug: string; email: string; password: string },
+    { dispatch },
+  ): Promise<authApi.LoginResult["mfa"]> => {
     // Remember the workspace so the MFA step (which runs before a session exists)
     // can read it from the store instead of the URL.
     dispatch(setTenantSlug(arg.slug))
@@ -82,68 +70,58 @@ export const loginThunk = createAsyncThunk<
     } else if (res.mfa === "verify") {
       dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify" }))
     } else if (res.mfa === "enroll") {
-      dispatch(
-        setMfa({
-          token: res.mfa_token ?? "",
-          step: "enroll",
-          provisioningUri: res.provisioning_uri ?? undefined,
-        }),
-      )
+      dispatch(setMfa({ token: res.mfa_token ?? "", step: "enroll", provisioningUri: res.provisioning_uri ?? undefined }))
     }
     return res.mfa
-  }, rejectWithValue),
+  },
+  keepApiError,
 )
 
-export const verifyMfaThunk = createAsyncThunk<
-  void,
-  { slug: string; mfaToken: string; code: string },
-  { rejectValue: ApiErrorPayload }
->("auth/verifyMfa", (arg, { dispatch, rejectWithValue }) =>
-  runOrReject(async () => {
+export const verifyMfaThunk = createAsyncThunk(
+  "auth/verifyMfa",
+  async (arg: { slug: string; mfaToken: string; code: string }, { dispatch }) => {
     const res = await authApi.verifyMfa(arg.slug, arg.mfaToken, arg.code)
     setSession(res.session_token, arg.slug)
     await dispatch(fetchMe()).unwrap()
-  }, rejectWithValue),
+  },
+  keepApiError,
 )
 
 // --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory,
 // so login never mints a session — it always hands back a verify challenge. ---
-export const platformLoginThunk = createAsyncThunk<
-  void,
-  { email: string; password: string },
-  { rejectValue: ApiErrorPayload }
->("auth/platformLogin", (arg, { dispatch, rejectWithValue }) =>
-  runOrReject(async () => {
+export const platformLoginThunk = createAsyncThunk(
+  "auth/platformLogin",
+  async (arg: { email: string; password: string }, { dispatch }) => {
     const res = await authApi.platformLogin(arg.email, arg.password)
     dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
-  }, rejectWithValue),
+  },
+  keepApiError,
 )
 
-export const platformVerifyMfaThunk = createAsyncThunk<
-  void,
-  { mfaToken: string; code: string },
-  { rejectValue: ApiErrorPayload }
->("auth/platformVerifyMfa", (arg, { dispatch, rejectWithValue }) =>
-  runOrReject(async () => {
+export const platformVerifyMfaThunk = createAsyncThunk(
+  "auth/platformVerifyMfa",
+  async (arg: { mfaToken: string; code: string }, { dispatch }) => {
     const res = await authApi.platformVerifyMfa(arg.mfaToken, arg.code)
     // Platform session belongs to no tenant — store with an empty slug; tenant_id
     // stays NULL and the idle manager's timeouts come from /me, not local storage.
     setSession(res.session_token, "")
     await dispatch(fetchMe()).unwrap()
-  }, rejectWithValue),
+  },
+  keepApiError,
 )
 
-export const enrollActivateThunk = createAsyncThunk<
-  string[],
-  { slug: string; mfaToken: string; code: string },
-  { rejectValue: ApiErrorPayload }
->("auth/enrollActivate", (arg, { dispatch, rejectWithValue }) =>
-  runOrReject(async () => {
+export const enrollActivateThunk = createAsyncThunk(
+  "auth/enrollActivate",
+  async (
+    arg: { slug: string; mfaToken: string; code: string },
+    { dispatch },
+  ): Promise<string[]> => {
     const res = await authApi.enrollActivate(arg.slug, arg.mfaToken, arg.code)
     setSession(res.session_token, arg.slug)
     await dispatch(fetchMe()).unwrap()
     return res.recovery_codes
-  }, rejectWithValue),
+  },
+  keepApiError,
 )
 
 export const keepaliveThunk = createAsyncThunk("auth/keepalive", async () => {
@@ -197,7 +175,7 @@ const authSlice = createSlice({
       })
       .addCase(loginThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.payload, "Invalid credentials.")
+        s.error = apiErrorMessage(a.error, "Invalid credentials.")
       })
       .addCase(fetchMe.pending, (s) => {
         if (s.status !== "authenticated") s.status = "loading"
@@ -227,7 +205,7 @@ const authSlice = createSlice({
       })
       .addCase(verifyMfaThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.payload, "Verification failed.")
+        s.error = apiErrorMessage(a.error, "Verification failed.")
       })
       .addCase(platformLoginThunk.pending, (s) => {
         s.loading = true
@@ -238,7 +216,7 @@ const authSlice = createSlice({
       })
       .addCase(platformLoginThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.payload, "Invalid credentials.")
+        s.error = apiErrorMessage(a.error, "Invalid credentials.")
       })
       .addCase(platformVerifyMfaThunk.pending, (s) => {
         s.loading = true
@@ -250,7 +228,7 @@ const authSlice = createSlice({
       })
       .addCase(platformVerifyMfaThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.payload, "Verification failed.")
+        s.error = apiErrorMessage(a.error, "Verification failed.")
       })
       .addCase(enrollActivateThunk.pending, (s) => {
         s.loading = true
@@ -262,7 +240,7 @@ const authSlice = createSlice({
       })
       .addCase(enrollActivateThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.payload, "Enrollment failed.")
+        s.error = apiErrorMessage(a.error, "Enrollment failed.")
       })
       .addCase(logoutThunk.fulfilled, (s) => {
         clearSession()

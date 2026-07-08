@@ -9,8 +9,7 @@ vi.mock("@/lib/auth/storage", () => ({
 
 import { configureStore } from "@reduxjs/toolkit"
 import * as api from "@/lib/auth/api"
-import { ApiError } from "@/lib/api/client"
-import { apiErrorMessage, apiErrorStatus } from "@/lib/api/errors"
+import { ApiError, apiErrorHttpStatus, apiErrorMessage } from "@/lib/api/errors"
 import authReducer, {
   forceLogout,
   loginThunk,
@@ -61,9 +60,9 @@ describe("authSlice", () => {
     )
     expect(loginThunk.rejected.match(action)).toBe(true)
     expect(store.getState().auth.error).toBe("Your account has been deactivated.")
-    // .unwrap() throws the payload — pages must be able to read status/message.
-    expect(apiErrorStatus(action.payload)).toBe(403)
-    expect(apiErrorMessage(action.payload, "fallback")).toBe(
+    // .unwrap() throws the serialized error — pages must read status/message.
+    expect(apiErrorHttpStatus(action.error)).toBe(403)
+    expect(apiErrorMessage(action.error, "fallback")).toBe(
       "Your account has been deactivated.",
     )
   })

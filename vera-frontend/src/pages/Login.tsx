@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { PasswordInput } from "@/components/ui/password-input"
 import { Label } from "@/components/ui/label"
-import { apiErrorMessage, apiErrorStatus } from "@/lib/api/errors"
+import { apiErrorHttpStatus, apiErrorMessage } from "@/lib/api/client"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { loginThunk, selectStatus } from "@/store/authSlice"
 
@@ -73,11 +73,9 @@ export function Login() {
         navigate(res === "verify" ? "/mfa" : "/mfa-enroll")
       }
     } catch (err) {
-      setError(
-        apiErrorStatus(err) === 401
-          ? "Invalid credentials."
-          : apiErrorMessage(err, "Something went wrong."),
-      )
+      setError(apiErrorHttpStatus(err) === 401
+        ? "Invalid credentials."
+        : apiErrorMessage(err, "Something went wrong."))
     } finally {
       setBusy(false)
     }

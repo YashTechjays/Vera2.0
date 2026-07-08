@@ -247,7 +247,7 @@ export function LiveMonitoring() {
               <TableHead>Duration</TableHead>
               <TableHead>Call Status</TableHead>
               <TableHead>Visible To All</TableHead>
-              <TableHead className="text-right">Action</TableHead>
+              <TableHead>Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -289,7 +289,7 @@ export function LiveMonitoring() {
                       }}
                     />
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell>
                     <Button
                       size="sm"
                       variant={call.is_owner ? "default" : "outline"}

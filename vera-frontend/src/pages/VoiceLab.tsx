@@ -47,14 +47,6 @@ const SHOW_IN_BROWSER_SESSION_DEFAULT: boolean = false
 const SHOW_IN_BROWSER_SESSION =
   SHOW_IN_BROWSER_SESSION_DEFAULT || localStorage.getItem("vera.showBrowserSession") === "1"
 
-/** Visibility of the "IVR navigation" toggle; same hide/unhide pattern as
- *  SHOW_IN_BROWSER_SESSION above (localStorage key: "vera.showIvrNavigation").
- *  While hidden the toggle stays off, so sessions start with
- *  `enable_ivr_navigation: false`. */
-const SHOW_IVR_NAVIGATION_DEFAULT: boolean = false
-const SHOW_IVR_NAVIGATION =
-  SHOW_IVR_NAVIGATION_DEFAULT || localStorage.getItem("vera.showIvrNavigation") === "1"
-
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.Disconnected]: "Disconnected",
   [ConnectionState.Connecting]: "Connecting…",
@@ -428,36 +420,34 @@ export function VoiceLab() {
               )}
             </div>
 
-            {SHOW_IVR_NAVIGATION && (
-              <div
-                className={cn(
-                  "flex items-center justify-between gap-4 rounded-lg border p-3 transition-colors",
-                  ivrNavigation && "border-primary/40 bg-primary/5",
-                )}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
-                    <ListTree className="size-4 text-muted-foreground" />
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="ivr-navigation" className="leading-none">
-                      IVR navigation
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Let the agent navigate the payer's phone menu automatically before reaching
-                      a rep.
-                    </p>
-                  </div>
+            <div
+              className={cn(
+                "flex items-center justify-between gap-4 rounded-lg border p-3 transition-colors",
+                ivrNavigation && "border-primary/40 bg-primary/5",
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                  <ListTree className="size-4 text-muted-foreground" />
                 </div>
-                <Switch
-                  id="ivr-navigation"
-                  checked={ivrNavigation}
-                  onCheckedChange={setIvrNavigation}
-                />
+                <div className="space-y-1">
+                  <Label htmlFor="ivr-navigation" className="leading-none">
+                    IVR navigation
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    Let the agent navigate the payer's phone menu automatically before reaching
+                    a rep.
+                  </p>
+                </div>
               </div>
-            )}
+              <Switch
+                id="ivr-navigation"
+                checked={ivrNavigation}
+                onCheckedChange={setIvrNavigation}
+              />
+            </div>
 
-            {SHOW_IVR_NAVIGATION && ivrNavigation && (
+            {ivrNavigation && (
               <div className="space-y-1.5 rounded-lg border p-3">
                 <Label htmlFor="ivr-provider">Insurance provider</Label>
                 <Select
