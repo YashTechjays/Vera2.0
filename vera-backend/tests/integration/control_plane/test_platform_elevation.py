@@ -8,7 +8,7 @@ minted sessions (GCIP login is ADR-0006 §D, deferred), mirroring rbac_world."""
 
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -37,6 +37,10 @@ class World:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _idem() -> dict[str, str]:
+    return {"Idempotency-Key": str(uuid4())}
 
 
 async def _mint(
@@ -339,7 +343,7 @@ async def test_elevated_operator_manages_roles_like_a_tenant_admin(
 
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(w.super_token),
+        headers={**_auth(w.super_token), **_idem()},
         json={"name": "ELEVATED_MADE", "description": "made under elevation", "permission_ids": []},
     )
     assert created.status_code == 200, created.text
@@ -347,7 +351,7 @@ async def test_elevated_operator_manages_roles_like_a_tenant_admin(
 
     patched = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(w.super_token),
+        headers={**_auth(w.super_token), **_idem()},
         json={"description": "edited under elevation"},
     )
     assert patched.status_code == 200, patched.text
@@ -357,7 +361,7 @@ async def test_elevated_operator_manages_roles_like_a_tenant_admin(
     assert not any(p["code"].startswith("platform:") for p in perms.json()["data"])
 
     deleted = await client.request(
-        "DELETE", f"/api/v1/roles/{role_id}", headers=_auth(w.super_token)
+        "DELETE", f"/api/v1/roles/{role_id}", headers={**_auth(w.super_token), **_idem()}
     )
     assert deleted.status_code == 200, deleted.text
 

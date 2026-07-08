@@ -53,12 +53,16 @@ export function updateRole(
   return apiRequest<RoleDetail>(`/roles/${encodeURIComponent(roleId)}`, {
     method: "PATCH",
     body: patch,
+    headers: { "Idempotency-Key": randomId() },
   })
 }
 
 /** 409 while users still hold the role — the message carries the holder count. */
 export function deleteRole(roleId: string): Promise<null> {
-  return apiRequest<null>(`/roles/${encodeURIComponent(roleId)}`, { method: "DELETE" })
+  return apiRequest<null>(`/roles/${encodeURIComponent(roleId)}`, {
+    method: "DELETE",
+    headers: { "Idempotency-Key": randomId() },
+  })
 }
 
 export function listUserRoles(userId: string): Promise<Role[]> {

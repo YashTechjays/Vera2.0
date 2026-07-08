@@ -227,7 +227,7 @@ async def test_create_custom_role_appears_in_list(
 ) -> None:
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "BILLING_VIEWER", "permission_ids": []},
     )
     assert created.status_code == 200, created.text
@@ -343,7 +343,7 @@ async def test_create_role_rejects_platform_permission(
         )
     resp = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "SNEAKY", "permission_ids": [str(platform_perm_id)]},
     )
     assert resp.status_code == 403
@@ -375,7 +375,7 @@ async def test_get_role_detail_includes_permissions(
     users_read = next(p for p in perms.json()["data"] if p["code"] == "users:read")
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "DETAIL_ROLE", "permission_ids": [users_read["id"]]},
     )
     role_id = created.json()["data"]["id"]
@@ -400,7 +400,7 @@ async def test_create_role_accepts_description(
 ) -> None:
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "DESCRIBED", "description": "Sees billing", "permission_ids": []},
     )
     assert created.status_code == 200, created.text
@@ -415,14 +415,14 @@ async def test_patch_role_updates_fields_and_permissions(
     calls_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "calls:read")
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "PATCH_ME", "permission_ids": [users_read]},
     )
     role_id = created.json()["data"]["id"]
 
     patched = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "PATCHED", "description": "now different", "permission_ids": [calls_read]},
     )
     assert patched.status_code == 200, patched.text
@@ -434,7 +434,7 @@ async def test_patch_role_updates_fields_and_permissions(
     # Omitted fields stay unchanged (None = leave alone).
     partial = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"description": "only this"},
     )
     assert partial.json()["data"]["name"] == "PATCHED"
@@ -452,14 +452,14 @@ async def test_patch_role_overlapping_permission_set_is_not_a_conflict(
     calls_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "calls:read")
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "OVERLAP_PATCH", "permission_ids": [users_read]},
     )
     role_id = created.json()["data"]["id"]
 
     patched = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"permission_ids": [users_read, calls_read]},
     )
     assert patched.status_code == 200, patched.text
@@ -474,7 +474,7 @@ async def test_patch_system_role_is_forbidden(
     supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
     resp = await client.patch(
         f"/api/v1/roles/{supervisor_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "HIJACKED"},
     )
     assert resp.status_code == 403  # explicit ownership check, not a silent 0-row update
@@ -487,7 +487,7 @@ async def test_patch_role_rejects_platform_permission(
 ) -> None:
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "NO_PLATFORM_VIA_PATCH", "permission_ids": []},
     )
     role_id = created.json()["data"]["id"]
@@ -497,7 +497,7 @@ async def test_patch_role_rejects_platform_permission(
         )
     resp = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"permission_ids": [str(platform_perm_id)]},
     )
     assert resp.status_code == 403
@@ -508,26 +508,26 @@ async def test_patch_role_unknown_permission_is_400_and_dup_name_409(
 ) -> None:
     a = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "PATCH_A", "permission_ids": []},
     )
     await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "PATCH_B", "permission_ids": []},
     )
     a_id = a.json()["data"]["id"]
 
     bad_perm = await client.patch(
         f"/api/v1/roles/{a_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"permission_ids": [str(uuid4())]},
     )
     assert bad_perm.status_code == 400
 
     dup = await client.patch(
         f"/api/v1/roles/{a_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "PATCH_B"},
     )
     assert dup.status_code == 409  # unique (tenant_id, name)
@@ -544,7 +544,7 @@ async def test_patch_role_invalidates_holder_permission_cache(
     users_read = next(p["id"] for p in perms.json()["data"] if p["code"] == "users:read")
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "TEMP_USER_READERS", "permission_ids": [users_read]},
     )
     role_id = created.json()["data"]["id"]
@@ -569,7 +569,7 @@ async def test_patch_role_invalidates_holder_permission_cache(
 
     stripped = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"permission_ids": []},
     )
     assert stripped.status_code == 200, stripped.text
@@ -591,7 +591,7 @@ async def test_delete_role_blocked_while_held_then_succeeds(
 ) -> None:
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "DELETE_ME", "permission_ids": []},
     )
     role_id = created.json()["data"]["id"]
@@ -608,7 +608,7 @@ async def test_delete_role_blocked_while_held_then_succeeds(
     )
 
     blocked = await client.request(
-        "DELETE", f"/api/v1/roles/{role_id}", headers=_auth(rbac_world.admin_token)
+        "DELETE", f"/api/v1/roles/{role_id}", headers={**_auth(rbac_world.admin_token), **_idem()}
     )
     assert blocked.status_code == 409  # DECISION: no silent cascade
     assert blocked.json()["data"]["holder_count"] == 1
@@ -619,7 +619,7 @@ async def test_delete_role_blocked_while_held_then_succeeds(
         headers=_auth(rbac_world.admin_token),
     )
     deleted = await client.request(
-        "DELETE", f"/api/v1/roles/{role_id}", headers=_auth(rbac_world.admin_token)
+        "DELETE", f"/api/v1/roles/{role_id}", headers={**_auth(rbac_world.admin_token), **_idem()}
     )
     assert deleted.status_code == 200, deleted.text
     listing = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
@@ -632,11 +632,13 @@ async def test_delete_system_role_forbidden_and_unknown_404(
     roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
     supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
     forbidden = await client.request(
-        "DELETE", f"/api/v1/roles/{supervisor_id}", headers=_auth(rbac_world.admin_token)
+        "DELETE",
+        f"/api/v1/roles/{supervisor_id}",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
     )
     assert forbidden.status_code == 403
     missing = await client.request(
-        "DELETE", f"/api/v1/roles/{uuid4()}", headers=_auth(rbac_world.admin_token)
+        "DELETE", f"/api/v1/roles/{uuid4()}", headers={**_auth(rbac_world.admin_token), **_idem()}
     )
     assert missing.status_code == 404
 
@@ -680,7 +682,7 @@ async def test_revoking_one_of_two_roles_manage_sources_is_allowed(
     roles_manage = next(p["id"] for p in perms if p["code"] == "roles:manage")
     extra = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "SECOND_MANAGER", "permission_ids": [roles_manage]},
     )
     extra_id = extra.json()["data"]["id"]
@@ -716,7 +718,7 @@ async def _make_sole_manager(
     roles_manage = next(p["id"] for p in perms if p["code"] == "roles:manage")
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": role_name, "permission_ids": [roles_manage]},
     )
     role_id = created.json()["data"]["id"]
@@ -763,7 +765,7 @@ async def test_patch_role_dropping_own_last_roles_manage_source_is_blocked(
 
     resp = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(fresh_token),
+        headers={**_auth(fresh_token), **_idem()},
         json={"permission_ids": []},
     )
     assert resp.status_code == 409
@@ -792,7 +794,7 @@ async def test_patch_role_dropping_roles_manage_by_a_different_admin_is_allowed(
 
     resp = await client.patch(
         f"/api/v1/roles/{role_id}",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"permission_ids": []},
     )
     assert resp.status_code == 200, resp.text
@@ -830,7 +832,7 @@ async def test_list_user_roles_unknown_user_404_and_norole_403(
 async def test_list_role_holders(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
     created = await client.post(
         "/api/v1/roles",
-        headers=_auth(rbac_world.admin_token),
+        headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "HOLDER_TEST_ROLE", "permission_ids": []},
     )
     role_id = created.json()["data"]["id"]

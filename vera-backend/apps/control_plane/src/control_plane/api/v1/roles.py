@@ -8,9 +8,10 @@ the effective-permission cache for the affected user (auth/rbac.py) and is audit
 """
 
 from collections.abc import Sequence
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.common import (
     PLATFORM_PERMISSION_PREFIX,
+    AppSettings,
     AuthAudit,
     Resolver,
     TenantId,
@@ -29,7 +31,7 @@ from control_plane.api.v1.common import (
 )
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
-from control_plane.deps import client_ip
+from control_plane.deps import client_ip, get_idempotency_store
 from control_plane.exceptions import (
     BadRequestError,
     ConflictError,
@@ -38,6 +40,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import AppUser, Permission, Role, RolePermission, UserRole
 from vera_core.models.enums import AuthEvent
@@ -241,8 +244,17 @@ async def update_role(
     session: TenantSession,
     audit: AuthAudit,
     resolver: Resolver,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[RoleDetailResponse]:
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        _caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
     role = await _load_role(session, role_id)
     # Explicit ownership check (spec): don't rely on RLS's silent 0-row update.
     # `tenant_id IS NULL` here means "global system role", not "platform caller".
@@ -353,8 +365,17 @@ async def create_role(
     tenant_id: TenantId,
     session: TenantSession,
     audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[RoleResponse]:
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        _caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
     # Resolve permission ids and enforce the tenant-role grant guard (defense in depth:
     # platform-tier perms are also blocked at assignment, but stop them from entering here).
     permissions = await _resolve_grantable_permissions(session, body.permission_ids)
@@ -541,8 +562,17 @@ async def delete_role(
     tenant_id: TenantId,
     session: TenantSession,
     audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     _caller: VerifiedIdentity = require("roles:manage"),
 ) -> ResponseModel[None]:
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        _caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
     role = await _load_role(session, role_id)
     if role.tenant_id is None:
         raise CustomAPIException(
