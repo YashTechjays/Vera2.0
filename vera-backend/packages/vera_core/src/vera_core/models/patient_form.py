@@ -28,10 +28,11 @@ class PatientForm(Base, TenantScopedMixin):
     __table_args__ = (
         check_in("status", FormStatus),
         Index("ix_patient_form_tenant_status", "tenant_id", "status"),
-        # The queue drain: only the small set of queued rows is indexed.
+        # The queue drain: only the small set of queued rows is indexed,
+        # ordered by enqueued_at for FIFO dispatch.
         Index(
             "ix_patient_form_queued",
-            "scheduled_at",
+            "enqueued_at",
             postgresql_where=text("status = 'in_queue'"),
         ),
         # Fuzzy name search (pg_trgm). Only patient_name — see module docstring.
@@ -83,3 +84,11 @@ class PatientForm(Base, TenantScopedMixin):
     completion_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The user who queued this form — persisted so the dispatcher can attribute
+    # ownership (`call.initiated_by_id`) to the queuer even when the call is
+    # actually created later by a different actor (retry-at-callback, freed-slot
+    # dispatch). Never overwritten on retry, so ownership survives re-enqueue.
+    enqueued_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )

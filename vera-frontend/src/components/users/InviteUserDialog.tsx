@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { Check, Copy } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -7,22 +7,58 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { ApiError } from "@/lib/api/client"
-import { inviteUser, type InviteUserResult } from "@/lib/auth/api"
+import { inviteUser, listRoles, type InviteUserResult, type RoleSummary } from "@/lib/auth/api"
+import { copyText } from "@/lib/clipboard"
 
 export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {}) {
   const [open, setOpen] = useState(false)
   const [email, setEmail] = useState("")
   const [name, setName] = useState("")
   const [sendEmail, setSendEmail] = useState(true)
+  const [roles, setRoles] = useState<RoleSummary[]>([])
+  const [roleId, setRoleId] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<InviteUserResult | null>(null)
   const [copied, setCopied] = useState(false)
 
-  function copyLink() {
+  // Load the assignable roles (global system roles + this tenant's custom roles)
+  // once per dialog lifetime (not on every open) — cheap to keep for the session,
+  // and roles rarely change while a Users page is open. Retries automatically the
+  // next time the dialog opens if the previous attempt failed (roles stays empty).
+  useEffect(() => {
+    if (!open || roles.length > 0) return
+    let cancelled = false
+    listRoles()
+      .then((r) => {
+        if (!cancelled) setRoles(r)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(
+            err instanceof ApiError
+              ? `Could not load roles: ${err.message}`
+              : "Could not load roles. You can still invite without selecting a role."
+          )
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, roles.length])
+
+  // Revert the "copied" tick to the copy icon after a moment.
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 2000)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  async function copyLink() {
     if (!result) return
-    void navigator.clipboard.writeText(result.invite_url).then(() => setCopied(true))
+    setCopied(await copyText(result.invite_url))
   }
 
   async function onSubmit(e: FormEvent) {
@@ -30,7 +66,12 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
     setError(null)
     setBusy(true)
     try {
-      const res = await inviteUser({ email, name, roleIds: [], sendEmail })
+      const res = await inviteUser({
+        email,
+        name,
+        roleIds: roleId ? [roleId] : [],
+        sendEmail,
+      })
       setResult(res)
       onInvited?.()
     } catch (err) {
@@ -42,7 +83,7 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
 
   function reset() {
     setOpen(false)
-    setEmail(""); setName(""); setSendEmail(true); setError(null); setResult(null); setBusy(false); setCopied(false)
+    setEmail(""); setName(""); setSendEmail(true); setRoleId(""); setError(null); setResult(null); setBusy(false); setCopied(false)
   }
 
   const submitLabel = sendEmail ? "Send invitation" : "Create invitation"
@@ -118,6 +159,21 @@ export function InviteUserDialog({ onInvited }: { onInvited?: () => void } = {})
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                 />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="invite-role">Role</Label>
+                <Select
+                  id="invite-role"
+                  value={roleId}
+                  onChange={(e) => setRoleId(e.target.value)}
+                >
+                  <option value="">No role (invite only)</option>
+                  {roles.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name}
+                    </option>
+                  ))}
+                </Select>
               </div>
               <div className="flex items-center gap-2 text-sm">
                 <Checkbox

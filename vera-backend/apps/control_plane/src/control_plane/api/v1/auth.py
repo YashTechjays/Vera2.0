@@ -42,7 +42,11 @@ from control_plane.api.v1.common import (
 from control_plane.auth import elevation, mfa
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import INVITE_MFA_NS, INVITE_NS
-from control_plane.auth.password import MAX_PASSWORD_BYTES, hash_password, verify_password
+from control_plane.auth.password import (
+    MAX_PASSWORD_BYTES,
+    hash_password,
+    verify_password_or_dummy,
+)
 from control_plane.auth.providers import resolve_login_provider
 from control_plane.auth.session import MFA_ENROLL_NS, MFA_NS, SessionData, SessionStore
 from control_plane.auth.tenant_slug import normalize_slug, resolve_tenant_id
@@ -213,13 +217,33 @@ class _PasswordCreds:
     hashed_password: str | None
     mfa_enabled: bool
     account_type: str
+    status: str
+
+
+DEACTIVATED_MESSAGE = "Your account has been deactivated. Please contact your administrator."
+
+
+def raise_for_inactive(creds: _PasswordCreds) -> None:
+    """403 for a deactivated account, uniform 401 for any other non-active status.
+
+    MUST be called only AFTER the password has verified: the caller proved
+    credential ownership, so naming the reason discloses nothing to outsiders.
+    Wrong passwords must keep the uniform 401 (no account-status enumeration).
+    """
+    if creds.status == "active":
+        return
+    if creds.status == "deactivated":
+        raise CustomAPIException(DefaultExceptionCode.FORBIDDEN, message=DEACTIVATED_MESSAGE)
+    raise _unauthorized()
 
 
 async def _load_password_creds(
     session: AsyncSession, email: str, *, account_type: str | None = None
 ) -> _PasswordCreds | None:
-    """Resolve an active user's password credentials within the current session.
+    """Resolve a user's password credentials within the current session.
     Returns plain values (no lazy ORM attributes) so they survive the session.
+    Includes `status` unfiltered — callers gate on it AFTER verifying the
+    password (see `raise_for_inactive`).
     `account_type` pins the plane (e.g. 'platform') so a stray row from the other
     plane can never authenticate here; left unset for tenant login (RLS already
     confines the session to one tenant)."""
@@ -229,6 +253,7 @@ async def _load_password_creds(
                 AppUser.id,
                 AppUser.email,
                 AppUser.account_type,
+                AppUser.status,
                 UserIdentity.hashed_password,
                 UserIdentity.mfa_enabled,
             )
@@ -236,7 +261,6 @@ async def _load_password_creds(
             .where(
                 UserIdentity.provider_type == ProviderKind.PASSWORD.value,
                 UserIdentity.email == email,
-                AppUser.status == "active",
                 *([AppUser.account_type == account_type] if account_type is not None else []),
             )
         )
@@ -249,6 +273,7 @@ async def _load_password_creds(
         hashed_password=row.hashed_password,
         mfa_enabled=row.mfa_enabled,
         account_type=row.account_type,
+        status=row.status,
     )
 
 
@@ -271,6 +296,7 @@ async def _stamp_last_login(
     response_model=ResponseModel[LoginResponse],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.VALIDATION_ERROR,
     ),
 )
@@ -314,16 +340,28 @@ async def login(
         # exist; that FK would fail), so this 401 is intentionally un-audited.
         # Every failure past this point has a confirmed-real tenant + provider.
         raise _unauthorized()
-    if (
-        creds is None
-        or creds.hashed_password is None
-        or not verify_password(body.password, creds.hashed_password)
-    ):
+    # Constant-time: always run one bcrypt verify, even for an unknown email or a
+    # user with no password hash (dummy verify → False). Every failure branch below
+    # costs the same, so response time can't reveal whether the email is registered.
+    password_ok = verify_password_or_dummy(
+        body.password, creds.hashed_password if creds is not None else None
+    )
+    if creds is None or not password_ok:
         user_id = creds.user_id if creds is not None else None
         await _audit(
             audit, tenant_id=tenant_id, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=user_id
         )
         raise _unauthorized()
+    if creds.status != "active":
+        await _audit(
+            audit,
+            tenant_id=tenant_id,
+            event=AuthEvent.LOGIN_FAILURE,
+            ip=ip,
+            user_id=creds.user_id,
+            reason=f"account_{creds.status}",
+        )
+        raise_for_inactive(creds)
 
     base = SessionData(
         user_id=creds.user_id,
@@ -490,14 +528,26 @@ async def mfa_enroll_activate(
     ),
 )
 async def logout(
-    _identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    identity: Annotated[VerifiedIdentity, Depends(current_identity)],
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    request: Request,
     store: Store,
+    audit: AuthAudit,
 ) -> ResponseModel[None]:
-    # Token-scoped self-op: `current_identity` proves a live session (expired → 401);
-    # the slug is irrelevant. delete_session reaps both the `sess` and `sess_abs` keys.
+    # Token-scoped self-op: `current_identity` proves a live session (expired → 401),
+    # so only real logouts are audited; the slug is irrelevant. delete_session reaps
+    # both the `sess` and `sess_abs` keys. A platform operator's tenant_id is None, so
+    # emit via emit_auth_event (accepts None → the log_auth_event definer path), not the
+    # UUID-only _audit helper.
     if credentials is not None:
         await store.delete_session(credentials.credentials)
+    await emit_auth_event(
+        audit,
+        tenant_id=identity.tenant_id,
+        event=AuthEvent.LOGOUT,
+        ip=client_ip(request),
+        user_id=identity.user_id,
+    )
     return ok(None, message="Logged out.")
 
 

@@ -5,6 +5,7 @@ import {
   RoomAudioRenderer,
   useConnectionState,
   useParticipants,
+  useRoomInfo,
 } from "@livekit/components-react"
 import { ConnectionState } from "livekit-client"
 // `/max` metadata so isValidPhoneNumber does real per-country validation (length +
@@ -16,18 +17,22 @@ import "react-phone-number-input/style.css"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
 import {
   endVoiceSession,
+  listCallProviders,
   startVoiceSession,
+  type ProviderOption,
   type VoiceSessionMode,
   type VoiceSessionResponse,
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
 import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
+import { parseCallFailure } from "@/lib/voice-lab/callFailure"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -50,15 +55,33 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.SignalReconnecting]: "Reconnecting…",
 }
 
+/** Watches LiveKit room metadata for the control plane's "call_failed" signal and
+ *  reports it once. Must render inside <LiveKitRoom>. */
+function CallFailureWatcher({ onFailure }: { onFailure: (message: string) => void }) {
+  const { metadata } = useRoomInfo()
+  const fired = useRef(false)
+  useEffect(() => {
+    if (fired.current) return
+    const message = parseCallFailure(metadata)
+    if (message) {
+      fired.current = true
+      onFailure(message)
+    }
+  }, [metadata, onFailure])
+  return null
+}
+
 /** Renders live connection + participant state. Must live inside <LiveKitRoom>
  *  so the LiveKit room context is available to its hooks. */
 function SessionPanel({
   mode,
   onEnd,
+  onDisconnected,
   actions,
 }: {
   mode: VoiceSessionMode
   onEnd: () => void
+  onDisconnected: () => void
   actions?: ReactNode
 }) {
   const state = useConnectionState()
@@ -72,9 +95,9 @@ function SessionPanel({
     // Auto-cleanup: if we were connected and the room disconnected (agent deleted it,
     // network drop, etc.), clear the session so the UI resets to the start form.
     if (wasConnected.current && state === ConnectionState.Disconnected) {
-      onEnd()
+      onDisconnected()
     }
-  }, [state, onEnd])
+  }, [state, onDisconnected])
 
   return (
     <Card>
@@ -201,6 +224,10 @@ export function VoiceLab() {
   // The PhoneInput yields an E.164 string (e.g. "+15551234567") or undefined.
   const [phone, setPhone] = useState<string | undefined>(undefined)
   const [ivrNavigation, setIvrNavigation] = useState(false)
+  // Provider picker for IVR-playbook selection. The list is readable by any operator with
+  // voice_lab:sandbox; the provider's active playbook is applied server-side.
+  const [providers, setProviders] = useState<ProviderOption[]>([])
+  const [providerId, setProviderId] = useState("")
   // Only flag the number field once the operator has interacted with it, so an
   // untouched empty form doesn't show a red error.
   const [touched, setTouched] = useState(false)
@@ -213,6 +240,20 @@ export function VoiceLab() {
   const phoneValid = !!phone && isValidPhoneNumber(phone)
   const showPhoneError = touched && !phoneValid
 
+  // Load selectable providers once; a failed load just leaves the picker with the generic
+  // option, so errors are non-fatal here.
+  useEffect(() => {
+    let cancelled = false
+    listCallProviders()
+      .then((rows) => {
+        if (!cancelled) setProviders(rows)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   async function start(mode: VoiceSessionMode) {
     setError(null)
     setPending(mode)
@@ -220,6 +261,7 @@ export function VoiceLab() {
       const result = await startVoiceSession({
         mode,
         enable_ivr_navigation: ivrNavigation,
+        ...(ivrNavigation && providerId ? { insurance_provider_id: providerId } : {}),
         ...(mode === "outbound" ? { phone_number: phone! } : {}),
       })
       setSession(result)
@@ -246,6 +288,31 @@ export function VoiceLab() {
     }
   }, [session?.room_name])
 
+  // Auto-cleanup when the room disconnects (agent deleted it, or a browser network drop).
+  // Reset to the form, then best-effort DELETE the room: a genuine network drop won't have
+  // torn it down server-side, so skipping this would orphan the agent session + any live
+  // outbound SIP leg. For a call-failure or normal end the room is already gone → DELETE is a
+  // harmless no-op. We deliberately do NOT clear `error`, so a call-failure banner set just
+  // before the disconnect survives.
+  const resetSession = useCallback(async () => {
+    const roomName = session?.room_name
+    setSession(null)
+    if (roomName) {
+      try {
+        await endVoiceSession(roomName)
+      } catch {
+        // best-effort: the room may already be gone (agent/close path deleted it first)
+      }
+    }
+  }, [session?.room_name])
+
+  // A failed outbound call: show why, then drop back to the form. The control plane has
+  // already (or is about to) delete the room server-side, so no DELETE call is needed here.
+  const failSession = useCallback((message: string) => {
+    setError(message)
+    setSession(null)
+  }, [])
+
   return (
     <div className="space-y-6">
       <div>
@@ -267,10 +334,12 @@ export function VoiceLab() {
           video={false}
           onError={(e) => setError(e.message)}
         >
+          <CallFailureWatcher onFailure={failSession} />
           <div className="space-y-6">
             <SessionPanel
               mode={session.mode}
               onEnd={endSession}
+              onDisconnected={resetSession}
               actions={
                 session.mode === "outbound" ? <VoiceLabDialpad onError={setError} /> : undefined
               }
@@ -377,6 +446,27 @@ export function VoiceLab() {
                 onCheckedChange={setIvrNavigation}
               />
             </div>
+
+            {ivrNavigation && (
+              <div className="space-y-1.5 rounded-lg border p-3">
+                <Label htmlFor="ivr-provider">Insurance provider</Label>
+                <Select
+                  id="ivr-provider"
+                  value={providerId}
+                  onChange={(ev) => setProviderId(ev.target.value)}
+                >
+                  <option value="">Generic navigator (no playbook)</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-sm text-muted-foreground">
+                  Uses the provider's active playbook to specialize the navigator, if one exists.
+                </p>
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-3">
               <Button

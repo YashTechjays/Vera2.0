@@ -5,11 +5,14 @@ import {
   BarChart3,
   Database,
   KeyRound,
+  ListTree,
   Mic,
   Settings,
   Users,
   type LucideIcon,
 } from "lucide-react"
+import { useAppSelector } from "@/store/hooks"
+import { selectIsElevated, selectIsSuperAdmin, selectPermissions } from "@/store/authSlice"
 
 export type NavItem = {
   title: string
@@ -22,13 +25,14 @@ export type NavItem = {
 }
 
 export const navItems: NavItem[] = [
-  { title: "Live Monitoring", to: "/", icon: Activity },
+  { title: "Live Monitoring", to: "/", icon: Activity, permission: "calls:read" },
   { title: "Data Management", to: "/data-management", icon: Database, permission: "forms:read" },
-  { title: "Voice Lab", to: "/voice-lab", icon: Mic, permission: "calls:read" },
-  { title: "Call History", to: "/call-history", icon: PhoneCall },
-  { title: "Analytics", to: "/analytics", icon: BarChart3 },
+  { title: "Voice Lab", to: "/voice-lab", icon: Mic, permission: "voice_lab:sandbox" },
+  { title: "Call History", to: "/call-history", icon: PhoneCall, permission: "calls:read" },
+  { title: "Analytics", to: "/analytics", icon: BarChart3, permission: "calls:read" },
   { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, superAdminOnly: true },
   { title: "Agent Prompt", to: "/agent-prompt", icon: Bot, superAdminOnly: true },
+  { title: "IVR Playbooks", to: "/ivr-playbooks", icon: ListTree, superAdminOnly: true },
   { title: "Users", to: "/users", icon: Users, permission: "users:read" },
   { title: "Settings", to: "/settings", icon: Settings },
 ]
@@ -55,4 +59,30 @@ export function visibleNavFor({ permissions, isSuperAdmin, isElevated }: NavCont
   return isSuperAdmin
     ? [...visible.filter((i) => i.superAdminOnly), ...visible.filter((i) => !i.superAdminOnly)]
     : visible
+}
+
+/** True if `to` appears in the current user's visible nav — gates a route the same
+ *  way its sidebar entry is gated, without duplicating the permission logic.
+ *  A route with no matching nav entry has nothing to gate, so it's always visible. */
+export function isRouteVisible(to: string, ctx: NavContext): boolean {
+  const item = navItems.find((i) => i.to === to)
+  if (!item) return true
+  return visibleNavFor(ctx).includes(item)
+}
+
+/** Where to send a user who can't (or shouldn't) land on the route they hit —
+ *  their first visible nav item. Settings carries no permission gate, so this is
+ *  never empty for an authenticated tenant user. */
+export function defaultRouteFor(ctx: NavContext): string {
+  return visibleNavFor(ctx)[0]?.to ?? "/settings"
+}
+
+/** The current user's NavContext, assembled from the auth store — the single
+ *  place Sidebar and RequireNavRoute read permissions/elevation from, so they
+ *  can never diverge on what's visible. */
+export function useNavContext(): NavContext {
+  const permissions = useAppSelector(selectPermissions)
+  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
+  const isElevated = useAppSelector(selectIsElevated)
+  return { permissions, isSuperAdmin, isElevated }
 }

@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 
 from livekit import rtc
 from livekit.agents import (
@@ -26,8 +27,9 @@ from redis.asyncio import Redis
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
-from agent_worker.transcript_publisher import attach_transcript_publisher
+from agent_worker.transcript_publisher import ReorderingEmitter, attach_transcript_publisher
 from vera_core.config.settings import get_settings
+from vera_core.events import CallFailedEvent, CallFailureReason, WorkerEventBus
 from vera_core.observability.correlation import (
     call_trace_attributes,
     is_listen_only_identity,
@@ -39,8 +41,6 @@ from vera_core.redis import create_redis
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("agent_worker")
-
-AGENT_NAME = "vera-agent"
 
 # Bound the wait so a never-answered outbound call doesn't pin a worker forever.
 _SPEAKER_TIMEOUT_S = 60.0
@@ -64,56 +64,105 @@ def _is_ready_speaker(participant: rtc.Participant) -> bool:
     return True
 
 
-async def wait_for_speaker(
-    ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_S
-) -> rtc.RemoteParticipant | None:
-    """Block until a ready, non-monitor remote participant is present, or the timeout.
+@dataclass(frozen=True)
+class SpeakerReady:
+    """A ready, non-monitor participant is present — the agent may start/greet."""
 
-    Returns that participant once the browser caller has joined or the SIP callee has
-    answered, or None on timeout. The caller pins the agent's audio input to the
-    returned participant so it listens to the speaker and not the listen-only monitor.
+    participant: rtc.RemoteParticipant
 
-    Subscribe to events BEFORE checking existing participants so that a participant
-    who joins in the gap between the two steps is never missed (the event fires into
-    an already-listening handler and resolves the future immediately).
+
+@dataclass(frozen=True)
+class CallFailed:
+    """The outbound call did not connect (busy/declined/no-answer/trunk error)."""
+
+    reason: CallFailureReason
+
+
+type WaitResult = SpeakerReady | CallFailed
+
+# SIP disconnect reason (int enum) → user-facing failure class. Anything not listed
+# (incl. None and SIP_TRUNK_FAILURE) is an opaque failure.
+_SIP_FAILURE_REASONS: dict[int, CallFailureReason] = {
+    rtc.DisconnectReason.USER_REJECTED: CallFailureReason.BUSY_OR_DECLINED,
+    rtc.DisconnectReason.USER_UNAVAILABLE: CallFailureReason.NO_ANSWER,
+}
+
+
+def classify_sip_disconnect(reason: int | None) -> CallFailureReason:
+    if reason is None:
+        return CallFailureReason.FAILED
+    return _SIP_FAILURE_REASONS.get(reason, CallFailureReason.FAILED)
+
+
+async def wait_for_speaker(ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_S) -> WaitResult:
+    """Block until the call is ready to run or has failed.
+
+    Returns SpeakerReady once the browser caller joins or the SIP callee answers
+    (sip.callStatus == "active"). Returns CallFailed if the SIP callee drops before
+    answering (busy/declined/trunk error) or nobody becomes ready within timeout_s
+    (treated as no-answer). Subscribe to events BEFORE scanning existing participants
+    so a join/attr/disconnect in the gap is never missed.
     """
     loop = asyncio.get_running_loop()
-    arrived: asyncio.Future[rtc.RemoteParticipant] = loop.create_future()
+    result: asyncio.Future[WaitResult] = loop.create_future()
 
-    def _resolve(participant: rtc.Participant) -> None:
-        if arrived.done() or not _is_ready_speaker(participant):
+    def _resolve_ready(participant: rtc.Participant) -> None:
+        if result.done() or not _is_ready_speaker(participant):
             return
-        # Look up the RemoteParticipant (filters out the agent's own local participant,
-        # which never appears in remote_participants).
         remote = ctx.room.remote_participants.get(participant.identity)
         if remote is not None:
-            arrived.set_result(remote)
+            result.set_result(SpeakerReady(remote))
 
     def _on_connected(participant: rtc.RemoteParticipant) -> None:
-        _resolve(participant)
+        logger.info(
+            "wait_for_speaker[%s]: participant_connected identity=%s kind=%s sip.callStatus=%s",
+            ctx.room.name,
+            participant.identity,
+            participant.kind,
+            participant.attributes.get(_SIP_CALL_STATUS_ATTR),
+        )
+        _resolve_ready(participant)
 
     def _on_attributes_changed(_changed: dict[str, str], participant: rtc.Participant) -> None:
-        # The SIP callee's ring → active transition arrives here, not as a new join.
-        _resolve(participant)
+        _resolve_ready(participant)
 
-    # Subscribe FIRST — closing the race window where a join event could fire
-    # between the existing-participant scan and the event registration.
+    def _on_disconnected(participant: rtc.RemoteParticipant) -> None:
+        # A SIP callee dropping before it answered means the outbound call failed.
+        logger.info(
+            "wait_for_speaker[%s]: participant_disconnected identity=%s kind=%s reason=%s",
+            ctx.room.name,
+            participant.identity,
+            participant.kind,
+            participant.disconnect_reason,
+        )
+        if result.done() or participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            return
+        result.set_result(CallFailed(classify_sip_disconnect(participant.disconnect_reason)))
+
     ctx.room.on("participant_connected", _on_connected)
     ctx.room.on("participant_attributes_changed", _on_attributes_changed)
+    ctx.room.on("participant_disconnected", _on_disconnected)
     try:
-        # Now check participants who arrived before we subscribed.
+        logger.info(
+            "wait_for_speaker[%s]: participants at scan = %s",
+            ctx.room.name,
+            {
+                p.identity: (str(p.kind), p.attributes.get(_SIP_CALL_STATUS_ATTR))
+                for p in ctx.room.remote_participants.values()
+            },
+        )
         for p in ctx.room.remote_participants.values():
-            _resolve(p)
-        if arrived.done():
-            return arrived.result()
-
+            _resolve_ready(p)
+        if result.done():
+            return result.result()
         async with asyncio.timeout(timeout_s):
-            return await arrived
+            return await result
     except TimeoutError:
-        return None
+        return CallFailed(CallFailureReason.NO_ANSWER)
     finally:
         ctx.room.off("participant_connected", _on_connected)
         ctx.room.off("participant_attributes_changed", _on_attributes_changed)
+        ctx.room.off("participant_disconnected", _on_disconnected)
 
 
 def build_room_input_options(speaker_identity: str | NotGiven) -> RoomInputOptions:
@@ -142,16 +191,11 @@ def session_id_for(room_name: str) -> str:
     return room_name
 
 
-async def publish_unanswered_notice(service: TranscriptService, room_name: str) -> None:
-    """Publish a user-facing transcript event when the outbound call is not answered,
-    then end the stream so the browser's TranscriptPanel shows feedback."""
-    await service.publish_turn(
-        room_name,
-        role="agent",
-        text="The outbound call was not answered or the line is unavailable. Please try again.",
-        ts=int(time.time() * 1000),
-    )
-    await service.end(room_name)
+async def _emit_call_failed(
+    bus: WorkerEventBus, room_name: str, reason: CallFailureReason, *, now_ms: int
+) -> None:
+    """Publish the call.failed event the control plane consumes to tear the room down."""
+    await bus.emit(CallFailedEvent(room_name=room_name, reason=reason, ts=now_ms))
 
 
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
@@ -197,24 +241,21 @@ async def entrypoint(ctx: JobContext) -> None:
     speaker: rtc.RemoteParticipant | None = None
     meta = json.loads(ctx.job.metadata or "{}")
     if meta.get("wait_for_speaker"):
-        speaker = await wait_for_speaker(ctx)
-        if speaker is None:
-            logger.warning("no speaker joined room %s within timeout — not starting", room_name)
-            # Publish feedback to the browser's transcript panel before exiting.
-            if meta.get("publish_transcript"):
-                timeout_redis = create_redis(settings.redis_url)
-                timeout_service = TranscriptService(
-                    RedisTranscriptStore(
-                        timeout_redis,
-                        ttl_seconds=settings.transcript_stream_ttl_seconds,
-                        end_grace_seconds=settings.transcript_end_grace_seconds,
-                    )
+        logger.info("wait_for_speaker: entering for room %s (meta=%s)", room_name, meta)
+        outcome = await wait_for_speaker(ctx)
+        logger.info("wait_for_speaker: outcome for room %s = %s", room_name, type(outcome).__name__)
+        if isinstance(outcome, CallFailed):
+            logger.warning("outbound call failed for room %s: %s", room_name, outcome.reason.value)
+            failure_redis = create_redis(settings.redis_url)
+            try:
+                bus = WorkerEventBus(failure_redis, maxlen=settings.worker_events_stream_maxlen)
+                await _emit_call_failed(
+                    bus, room_name, outcome.reason, now_ms=int(time.time() * 1000)
                 )
-                try:
-                    await publish_unanswered_notice(timeout_service, room_name)
-                finally:
-                    await timeout_redis.aclose()
+            finally:
+                await failure_redis.aclose()
             return
+        speaker = outcome.participant
 
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
@@ -230,6 +271,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
     transcript_redis: Redis | None = None
     transcript_service: TranscriptService | None = None
+    transcript_emitter: ReorderingEmitter | None = None
     if meta.get("publish_transcript"):
         transcript_redis = create_redis(settings.redis_url)
         transcript_service = TranscriptService(
@@ -239,9 +281,16 @@ async def entrypoint(ctx: JobContext) -> None:
                 end_grace_seconds=settings.transcript_end_grace_seconds,
             )
         )
-        attach_transcript_publisher(session, transcript_service, room_name)
+        transcript_emitter = attach_transcript_publisher(session, transcript_service, room_name)
 
     async def _on_shutdown() -> None:
+        # Order is load-bearing: flush held turns BEFORE end(). end() appends the sentinel
+        # that stops readers, so a turn flushed after it would be stranded behind the sentinel.
+        if transcript_emitter is not None:
+            try:
+                await transcript_emitter.aclose()
+            except Exception:  # best-effort; never block shutdown
+                logger.exception("failed to flush transcript for %s", room_name)
         if transcript_service is not None:
             try:
                 await transcript_service.end(room_name)
@@ -277,7 +326,14 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 def build_worker_options() -> WorkerOptions:
-    return WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, agent_name=AGENT_NAME)
+    # agent_name must match the control plane's dispatch name. Configurable via
+    # VERA_LIVEKIT_AGENT_NAME (default "vera-agent") so a laptop sharing a LiveKit
+    # project with a deployed worker can isolate its own dispatch pool.
+    return WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        prewarm_fnc=prewarm,
+        agent_name=get_settings().livekit_agent_name,
+    )
 
 
 if __name__ == "__main__":

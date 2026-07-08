@@ -28,6 +28,7 @@ import {
   type ApiKeyScope,
   type CreatedApiKey,
 } from "@/lib/api-keys"
+import { copyText } from "@/lib/clipboard"
 import { formatDate } from "@/lib/patient-forms/display"
 import { SettingsCard } from "./SettingsCard"
 
@@ -125,9 +126,9 @@ export function ApiKeysSection() {
     [refresh],
   )
 
-  const copyToken = useCallback(() => {
+  const copyToken = useCallback(async () => {
     if (!created) return
-    void navigator.clipboard.writeText(created.token).then(() => setCopied(true))
+    setCopied(await copyText(created.token))
   }, [created])
 
   return (

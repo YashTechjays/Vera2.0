@@ -6,16 +6,21 @@ No persistence: this creates an ephemeral LiveKit room, dispatches the agent, an
 appears in Live Monitoring. It is deliberately decoupled from /calls so it can be
 built and tested in parallel with the real call-initiation flow.
 
-Auth note (acknowledged stopgap): guards with `require("calls:read")`, matching the
-interim convention in `calls.py`.
+Auth note: guarded by the dedicated `voice_lab:sandbox` permission, kept separate
+from `calls:read` (which gates the real call system) so a narrow role like
+VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
+import logging
 import re
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
@@ -29,6 +34,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.livekit_gateway import OutboundDialError
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
@@ -36,6 +42,7 @@ from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
 from vera_core.integrations.credentials import get_integration_credentials
+from vera_core.models import InsuranceProvider
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.observability.correlation import (
     CALLER_IDENTITY_PREFIX,
@@ -48,8 +55,41 @@ from vera_core.transcript import TranscriptEvent, TranscriptService
 
 router = APIRouter(tags=["voice-lab"])
 
+logger = logging.getLogger("control_plane.voice_lab")
+
 # E.164: a leading + and 1-15 digits, first digit non-zero.
 _E164 = re.compile(r"^\+[1-9]\d{1,14}$")
+
+
+class ProviderOption(BaseModel):
+    """Minimal insurance-provider option for the call-start provider picker (non-PHI)."""
+
+    id: UUID
+    name: str
+
+
+@router.get(
+    "/voice-lab/insurance-providers",
+    response_model=ResponseModel[list[ProviderOption]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_call_providers(
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("voice_lab:sandbox"),
+) -> ResponseModel[list[ProviderOption]]:
+    """Active insurance providers a tenant operator can pick when starting an IVR call. The
+    insurance_provider table is GLOBAL (no RLS), so it resolves on the tenant-scoped session;
+    the provider's active playbook is then applied server-side at call start."""
+    rows = (
+        await session.execute(
+            select(InsuranceProvider.id, InsuranceProvider.name)
+            .where(InsuranceProvider.status == "active")
+            .order_by(InsuranceProvider.name)
+        )
+    ).all()
+    return ok([ProviderOption(id=row.id, name=row.name) for row in rows])
 
 
 @router.post(
@@ -69,7 +109,7 @@ async def start_voice_session(
     livekit: LiveKit,
     session: TenantSession,
     kms: Kms,
-    caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
+    caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[VoiceSessionResponse]:
     # Synthetic call id — no DB row; the room name is still the canonical
     # call--<tenant>--<call> so worker correlation/observability work unchanged.
@@ -100,19 +140,28 @@ async def start_voice_session(
     prefix = MONITOR_IDENTITY_PREFIX if is_outbound else CALLER_IDENTITY_PREFIX
     browser_identity = f"{prefix}{caller.user_id}"
 
-    await livekit.create_call_room(
+    metadata: dict[str, Any] = {
+        "wait_for_speaker": True,
+        "publish_transcript": True,
+        "enable_ivr_navigation": body.enable_ivr_navigation,
+    }
+    # When navigating, specialize the navigator with the provider's active playbook if one exists;
+    # otherwise the worker falls back to the generic navigator (no ivr_playbook key).
+    if body.enable_ivr_navigation:
+        await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
+    await livekit.create_call_room(room_name, metadata=metadata)
+    logger.info(
+        "voice-lab: created room + dispatched agent for room %s (outbound=%s)",
         room_name,
-        metadata={
-            "wait_for_speaker": True,
-            "publish_transcript": True,
-            "enable_ivr_navigation": body.enable_ivr_navigation,
-        },
+        outbound is not None,
     )
     if outbound is not None:
         phone_number, trunk_id = outbound
         try:
             await livekit.create_sip_participant(room_name, phone_number, trunk_id)
+            logger.info("voice-lab: placed outbound SIP call into room %s", room_name)
         except OutboundDialError as e:
+            logger.warning("voice-lab: outbound dial failed for room %s: %s", room_name, e)
             # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
             # after it was stored, or the carrier refused the call). Tear down the room
             # + dispatched agent we just created so nothing is left orphaned, and return
@@ -147,7 +196,7 @@ async def end_voice_session(
     room_name: str,
     tenant_id: TenantId,
     livekit: LiveKit,
-    _caller: VerifiedIdentity = require("calls:read"),
+    _caller: VerifiedIdentity = require("voice_lab:sandbox"),
 ) -> ResponseModel[None]:
     # Deleting the room is what actually ends the session: it disconnects the agent
     # worker (its session shuts down) and any SIP callee (the outbound call hangs up).
@@ -194,7 +243,7 @@ async def stream_transcript(
         user_id, permissions = await resolver.effective_permissions(
             session, tenant_id, identity.user_id
         )
-    allowed = "calls:read" in permissions
+    allowed = "voice_lab:sandbox" in permissions
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
@@ -204,14 +253,14 @@ async def stream_transcript(
             event_type=AuditEvent.PHI_ACCESS.value,
             resource_type="transcript",
             resource_id=room_name,
-            permission_key="calls:read",
+            permission_key="voice_lab:sandbox",
             decision="allow" if allowed else "deny",
             request_id=current_request_id(request),
         )
     )
     if not allowed:
         raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN, message="missing permission calls:read"
+            DefaultExceptionCode.FORBIDDEN, message="missing permission voice_lab:sandbox"
         )
 
     async def _events() -> AsyncIterator[str]:

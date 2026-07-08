@@ -23,13 +23,28 @@ Prerequisites: [`uv`](https://docs.astral.sh/uv/) and [`just`](https://github.co
 
 ```bash
 uv sync --all-packages   # or: just bootstrap
-just up                  # Postgres (pgvector) + Redis via docker compose
+just up                  # core infra: Postgres (pgvector) + Redis + sendria + livekit
 just migrate && just seed
 just api                 # control plane on :8000
 just check               # ruff + mypy + pytest — the CI gate
 ```
 
 Python is pinned to 3.12 (`.python-version`); the phi-codec dependency caps at `<3.13`.
+
+### Observability (Langfuse) — opt-in
+
+`just up` starts only the core dev infra. The self-hosted **Langfuse v3** tracing stack
+(ClickHouse + MinIO + its own Postgres/Redis + web + worker) is heavy, so it's gated behind
+the `langfuse` docker-compose profile and never starts with `just up` (or a plain
+`docker compose up`). Bring it up only when you need tracing:
+
+```bash
+just langfuse-up         # docker compose --profile langfuse up -d; web UI on :4000
+just langfuse-down       # stop it and free the RAM
+```
+
+Leaving it running balloons the Docker VM until the kernel OOM-kills ClickHouse. The worker
+degrades gracefully (drops spans) when it's down.
 
 ### Seeding a dev login
 

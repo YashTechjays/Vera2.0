@@ -1,11 +1,13 @@
 from .dto import (
     CallSummary,
     JoinTokenResponse,
+    RevokeAccessRequest,
     StartCallRequest,
     StartVoiceSessionRequest,
     VoiceSessionResponse,
 )
 from .form_template import FieldType, FormField, FormTemplate
+from .ivr_playbook import IvrPlaybookConfig
 from .persona import PersonaTweak
 
 __all__ = [
@@ -13,8 +15,10 @@ __all__ = [
     "FieldType",
     "FormField",
     "FormTemplate",
+    "IvrPlaybookConfig",
     "JoinTokenResponse",
     "PersonaTweak",
+    "RevokeAccessRequest",
     "StartCallRequest",
     "StartVoiceSessionRequest",
     "VoiceSessionResponse",

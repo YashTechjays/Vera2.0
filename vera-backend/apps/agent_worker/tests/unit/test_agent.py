@@ -266,6 +266,28 @@ async def test_strip_silence_token_passes_real_speech_through() -> None:
     assert await _drain(_strip_silence_token(_astream("Med", "ical"))) == "Medical"
 
 
+@pytest.mark.asyncio
+async def test_strip_silence_token_swallows_label_variant() -> None:
+    # Regression: on a silent turn the model sometimes emits the sentinel's LABEL
+    # ("SILENCE_TOKEN:") instead of [[SILENT]]. The exact-match stripper let it through, so
+    # "SILENCE_TOKEN:" was spoken + transcribed into a live call. All renderings must be silent.
+    assert await _drain(_strip_silence_token(_astream("SILENCE_TOKEN:"))) == ""
+    assert await _drain(_strip_silence_token(_astream("SILENCE_TOKEN: [[SILENT]]"))) == ""
+    assert await _drain(_strip_silence_token(_astream("silence_token :"))) == ""
+    # a real answer that merely follows the sentinel still gets spoken (remainder is kept)
+    assert await _drain(_strip_silence_token(_astream("[[SILENT]] Provider"))) == " Provider"
+
+
+@pytest.mark.asyncio
+async def test_strip_silence_token_label_is_word_boundaried() -> None:
+    # The label alternative must strip only the standalone label, never a word that merely
+    # contains it — an unanchored regex turned "the SILENCE_TOKENS list" into "the S list".
+    assert (
+        await _drain(_strip_silence_token(_astream("read the SILENCE_TOKENS list")))
+        == "read the SILENCE_TOKENS list"
+    )
+
+
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     boundary = PassthroughPHIBoundary()
     nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")
@@ -276,3 +298,30 @@ def test_build_agent_selects_by_ivr_navigation_flag() -> None:
         build_agent({"enable_ivr_navigation": False}, boundary=boundary, session_id="s1"),
         VeraAgent,
     )
+
+
+def test_build_agent_playbook_specializes_but_never_selects() -> None:
+    boundary = PassthroughPHIBoundary()
+    # With the flag on, the playbook specializes the navigator's instructions.
+    nav = build_agent(
+        {"enable_ivr_navigation": True, "ivr_playbook": {"rep_keyword": "Advocate"}},
+        boundary=boundary,
+        session_id="s1",
+    )
+    assert isinstance(nav, IvrNavigatorAgent)
+    assert "<rep_keyword>Advocate</rep_keyword>" in nav.instructions
+    # The flag is the sole selector: a playbook without it — even with the flag explicitly
+    # false — never overrides the opt-out into a silent-on-connect navigator.
+    for meta in (
+        {"ivr_playbook": {"rep_keyword": "Advocate"}},
+        {"enable_ivr_navigation": False, "ivr_playbook": {"rep_keyword": "Advocate"}},
+    ):
+        assert isinstance(build_agent(meta, boundary=boundary, session_id="s1"), VeraAgent)
+    # A malformed playbook is fail-safe: the navigator still runs, just generic.
+    generic = build_agent(
+        {"enable_ivr_navigation": True, "ivr_playbook": {"bogus": "x"}},
+        boundary=boundary,
+        session_id="s1",
+    )
+    assert isinstance(generic, IvrNavigatorAgent)
+    assert "<provider_playbook" not in generic.instructions

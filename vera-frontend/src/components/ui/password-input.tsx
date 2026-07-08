@@ -15,7 +15,9 @@ function PasswordInput({
     <div className="relative">
       <Input
         type={visible ? "text" : "password"}
-        className={cn("pr-9", className)}
+        // [&::-ms-reveal]:hidden suppresses Edge's built-in reveal eye, which
+        // would otherwise show up next to our own toggle.
+        className={cn("pr-9 [&::-ms-reveal]:hidden", className)}
         {...props}
       />
       <button

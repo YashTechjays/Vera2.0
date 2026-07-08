@@ -1,4 +1,10 @@
 # Local dev infra only — production runs Cloud SQL + Memorystore.
+#
+# `just up` starts only the CORE services (postgres, redis, sendria, livekit).
+# The heavy Langfuse v3 observability stack is gated behind the "langfuse" compose
+# profile, so it never starts unless you ask for it (`just langfuse-up`, or
+# `docker compose --profile langfuse up`). Left running, that stack balloons the
+# Docker VM until the kernel OOM-kills its ClickHouse. See CLAUDE.md → "Local infra".
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -31,6 +37,9 @@ services:
   # VERA_SMTP_* defaults point here. Captured mail is viewable at http://localhost:1080.
   sendria:
     image: msztolcman/sendria:v2.2.2.0
+    # sendria publishes an amd64-only image; pin the platform so it runs under
+    # emulation on Apple Silicon (arm64) without the host-platform-mismatch warning.
+    platform: linux/amd64
     ports:
       - "1025:1025"
       - "1080:1080"
@@ -44,15 +53,20 @@ services:
       - "7882:7882/udp"
 
   # ---------------------------------------------------------------------------
-  # Langfuse v3 self-hosted observability stack
-  # All service/volume names are prefixed "langfuse-" to avoid collisions with
-  # the app postgres (5432) and redis (6379) services above.
-  # Only langfuse-web (4000→3000) and langfuse-minio (9090→9000) are host-mapped.
-  # Host port 3000 is reserved for the frontend React app.
+  # Langfuse v3 self-hosted observability stack — OPT-IN.
+  # Every service below is gated behind the "langfuse" profile, so none of it
+  # starts on a plain `docker compose up` / `just up`. Bring it up on demand with
+  # `just langfuse-up` (= `docker compose --profile langfuse up -d`).
+  #
+  # All service/volume names are prefixed "langfuse-" to avoid collisions with the
+  # app postgres (5432) and redis (6379) services above. Only langfuse-web
+  # (4000→3000) and langfuse-minio (9090→9000) are host-mapped. Host port 3000 is
+  # reserved for the frontend React app.
   # ---------------------------------------------------------------------------
 
   langfuse-postgres:
     image: postgres:16-alpine
+    profiles: ["langfuse"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: langfuse
@@ -68,6 +82,7 @@ services:
 
   langfuse-redis:
     image: redis:7-alpine
+    profiles: ["langfuse"]
     restart: unless-stopped
     command: redis-server --requirepass myredissecret
     volumes:
@@ -80,6 +95,7 @@ services:
 
   langfuse-clickhouse:
     image: clickhouse/clickhouse-server:latest
+    profiles: ["langfuse"]
     restart: unless-stopped
     user: "101:101"
     environment:
@@ -97,6 +113,7 @@ services:
 
   langfuse-minio:
     image: minio/minio:latest
+    profiles: ["langfuse"]
     restart: unless-stopped
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
@@ -115,6 +132,7 @@ services:
 
   langfuse-web:
     image: langfuse/langfuse:3
+    profiles: ["langfuse"]
     restart: unless-stopped
     depends_on:
       langfuse-postgres:
@@ -176,6 +194,7 @@ services:
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3
+    profiles: ["langfuse"]
     restart: unless-stopped
     depends_on:
       langfuse-postgres:

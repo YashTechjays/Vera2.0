@@ -1,1 +1,4 @@
-[{ "file": "ibv_form_standard.json", "insurance_type": "infertility_treatment" }]
+[
+  { "file": "ibv_form_standard_v2.json", "insurance_type": "infertility_treatment" },
+  { "file": "disease_only_verification.json", "insurance_type": "disease_only" }
+]

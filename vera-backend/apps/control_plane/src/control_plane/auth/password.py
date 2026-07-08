@@ -23,3 +23,17 @@ def verify_password(password: str, hashed: str) -> bool:
         return bcrypt.checkpw(password.encode(), hashed.encode())
     except ValueError:
         return False
+
+
+# A dummy hash generated once at import from the SAME _ROUNDS as real hashes, so a
+# verify against it costs exactly what a real verify costs (the bcrypt cost factor
+# drives timing). The password is a throwaway, not a secret.
+_DUMMY_HASH = hash_password("vera-timing-equalizer")
+
+
+def verify_password_or_dummy(password: str, hashed: str | None) -> bool:
+    """Constant-work verify: when there is no stored hash (unknown email, or a user
+    with no password identity), still run a full bcrypt comparison against a dummy
+    hash and return False. Keeps the unknown-email path the same latency as the
+    wrong-password path — closes the login user-enumeration timing side-channel."""
+    return verify_password(password, hashed if hashed is not None else _DUMMY_HASH)

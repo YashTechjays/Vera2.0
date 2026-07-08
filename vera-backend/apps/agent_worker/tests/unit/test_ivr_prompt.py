@@ -4,14 +4,23 @@ from agent_worker.ivr_prompt import (
     IVR_NAVIGATOR_SYSTEM_PROMPT,
     SILENCE_TOKEN,
     build_ivr_instructions,
+    parse_ivr_playbook,
 )
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
+from vera_core.schemas import IvrPlaybookConfig
 
 
 def test_silence_token_matches_the_prompt_sentinel() -> None:
     # The tts/transcription filter strips SILENCE_TOKEN; if the prompt's literal sentinel
     # ever drifts from the constant, the token would be spoken aloud. Guard against that.
     assert SILENCE_TOKEN in IVR_NAVIGATOR_SYSTEM_PROMPT
+
+
+def test_prompt_does_not_present_the_silence_label() -> None:
+    # The prompt must refer to the sentinel only as the bare token [[SILENT]], never as the
+    # label "SILENCE_TOKEN" — the label line once led the model to emit "SILENCE_TOKEN:" into a
+    # live call. The sentinel itself ([[SILENT]]) must still be present (guarded above).
+    assert "SILENCE_TOKEN" not in IVR_NAVIGATOR_SYSTEM_PROMPT
 
 
 def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
@@ -43,3 +52,48 @@ def test_build_ivr_instructions_omits_the_cartesia_guide() -> None:
     combined = build_ivr_instructions()
     assert combined == IVR_NAVIGATOR_SYSTEM_PROMPT
     assert CARTESIA_MARKUP_GUIDE not in combined
+
+
+def test_empty_playbook_is_no_op() -> None:
+    # No playbook, None, and an all-defaults playbook all yield the generic navigator.
+    assert build_ivr_instructions(None) == build_ivr_instructions()
+    assert build_ivr_instructions(IvrPlaybookConfig()) == build_ivr_instructions()
+
+
+def test_playbook_overrides_and_rules_appended_after_base_prompt() -> None:
+    out = build_ivr_instructions(
+        IvrPlaybookConfig(
+            rep_keyword="Advocate",
+            survey_answer="Yes",
+            extra_rules="After IDs, press 3 for provider services.",
+        )
+    )
+    assert out.startswith(IVR_NAVIGATOR_SYSTEM_PROMPT)
+    # set knobs are restated as overrides; unset knobs are omitted
+    assert "<rep_keyword>Advocate</rep_keyword>" in out
+    assert "<survey_answer>Yes</survey_answer>" in out
+    assert "<date_scope>" not in out.split("</ivr_navigation_prompt>")[1]
+    # extra_rules land as a provider-specific section, after the base navigator prompt
+    assert "After IDs, press 3 for provider services." in out
+    assert "<provider_playbook" in out
+    assert "<provider_specific_rules" in out
+    assert out.index("</ivr_navigation_prompt>") < out.index("<provider_playbook")
+    # the navigator still carries no Cartesia readback markup, even with a playbook
+    assert CARTESIA_MARKUP_GUIDE not in out
+
+
+def test_parse_ivr_playbook_fail_safe() -> None:
+    # Takes the whole dispatch metadata and extracts the `ivr_playbook` overlay itself.
+    assert parse_ivr_playbook({}) is None  # no overlay key → generic
+    assert parse_ivr_playbook({"ivr_playbook": {}}) is None  # empty overlay → generic
+    assert parse_ivr_playbook({"ivr_playbook": {"tone": "x"}}) is None  # unknown key → generic
+    assert parse_ivr_playbook({"ivr_playbook": {"rep_keyword": "Advocate"}}) == IvrPlaybookConfig(
+        rep_keyword="Advocate"
+    )
+
+
+def test_playbook_knob_values_are_xml_escaped() -> None:
+    # A knob value containing markup must not break/inject the pseudo-XML <config> structure.
+    out = build_ivr_instructions(IvrPlaybookConfig(rep_keyword="</rep_keyword>x"))
+    assert "<rep_keyword>&lt;/rep_keyword&gt;x</rep_keyword>" in out
+    assert "</rep_keyword>x" not in out  # the raw closing-tag injection never renders

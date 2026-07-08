@@ -1,6 +1,16 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
-import { visibleNavFor } from "@/lib/nav"
+// nav.ts now also exports useNavContext, which pulls in the Redux store chain
+// (authSlice -> auth/storage) purely via import graph. That module touches
+// sessionStorage at import time, which isn't defined in this file's (node) test
+// environment, so stub it out the same way Sidebar.test.ts does.
+vi.mock("@/lib/auth/storage", () => ({
+  getToken: () => null,
+  setSession: vi.fn(),
+  clearSession: vi.fn(),
+}))
+
+import { defaultRouteFor, isRouteVisible, visibleNavFor } from "@/lib/nav"
 
 const ALL_PERMS = ["forms:read", "calls:read", "users:read"]
 
@@ -11,11 +21,23 @@ describe("visibleNavFor", () => {
       isSuperAdmin: false,
       isElevated: false,
     }).map((i) => i.title)
-    expect(titles).toContain("Live Monitoring") // no permission required
+    expect(titles).not.toContain("Live Monitoring") // calls:read missing
     expect(titles).toContain("Users") // has users:read
+    expect(titles).toContain("Settings") // no permission required
     expect(titles).not.toContain("Data Management") // forms:read missing
+    expect(titles).not.toContain("Voice Lab") // voice_lab:sandbox missing
     expect(titles).not.toContain("Tenant Access") // platform-only
     expect(titles).not.toContain("Agent Prompt")
+    expect(titles).not.toContain("IVR Playbooks")
+  })
+
+  it("virtual_assistant-shaped permission set sees only Voice Lab and Settings", () => {
+    const titles = visibleNavFor({
+      permissions: ["voice_lab:sandbox"],
+      isSuperAdmin: false,
+      isElevated: false,
+    }).map((i) => i.title)
+    expect(titles).toEqual(["Voice Lab", "Settings"])
   })
 
   it("super admin, NOT elevated: only platform items, tenant items hidden", () => {
@@ -25,7 +47,7 @@ describe("visibleNavFor", () => {
       isSuperAdmin: true,
       isElevated: false,
     }).map((i) => i.title)
-    expect(titles).toEqual(["Tenant Access", "Agent Prompt"])
+    expect(titles).toEqual(["Tenant Access", "Agent Prompt", "IVR Playbooks"])
   })
 
   it("super admin, elevated: platform items first, then tenant items", () => {
@@ -34,8 +56,36 @@ describe("visibleNavFor", () => {
       isSuperAdmin: true,
       isElevated: true,
     }).map((i) => i.title)
-    expect(titles.slice(0, 2)).toEqual(["Tenant Access", "Agent Prompt"])
+    expect(titles.slice(0, 3)).toEqual(["Tenant Access", "Agent Prompt", "IVR Playbooks"])
     expect(titles).toContain("Live Monitoring")
     expect(titles).toContain("Users")
+  })
+})
+
+describe("defaultRouteFor", () => {
+  it("sends a virtual_assistant-shaped user to Voice Lab", () => {
+    expect(
+      defaultRouteFor({ permissions: ["voice_lab:sandbox"], isSuperAdmin: false, isElevated: false })
+    ).toBe("/voice-lab")
+  })
+
+  it("falls back to Settings when no other item is visible", () => {
+    expect(
+      defaultRouteFor({ permissions: [], isSuperAdmin: false, isElevated: false })
+    ).toBe("/settings")
+  })
+})
+
+describe("isRouteVisible", () => {
+  it("hides a gated route the user lacks the permission for", () => {
+    expect(
+      isRouteVisible("/", { permissions: ["voice_lab:sandbox"], isSuperAdmin: false, isElevated: false })
+    ).toBe(false)
+  })
+
+  it("shows a route with no matching nav entry (nothing to gate)", () => {
+    expect(
+      isRouteVisible("/mfa-enroll", { permissions: [], isSuperAdmin: false, isElevated: false })
+    ).toBe(true)
   })
 })
