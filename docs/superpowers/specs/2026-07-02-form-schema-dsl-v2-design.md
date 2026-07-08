@@ -215,6 +215,14 @@ its sections complete — by then any answers their `applicable_when` depends on
 `coverage_type`, asked mid-task) exist. It is the only field-level task reference;
 everything else maps via sections.
 
+> **Amended 2026-07-08** (by the prompt-compiler design §3.4): `confirm_in_task`
+> widens from a plain task key to
+> `{"task_key": "…", "confirm_immediate": true|false}` (the string form stays legal
+> and means `confirm_immediate: false`). `confirm_immediate: true` speaks the
+> confirmation **immediately after the gating question is answered** (spouse
+> name/DOB right after `coverage_type` = Family), not at the task's end; `false`
+> keeps the end-of-task behavior described above.
+
 **Types** drive both the UI widget default and the extraction/normalization target:
 `enum`→select, `date`→date input, `phone`→tel, `currency`/`percent`/`integer`→validated
 text, `text`→input (or `ui.widget: "textarea"`). `special_values` lists the

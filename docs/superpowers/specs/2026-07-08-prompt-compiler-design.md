@@ -131,6 +131,9 @@ into the `prompt` string. The IR is no longer stored anywhere.
    as "Ask only if …" clauses. `ask_groups` render as one combined question
    replacing its members on the first pass; `alternatives` render as either/or
    ("once one is answered, record N/A for the others"). `confirm_in_task` leaves
+   render per their `confirm_immediate` flag (§3.4): immediate ones attach to
+   their anchor question ("if the answer is Family, immediately confirm: …", all
+   immediate confirms sharing the anchor grouped together); non-immediate ones
    render in a "confirm at the end of this task" block.
 4. **Termination rules** — each flow rule attaches to the task whose sections
    contain its trigger fields (where it can actually fire): condition in words,
@@ -165,6 +168,39 @@ applicability, flow rules, and contradictions, so wording is uniform everywhere.
   document order (where the last answer arrives).
 - `skip_to_task` referencing a task that renders later is expected; the renderer
   only names it.
+
+### 3.4 DSL change: `confirm_in_task` gains `confirm_immediate`
+
+The fixed end-of-task rule is wrong for the spouse case: once `coverage_type` is
+answered "Family", the agent should confirm spouse name and DOB **right there**,
+not minutes later. The DSL grows a knob:
+
+```jsonc
+"confirm_in_task": { "task_key": "insurance_basics", "confirm_immediate": true }
+```
+
+- **Grammar** (`dsl.py`): `confirm_in_task: str | ConfirmInTask` — the plain-string
+  form stays legal and means `{task_key: <str>, confirm_immediate: false}`. The
+  union is required for compatibility: already-published `schema_version` documents
+  in the DB carry the string form and must keep validating. `ConfirmInTask` is a
+  pydantic model with `Field(description=…)` intent on both fields.
+- **Semantics**: `confirm_immediate: true` → the confirmation is spoken immediately
+  after its **anchor question** is answered and the leaf's gate is satisfied;
+  `false` → at the end of the named task (previous behavior, still the default).
+- **Anchor** = the last (document-order) `ask`/`confirm` leaf referenced by the
+  confirm leaf's gate chain that is collected in the named task. All immediate
+  confirms sharing an anchor are grouped and rendered on that question ("if the
+  answer is Family, immediately confirm: spouse name …, spouse date of birth …").
+- **New validator rule** (`dsl.py`): `confirm_immediate: true` requires the gate
+  chain to reference at least one collectable leaf inside the named task —
+  otherwise "immediately after" has no anchor and the document is rejected.
+- **Catalog**: `spouse_partner_name` and `spouse_partner_dob` move to
+  `{"task_key": "insurance_basics", "confirm_immediate": true}`; recompile
+  republishes the IBV artifact.
+- **Surfaces**: `dsl.py` (model + validator), `prompting.py` (IR routing +
+  rendering), catalog + artifact, and a check that the frontend's UI subset
+  really ignores `confirm_in_task` (it is voice-only per `types.ts`).
+- The base v2 spec §4.4 carries the matching amendment note.
 
 ## 4. Prompt document (`prompt_version.composite_json`)
 
@@ -329,6 +365,10 @@ seams).
 - **Placeholder namespace**: context-leaf path accepted, non-context leaf path
   rejected, unknown token rejected — in both the `dsl.py` task-text validator and
   the API save path.
+- **confirm_in_task**: string form still validates (published documents);
+  `confirm_immediate: true` renders on the anchor question and `false` in the
+  end-of-task block; `true` with no in-task anchor rejected by the validator;
+  round-trip (`load → compile`) preserves whichever form the document uses.
 - **API integration**: draft validation (unknown task_key, bad placeholder, empty
   entry), preview merge with and without a published version.
 - **Seeder**: carry-forward on republish, task_key drop reporting, idempotency.
