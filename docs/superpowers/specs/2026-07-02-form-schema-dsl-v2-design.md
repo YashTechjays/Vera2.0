@@ -216,12 +216,13 @@ its sections complete — by then any answers their `applicable_when` depends on
 everything else maps via sections.
 
 > **Amended 2026-07-08** (by the prompt-compiler design §3.4): `confirm_in_task`
-> widens from a plain task key to
-> `{"task_key": "…", "confirm_immediate": true|false}` (the string form stays legal
-> and means `confirm_immediate: false`). `confirm_immediate: true` speaks the
+> changes from a plain task key to the **object form only**:
+> `{"task_key": "…", "confirm_immediate": true|false}` — the string form is
+> rejected so behavior is always explicit. `confirm_immediate: true` speaks the
 > confirmation **immediately after the gating question is answered** (spouse
 > name/DOB right after `coverage_type` = Family), not at the task's end; `false`
-> keeps the end-of-task behavior described above.
+> keeps the end-of-task behavior described above. Published documents carrying the
+> string form must be republished (pre-production stance).
 
 **Types** drive both the UI widget default and the extraction/normalization target:
 `enum`→select, `date`→date input, `phone`→tel, `currency`/`percent`/`integer`→validated

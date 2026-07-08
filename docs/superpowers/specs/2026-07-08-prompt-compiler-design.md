@@ -179,11 +179,17 @@ not minutes later. The DSL grows a knob:
 "confirm_in_task": { "task_key": "insurance_basics", "confirm_immediate": true }
 ```
 
-- **Grammar** (`dsl.py`): `confirm_in_task: str | ConfirmInTask` — the plain-string
-  form stays legal and means `{task_key: <str>, confirm_immediate: false}`. The
-  union is required for compatibility: already-published `schema_version` documents
-  in the DB carry the string form and must keep validating. `ConfirmInTask` is a
-  pydantic model with `Field(description=…)` intent on both fields.
+- **Grammar** (`dsl.py`): `confirm_in_task: ConfirmInTask | None` — **object form
+  only**; the legacy plain-string form is rejected so the behavior is always
+  explicit (no silently-implied end-of-task default). `ConfirmInTask` is a
+  pydantic model (`task_key: str`, `confirm_immediate: bool`) with
+  `Field(description=…)` intent on both fields.
+- **Compatibility consequence (accepted, pre-production)**: already-published
+  `schema_version` rows carry the string form and will fail to load after this
+  change. Dev databases are re-seeded (`just seed-schemas` publishes the new
+  document); forms pinned to old versions are dev artifacts and get recreated. No
+  `dsl_version` bump: readers and documents deploy together and no production
+  data exists — revisit this stance the moment production rows exist.
 - **Semantics**: `confirm_immediate: true` → the confirmation is spoken immediately
   after its **anchor question** is answered and the leaf's gate is satisfied;
   `false` → at the end of the named task (previous behavior, still the default).
@@ -197,9 +203,16 @@ not minutes later. The DSL grows a knob:
 - **Catalog**: `spouse_partner_name` and `spouse_partner_dob` move to
   `{"task_key": "insurance_basics", "confirm_immediate": true}`; recompile
   republishes the IBV artifact.
-- **Surfaces**: `dsl.py` (model + validator), `prompting.py` (IR routing +
-  rendering), catalog + artifact, and a check that the frontend's UI subset
-  really ignores `confirm_in_task` (it is voice-only per `types.ts`).
+- **Surfaces (verified by grep, complete list)**: `dsl.py` — field type, the
+  `task_keys` membership check becomes `.task_key`, the role guard and
+  requires-confirm_in_task rules are presence checks (unchanged), plus the new
+  anchor rule; `prompting.py` — `confirms_by_task` keys on `.task_key` and routing
+  splits on `.confirm_immediate`; `catalog/ibv_standard.py` — the two spouse
+  fields (the only users in either catalog; `disease_only` has none); the IBV
+  compiled artifact (regenerated); `tests/unit/forms/test_prompting.py::
+  test_confirm_in_task_fields_attach_to_their_task_end` (updated for the new
+  semantics). The frontend is untouched: `confirm_in_task` appears only in the
+  `types.ts` comment listing voice-only constructs the UI subset ignores.
 - The base v2 spec §4.4 carries the matching amendment note.
 
 ## 4. Prompt document (`prompt_version.composite_json`)
@@ -365,10 +378,10 @@ seams).
 - **Placeholder namespace**: context-leaf path accepted, non-context leaf path
   rejected, unknown token rejected — in both the `dsl.py` task-text validator and
   the API save path.
-- **confirm_in_task**: string form still validates (published documents);
+- **confirm_in_task**: string form REJECTED (object-only grammar);
   `confirm_immediate: true` renders on the anchor question and `false` in the
   end-of-task block; `true` with no in-task anchor rejected by the validator;
-  round-trip (`load → compile`) preserves whichever form the document uses.
+  round-trip (`load → compile`) preserves the object form.
 - **API integration**: draft validation (unknown task_key, bad placeholder, empty
   entry), preview merge with and without a published version.
 - **Seeder**: carry-forward on republish, task_key drop reporting, idempotency.
