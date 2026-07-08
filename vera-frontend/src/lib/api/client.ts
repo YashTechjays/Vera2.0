@@ -39,19 +39,15 @@ type Envelope<T> = {
   description: string | null
 }
 
-/** Thrown on any non-success outcome: network failure, HTTP error, or a
- *  `status: "FAIL"` envelope. `errorCode` is the backend's stable code. */
-export class ApiError extends Error {
-  readonly httpStatus: number
-  readonly errorCode: string | null
-
-  constructor(httpStatus: number, errorCode: string | null, message: string) {
-    super(message)
-    this.name = "ApiError"
-    this.httpStatus = httpStatus
-    this.errorCode = errorCode
-  }
-}
+// ApiError and its serialization helpers live in ./errors (dependency-free);
+// re-exported here so existing `from "@/lib/api/client"` imports keep working.
+export {
+  ApiError,
+  apiErrorHttpStatus,
+  apiErrorMessage,
+  serializeApiError,
+} from "@/lib/api/errors"
+import { ApiError } from "@/lib/api/errors"
 
 type RequestOptions = {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"

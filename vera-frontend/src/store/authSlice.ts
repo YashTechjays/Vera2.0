@@ -2,7 +2,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 
 import * as authApi from "@/lib/auth/api"
 import type { MeResponse } from "@/lib/auth/api"
-import { ApiError } from "@/lib/api/client"
+import { apiErrorMessage, serializeApiError } from "@/lib/api/client"
 import { clearSession, getToken, setSession } from "@/lib/auth/storage"
 
 type Status = "loading" | "anonymous" | "authenticated"
@@ -39,9 +39,12 @@ const initialState: AuthState = {
   sessionExpiresAt: null,
 }
 
-function message(err: unknown, fallback: string): string {
-  return err instanceof ApiError ? err.message : fallback
-}
+// createAsyncThunk serializes thrown errors to plain {name, message} objects,
+// so ApiError instances (and their httpStatus) don't survive to `unwrap()`
+// callers or `rejected` reducers. Every thunk whose error surfaces in the UI
+// passes `serializeApiError` to keep the backend's message and status readable
+// via apiErrorMessage/apiErrorHttpStatus.
+const keepApiError = { serializeError: serializeApiError }
 
 export const fetchMe = createAsyncThunk("auth/fetchMe", async () => {
   const me = await authApi.getMe()
@@ -71,6 +74,7 @@ export const loginThunk = createAsyncThunk(
     }
     return res.mfa
   },
+  keepApiError,
 )
 
 export const verifyMfaThunk = createAsyncThunk(
@@ -80,6 +84,7 @@ export const verifyMfaThunk = createAsyncThunk(
     setSession(res.session_token, arg.slug)
     await dispatch(fetchMe()).unwrap()
   },
+  keepApiError,
 )
 
 // --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory,
@@ -90,6 +95,7 @@ export const platformLoginThunk = createAsyncThunk(
     const res = await authApi.platformLogin(arg.email, arg.password)
     dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
   },
+  keepApiError,
 )
 
 export const platformVerifyMfaThunk = createAsyncThunk(
@@ -101,6 +107,7 @@ export const platformVerifyMfaThunk = createAsyncThunk(
     setSession(res.session_token, "")
     await dispatch(fetchMe()).unwrap()
   },
+  keepApiError,
 )
 
 export const enrollActivateThunk = createAsyncThunk(
@@ -114,6 +121,7 @@ export const enrollActivateThunk = createAsyncThunk(
     await dispatch(fetchMe()).unwrap()
     return res.recovery_codes
   },
+  keepApiError,
 )
 
 export const keepaliveThunk = createAsyncThunk("auth/keepalive", async () => {
@@ -167,7 +175,7 @@ const authSlice = createSlice({
       })
       .addCase(loginThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Invalid credentials.")
+        s.error = apiErrorMessage(a.error, "Invalid credentials.")
       })
       .addCase(fetchMe.pending, (s) => {
         if (s.status !== "authenticated") s.status = "loading"
@@ -197,7 +205,7 @@ const authSlice = createSlice({
       })
       .addCase(verifyMfaThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Verification failed.")
+        s.error = apiErrorMessage(a.error, "Verification failed.")
       })
       .addCase(platformLoginThunk.pending, (s) => {
         s.loading = true
@@ -208,7 +216,7 @@ const authSlice = createSlice({
       })
       .addCase(platformLoginThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Invalid credentials.")
+        s.error = apiErrorMessage(a.error, "Invalid credentials.")
       })
       .addCase(platformVerifyMfaThunk.pending, (s) => {
         s.loading = true
@@ -220,7 +228,7 @@ const authSlice = createSlice({
       })
       .addCase(platformVerifyMfaThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Verification failed.")
+        s.error = apiErrorMessage(a.error, "Verification failed.")
       })
       .addCase(enrollActivateThunk.pending, (s) => {
         s.loading = true
@@ -232,7 +240,7 @@ const authSlice = createSlice({
       })
       .addCase(enrollActivateThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Enrollment failed.")
+        s.error = apiErrorMessage(a.error, "Enrollment failed.")
       })
       .addCase(logoutThunk.fulfilled, (s) => {
         clearSession()

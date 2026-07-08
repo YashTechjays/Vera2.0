@@ -2,12 +2,13 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
+import { copyText } from "@/lib/clipboard"
 
 export function RecoveryCodes({ codes, onContinue }: { codes: string[]; onContinue: () => void }) {
   const [saved, setSaved] = useState(false)
 
   function copy() {
-    void navigator.clipboard.writeText(codes.join("\n"))
+    void copyText(codes.join("\n"))
   }
   function download() {
     const blob = new Blob([codes.join("\n")], { type: "text/plain" })
