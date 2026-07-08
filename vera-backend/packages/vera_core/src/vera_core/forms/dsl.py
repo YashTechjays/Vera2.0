@@ -513,9 +513,7 @@ class FormSchemaDoc(_Model):
         # stt key terms: bounded, unique, static vocabulary
         terms = self.stt_key_terms or []
         if len(terms) > MAX_STT_KEY_TERMS:
-            errors.append(
-                f"stt_key_terms: {len(terms)} terms exceeds limit of {MAX_STT_KEY_TERMS}"
-            )
+            errors.append(f"stt_key_terms: {len(terms)} terms exceeds limit of {MAX_STT_KEY_TERMS}")
         seen_terms: set[str] = set()
         for i, term in enumerate(terms):
             where = f"stt_key_terms[{i}]"
