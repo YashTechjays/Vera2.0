@@ -1,6 +1,6 @@
-# Task prompts in the form-schema DSL — introduction task, placeholder contract
+# Task prompts in the form-schema DSL — introduction task, placeholder contract, STT key terms
 
-**Date:** 2026-07-06
+**Date:** 2026-07-06 (STT key terms added 2026-07-08)
 **Status:** Approved
 **Amends:** `2026-07-02-form-schema-dsl-v2-design.md` §4.6 (tasks), §5 (task builder / prompt compiler contracts)
 
@@ -33,12 +33,15 @@ lets one schema serve every patient form.
   task creation, validated at document-validation time.
 - Port the remaining task-specific SmartCaller content (wrap-up critical-fields rule,
   hold-phrase outro).
+- A document-level `stt_key_terms` vocabulary fed to the STT component to improve
+  transcription of domain terms — session-wide, applying to every task.
 
 **Non-goals**
 
 - IVR navigation (provider playbooks), the gap-analysis phase, and the final goodbye /
   end-call ritual remain runtime stages composed around the schema tasks.
-- No new `Task` model fields, no `dsl_version` bump (no grammar-shape change).
+- No new `Task` model fields; no `dsl_version` bump — the only grammar addition
+  (`stt_key_terms`) is optional and additive (§6).
 - The runtime task builder / prompt compiler implementation (this branch's next step)
   is specified only at the contract level here.
 
@@ -137,22 +140,70 @@ The final goodbye / end-call phrase is deliberately NOT a task outro: gap analys
 re-open questions after `wrap_up`, and call termination is a tool call in Vera 2.0,
 not a phrase trigger.
 
-## 6. Implementation surfaces
+## 6. `stt_key_terms` — session-wide STT vocabulary
+
+New optional top-level key on `FormSchemaDoc`, alongside `system_fields`:
+
+```jsonc
+"stt_key_terms": ["intrauterine insemination", "IUI", "coinsurance", ...]
+```
+
+**Semantics.** A flat list of domain terms fed verbatim to the STT component when the
+voice session is built — `deepgram.STTv2(model="flux-general-en", keyterms=terms)` in
+`agent_worker/cascade.py::build_session`. STT is constructed once per session, so the
+terms apply to every task for the whole call; they are deliberately NOT per-task.
+Plain strings only: Flux keyterm prompting takes no boost weights (nova-2 `keywords`
+did; that model is not in play).
+
+**Validator rules.** Every term is a non-empty trimmed string (multi-word phrases
+count as one keyterm); no case-insensitive duplicates; at most 100 terms (Deepgram's
+keyterm-prompting limit); no `{{placeholders}}` — key terms are static domain
+vocabulary and are never hydrated. Being schema-level and shared across all patients,
+per-patient PHI in key terms is impossible by construction.
+
+**Rejected shapes.** Per-task terms (STT is per-session; requirement is session-wide)
+and auto-derivation from schema titles/enum values (implicit and noisy — it would
+sweep in "Yes"/"No"/"N/A"; an authoring helper can come later).
+
+**Initial IBV vocabulary** (authored in `catalog/ibv_standard.py`, ~40 terms):
+
+- *Treatments:* intrauterine insemination, IUI, in vitro fertilization, IVF,
+  ovulation induction, egg cryopreservation, embryo cryopreservation, frozen embryo
+  transfer, embryo biopsy, semen analysis, sperm cryopreservation, infertility
+- *Plan/benefits:* coinsurance, copay, deductible, out-of-pocket maximum, lifetime
+  maximum, prior authorization, coordination of benefits, policy situs, PPO, HMO,
+  EPO, POS, self insured, fully funded, benefit year, plan year, telehealth,
+  PCP referral, infertility plan mandate, cycle limit
+- *Admin:* pharmacy benefit manager, third party administrator, specialty pharmacy,
+  member ID, group number, NPI, tax ID
+
+CPT codes are deliberately excluded — they are spoken as digit strings, where keyterm
+boosting does not help.
+
+**Versioning.** Additive optional key; `_Model` is `extra="forbid"` but validator and
+documents ship together in-repo, so no `dsl_version` bump and no intake/review/
+frontend gate changes (the UI subset ignores voice-only keys).
+
+## 7. Implementation surfaces
 
 1. `vera_core/forms/dsl.py` — the placeholder validator rule (scan task
    `intro`/`outro`/`prompt` for `{{token}}`, require membership in `system_fields`);
-   `Task` doc comment documenting the LiveKit mapping + placeholder contract.
+   `Task` doc comment documenting the LiveKit mapping + placeholder contract;
+   `FormSchemaDoc.stt_key_terms` + its validator rules (§6).
 2. `vera_core/forms/catalog/ibv_standard.py` — the `introduction` task; `wrap_up`
-   prompt + outro additions. Compiled JSON is generated — never hand-edited; run
-   `just compile-schemas` and let the freshness + round-trip tests gate drift.
+   prompt + outro additions; the `stt_key_terms` list. Compiled JSON is generated —
+   never hand-edited; run `just compile-schemas` and let the freshness + round-trip
+   tests gate drift.
 3. Spec `2026-07-02-form-schema-dsl-v2-design.md` — amend §4.6 ("only
    form-collection tasks") to admit schema-defined ritual tasks with `sections: []`;
-   document the placeholder namespace, validator rule, and PHI hydration note in §5.
+   document the placeholder namespace, validator rule, and PHI hydration note in §5;
+   add `stt_key_terms` to the document grammar (§4) and the task-builder contract (§5).
 4. Tests (`tests/unit/forms/test_schema_dsl.py` area) — unknown placeholder rejected;
-   known placeholder accepted; `sections: []` task valid; recompiled artifact fresh.
+   known placeholder accepted; `sections: []` task valid; `stt_key_terms` duplicate /
+   over-cap / placeholder-bearing lists rejected; recompiled artifact fresh.
 5. `just check` + code-simplifier pass before commit (repo rule).
 
-## 7. Edge cases
+## 8. Edge cases
 
 - Unknown `{{token}}` in task text → document validation error listing the task key
   and the offending token.
