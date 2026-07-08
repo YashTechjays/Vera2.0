@@ -862,8 +862,9 @@ async def test_list_role_holders(client: httpx.AsyncClient, rbac_world: RBACWorl
     assert len(data) == 1
     assert data[0]["id"] == user_id
     assert data[0]["name"] == "Holder"
-    assert data[0]["email"] == "holder@test.example"
-    assert data[0]["status"] == "invited"
+    # Minimum-necessary: no email/status here — that data is gated by users:read.
+    assert "email" not in data[0]
+    assert "status" not in data[0]
 
 
 async def test_list_role_holders_of_system_role(
@@ -877,8 +878,8 @@ async def test_list_role_holders_of_system_role(
         f"/api/v1/roles/{tenant_admin_id}/users", headers=_auth(rbac_world.admin_token)
     )
     assert holders.status_code == 200, holders.text
-    emails = {h["email"] for h in holders.json()["data"]}
-    assert "admin@test.example" in emails  # the shared rbac_world admin persona
+    names = {h["name"] for h in holders.json()["data"]}
+    assert "Admin" in names  # the shared rbac_world admin persona
 
 
 async def test_list_role_holders_unknown_role_404_and_norole_403(

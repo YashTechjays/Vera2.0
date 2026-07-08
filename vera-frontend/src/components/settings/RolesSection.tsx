@@ -316,10 +316,7 @@ export function RolesSection() {
                     <li key={h.id} className="flex items-center justify-between gap-3 px-3 py-2">
                       <span className="min-w-0">
                         <span className="block truncate text-sm font-medium">
-                          {h.name || h.email}
-                        </span>
-                        <span className="block truncate text-xs text-muted-foreground">
-                          {h.email}
+                          {h.name || "—"}
                         </span>
                       </span>
                       <Button

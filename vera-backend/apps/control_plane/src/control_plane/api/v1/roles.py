@@ -82,10 +82,11 @@ class RoleDetailResponse(RoleResponse):
 
 
 class RoleHolderResponse(BaseModel):
+    """Minimum-necessary: id + display name only. Emails/status live behind
+    users:read (GET /users) — this endpoint is gated only by roles:manage."""
+
     id: UUID
     name: str
-    email: str
-    status: str
 
 
 def _to_response(row: Role) -> RoleResponse:
@@ -218,7 +219,7 @@ async def list_role_holders(
         .all()
     )
     return ok(
-        [RoleHolderResponse(id=r.id, name=r.name, email=r.email, status=r.status) for r in rows]
+        [RoleHolderResponse(id=r.id, name=r.name) for r in rows]
     )
 
 

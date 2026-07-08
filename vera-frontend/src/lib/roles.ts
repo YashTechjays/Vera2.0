@@ -75,8 +75,6 @@ export function assignRole(userId: string, roleId: string): Promise<null> {
 export type RoleHolder = {
   id: string
   name: string
-  email: string
-  status: string
 }
 
 /** Who currently holds a role — powers the delete dialog's pre-flight check
