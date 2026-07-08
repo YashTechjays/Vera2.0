@@ -10,7 +10,13 @@ from typing import Any
 
 from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.planning import CallPlan, PlanField, PlanTask, compile_call_plan
-from vera_core.forms.runtime import advance, is_affirmation, next_task, normalize_answer
+from vera_core.forms.runtime import (
+    advance,
+    is_affirmation,
+    next_task,
+    normalize_answer,
+    terminate_fired,
+)
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 V2_DOC: FormSchemaDoc = load_document(
@@ -280,6 +286,30 @@ class TestTerminateFlowRule:
     def test_rule_does_not_fire_when_eligible(self) -> None:
         plan = _terminate_plan()
         assert next_task("start", plan, {"sections.elig.eligible": "Yes"}) == "middle"
+
+
+class TestTerminateFired:
+    NET = "sections.insurance_information"
+
+    def test_fires_when_out_of_network_disqualifies(self) -> None:
+        answers = {
+            f"{self.NET}.doctor_inside_network": "No",
+            f"{self.NET}.facility_inside_network": "No",
+            f"{self.NET}.out_of_network_coverage": "No",
+        }
+        assert terminate_fired(PLAN, answers) is True
+
+    def test_does_not_fire_before_all_answers(self) -> None:
+        assert terminate_fired(PLAN, {}) is False
+        assert terminate_fired(PLAN, {f"{self.NET}.doctor_inside_network": "No"}) is False
+
+    def test_does_not_fire_when_in_network(self) -> None:
+        answers = {
+            f"{self.NET}.doctor_inside_network": "Yes",
+            f"{self.NET}.facility_inside_network": "No",
+            f"{self.NET}.out_of_network_coverage": "No",
+        }
+        assert terminate_fired(PLAN, answers) is False
 
 
 class TestNextTaskRouting:

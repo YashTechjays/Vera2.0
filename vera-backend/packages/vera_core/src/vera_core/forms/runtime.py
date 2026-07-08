@@ -19,6 +19,7 @@ from vera_core.forms.conditions import (
     evaluate,
     resolve_applicability,
 )
+from vera_core.forms.dsl import FlowRule
 from vera_core.forms.planning import CallPlan, PlanField, PlanTask
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
@@ -119,6 +120,23 @@ def _reachable(task: PlanTask, plan: CallPlan, answers: Answers) -> bool:
     return _has_askable(task, plan, answers)
 
 
+def _fired_terminate_rule(plan: CallPlan, answers: Answers) -> FlowRule | None:
+    """The first `terminate_call` flow rule whose condition holds, or None — the single
+    source of truth for both the mid-task check and `next_task`'s routing."""
+    shared = plan.shared_conditions or {}
+    for rule in plan.flow_rules or []:
+        if rule.action == "terminate_call" and evaluate(rule.when, answers, shared):
+            return rule
+    return None
+
+
+def terminate_fired(plan: CallPlan, answers: Answers) -> bool:
+    """True once a `terminate_call` flow rule's condition holds — checked after every answer
+    so a disqualifying reply (e.g. no out-of-network coverage) ends the interview mid-task
+    instead of only at the current task's boundary."""
+    return _fired_terminate_rule(plan, answers) is not None
+
+
 def next_task(current_task_key: str, plan: CallPlan, answers: Answers) -> str | None:
     """The next task to hand off to, or None to end the call.
 
@@ -126,14 +144,12 @@ def next_task(current_task_key: str, plan: CallPlan, answers: Answers) -> str | 
     when set and ahead, otherwise to the FINAL task (so the always-run wrap-up still captures
     the rep's name + call reference), or ends outright if already there. Absent a rule, we
     advance to the next reachable task; the final task always runs."""
-    shared = plan.shared_conditions or {}
     order = [t.task_key for t in plan.tasks]
     idx = order.index(current_task_key)
     last = order[-1]
 
-    for rule in plan.flow_rules or []:
-        if rule.action != "terminate_call" or not evaluate(rule.when, answers, shared):
-            continue
+    rule = _fired_terminate_rule(plan, answers)
+    if rule is not None:
         # skip_to_task is optional; a pure terminate rule falls back to the final task so the
         # interview still ends at wrap-up instead of interrogating a dead-end verification.
         target = rule.skip_to_task or last

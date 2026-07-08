@@ -91,6 +91,18 @@ def test_instructions_carry_the_task_questions() -> None:
     assert "Is this service covered?" in agent.instructions
 
 
+def test_instructions_exclude_the_static_question_script() -> None:
+    # The plan supplies the questions; the static SYSTEM_PROMPT interview (diagnostic gate,
+    # CPT-code walkthrough, infertility gate) must NOT leak in, or the agent blends two
+    # conflicting scripts. (58340 is intentionally NOT checked — it's a Cartesia markup
+    # example in the shared readback guide, not a question.)
+    instructions = _agent(_state()).instructions.lower()
+    assert "diagnostic testing" not in instructions
+    assert "labs, x-ray" not in instructions
+    assert "diagnostic cpt codes" not in instructions
+    assert "five essential data points" not in instructions
+
+
 def test_greets_on_enter_and_is_plain() -> None:
     agent = _agent(_state())
     assert type(agent).on_enter is not Agent.on_enter
@@ -235,6 +247,78 @@ async def test_confirm_correction_stores_the_corrected_value() -> None:
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         await _record_tool(agent)(value="W99")
     assert state.answers[MEMBER_ID] == "W99"
+
+
+def _terminate_state() -> PlanRunState:
+    raw: dict[str, Any] = {
+        "dsl_version": "2.1",
+        "name": "T",
+        "insurance_type": "infertility_treatment",
+        "sections": {
+            "elig": {
+                "title": "Eligibility",
+                "fields": {
+                    "eligible": {
+                        "type": "enum",
+                        "title": "Eligible",
+                        "role": "ask",
+                        "values": ["Yes", "No"],
+                        "required": True,
+                        "prompt": {"ask": "Eligible?"},
+                    },
+                    "note": {
+                        "type": "text",
+                        "title": "Note",
+                        "role": "ask",
+                        "prompt": {"ask": "Any note?"},
+                    },
+                },
+            },
+            "closing": {
+                "title": "Closing",
+                "fields": {
+                    "rep": {
+                        "type": "text",
+                        "title": "Rep",
+                        "role": "ask",
+                        "required": True,
+                        "prompt": {"ask": "Your name?"},
+                    }
+                },
+            },
+        },
+        "tasks": [
+            {"task_key": "start", "title": "Start", "sections": ["elig"]},
+            {"task_key": "wrap_up", "title": "Wrap", "sections": ["closing"]},
+        ],
+        "flow_rules": [
+            {
+                "rule_key": "ineligible",
+                "when": {"field": "sections.elig.eligible", "op": "eq", "value": "No"},
+                "action": "terminate_call",
+                "skip_to_task": "wrap_up",
+            }
+        ],
+    }
+    plan = compile_call_plan(
+        FormSchemaDoc.model_validate(raw), call_id="c", room_name="r", current_year=2026
+    )
+    return PlanRunState(plan=plan, answers={}, boundary=PassthroughPHIBoundary(), session_id="s1")
+
+
+@pytest.mark.asyncio
+async def test_terminating_answer_hands_off_immediately_mid_task() -> None:
+    # A terminate flow rule satisfied mid-task must jump to wrap_up right away — NOT keep
+    # asking the rest of the current task (the out-of-network dead-end-verification bug).
+    state = _terminate_state()
+    agent = PlanTaskAgent(state, "start")
+    agent._asked = agent.pending_field()  # eligible
+    mock_session = MagicMock()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        result = await _record_tool(agent)(value="No")
+    assert isinstance(result, PlanTaskAgent)
+    assert result._task.task_key == "wrap_up"  # not "ask the next question"
+    assert "sections.elig.note" not in state.answers  # the rest of the task was skipped
 
 
 def test_handoff_shares_the_answer_map_across_agents() -> None:

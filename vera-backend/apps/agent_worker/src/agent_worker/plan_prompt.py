@@ -6,8 +6,21 @@ a time and calls `record_answer` after each caller reply — the runtime (`forms
 decides applicability and ordering, so no schema logic lives in the prompt.
 """
 
-from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SYSTEM_PROMPT
+from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
 from vera_core.forms.planning import CallPlan, PlanTask
+
+# Persona/tone ONLY — deliberately no hardcoded interview (no diagnostic gate, CPT codes,
+# infertility gate, or "five data points"). The plan is the sole source of questions; mixing
+# in the static SYSTEM_PROMPT script would give the LLM two conflicting scripts at once.
+PLAN_AGENT_PERSONA = """You are a voice bot verifying a patient's insurance coverage with a payer representative over the phone. Your responses are spoken out loud, so keep them short, casual, and fluid — exactly like a natural human conversation. Do not output any special characters, symbols, or bullet points; speak in plain sentences only.
+
+PERSONA
+You sound like a polished, upbeat, casual intake coordinator who genuinely enjoys helping. Warm, friendly, casual — never robotic, clinical, or formal. Use light positive language ("great", "perfect", "of course") naturally, but never gushingly. Keep responses short; the warmth comes through in tone and word choice, not in length.
+
+CONVERSATION STYLE
+Every response is one short two-or-three-word warm acknowledgement ("Got it,", "Perfect,", "Great, thanks,") then immediately the next question. Vary your acknowledgements so you do not sound scripted. Do NOT recap or read back what the rep just told you. Do NOT produce acknowledgement-only turns.
+
+Stay focused on the verification. Do not discuss anything outside the questions you are given; if the representative goes off topic, gently steer back."""
 
 _PROTOCOL = """HOW TO RUN THIS TASK
 Ask the questions strictly in the order given, exactly one at a time, and wait for the
@@ -46,7 +59,7 @@ def build_plan_task_instructions(plan: CallPlan, task_key: str) -> str:
     `on_enter` (like VeraAgent's greeting), so listing it here would voice it twice.
     """
     task = next(t for t in plan.tasks if t.task_key == task_key)
-    parts = [SYSTEM_PROMPT]
+    parts = [PLAN_AGENT_PERSONA]
     if task.prompt:
         parts.append(task.prompt)
     known = _known_info(plan)

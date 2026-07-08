@@ -14,7 +14,13 @@ from livekit.agents import Agent, function_tool
 from agent_worker.plan_prompt import build_plan_task_instructions
 from agent_worker.plan_run_state import PlanRunState
 from vera_core.forms.planning import PlanField, PlanTask
-from vera_core.forms.runtime import advance, is_affirmation, next_task, normalize_answer
+from vera_core.forms.runtime import (
+    advance,
+    is_affirmation,
+    next_task,
+    normalize_answer,
+    terminate_fired,
+)
 
 logger = logging.getLogger("agent_worker")
 
@@ -72,14 +78,19 @@ class PlanTaskAgent(Agent):
             logger.info("unrecognized answer for %s; re-prompting", field.field_path)
             return f"I didn't quite catch that — please ask again: {field.resolved_prompt}"
         self._state.answers[field.field_path] = recorded
+        # A disqualifying answer can trip a terminate_call flow rule partway through the task
+        # (e.g. no out-of-network coverage) — hand off immediately rather than asking the rest.
+        if terminate_fired(self._state.plan, self._state.answers):
+            return self._complete(terminated=True)
         self._asked = self.pending_field()
         if self._asked is not None:
             return f"Recorded. Now ask the representative: {self._asked.resolved_prompt}"
         return self._complete()
 
-    def _complete(self) -> str | Agent:
-        """Run the outro, then hand off to the next task's agent — or end the call."""
-        if self._task.outro:
+    def _complete(self, terminated: bool = False) -> str | Agent:
+        """Hand off to the next task's agent — or end the call. On normal completion the task
+        outro is spoken; a mid-task terminate skips it (the task was abandoned)."""
+        if self._task.outro and not terminated:
             self.session.say(self._task.outro)
         target = next_task(self._task.task_key, self._state.plan, self._state.answers)
         if target is None:
