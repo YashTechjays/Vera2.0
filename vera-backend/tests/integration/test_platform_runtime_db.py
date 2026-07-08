@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from scripts.seed import _seed_permissions, _seed_system_roles
@@ -336,3 +337,43 @@ async def test_elevated_session_sees_tenant_and_own_grant(
     assert grant_id in grant_ids
     assert world.tenant_user_id in app_user_ids  # tenant rows visible
     assert world.platform_user_id in app_user_ids  # own NULL-tenant row visible too
+
+
+# --- nil-tenant sentinel hardening -----------------------------------------
+
+
+async def test_tenant_nil_id_rejected_by_check(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The DB refuses a tenant row with the nil-UUID sentinel id — even from a
+    superuser (seed/fixture accidents), so platform_session's GUC pin can never
+    match a real tenant."""
+    async with admin_sessionmaker() as s:
+        with pytest.raises(IntegrityError, match="ck_tenant_id_not_nil"):
+            async with s.begin():
+                s.add(
+                    Tenant(
+                        id=UUID(int=0),
+                        slug="nil-tenant",
+                        name="Nil Tenant",
+                        status="active",
+                    )
+                )
+
+
+async def test_platform_session_cannot_write_nil_tenant_row(
+    rls_sessionmaker: async_sessionmaker[AsyncSession], world: PlatformWorld
+) -> None:
+    """Write side of the sentinel: a platform session's GUC equals the nil UUID,
+    so strict WITH CHECK would admit a nil-tenant row — the FK to tenant.id must
+    refuse it (no nil tenant can exist, enforced by ck_tenant_id_not_nil)."""
+    async with rls_sessionmaker() as s:
+        with pytest.raises((IntegrityError, ProgrammingError)):
+            async with s.begin():
+                await set_platform(s)
+                await s.execute(
+                    text(
+                        "INSERT INTO role (id, tenant_id, name, description)"
+                        " VALUES (:i, :t, 'NIL-ROLE', '')"
+                    ).bindparams(i=uuid7(), t=UUID(int=0))
+                )
