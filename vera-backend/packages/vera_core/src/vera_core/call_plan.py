@@ -6,9 +6,11 @@ plan carries no prefilled PHI (see `forms.planning`), so it is safe in Redis alo
 tokens/reference-ids everything else caches — never raw values.
 """
 
+import logging
 from typing import Any, Protocol
 from uuid import UUID
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +20,8 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.planning import CallPlan, compile_call_plan
 from vera_core.models import FormSchema, PatientForm, SchemaVersion
 from vera_core.models.enums import VersionStatus
+
+logger = logging.getLogger(__name__)
 
 CALL_PLAN_KEY_PREFIX = "vera:callplan:"
 
@@ -72,17 +76,25 @@ async def _compile_and_store(
     store: CallPlanStore,
 ) -> bool:
     """Compile a schema document into a plan and stash it for the worker. Returns False (no
-    plan written) for a missing or legacy v1 schema — the worker then falls back to the
-    static agent. The current year comes from the DB clock (never the app clock)."""
-    if schema_json is None or not is_v2(schema_json):
+    plan written; the worker falls back to the static agent) for a missing/legacy/malformed
+    schema — a bad schema never 500s call-start nor bounces the form, matching the worker's
+    fail-safe. The current year comes from the DB clock (never the app clock)."""
+    if schema_json is None:
+        # A v2 form whose pinned SchemaVersion carries no schema_json is a data bug, not the
+        # benign v1 case below — surface it distinctly.
+        logger.warning("call plan: no schema_json for call %s; static fallback (data bug)", call_id)
+        return False
+    if not is_v2(schema_json):
+        return False  # legacy v1 form — benign; the worker runs the static agent
+    try:
+        doc = FormSchemaDoc.model_validate(schema_json)
+    except ValidationError:
+        logger.exception(
+            "call plan: v2 schema failed to parse for call %s; static fallback", call_id
+        )
         return False
     year = (await session.execute(select(func.extract("year", func.now())))).scalar_one()
-    plan = compile_call_plan(
-        FormSchemaDoc.model_validate(schema_json),
-        call_id=str(call_id),
-        room_name=room_name,
-        current_year=int(year),
-    )
+    plan = compile_call_plan(doc, call_id=str(call_id), room_name=room_name, current_year=int(year))
     await store.put(room_name, plan)
     return True
 

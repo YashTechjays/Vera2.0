@@ -14,7 +14,7 @@ from livekit.agents import Agent, function_tool
 from agent_worker.plan_prompt import build_plan_task_instructions
 from agent_worker.plan_run_state import PlanRunState
 from vera_core.forms.planning import PlanField, PlanTask
-from vera_core.forms.runtime import advance, next_task
+from vera_core.forms.runtime import advance, next_task, normalize_answer
 
 logger = logging.getLogger("agent_worker")
 
@@ -26,6 +26,9 @@ class PlanTaskAgent(Agent):
         self._boundary = state.boundary
         self._session_id = state.session_id
         self._task: PlanTask = next(t for t in state.plan.tasks if t.task_key == task_key)
+        # The field the agent is currently soliciting — answers are recorded against THIS,
+        # never a freshly-inferred field, so a value can't land on the wrong path.
+        self._asked: PlanField | None = None
         super().__init__(instructions=build_plan_task_instructions(state.plan, task_key))
 
     def pending_field(self) -> PlanField | None:
@@ -36,6 +39,7 @@ class PlanTaskAgent(Agent):
     async def on_enter(self) -> None:
         if self._task.intro:
             self.session.say(self._task.intro)
+        self._asked = self.pending_field()
 
     @function_tool(
         name="record_answer",
@@ -45,12 +49,23 @@ class PlanTaskAgent(Agent):
         ),
     )
     async def _record_answer(self, value: str) -> str | Agent:
-        field = self.pending_field()
-        if field is not None:
-            self._state.answers[field.field_path] = value
-        nxt = self.pending_field()
-        if nxt is not None:
-            return f"Recorded. Now ask the representative: {nxt.resolved_prompt}"
+        field = self._asked
+        if field is None:
+            # Nothing was being asked (task already exhausted) — don't silently drop the turn.
+            logger.info(
+                "record_answer with no field awaiting on task %s; ignoring", self._task.task_key
+            )
+            return self._complete()
+        normalized = normalize_answer(field, value)
+        if normalized is None:
+            # Couldn't validate against the field's expected/valid values — re-ask rather than
+            # storing a value that would mis-gate the cascade. Keep `_asked` unchanged.
+            logger.info("unrecognized answer for %s; re-prompting", field.field_path)
+            return f"I didn't quite catch that — please ask again: {field.resolved_prompt}"
+        self._state.answers[field.field_path] = normalized
+        self._asked = self.pending_field()
+        if self._asked is not None:
+            return f"Recorded. Now ask the representative: {self._asked.resolved_prompt}"
         return self._complete()
 
     def _complete(self) -> str | Agent:

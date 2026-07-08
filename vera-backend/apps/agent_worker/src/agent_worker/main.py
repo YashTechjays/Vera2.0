@@ -6,6 +6,7 @@ room name IS the session id and the Langfuse correlation key.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -22,6 +23,7 @@ from livekit.agents import (
     cli,
 )
 from opentelemetry import trace
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from agent_worker.agent import build_agent
@@ -232,18 +234,37 @@ async def _load_plan_state(
     """Read this call's compiled plan (non-PHI) from Redis and wrap it in the shared run
     state. Fail-safe: returns None on any error so a missing/bad plan never kills the call
     (the worker then runs the static persona)."""
-    redis = create_redis(settings.redis_url)
+    try:
+        redis = create_redis(settings.redis_url)
+    except Exception:
+        logger.exception("call plan: redis client init failed for %s; static fallback", room_name)
+        return None
     try:
         plan = await RedisCallPlanStore(redis, ttl_seconds=settings.call_plan_ttl_seconds).get(
             room_name
         )
+    except ValidationError:
+        # The plan exists but doesn't match this worker's CallPlan model — a
+        # control-plane/worker schema drift across a deploy would fail EVERY v2 call this way.
+        # Loud + distinct from the benign "no plan" path below so the outage is alertable.
+        logger.error(
+            "call plan for %s failed to validate — possible compiler/worker schema drift; "
+            "static fallback",
+            room_name,
+        )
+        return None
     except Exception:
-        logger.exception("failed to load call plan for %s; using static persona", room_name)
+        # Redis I/O (unreachable, timeout) — fail-safe to the static agent, never kill the call.
+        logger.exception("call plan: redis read failed for %s; static fallback", room_name)
         return None
     finally:
-        await redis.aclose()
+        with contextlib.suppress(Exception):
+            await redis.aclose()  # best-effort; a close error must not mask a good load
     if plan is None:
         logger.info("no call plan for %s; running the static agent", room_name)
+        return None
+    if not plan.tasks:
+        logger.error("call plan for %s has no tasks; static fallback", room_name)
         return None
     logger.info("call plan loaded for %s: %d tasks", room_name, len(plan.tasks))
     return PlanRunState(plan=plan, boundary=boundary, session_id=session_id)

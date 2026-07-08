@@ -10,11 +10,12 @@ from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SYSTEM_PROMPT
 from vera_core.forms.planning import CallPlan, PlanTask
 
 _PROTOCOL = """HOW TO RUN THIS TASK
-Ask one question at a time, in the order given. After the representative answers a
-question, call the record_answer tool with just their answer value — I will tell you the
-next question to ask, or tell you the task is complete. Only ask the questions I give you;
-never invent questions or ask for information not listed. Give a short warm acknowledgement
-before each question, but never read the answer back."""
+Ask the questions strictly in the order given, exactly one at a time, and wait for the
+representative's answer before moving on — never ask a later question before an earlier one,
+and never bundle two. After each answer, call the record_answer tool with just their answer
+value; I will tell you the exact next question to ask, or that the task is complete. Only ask
+the questions I give you; never invent questions or ask for information not listed. Give a
+short warm acknowledgement before each question, but never read the answer back."""
 
 
 def _question_lines(task: PlanTask) -> str:

@@ -11,6 +11,7 @@ worker's task agents are thin shells over these two functions:
   task-level and all-inactive skipping, and the always-run final task.
 """
 
+import re
 from collections.abc import Mapping, MutableMapping
 
 from vera_core.forms.conditions import (
@@ -19,6 +20,47 @@ from vera_core.forms.conditions import (
     resolve_applicability,
 )
 from vera_core.forms.planning import CallPlan, PlanField, PlanTask
+
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _standalone(needle: str, haystack: str) -> bool:
+    """`needle` appears as a standalone token in `haystack` (both lowercased) — tolerant of
+    surrounding filler ("yes it's covered" → "yes") but not of embedding ("no" ⊄ "nope")."""
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
+
+
+def normalize_answer(field: PlanField, raw: str) -> str | None:
+    """Map a raw spoken answer to the field's canonical value, or None when it can't be
+    validated (the agent then re-prompts instead of storing a value that mis-gates the
+    cascade). Enum answers must resolve to a listed value; numeric answers must parse and
+    fall in range; free text passes through trimmed."""
+    text = raw.strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    candidates = (field.expected_values or []) + (field.special_values or [])
+    # Prefer an exact (case-insensitive) match on any candidate, then fall back to a
+    # standalone-token match — so "yes" beats a stray "no" embedded in filler.
+    for candidate in candidates:
+        if lowered == candidate.lower():
+            return candidate
+    for candidate in candidates:
+        if _standalone(candidate.lower(), lowered):
+            return candidate
+    if field.expected_values:
+        return None  # an enum must resolve to one of its listed values
+    validation = field.validation
+    if validation is not None and validation.range is not None:
+        match = _NUMBER_RE.search(text.replace(",", ""))
+        if match is None:
+            return None
+        number = float(match.group())
+        rng = validation.range
+        if (rng.min is not None and number < rng.min) or (rng.max is not None and number > rng.max):
+            return None
+    return text
+
 
 Answers = Mapping[str, str]
 
@@ -66,22 +108,25 @@ def _reachable(task: PlanTask, plan: CallPlan, answers: Answers) -> bool:
 
 
 def next_task(current_task_key: str, plan: CallPlan, answers: Answers) -> str | None:
-    """The next task to hand off to, or None to end the call. A `terminate`/`skip_to_task`
-    flow rule jumps ahead; otherwise advance to the next reachable task. The final task
-    always runs (it captures the rep's name + call reference before hangup)."""
+    """The next task to hand off to, or None to end the call.
+
+    A fired `terminate_call` flow rule ends the interview: it jumps to its `skip_to_task`
+    when set and ahead, otherwise to the FINAL task (so the always-run wrap-up still captures
+    the rep's name + call reference), or ends outright if already there. Absent a rule, we
+    advance to the next reachable task; the final task always runs."""
     shared = plan.shared_conditions or {}
     order = [t.task_key for t in plan.tasks]
     idx = order.index(current_task_key)
+    last = order[-1]
 
     for rule in plan.flow_rules or []:
-        if (
-            rule.skip_to_task
-            and evaluate(rule.when, answers, shared)
-            and order.index(rule.skip_to_task) > idx
-        ):
-            return rule.skip_to_task
+        if rule.action != "terminate_call" or not evaluate(rule.when, answers, shared):
+            continue
+        # skip_to_task is optional; a pure terminate rule falls back to the final task so the
+        # interview still ends at wrap-up instead of interrogating a dead-end verification.
+        target = rule.skip_to_task or last
+        return target if order.index(target) > idx else None
 
-    last = order[-1]
     for task in plan.tasks[idx + 1 :]:
         if task.task_key == last or _reachable(task, plan, answers):
             return task.task_key

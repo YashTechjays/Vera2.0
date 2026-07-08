@@ -104,28 +104,63 @@ def test_pending_field_is_first_applicable_collect() -> None:
     assert field is not None and field.field_path == COVERED
 
 
-@pytest.mark.asyncio
-async def test_record_answer_stores_and_returns_next_question() -> None:
-    state = _state()
-    agent = _agent(state)
-    tool = next(
+def _ready_agent(state: PlanRunState, task_key: str = "svc") -> PlanTaskAgent:
+    """Agent with `_asked` primed as on_enter would (the first field being solicited)."""
+    agent = _agent(state, task_key)
+    agent._asked = agent.pending_field()
+    return agent
+
+
+def _record_tool(agent: PlanTaskAgent) -> FunctionTool:
+    return next(
         t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "record_answer"
     )
-    result = await tool(value="Yes")
+
+
+@pytest.mark.asyncio
+async def test_record_answer_stores_against_asked_field_and_returns_next() -> None:
+    state = _state()
+    agent = _ready_agent(state)
+    result = await _record_tool(agent)(value="Yes")
     assert state.answers[COVERED] == "Yes"
     assert "copay" in str(result).lower()
 
 
 @pytest.mark.asyncio
-async def test_cascade_no_collapses_children_then_hands_off() -> None:
+async def test_record_answer_normalizes_synonym_before_storing() -> None:
+    # The transcription-miss fix: a wordy "yes" must gate as the canonical "Yes".
     state = _state()
-    agent = _agent(state)
-    tool = next(
-        t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "record_answer"
-    )
+    agent = _ready_agent(state)
+    await _record_tool(agent)(value="yes it's covered")
+    assert state.answers[COVERED] == "Yes"
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_answer_reprompts_without_storing() -> None:
+    state = _state()
+    agent = _ready_agent(state)
+    result = await _record_tool(agent)(value="maybe, not sure")
+    assert COVERED not in state.answers  # nothing stored on a value that can't be validated
+    assert "ask again" in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_record_with_no_asked_field_does_not_store() -> None:
+    state = _state()
+    agent = _agent(state)  # _asked left None (nothing being solicited)
     mock_session = MagicMock()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
-        result = await tool(value="No")
+        await _record_tool(agent)(value="Yes")
+    assert COVERED not in state.answers
+
+
+@pytest.mark.asyncio
+async def test_cascade_no_collapses_children_then_hands_off() -> None:
+    state = _state()
+    agent = _ready_agent(state)
+    mock_session = MagicMock()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        result = await _record_tool(agent)(value="No")
     # covered=No → copay auto-filled inapplicable, task exhausted → hands off to next task
     assert state.answers[COVERED] == "No"
     assert state.answers[COPAY] == "$0"
