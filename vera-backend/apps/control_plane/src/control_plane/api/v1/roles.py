@@ -218,9 +218,7 @@ async def list_role_holders(
         .scalars()
         .all()
     )
-    return ok(
-        [RoleHolderResponse(id=r.id, name=r.name) for r in rows]
-    )
+    return ok([RoleHolderResponse(id=r.id, name=r.name) for r in rows])
 
 
 @router.patch(
@@ -550,6 +548,9 @@ async def delete_role(
         raise CustomAPIException(
             DefaultExceptionCode.FORBIDDEN, message="system roles cannot be deleted"
         )
+    # FOR UPDATE closes the count-then-delete race: a concurrent assign (FOR SHARE
+    # in _role_visible) either commits before the count below or waits behind us.
+    await session.execute(select(Role.id).where(Role.id == role_id).with_for_update())
     # DECISION: never cascade a delete over live grants. The admin revokes per
     # user first (each revoke is audited + cache-invalidating), so by the time
     # this runs there is no holder cache to invalidate.
@@ -586,7 +587,17 @@ async def _user_in_tenant(session: AsyncSession, user_id: UUID) -> bool:
 
 async def _role_visible(session: AsyncSession, role_id: UUID) -> bool:
     row = (await session.execute(select(Role.id).where(Role.id == role_id))).scalar_one_or_none()
-    return row is not None
+    if row is None:
+        return False
+    # FOR SHARE on tenant-owned roles only: an assign holds the row so a concurrent
+    # delete_role (FOR UPDATE) waits and its holder count sees this grant. System
+    # roles can't be deleted, and locking them would trip the RLS UPDATE policy.
+    await session.execute(
+        select(Role.id)
+        .where(Role.id == role_id, Role.tenant_id.is_not(None))
+        .with_for_update(read=True)
+    )
+    return True
 
 
 async def _load_role(session: AsyncSession, role_id: UUID) -> Role:
