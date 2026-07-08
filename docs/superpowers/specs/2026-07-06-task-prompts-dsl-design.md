@@ -58,9 +58,10 @@ For every task in `tasks`:
 | `prompt`   | Supplied directly as the agent's task instructions                                                                       | yes          |
 | `sections` | The form sections whose `ask`/`confirm` fields the task collects; **may be empty** for ritual tasks that collect nothing | —            |
 
-A task with `sections: []` is a first-class shape: it exists purely for conversational
-behavior (the introduction task). The UI and the intake/review readers never consume
-`tasks`, so nothing renders differently.
+A task with `sections: []` is a legal first-class shape for pure ritual tasks. (The
+introduction task ended up carrying one tiny collect section — `patient_verification`,
+§4.1 — so its outcome lands as a real field answer.) The UI and the intake/review
+readers never consume `tasks`, so nothing renders differently.
 
 ### 3.1 Placeholder namespace
 
@@ -90,7 +91,7 @@ placeholders carry no PHI marking; the task builder decides token-vs-raw per sea
 ## 4. New `introduction` task (Vera 1.0 Phase 2 START)
 
 First entry in `tasks`, `task_key: "introduction"`, title "Introduction & Patient
-Verification", `sections: []`.
+Verification", `sections: ["patient_verification"]` (§4.1).
 
 **intro** (adapted from `phase_2_basics.py::PHASE_2_START`; `{clinic_name}` →
 `{{hospital_name}}`, `[pause]` dropped — TTS would read it aloud):
@@ -113,6 +114,10 @@ Verification", `sections: []`.
   keep waiting.
 - If the representative cannot find the patient, provide the member ID {{member_id}}
   and the insurance provider {{insurance_provider_name}}.
+- Record `patient_on_plan = "No"` ONLY after the fallback details and the
+  verification details below have been provided and the representative still denies
+  the patient is on the plan — then wrap up the conversation politely (the
+  `patient_not_on_plan` flow rule routes to `wrap_up`, §4.1).
 - If the representative asks questions to verify the call is legitimate, answer from
   these details: patient {{patient_name}}, date of birth {{patient_dob}}, member ID
   {{member_id}}, facility {{hospital_name}} at {{hospital_address}}, facility NPI
@@ -123,6 +128,38 @@ Verification", `sections: []`.
 **outro:** "Great, let me pull up my questions..." — plays while `insurance_basics`
 spins up; `insurance_basics` therefore keeps no `intro` and its first ask lands
 immediately after.
+
+### 4.1 Verification outcome + denial flow rule
+
+Flow rules trigger on conditions over field answers, so the verification needs an
+outcome field. New collect section `patient_verification` — placed first among the
+collect sections (right before `insurance_information` in document order) — with a
+single required leaf:
+
+```jsonc
+"patient_on_plan": { "type": "enum", "title": "Patient On Plan", "role": "ask",
+  "required": true, "values": ["Yes", "No"],
+  "prompt": { "ask": "Can you confirm the patient is on this plan?" } }
+```
+
+The intro script already poses this question; the standalone `prompt.ask` exists for
+re-asks. The extractor records the rep's answer as a real `field_answer` row, and the
+UI shows a visible "Patient On Plan" field — an audit trail for why a call ended.
+
+New flow rule (mirrors `no_out_of_network_coverage`):
+
+```jsonc
+{ "rule_key": "patient_not_on_plan",
+  "when": { "field": "sections.patient_verification.patient_on_plan",
+            "op": "eq", "value": "No" },
+  "action": "terminate_call",
+  "skip_to_task": "wrap_up",
+  "note": "Representative denied the patient is on the plan even after the security
+           details were provided." }
+```
+
+Termination still routes through `wrap_up`, so the representative's name and the call
+reference number are captured before the graceful goodbye; gap analysis does not run.
 
 ## 5. Vera 1.0 phase → task mapping (existing tasks)
 
@@ -205,10 +242,11 @@ frontend gate changes (the UI subset ignores voice-only keys).
    `intro`/`outro`/`prompt` for `{{token}}`, require membership in `system_fields`);
    `Task` doc comment documenting the LiveKit mapping + placeholder contract;
    `FormSchemaDoc.stt_key_terms` + its validator rules (§6).
-2. `vera_core/forms/catalog/ibv_standard.py` — the `introduction` task; `wrap_up`
-   prompt + outro additions; the `stt_key_terms` list. Compiled JSON is generated —
-   never hand-edited; run `just compile-schemas` and let the freshness + round-trip
-   tests gate drift.
+2. `vera_core/forms/catalog/ibv_standard.py` — the `introduction` task; the
+   `patient_verification` section + `patient_not_on_plan` flow rule (§4.1);
+   `closing_admin` / `wrap_up` prompt + intro/outro changes (§5); the
+   `stt_key_terms` list. Compiled JSON is generated — never hand-edited; run
+   `just compile-schemas` and let the freshness + round-trip tests gate drift.
 3. Spec `2026-07-02-form-schema-dsl-v2-design.md` — amend §4.6 ("only
    form-collection tasks") to admit schema-defined ritual tasks with `sections: []`;
    document the placeholder namespace, validator rule, and PHI hydration note in §5;
