@@ -29,6 +29,7 @@ KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 PATH_PREFIX = "sections."
 MAX_PATH_LENGTH = 255
+MAX_STT_KEY_TERMS = 100  # Deepgram keyterm-prompting limit
 
 SectionRole = Literal["collect", "context", "ui_only"]
 LeafRole = Literal["ask", "confirm", "context", "readonly", "input"]
@@ -311,6 +312,9 @@ class FormSchemaDoc(_Model):
     insurance_type: str
     description: str | None = None
     system_fields: dict[str, str] | None = None
+    # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
+    # at voice-session build; applies to every task. Static domain terms only.
+    stt_key_terms: list[str] | None = None
     shared_conditions: dict[str, Condition] | None = None
     sections: dict[str, Section]
     tasks: list[Task]
@@ -505,6 +509,25 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
+
+        # stt key terms: bounded, unique, static vocabulary
+        terms = self.stt_key_terms or []
+        if len(terms) > MAX_STT_KEY_TERMS:
+            errors.append(
+                f"stt_key_terms: {len(terms)} terms exceeds limit of {MAX_STT_KEY_TERMS}"
+            )
+        seen_terms: set[str] = set()
+        for i, term in enumerate(terms):
+            where = f"stt_key_terms[{i}]"
+            if not term or term != term.strip():
+                errors.append(f"{where}: empty or untrimmed term {term!r}")
+                continue
+            if "{{" in term:
+                errors.append(f"{where}: placeholders are not allowed in key terms")
+            lowered = term.lower()
+            if lowered in seen_terms:
+                errors.append(f"{where}: duplicate term {term!r}")
+            seen_terms.add(lowered)
 
         # flow rules
         for rule in self.flow_rules or []:

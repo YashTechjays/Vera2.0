@@ -155,3 +155,26 @@ class TestDocumentValidation:
         doc = minimal_doc()
         doc["tasks"][0]["intro"] = "This {{ is not a placeholder."
         FormSchemaDoc.model_validate(doc)
+
+    def test_stt_key_terms_valid_list_accepted(self) -> None:
+        FormSchemaDoc.model_validate(minimal_doc(stt_key_terms=["coinsurance", "IVF"]))
+
+    def test_stt_key_terms_duplicate_rejected(self) -> None:
+        doc = minimal_doc(stt_key_terms=["IVF", "ivf"])
+        with pytest.raises(ValidationError, match="duplicate term"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_stt_key_terms_empty_or_untrimmed_rejected(self) -> None:
+        for bad in ["", " coinsurance", "coinsurance "]:
+            with pytest.raises(ValidationError, match="empty or untrimmed"):
+                FormSchemaDoc.model_validate(minimal_doc(stt_key_terms=[bad]))
+
+    def test_stt_key_terms_placeholder_rejected(self) -> None:
+        doc = minimal_doc(stt_key_terms=["{{patient_name}}"])
+        with pytest.raises(ValidationError, match="placeholders are not allowed"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_stt_key_terms_cap_enforced(self) -> None:
+        doc = minimal_doc(stt_key_terms=[f"term {i}" for i in range(101)])
+        with pytest.raises(ValidationError, match="exceeds limit"):
+            FormSchemaDoc.model_validate(doc)
