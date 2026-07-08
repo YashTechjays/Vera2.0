@@ -23,23 +23,11 @@ TENANT_GUC = "app.tenant_id"
 # rows — never any tenant PHI row, which stays gated on a matching TENANT_GUC.
 PLATFORM_GUC = "app.platform"
 
-# A syntactically-valid sentinel for TENANT_GUC in platform-only sessions. Postgres
-# custom GUCs are registered per-connection, not per-transaction: once ANY
-# transaction on a pooled connection calls set_config(TENANT_GUC, ..., true), that
-# connection's backend remembers app.tenant_id as a known parameter for the rest of
-# its life — a LATER transaction that never sets it again no longer reads back NULL
-# from current_setting(TENANT_GUC, true); it reads back '' (the custom GUC's own
-# reset value). Every RLS policy casts that read with `::uuid`, which raises on ''
-# but not on NULL. A platform session must therefore pin TENANT_GUC to a value that
-# always casts cleanly and can never match a real tenant row, rather than leaving it
-# unset and hoping the connection was never previously touched by a tenant session.
-#
-# Pinning the sentinel also changes strict WITH CHECK semantics from "always deny" (an
-# unset/NULL GUC can never equal any tenant_id) to "deny unless a row's tenant column
-# literally equals the nil UUID" — closed off by FK anchoring on every tenant_id column,
-# since no real tenant row can ever have id = NIL_TENANT_ID: the DB enforces that via
-# ck_tenant_id_not_nil on tenant.id (migration efa94eaaf3f9), so a seed/fixture accident
-# fails loudly instead of silently widening every platform session.
+# Platform sessions pin TENANT_GUC to this sentinel instead of leaving it unset: a
+# pooled connection that ever set the GUC later reads back '' (not NULL), and RLS's
+# ::uuid cast raises on ''. The nil UUID always casts cleanly and can never match a
+# real tenant — ck_tenant_id_not_nil (migration efa94eaaf3f9) guarantees no tenant
+# row ever carries this id.
 NIL_TENANT_ID = UUID(int=0)
 
 
