@@ -179,8 +179,7 @@ class AuthEvent(enum.StrEnum):
     # Token-scoped self-logout (/auth/logout). Tenant users write a tenant-scoped
     # row; platform operators (tenant_id IS NULL) go through log_auth_event.
     LOGOUT = "logout"
-    # Global prompt-catalog mutations (platform operators, tenant_id IS NULL) —
-    # they change what the LLM runs on live calls, so they need evidence.
+    # Prompt-catalog mutations (platform, tenant_id IS NULL) — live-call LLM evidence.
     PROMPT_VERSION_CREATED = "prompt_version_created"
     PROMPT_VERSION_PUBLISHED = "prompt_version_published"
 

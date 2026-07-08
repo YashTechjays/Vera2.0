@@ -332,7 +332,6 @@ export function IbvProvider({
       setSaveState("saved")
       setSavedTick((t) => t + 1)
     } catch (err) {
-      // Save failures must not unmount the form — the user's edits stay intact.
       setSaveError(err instanceof ApiError ? err.message : "Could not save changes.")
       setSaveState("idle")
     }

@@ -1,7 +1,6 @@
 import { ApiError } from "@/lib/api/client"
 
-/** ApiError flattened to plain data: RTK serializes thrown errors, so class
- *  instances never survive a thunk rejection — this payload does. */
+/** ApiError as plain data — class instances don't survive RTK's rejection serialization. */
 export type ApiErrorPayload = {
   kind: "api-error"
   message: string
@@ -25,8 +24,7 @@ function isApiErrorPayload(err: unknown): err is ApiErrorPayload {
   return typeof err === "object" && err !== null && (err as ApiErrorPayload).kind === "api-error"
 }
 
-/** The real backend message from an ApiError or a rejectWithValue payload;
- *  the fallback for anything else (network failures, bugs). */
+/** Backend message from an ApiError or payload; the fallback for anything else. */
 export function apiErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof ApiError || isApiErrorPayload(err)) return err.message
   return fallback

@@ -97,8 +97,7 @@ async def list_prompts(
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _READ],
 ) -> ResponseModel[list[PromptSummary]]:
-    # Outer join, not N+1: uq_prompt_version_published_per_prompt guarantees at
-    # most one published row per prompt, so the join can't fan out.
+    # The published-per-prompt unique index means the outer join can't fan out.
     rows = (
         await session.execute(
             select(Prompt.id, Prompt.name, FormSchema.insurance_type, PromptVersion.version)

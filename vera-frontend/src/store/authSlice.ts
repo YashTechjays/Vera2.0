@@ -39,14 +39,12 @@ const initialState: AuthState = {
   sessionExpiresAt: null,
 }
 
-// Reducers read the rejectWithValue payload; RTK's serialized error never
-// carries backend detail, so anything else gets the fallback.
+// Rejections carry backend detail only via the rejectWithValue payload.
 function message(payload: unknown, fallback: string): string {
   return apiErrorMessage(payload, fallback)
 }
 
-/** Run a thunk body, converting a thrown ApiError into a rejectWithValue
- *  payload so its message/status survive RTK's error serialization. */
+/** Convert a thrown ApiError into rejectWithValue so its data survives serialization. */
 async function runOrReject<T, R>(
   fn: () => Promise<T>,
   rejectWithValue: (value: ApiErrorPayload) => R,
