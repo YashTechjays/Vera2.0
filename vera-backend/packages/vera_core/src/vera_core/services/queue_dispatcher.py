@@ -212,6 +212,8 @@ async def try_dispatch(
                     form_id=form.id,
                     current_status=CallStatus.INITIATED.value,
                     mode=call_mode.value,
+                    # Whoever enqueued the form owns the call, however late dispatch runs.
+                    initiated_by_id=form.enqueued_by_id,
                 )
                 session.add(call)
                 await session.flush()

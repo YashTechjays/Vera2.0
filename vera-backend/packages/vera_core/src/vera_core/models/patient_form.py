@@ -85,3 +85,10 @@ class PatientForm(Base, TenantScopedMixin):
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The user who queued this form — persisted so the dispatcher can attribute
+    # ownership (`call.initiated_by_id`) to the queuer even when the call is
+    # actually created later by a different actor (retry-at-callback, freed-slot
+    # dispatch). Never overwritten on retry, so ownership survives re-enqueue.
+    enqueued_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )

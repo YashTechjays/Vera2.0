@@ -15,6 +15,7 @@ from typing import Final
 DEFAULT_PERMISSIONS: Final[dict[str, str]] = {
     "calls:read": "View calls and their status/results",
     "calls:write": "Create and manage verification calls",
+    "calls:publish": "Publish a call so other VAs in the tenant can view and intervene",
     "voice_lab:sandbox": "Use the Voice Lab sandbox to start and monitor test voice sessions",
     "forms:read": "View form templates and filled forms",
     "forms:write": "Create and edit form templates",
@@ -57,6 +58,7 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
         {
             "calls:read",
             "calls:write",
+            "calls:publish",
             "voice_lab:sandbox",
             "forms:read",
             "forms:write",

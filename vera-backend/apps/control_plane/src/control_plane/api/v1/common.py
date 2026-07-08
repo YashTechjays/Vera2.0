@@ -21,6 +21,7 @@ from control_plane.auth.invitations import InvitationStore
 from control_plane.auth.rbac import PermissionResolver, get_resolver
 from control_plane.deps import (
     current_tenant_id,
+    get_audit,
     get_auth_audit,
     get_call_plan_store,
     get_email_sender,
@@ -32,7 +33,7 @@ from control_plane.deps import (
     tenant_scoped_session,
 )
 from control_plane.email import EmailSender
-from vera_core.audit import AuthAuditRecord, AuthAuditSink
+from vera_core.audit import AuditSink, AuthAuditRecord, AuthAuditSink
 from vera_core.call_plan import CallPlanStore
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
@@ -58,6 +59,7 @@ TenantSession = Annotated[AsyncSession, Depends(tenant_scoped_session)]
 SelfScopedSession = Annotated[AsyncSession, Depends(self_scoped_session)]
 TenantId = Annotated[UUID, Depends(current_tenant_id)]
 AuthAudit = Annotated[AuthAuditSink, Depends(get_auth_audit)]
+Audit = Annotated[AuditSink, Depends(get_audit)]
 AppSettings = Annotated[Settings, Depends(get_settings_state)]
 Invites = Annotated[InvitationStore, Depends(get_invitation_store)]
 Email = Annotated[EmailSender, Depends(get_email_sender)]
