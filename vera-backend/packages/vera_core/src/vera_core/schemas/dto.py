@@ -17,6 +17,8 @@ class CallSummary(BaseModel):
     patient_name: str | None = None
     started_at: datetime | None = None
     created_at: datetime
+    published: bool = False
+    is_owner: bool = False
 
 
 class StartCallRequest(BaseModel):
@@ -27,6 +29,10 @@ class StartCallRequest(BaseModel):
     # Which insurance provider this call targets — populates Call.insurance_provider_id and drives
     # playbook selection. Optional until forms carry a provider FK.
     insurance_provider_id: UUID | None = None
+
+
+class RevokeAccessRequest(BaseModel):
+    target_user_id: UUID
 
 
 class JoinTokenResponse(BaseModel):

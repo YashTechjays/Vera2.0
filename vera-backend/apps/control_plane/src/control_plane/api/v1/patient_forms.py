@@ -61,7 +61,11 @@ from vera_core.models import (
     Tenant,
 )
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import AnswerSource, DisputeActionType, FormStatus
+from vera_core.models.enums import (
+    AnswerSource,
+    DisputeActionType,
+    FormStatus,
+)
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
 
@@ -853,6 +857,10 @@ async def update_patient_form_status(
     # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
     if target == FormStatus.IN_QUEUE:
         form.enqueued_at = func.now()
+        # Persist the queuer so the dispatcher can attribute call ownership
+        # (`initiated_by_id`) even when the call is created later by a different
+        # actor (freed-slot dispatch, retry-at-callback).
+        form.enqueued_by_id = caller.user_id
 
     await session.flush()
 
@@ -873,7 +881,8 @@ async def update_patient_form_status(
 
     # Fire the dispatcher if a form was just enqueued. The response acknowledges
     # the manual transition (target), not whatever the dispatcher advanced the
-    # form to afterwards — clients observe dispatch via the calls list.
+    # form to afterwards — clients observe dispatch via the calls list. The
+    # dispatcher itself attributes ownership from `form.enqueued_by_id`, set above.
     if target == FormStatus.IN_QUEUE:
         await try_dispatch(session, tenant_id, livekit, audit=audit)
 

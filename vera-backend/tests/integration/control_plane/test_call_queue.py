@@ -238,6 +238,97 @@ async def test_manual_call_then_completed_callback(
 
 
 @pytest.mark.asyncio
+async def test_enqueue_stamps_enqueued_by_id(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    queue_form_id: UUID,
+) -> None:
+    """Moving a form to IN_QUEUE stamps `enqueued_by_id` with the acting user —
+    the queuer must be persisted on the form so the dispatcher can attribute
+    ownership even when the call is created later by a different actor."""
+    resp = await client.put(
+        f"/api/v1/patient-forms/{queue_form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as session:
+        enqueued_by_id = (
+            await session.execute(
+                text("SELECT enqueued_by_id FROM patient_form WHERE id = :fid").bindparams(
+                    fid=queue_form_id
+                )
+            )
+        ).scalar_one()
+    assert enqueued_by_id == rbac_world.admin_id
+
+
+@pytest.mark.asyncio
+async def test_dispatched_call_carries_queuer_as_owner(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    queue_form_id: UUID,
+) -> None:
+    """A call started by the queue dispatcher is owned by the user who queued
+    the form — `initiated_by_id` must not be left null for queue-started calls."""
+    resp = await client.put(
+        f"/api/v1/patient-forms/{queue_form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as session:
+        initiated_by_id = (
+            await session.execute(
+                text("SELECT initiated_by_id FROM call WHERE form_id = :fid").bindparams(
+                    fid=queue_form_id
+                )
+            )
+        ).scalar_one()
+    assert initiated_by_id == rbac_world.admin_id
+
+
+@pytest.mark.asyncio
+async def test_queue_started_call_is_publishable_by_queuer(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    queue_form_id: UUID,
+) -> None:
+    """The queuer owns the queue-started call and can publish it — a queue-
+    started call must not be stuck ownerless (unpublishable by anyone)."""
+    resp = await client.put(
+        f"/api/v1/patient-forms/{queue_form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    calls = (await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))).json()[
+        "data"
+    ]
+    owned = [c["id"] for c in calls if c["is_owner"] is True]
+    assert owned, f"expected an owned queue-started call, got: {calls}"
+    call_id = owned[0]
+
+    # A non-owner (supervisor) cannot publish a queue-started call either.
+    forbidden = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert forbidden.status_code == 403, forbidden.text
+
+    # The queuer (owner) can publish it.
+    pub = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert pub.status_code == 200, pub.text
+    assert pub.json()["data"]["published"] is True
+
+
+@pytest.mark.asyncio
 async def test_manual_call_form_not_redispatched(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

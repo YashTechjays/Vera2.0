@@ -1,20 +1,23 @@
-"""Verification-call endpoints: create, join-token, active-list.
+"""Verification-call endpoints: create, join-token, active-list, publish,
+revoke-access, and the agent-worker status callback.
 
-Auth note (acknowledged stopgap): all three endpoints guard with
-`require("calls:read")` for now — the SPA has no real auth yet, and the
-spec flags this.  A later task tightens POST / join-token to a write /
-manage permission once the RBAC catalog is extended.
+Auth note (acknowledged stopgap): create / join-token / active-list guard
+with `require("calls:read")` for now — the SPA has no real auth yet, and
+the spec flags this. `publish` and `revoke-access` are owner-only actions
+gated on `require("calls:publish")`: the caller must hold the permission
+*and* be the call's `initiated_by_id`, enforced by an explicit 403 check
+in each handler.
 """
 
 import contextlib
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
-from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit
@@ -25,13 +28,20 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.ivr_selection import add_active_playbook_metadata
+from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
 from vera_core.observability.correlation import room_name_for_call
-from vera_core.schemas import CallSummary, JoinTokenResponse, PersonaTweak, StartCallRequest
+from vera_core.schemas import (
+    CallSummary,
+    JoinTokenResponse,
+    PersonaTweak,
+    RevokeAccessRequest,
+    StartCallRequest,
+)
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
 
@@ -49,7 +59,12 @@ _ACTIVE_STATUSES = (
 )
 
 
-def _summary(call: Call, patient_name: str | None) -> CallSummary:
+def _supervisor_identity(user_id: UUID) -> str:
+    """LiveKit participant identity for a VA joining/intervening on a call."""
+    return f"supervisor-{user_id}"
+
+
+def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
     return CallSummary(
         id=call.id,
         tenant_id=call.tenant_id,
@@ -58,6 +73,8 @@ def _summary(call: Call, patient_name: str | None) -> CallSummary:
         patient_name=patient_name,
         started_at=call.started_at,
         created_at=call.created_at,
+        published=call.published,
+        is_owner=call.initiated_by_id == caller_id,
     )
 
 
@@ -76,7 +93,7 @@ async def start_call(
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
-    _caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
+    caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[CallSummary]:
     form = (
         await session.execute(
@@ -125,6 +142,7 @@ async def start_call(
         tenant_id=tenant_id,
         form_id=form.id,
         current_status=CallStatus.INITIATED,
+        initiated_by_id=caller.user_id,
         insurance_provider_id=body.insurance_provider_id,
     )
     session.add(call)
@@ -156,7 +174,7 @@ async def start_call(
             event_value=CallStatus.INITIATED,
         )
     )
-    return ok(_summary(call, form.patient_name))
+    return ok(_summary(call, form.patient_name, caller.user_id))
 
 
 @router.get(
@@ -170,9 +188,12 @@ async def start_call(
 )
 async def join_token(
     call_id: UUID,
+    request: Request,
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
+    audit: Audit,
+    intervene: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
     call = (
@@ -180,10 +201,101 @@ async def join_token(
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
+    if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
+        # Ownerless calls are joinable tenant-wide; revoked users get the same
+        # 404 as a private call (no enumeration).
+        revoked = str(caller.user_id) in call.revoked_user_ids
+        if revoked or (call.initiated_by_id is not None and not call.published):
+            raise NotFoundError(message="call not found")  # don't reveal a private call
+        await audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.USER,
+                actor_user_id=caller.user_id,
+                actor_label=caller.email or caller.subject,
+                event_type=AuditEvent.CALL_INTERVENE_JOIN.value,
+                resource_type="call",
+                resource_id=str(call.id),
+                permission_key="calls:read",
+                decision="allow",
+                request_id=current_request_id(request),
+                detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
+            )
+        )
     room_name = room_name_for_call(tenant_id, call.id)
-    identity = f"supervisor-{caller.user_id}"
-    token = livekit.mint_join_token(room_name=room_name, identity=identity)
+    identity = _supervisor_identity(caller.user_id)
+    # Watch-only tokens are server-side mute; only ?intervene=true may publish.
+    token = livekit.mint_join_token(room_name=room_name, identity=identity, can_publish=intervene)
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
+
+
+@router.post(
+    "/calls/{call_id}/publish",
+    response_model=ResponseModel[CallSummary],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def publish_call(
+    call_id: UUID,
+    request: Request,
+    response: Response,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: Audit,
+    caller: VerifiedIdentity = require("calls:publish"),
+) -> ResponseModel[CallSummary]:
+    response.headers["Cache-Control"] = "no-store"
+    # RLS scopes to the caller's tenant; the row lock serializes concurrent publishes.
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
+    ).scalar_one_or_none()
+    if call is None:
+        raise NotFoundError(message="call not found")
+    if call.initiated_by_id != caller.user_id:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="only the owner can publish"
+        )
+    if not call.published:  # idempotent, one-way — no un-publish
+        call.published = True
+        call.published_at = func.now()
+        await audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.USER,
+                actor_user_id=caller.user_id,
+                actor_label=caller.email or caller.subject,
+                event_type=AuditEvent.CALL_PUBLISH.value,
+                resource_type="call",
+                resource_id=str(call.id),
+                permission_key="calls:publish",
+                decision="allow",
+                request_id=current_request_id(request),
+            )
+        )
+    # Same row shape as list_calls — a None patient_name blanks the UI's
+    # Patient cell until the next poll.
+    patient_name = (
+        await session.execute(
+            select(PatientForm.patient_name).where(PatientForm.id == call.form_id)
+        )
+    ).scalar_one_or_none()
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type="call",
+            resource_id=str(call.id),
+            request_id=current_request_id(request),
+            detail={"fields": ["patient_name"]},
+        )
+    )
+    return ok(_summary(call, patient_name, caller.user_id))
 
 
 @router.get(
@@ -195,19 +307,98 @@ async def join_token(
     ),
 )
 async def list_calls(
-    _tenant_id: TenantId,
+    request: Request,
+    response: Response,
+    tenant_id: TenantId,
     session: TenantSession,
-    _caller: VerifiedIdentity = require("calls:read"),
+    audit: Audit,
+    caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[list[CallSummary]]:
+    response.headers["Cache-Control"] = "no-store"
     rows = (
         await session.execute(
             select(Call, PatientForm.patient_name)
             .join(PatientForm, PatientForm.id == Call.form_id)
             .where(Call.current_status.in_(list(_ACTIVE_STATUSES)))
+            # Ownerless (pre-ownership dispatcher) calls are tenant-visible —
+            # hidden, they'd have no monitoring and no owner to ever publish them.
+            .where(
+                or_(
+                    Call.initiated_by_id == caller.user_id,
+                    Call.published.is_(True),
+                    Call.initiated_by_id.is_(None),
+                )
+            )
             .order_by(Call.created_at.desc())
         )
     ).all()
-    return ok([_summary(c, name) for c, name in rows])
+    # PHI disclosure (patient_name) — audit field names, mirroring list_patient_forms.
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type="call",
+            resource_id="list",
+            request_id=current_request_id(request),
+            detail={"fields": ["patient_name"]},
+        )
+    )
+    return ok([_summary(c, name, caller.user_id) for c, name in rows])
+
+
+@router.post(
+    "/calls/{call_id}/revoke-access",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def revoke_access(
+    call_id: UUID,
+    body: RevokeAccessRequest,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    livekit: LiveKit,
+    audit: Audit,
+    caller: VerifiedIdentity = require("calls:publish"),
+) -> ResponseModel[None]:
+    # Row lock: concurrent revokes must not overwrite each other's list append.
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
+    ).scalar_one_or_none()
+    if call is None:
+        raise NotFoundError(message="call not found")
+    if call.initiated_by_id != caller.user_id:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="only the owner can revoke access"
+        )
+    target = str(body.target_user_id)
+    if target not in call.revoked_user_ids:
+        call.revoked_user_ids = [*call.revoked_user_ids, target]
+    room_name = room_name_for_call(tenant_id, call.id)
+    await livekit.remove_participant(room_name, _supervisor_identity(body.target_user_id))
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.CALL_INTERVENE_REVOKE.value,
+            resource_type="call",
+            resource_id=str(call.id),
+            permission_key="calls:publish",
+            decision="allow",
+            request_id=current_request_id(request),
+            detail={"target_user_id": str(body.target_user_id)},
+        )
+    )
+    return ok(None, message="Access revoked.")
 
 
 class UpdateCallStatusRequest(BaseModel):
@@ -239,7 +430,7 @@ async def update_call_status(
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
-    _caller: VerifiedIdentity = require("calls:read"),
+    caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[CallSummary]:
     """Callback endpoint for the agent worker to report call terminal status.
 
@@ -267,7 +458,7 @@ async def update_call_status(
         form = (
             await session.execute(select(PatientForm).where(PatientForm.id == call.form_id))
         ).scalar_one_or_none()
-        return ok(_summary(call, form.patient_name if form else None))
+        return ok(_summary(call, form.patient_name if form else None, caller.user_id))
 
     form = (
         await session.execute(
@@ -342,4 +533,4 @@ async def update_call_status(
     # Fire the dispatcher — a concurrency slot just freed up.
     await try_dispatch(session, tenant_id, livekit, audit=audit)
 
-    return ok(_summary(call, form.patient_name))
+    return ok(_summary(call, form.patient_name, caller.user_id))
