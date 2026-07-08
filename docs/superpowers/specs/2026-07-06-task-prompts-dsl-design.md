@@ -16,7 +16,7 @@ verification behavior (what the rep may ask to establish the call is legitimate)
 nowhere near the schema that knows the patient's identifiers.
 
 SmartCaller (Vera 1.0) solved this with per-phase prompt modules
-(`src/pipecat_module/prompts/phases/phase_*.py`). This design ports the *task-specific*
+(`src/pipecat_module/prompts/phases/phase_*.py`). This design ports the _task-specific_
 parts of those phases into the schema DSL and defines the placeholder contract that
 lets one schema serve every patient form.
 
@@ -38,8 +38,10 @@ lets one schema serve every patient form.
 
 **Non-goals**
 
-- IVR navigation (provider playbooks), the gap-analysis phase, and the final goodbye /
-  end-call ritual remain runtime stages composed around the schema tasks.
+- IVR navigation (provider playbooks), the gap-analysis phase, and the end-call
+  mechanics remain runtime stages composed around the schema tasks; gap analysis is
+  pinned between `closing_admin` and `wrap_up` (§5), and the goodbye itself is now
+  `wrap_up`'s outro.
 - No new `Task` model fields; no `dsl_version` bump — the only grammar addition
   (`stt_key_terms`) is optional and additive (§6).
 - The runtime task builder / prompt compiler implementation (this branch's next step)
@@ -49,12 +51,12 @@ lets one schema serve every patient form.
 
 For every task in `tasks`:
 
-| Key | LiveKit AgentTask meaning | Placeholders |
-|---|---|---|
-| `intro` | Spoken verbatim when the task starts (TTS-safe text — no stage directions; pacing via ellipses) | yes |
-| `outro` | Spoken verbatim when the task completes; also masks next-task spin-up latency | yes |
-| `prompt` | Supplied directly as the agent's task instructions | yes |
-| `sections` | The form sections whose `ask`/`confirm` fields the task collects; **may be empty** for ritual tasks that collect nothing | — |
+| Key        | LiveKit AgentTask meaning                                                                                                | Placeholders |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------ | ------------ |
+| `intro`    | Spoken verbatim when the task starts (TTS-safe text — no stage directions; pacing via ellipses)                          | yes          |
+| `outro`    | Spoken verbatim when the task completes; also masks next-task spin-up latency                                            | yes          |
+| `prompt`   | Supplied directly as the agent's task instructions                                                                       | yes          |
+| `sections` | The form sections whose `ask`/`confirm` fields the task collects; **may be empty** for ritual tasks that collect nothing | —            |
 
 A task with `sections: []` is a first-class shape: it exists purely for conversational
 behavior (the introduction task). The UI and the intake/review readers never consume
@@ -81,7 +83,7 @@ back to the field's `default` (e.g. `callback_number` → `"N/A"`) when unanswer
 **PHI:** hydration happens inside the trust boundary, and raw patient identifiers
 never land in an LLM prompt. Text destined for the LLM is hydrated with the session's
 `[[TYPE_N]]` PHI tokens; re-identification happens at the TTS seam
-(`vera_core.phi.hydrate_for_speech`) so the caller *speaks* real values. Non-PHI
+(`vera_core.phi.hydrate_for_speech`) so the caller _speaks_ real values. Non-PHI
 handles (facility/provider identifiers) may hydrate raw. The schema stays neutral —
 placeholders carry no PHI marking; the task builder decides token-vs-raw per seam.
 
@@ -124,21 +126,28 @@ immediately after.
 
 ## 5. SmartCaller phase → task mapping (existing tasks)
 
-| SmartCaller phase | Task | Change |
-|---|---|---|
-| Phase 1 IVR | — | runtime (IVR playbooks) — unchanged |
-| Phase 2 START | `introduction` (new) | §4 above |
-| Phase 2 questions | `insurance_basics` | no intro (by design); prompt unchanged — OON early termination already lives in `flow_rules.no_out_of_network_coverage` |
-| Phase 3 | `coverage` | intro/outro already match; unchanged |
-| Phase 4 | `financial` | intro/outro already match; unchanged |
-| Phase 5 male partner | `male_partner` | intro/outro already match; unchanged |
-| Phase 5 admin | `closing_admin` | intro/outro already match; unchanged |
-| Phase 5 closing ritual | `wrap_up` | prompt gains the critical-fields rule: the representative's name and the call reference number must be actual values — never accept "None", "Unknown", "Not provided" or any placeholder. outro added (hold phrase, masks gap-analysis latency): "Perfect, I have everything I need. Let me take a quick moment to review my notes and make sure I haven't missed anything. One moment please." |
-| Phase 6 gap analysis | — | runtime — unchanged |
+| SmartCaller phase      | Task                 | Change                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase 1 IVR            | —                    | runtime (IVR playbooks) — unchanged                                                                                                                                                                                                                                                                                                                                                             |
+| Phase 2 START          | `introduction` (new) | §4 above                                                                                                                                                                                                                                                                                                                                                                                        |
+| Phase 2 questions      | `insurance_basics`   | no intro (by design); prompt unchanged — OON early termination already lives in `flow_rules.no_out_of_network_coverage`                                                                                                                                                                                                                                                                         |
+| Phase 3                | `coverage`           | intro/outro already match; unchanged                                                                                                                                                                                                                                                                                                                                                            |
+| Phase 4                | `financial`          | intro/outro already match; unchanged                                                                                                                                                                                                                                                                                                                                                            |
+| Phase 5 male partner   | `male_partner`       | intro/outro already match; unchanged                                                                                                                                                                                                                                                                                                                                                            |
+| Phase 5 admin          | `closing_admin`      | intro already matches; **outro extended with the hold phrase** (plays right before the runtime gap-analysis review and masks its spin-up): "Perfect, I have all the administrative details I need. Let me take a quick moment to review my notes and make sure I haven't missed anything. One moment please." |
+| Phase 5 gap analysis   | —                    | runtime — **pinned to run after `closing_admin` and before `wrap_up`**, re-asking any required-but-unanswered questions |
+| Phase 6 closing ritual | `wrap_up`            | runs LAST, after gap analysis. intro added: "Thanks so much for your patience — that covers everything on my list." prompt gains the critical-fields rule: the representative's name and the call reference number must be actual values — never accept "None", "Unknown", "Not provided" or any placeholder — and are asked only once every missing question is cleared. outro = the gradual goodbye: "That's everything I need today. Thank you so much for all your help — have a wonderful day!" |
 
-The final goodbye / end-call phrase is deliberately NOT a task outro: gap analysis may
-re-open questions after `wrap_up`, and call termination is a tool call in Vera 2.0,
-not a phrase trigger.
+**Call-flow ordering (pinned):** `closing_admin` → runtime gap analysis (re-ask
+required ∧ applicable ∧ unanswered fields) → `wrap_up` (rep name + reference number)
+→ graceful call end. The hold phrase is `closing_admin`'s outro so it masks the
+gap-analysis review; `wrap_up` stays the final schema task so the representative's
+name and the reference number are captured only after every gap is cleared. The
+goodbye IS `wrap_up`'s outro; call termination remains a runtime tool call — fired
+only after the outro finishes playing (graceful drain, never aborting in-flight
+TTS), not a phrase trigger. On early termination (`flow_rules`,
+`skip_to_task: "wrap_up"`) the runtime jumps straight to `wrap_up`; gap analysis does
+not run.
 
 ## 6. `stt_key_terms` — session-wide STT vocabulary
 
@@ -167,16 +176,16 @@ sweep in "Yes"/"No"/"N/A"; an authoring helper can come later).
 
 **Initial IBV vocabulary** (authored in `catalog/ibv_standard.py`, ~55 terms):
 
-- *Treatments:* intrauterine insemination, IUI, in vitro fertilization, IVF,
+- _Treatments:_ intrauterine insemination, IUI, in vitro fertilization, IVF,
   ovulation induction, egg cryopreservation, embryo cryopreservation, frozen embryo
   transfer, embryo biopsy, semen analysis, sperm cryopreservation, infertility
-- *Plan/benefits:* coinsurance, copay, deductible, out-of-pocket maximum, lifetime
+- _Plan/benefits:_ coinsurance, copay, deductible, out-of-pocket maximum, lifetime
   maximum, prior authorization, coordination of benefits, policy situs, PPO, HMO,
   EPO, POS, self insured, fully funded, benefit year, plan year, telehealth,
   PCP referral, infertility plan mandate, cycle limit
-- *Admin:* pharmacy benefit manager, third party administrator, specialty pharmacy,
+- _Admin:_ pharmacy benefit manager, third party administrator, specialty pharmacy,
   member ID, group number, NPI, tax ID
-- *Common answers* (the enum values the extractor records — misrecognition here costs
+- _Common answers_ (the enum values the extractor records — misrecognition here costs
   a field): covered, not covered, in network, out of network, individual, family,
   spouse, dependent, primary, secondary, tertiary, small group, large group,
   no limit, unlimited
