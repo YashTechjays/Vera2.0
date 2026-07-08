@@ -1,8 +1,8 @@
 """widen auth_audit_log event_type CHECK for prompt authoring
 
-Revision ID: bb0f3401df12
-Revises: 098fb25594c1
-Create Date: 2026-07-07 20:47:40.914286
+Revision ID: 8de309426e2f
+Revises: 9750fbeb1fc8
+Create Date: 2026-07-08 11:40:12.104501
 
 Adds `prompt_version_created` / `prompt_version_published`. Same pattern as
 467e0adaaea1: drop-and-recreate the named CHECK from the CURRENT enum — a
@@ -16,8 +16,8 @@ from alembic import op
 
 from vera_core.models.enums import AuthEvent, values_of
 
-revision: str = "bb0f3401df12"
-down_revision: str | None = "098fb25594c1"
+revision: str = "8de309426e2f"
+down_revision: str | None = "9750fbeb1fc8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
