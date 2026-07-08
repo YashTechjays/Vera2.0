@@ -224,6 +224,20 @@ audit). What changes:
 
 ## 6. Seeder rework (`scripts/seed.py::_seed_prompts`)
 
+### 6.1 Bootstrap chain (no chicken-and-egg)
+
+The first prompt document's content originates in **code**, not the DB:
+`FACTORY_SESSION` (persona / goal / base_instructions constants in
+`vera_core.forms.prompting`, adapted from Vera 1.0's agent persona, placeholder-
+free). The seed order is linear — `_seed_form_schemas` publishes the
+`schema_version` first, then `_seed_prompts` pins the factory v1 against it — so
+the `schema_version_id` FK is always satisfiable. After bootstrap the DB is
+authoritative: editing `FACTORY_SESSION` in code never retrofits an existing
+schema's prompts (those change only through the editor); the constants matter
+again only for never-bootstrapped schemas and the §3 degradation path.
+
+### 6.2 The step
+
 No rendered-text compilation. The step:
 
 1. Ensures the `Prompt` row per `FormSchema` exists (name `"<schema name> Prompt"`).
