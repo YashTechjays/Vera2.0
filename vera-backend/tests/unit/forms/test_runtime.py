@@ -10,7 +10,7 @@ from typing import Any
 
 from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.planning import CallPlan, PlanField, PlanTask, compile_call_plan
-from vera_core.forms.runtime import advance, next_task, normalize_answer
+from vera_core.forms.runtime import advance, is_affirmation, next_task, normalize_answer
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 V2_DOC: FormSchemaDoc = load_document(
@@ -114,6 +114,63 @@ def _field(**kw: Any) -> PlanField:
 
 
 _YESNO = ["Yes", "No", "N/A"]
+
+
+def _confirm_plan() -> CallPlan:
+    """A section with a prefilled confirm (read-back) field before an ask field."""
+    raw: dict[str, Any] = {
+        "dsl_version": "2.1",
+        "name": "T",
+        "insurance_type": "infertility_treatment",
+        "sections": {
+            "ins": {
+                "title": "Insurance",
+                "fields": {
+                    "policy_number": {
+                        "type": "text",
+                        "title": "Member ID",
+                        "role": "confirm",
+                        "prompt": {"confirm": "I have the member ID as {{value}} — correct?"},
+                    },
+                    "covered": {
+                        "type": "enum",
+                        "title": "Covered",
+                        "role": "ask",
+                        "values": ["Yes", "No"],
+                        "required": True,
+                        "prompt": {"ask": "Covered?"},
+                    },
+                },
+            }
+        },
+        "tasks": [{"task_key": "ins", "title": "Insurance", "sections": ["ins"]}],
+    }
+    return compile_call_plan(
+        FormSchemaDoc.model_validate(raw),
+        call_id="c",
+        room_name="r",
+        current_year=2026,
+        prefill={"sections.ins.policy_number": "W1"},
+    )
+
+
+def test_advance_returns_confirm_field_for_readback() -> None:
+    plan = _confirm_plan()
+    field = advance(plan.tasks[0], plan, {})
+    assert field is not None
+    assert field.field_path == "sections.ins.policy_number"
+    assert field.status == "CONFIRM"
+    assert field.prefilled_value == "W1"
+
+
+class TestIsAffirmation:
+    def test_affirmations(self) -> None:
+        for txt in ("yes", "Yes.", "yep", "that's right", "correct", "Confirmed", "sure"):
+            assert is_affirmation(txt), txt
+
+    def test_non_affirmations(self) -> None:
+        for txt in ("no, it's W99", "W12345", "actually it's different", ""):
+            assert not is_affirmation(txt), txt
 
 
 class TestNormalizeAnswer:

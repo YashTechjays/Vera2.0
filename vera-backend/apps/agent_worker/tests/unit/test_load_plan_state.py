@@ -9,7 +9,7 @@ import pytest
 from agent_worker import main as worker_main
 from vera_core.call_plan import call_plan_key
 from vera_core.config.settings import Settings
-from vera_core.forms.planning import CallPlan, PlanTask
+from vera_core.forms.planning import CallPlan, ContextItem, PlanTask
 from vera_core.phi import PassthroughPHIBoundary
 
 ROOM = "call--t--c"
@@ -53,6 +53,26 @@ async def test_empty_tasks_returns_none(monkeypatch: pytest.MonkeyPatch) -> None
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     await redis.set(call_plan_key(ROOM), _plan([]).model_dump_json(by_alias=True))
     assert await _load(monkeypatch, redis) is None
+
+
+async def test_context_values_seeded_into_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Known context values (e.g. spouse_gender) must seed the answer map so gates/routing
+    # can use them without asking.
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    plan = CallPlan(
+        call_id="c",
+        room_name=ROOM,
+        schema_version="2.1",
+        tasks=[PlanTask(task_key="t", order=0, fields=[])],
+        context_knowledge=[
+            ContextItem(field_path="sections.patient.spouse_gender", title="Spouse", value="Male"),
+            ContextItem(field_path="sections.patient.dob", title="DOB", value=None),  # unfilled
+        ],
+    )
+    await redis.set(call_plan_key(ROOM), plan.model_dump_json(by_alias=True))
+    state = await _load(monkeypatch, redis)
+    assert state is not None
+    assert state.answers == {"sections.patient.spouse_gender": "Male"}  # None one excluded
 
 
 async def test_redis_read_error_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

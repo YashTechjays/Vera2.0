@@ -19,16 +19,28 @@ short warm acknowledgement before each question, but never read the answer back.
 
 
 def _question_lines(task: PlanTask) -> str:
+    # COLLECT questions plus CONFIRM read-backs (their prompt already carries the value).
     lines = [
         f"{i}. {field.resolved_prompt}"
-        for i, field in enumerate((f for f in task.fields if f.status == "COLLECT"), start=1)
+        for i, field in enumerate(
+            (f for f in task.fields if f.status in ("COLLECT", "CONFIRM")), start=1
+        )
         if field.resolved_prompt
     ]
     return "\n".join(lines)
 
 
+def _known_info(plan: CallPlan) -> str:
+    """The patient facts already on file (prefilled context), for the agent to answer from
+    if the rep asks — never to volunteer."""
+    return "\n".join(
+        f"- {c.title}: {c.value}" for c in plan.context_knowledge if c.value is not None
+    )
+
+
 def build_plan_task_instructions(plan: CallPlan, task_key: str) -> str:
-    """Persona + this task's guidance + its question list + the ask/record protocol.
+    """Persona + known patient info + this task's guidance + its question list + the
+    ask/record protocol.
 
     The task intro is NOT included here — the agent speaks it deterministically in
     `on_enter` (like VeraAgent's greeting), so listing it here would voice it twice.
@@ -37,6 +49,12 @@ def build_plan_task_instructions(plan: CallPlan, task_key: str) -> str:
     parts = [SYSTEM_PROMPT]
     if task.prompt:
         parts.append(task.prompt)
+    known = _known_info(plan)
+    if known:
+        parts.append(
+            "PATIENT INFO YOU ALREADY KNOW (use to answer the rep if asked; never volunteer)\n"
+            + known
+        )
     parts.append(f"QUESTIONS FOR THIS TASK\n{_question_lines(task)}")
     parts.append(_PROTOCOL)
     parts.append(CARTESIA_MARKUP_GUIDE)

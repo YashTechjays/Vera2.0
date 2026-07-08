@@ -7,6 +7,7 @@ tokens/reference-ids everything else caches — never raw values.
 """
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.intake import iter_leaf_answers
 from vera_core.forms.planning import CallPlan, compile_call_plan
 from vera_core.models import FormSchema, PatientForm, SchemaVersion
 from vera_core.models.enums import VersionStatus
@@ -74,6 +76,7 @@ async def _compile_and_store(
     call_id: UUID,
     room_name: str,
     store: CallPlanStore,
+    prefill: Mapping[str, str] = {},
 ) -> bool:
     """Compile a schema document into a plan and stash it for the worker. Returns False (no
     plan written; the worker falls back to the static agent) for a missing/legacy/malformed
@@ -94,9 +97,19 @@ async def _compile_and_store(
         )
         return False
     year = (await session.execute(select(func.extract("year", func.now())))).scalar_one()
-    plan = compile_call_plan(doc, call_id=str(call_id), room_name=room_name, current_year=int(year))
+    plan = compile_call_plan(
+        doc, call_id=str(call_id), room_name=room_name, current_year=int(year), prefill=prefill
+    )
     await store.put(room_name, plan)
     return True
+
+
+def _prefill_from_form(form: PatientForm) -> dict[str, str]:
+    """The patient's known values as {field_path: value}. `intake_payload` is section-nested
+    (no `sections.` wrapper), so wrap it before flattening to get root-anchored paths that
+    match `PlanField.field_path`."""
+    payload = {"sections": form.intake_payload} if form.intake_payload else {}
+    return {path: str(value) for path, value in iter_leaf_answers(payload)}
 
 
 async def build_and_store_call_plan(
@@ -107,14 +120,20 @@ async def build_and_store_call_plan(
     room_name: str,
     store: CallPlanStore,
 ) -> bool:
-    """Compile the form's pinned schema version into a plan and stash it for the worker."""
+    """Compile the form's pinned schema version into a plan (prefilled from the form's
+    intake values) and stash it for the worker."""
     schema_json = (
         await session.execute(
             select(SchemaVersion.schema_json).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one_or_none()
     return await _compile_and_store(
-        session, schema_json, call_id=call_id, room_name=room_name, store=store
+        session,
+        schema_json,
+        call_id=call_id,
+        room_name=room_name,
+        store=store,
+        prefill=_prefill_from_form(form),
     )
 
 

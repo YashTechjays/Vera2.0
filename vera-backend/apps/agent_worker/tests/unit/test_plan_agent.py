@@ -168,6 +168,75 @@ async def test_cascade_no_collapses_children_then_hands_off() -> None:
     assert result._task.task_key == "close"
 
 
+MEMBER_ID = "sections.ins.member_id"
+
+
+def _confirm_state() -> PlanRunState:
+    raw: dict[str, Any] = {
+        "dsl_version": "2.1",
+        "name": "T",
+        "insurance_type": "infertility_treatment",
+        "sections": {
+            "patient": {
+                "title": "Patient",
+                "role": "context",
+                "fields": {
+                    "patient_name": {"type": "text", "title": "Patient Name", "role": "context"}
+                },
+            },
+            "ins": {
+                "title": "Insurance",
+                "fields": {
+                    "member_id": {
+                        "type": "text",
+                        "title": "Member ID",
+                        "role": "confirm",
+                        "prompt": {"confirm": "I have the member ID as {{value}} — correct?"},
+                    }
+                },
+            },
+        },
+        "tasks": [{"task_key": "ins", "title": "Insurance", "sections": ["ins"]}],
+    }
+    plan = compile_call_plan(
+        FormSchemaDoc.model_validate(raw),
+        call_id="c",
+        room_name="r",
+        current_year=2026,
+        prefill={MEMBER_ID: "W1", "sections.patient.patient_name": "Jane Doe"},
+    )
+    return PlanRunState(plan=plan, answers={}, boundary=PassthroughPHIBoundary(), session_id="s1")
+
+
+def test_instructions_include_confirm_readback_and_known_info() -> None:
+    agent = PlanTaskAgent(_confirm_state(), "ins")
+    assert "I have the member ID as W1 — correct?" in agent.instructions  # CONFIRM listed
+    assert "Patient Name: Jane Doe" in agent.instructions  # known context injected
+
+
+@pytest.mark.asyncio
+async def test_confirm_affirmation_stores_the_prefilled_value() -> None:
+    state = _confirm_state()
+    agent = PlanTaskAgent(state, "ins")
+    agent._asked = agent.pending_field()
+    assert agent._asked is not None and agent._asked.field_path == MEMBER_ID
+    mock_session = MagicMock()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        await _record_tool(agent)(value="yes, that's right")
+    assert state.answers[MEMBER_ID] == "W1"
+
+
+@pytest.mark.asyncio
+async def test_confirm_correction_stores_the_corrected_value() -> None:
+    state = _confirm_state()
+    agent = PlanTaskAgent(state, "ins")
+    agent._asked = agent.pending_field()
+    mock_session = MagicMock()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        await _record_tool(agent)(value="W99")
+    assert state.answers[MEMBER_ID] == "W99"
+
+
 def test_handoff_shares_the_answer_map_across_agents() -> None:
     # Seam 2: a second task agent reads the SAME answers the first collected.
     state = _state()

@@ -38,7 +38,9 @@ def _doc() -> FormSchemaDoc:
                         "type": "text",
                         "title": "Policy Number",
                         "role": "confirm",
-                        "prompt": {"confirm": "I have the policy number on file — is that right?"},
+                        "prompt": {
+                            "confirm": "I have the policy number as {{value}} — is that right?"
+                        },
                     },
                     "notes": {
                         "type": "text",
@@ -115,8 +117,10 @@ def _doc() -> FormSchemaDoc:
     return FormSchemaDoc.model_validate(raw)
 
 
-def _compile() -> CallPlan:
-    return compile_call_plan(_doc(), call_id="call_1", room_name="room_1", current_year=2026)
+def _compile(prefill: dict[str, str] | None = None) -> CallPlan:
+    return compile_call_plan(
+        _doc(), call_id="call_1", room_name="room_1", current_year=2026, prefill=prefill or {}
+    )
 
 
 def _field(plan: CallPlan, path: str) -> PlanField:
@@ -152,6 +156,30 @@ def test_ask_field_is_collect() -> None:
 def test_confirm_field_is_pending_context_with_no_value() -> None:
     field = _field(_compile(), "sections.basics.policy_number")
     assert field.status == "PENDING_CONTEXT"
+    assert field.prefilled_value is None
+
+
+def test_confirm_field_prefilled_becomes_confirm_with_value_substituted() -> None:
+    field = _field(
+        _compile({"sections.basics.policy_number": "W123"}), "sections.basics.policy_number"
+    )
+    assert field.status == "CONFIRM"
+    assert field.prefilled_value == "W123"
+    assert field.resolved_prompt == "I have the policy number as W123 — is that right?"
+
+
+def test_context_field_prefilled_carries_value() -> None:
+    plan = _compile({"sections.patient.patient_name": "Jane Doe"})
+    item = next(
+        c for c in plan.context_knowledge if c.field_path == "sections.patient.patient_name"
+    )
+    assert item.value == "Jane Doe"
+
+
+def test_ask_field_ignores_prefill() -> None:
+    # ask fields are always collected live, never prefilled.
+    field = _field(_compile({"sections.basics.plan_type": "PPO"}), "sections.basics.plan_type")
+    assert field.status == "COLLECT"
     assert field.prefilled_value is None
 
 

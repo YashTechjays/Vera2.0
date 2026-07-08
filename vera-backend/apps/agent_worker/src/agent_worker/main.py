@@ -266,8 +266,16 @@ async def _load_plan_state(
     if not plan.tasks:
         logger.error("call plan for %s has no tasks; static fallback", room_name)
         return None
-    logger.info("call plan loaded for %s: %d tasks", room_name, len(plan.tasks))
-    return PlanRunState(plan=plan, boundary=boundary, session_id=session_id)
+    # Seed the answer map with known context values (patient name, spouse gender, …) so gates
+    # and routing resolve without asking. Confirm values are NOT seeded — they're read back.
+    answers = {c.field_path: c.value for c in plan.context_knowledge if c.value is not None}
+    logger.info(
+        "call plan loaded for %s: %d tasks, %d known context values",
+        room_name,
+        len(plan.tasks),
+        len(answers),
+    )
+    return PlanRunState(plan=plan, boundary=boundary, session_id=session_id, answers=answers)
 
 
 async def entrypoint(ctx: JobContext) -> None:

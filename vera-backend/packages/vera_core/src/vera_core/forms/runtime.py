@@ -64,17 +64,29 @@ def normalize_answer(field: PlanField, raw: str) -> str | None:
 
 Answers = Mapping[str, str]
 
+_AFFIRMATIONS = frozenset(
+    {"yes", "yeah", "yep", "yup", "correct", "right", "confirmed", "confirm", "sure", "affirmative"}
+)
+
+
+def is_affirmation(text: str) -> bool:
+    """True if `text` reads as a plain 'yes, that's correct' — used to accept a confirm
+    read-back. A correction (a different value) is not an affirmation."""
+    lowered = text.lower()
+    return any(_standalone(word, lowered) for word in _AFFIRMATIONS)
+
 
 def advance(task: PlanTask, plan: CallPlan, answers: MutableMapping[str, str]) -> PlanField | None:
     """The next field to ask in `task`, or None when the task is exhausted. Out-of-scope
     fields are auto-filled with their `inapplicable_value` and never asked; fields whose
-    gates aren't decidable yet are skipped this pass (a later answer may reach them)."""
+    gates aren't decidable yet are skipped this pass (a later answer may reach them).
+    COLLECT fields are asked; CONFIRM fields are read back; KNOWN/PENDING are never spoken."""
     shared = plan.shared_conditions or {}
     for field in task.fields:
         if field.field_path in answers:
             continue
-        if field.status != "COLLECT":
-            # confirm/context prefill is deferred (PHI vault); skip for now.
+        if field.status not in ("COLLECT", "CONFIRM"):
+            # context (KNOWN) and deferred PENDING_CONTEXT fields are never spoken.
             continue
         match resolve_applicability(tuple(field.applicable_when), answers, shared):
             case Applicability.APPLICABLE:

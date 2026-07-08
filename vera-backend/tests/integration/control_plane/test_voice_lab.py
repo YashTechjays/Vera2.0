@@ -206,6 +206,7 @@ async def infertility_patient_form(
                     tenant_id=rbac_world.tenant_id,
                     schema_version_id=version_id,
                     patient_name=_FORM_PHI_NAME,
+                    intake_payload={"patient_information": {"patient_name": _FORM_PHI_NAME}},
                 )
             )
         yield form_id
@@ -224,7 +225,8 @@ async def test_browser_session_with_form_id_writes_plan(
     call_plan_store: InMemoryCallPlanStore,
     infertility_patient_form: UUID,
 ) -> None:
-    # A selected patient form compiles the plan from that form's pinned schema — PHI-free.
+    # A selected patient form compiles the plan from that form's pinned schema, prefilled
+    # from its intake_payload.
     resp = await client.post(
         "/api/v1/voice-lab/sessions",
         headers=_auth(rbac_world.admin_token),
@@ -236,7 +238,8 @@ async def test_browser_session_with_form_id_writes_plan(
     plan = await call_plan_store.get(room_name)
     assert plan is not None
     assert plan.schema_version == "2.1"
-    assert _FORM_PHI_NAME not in plan.model_dump_json()
+    ctx = {c.field_path: c.value for c in plan.context_knowledge}
+    assert ctx.get("sections.patient_information.patient_name") == _FORM_PHI_NAME
 
 
 @pytest.mark.asyncio

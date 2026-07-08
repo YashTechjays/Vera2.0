@@ -14,7 +14,7 @@ from livekit.agents import Agent, function_tool
 from agent_worker.plan_prompt import build_plan_task_instructions
 from agent_worker.plan_run_state import PlanRunState
 from vera_core.forms.planning import PlanField, PlanTask
-from vera_core.forms.runtime import advance, next_task, normalize_answer
+from vera_core.forms.runtime import advance, is_affirmation, next_task, normalize_answer
 
 logger = logging.getLogger("agent_worker")
 
@@ -56,13 +56,22 @@ class PlanTaskAgent(Agent):
                 "record_answer with no field awaiting on task %s; ignoring", self._task.task_key
             )
             return self._complete()
-        normalized = normalize_answer(field, value)
-        if normalized is None:
+        if (
+            field.status == "CONFIRM"
+            and field.prefilled_value is not None
+            and is_affirmation(value)
+        ):
+            # A read-back the rep confirmed → keep the prefilled value; otherwise fall through
+            # and treat the utterance as a correction (a fresh value to validate).
+            recorded: str | None = field.prefilled_value
+        else:
+            recorded = normalize_answer(field, value)
+        if recorded is None:
             # Couldn't validate against the field's expected/valid values — re-ask rather than
             # storing a value that would mis-gate the cascade. Keep `_asked` unchanged.
             logger.info("unrecognized answer for %s; re-prompting", field.field_path)
             return f"I didn't quite catch that — please ask again: {field.resolved_prompt}"
-        self._state.answers[field.field_path] = normalized
+        self._state.answers[field.field_path] = recorded
         self._asked = self.pending_field()
         if self._asked is not None:
             return f"Recorded. Now ask the representative: {self._asked.resolved_prompt}"

@@ -20,6 +20,7 @@ from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 
 _PHI_NAME = "Jane PHI Doe"
+_MEMBER_ID = "W88012345"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -64,6 +65,11 @@ async def v2_form_id(database_url: str, rbac_world: RBACWorld) -> AsyncGenerator
                     tenant_id=rbac_world.tenant_id,
                     schema_version_id=version_id,
                     patient_name=_PHI_NAME,
+                    # intake_payload is section-nested (no `sections.` wrapper).
+                    intake_payload={
+                        "patient_information": {"patient_name": _PHI_NAME},
+                        "insurance_information": {"policy_number": _MEMBER_ID},
+                    },
                 )
             )
             schema_id = schema.id
@@ -95,7 +101,7 @@ async def v2_form_id(database_url: str, rbac_world: RBACWorld) -> AsyncGenerator
 
 
 @pytest.mark.asyncio
-async def test_start_call_writes_phi_free_plan(
+async def test_start_call_writes_prefilled_plan(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     v2_form_id: UUID,
@@ -113,8 +119,16 @@ async def test_start_call_writes_phi_free_plan(
     assert plan is not None
     assert plan.schema_version == "2.1"
     assert plan.room_name == room_name
-    # Non-PHI: the patient name never appears anywhere in the compiled plan.
-    assert _PHI_NAME not in plan.model_dump_json()
-    # The ask-fields are compiled as COLLECT; a known infertility gate is present.
+    # Prefill (from intake_payload): patient name is known context, member ID a CONFIRM read-back.
+    ctx = {c.field_path: c.value for c in plan.context_knowledge}
+    assert ctx.get("sections.patient_information.patient_name") == _PHI_NAME
+    member_id = next(
+        f
+        for t in plan.tasks
+        for f in t.fields
+        if f.field_path == "sections.insurance_information.policy_number"
+    )
+    assert member_id.status == "CONFIRM" and member_id.prefilled_value == _MEMBER_ID
+    # The ask-fields are still compiled as COLLECT.
     collect = {f.field_path for t in plan.tasks for f in t.fields if f.status == "COLLECT"}
     assert "sections.infertility_treatment.infertility_tx_covered" in collect
