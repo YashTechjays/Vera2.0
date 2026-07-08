@@ -7,6 +7,7 @@ strict policy confines `user_role` to the tenant. Every assign/revoke invalidate
 the effective-permission cache for the affected user (auth/rbac.py) and is audited.
 """
 
+import asyncio
 from collections.abc import Sequence
 from typing import Annotated
 from uuid import UUID
@@ -271,8 +272,10 @@ async def update_role(
         role.description = body.description
         changed.append("description")
 
+    resolved: list[Permission] | None = None
     if body.permission_ids is not None:
         permissions = await _resolve_grantable_permissions(session, body.permission_ids)
+        resolved = sorted(permissions, key=lambda p: p.code)
         links = (
             (await session.execute(select(RolePermission).where(RolePermission.role_id == role_id)))
             .scalars()
@@ -314,8 +317,7 @@ async def update_role(
             .scalars()
             .all()
         )
-        for holder_id in holders:
-            await resolver.invalidate(tenant_id, holder_id)
+        await asyncio.gather(*(resolver.invalidate(tenant_id, h) for h in holders))
 
     if changed:
         await emit_auth_event(
@@ -326,7 +328,10 @@ async def update_role(
             user_id=_caller.user_id,
             meta={"role_id": str(role_id), "changed": changed},
         )
-    return ok(_to_detail(role, await _role_permissions(session, role_id)))
+    # Reuse the permissions resolved above; only a name/description-only PATCH
+    # still needs the lookup.
+    final = resolved if resolved is not None else await _role_permissions(session, role_id)
+    return ok(_to_detail(role, final))
 
 
 @router.get(
