@@ -86,6 +86,9 @@ class TestCompiledArtifacts:
         assert intro_task.outro == "Great, let me pull up my questions..."
         rule_keys = [r.rule_key for r in doc.flow_rules or []]
         assert rule_keys[0] == "patient_not_on_plan"
+        rule = (doc.flow_rules or [])[0]
+        assert rule.action == "terminate_call"
+        assert rule.skip_to_task == "wrap_up"
         wrap_up = doc.tasks[-1]
         assert wrap_up.task_key == "wrap_up"
         assert wrap_up.intro is not None and wrap_up.outro is not None
@@ -195,3 +198,8 @@ class TestDocumentValidation:
         doc = minimal_doc(stt_key_terms=[f"term {i}" for i in range(101)])
         with pytest.raises(ValidationError, match="exceeds limit"):
             FormSchemaDoc.model_validate(doc)
+
+    def test_empty_sections_ritual_task_is_valid(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"].insert(0, {"task_key": "ritual", "title": "Ritual", "sections": []})
+        FormSchemaDoc.model_validate(doc)
