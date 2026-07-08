@@ -52,6 +52,7 @@ export function RolesSection() {
   // Which role the open delete dialog belongs to — guards stale holder fetches
   // (same pattern as UserRolesCard.selectedUserIdRef).
   const confirmDeleteIdRef = useRef<string | null>(null)
+  const openEditIdRef = useRef<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -104,10 +105,15 @@ export function RolesSection() {
   const openEdit = useCallback(
     async (role: Role) => {
       if (permissions === null) return
+      openEditIdRef.current = role.id
       try {
-        setEditing(await getRole(role.id))
+        const detail = await getRole(role.id)
+        // Guard stale responses: a second Edit click supersedes this one.
+        if (openEditIdRef.current !== role.id) return
+        setEditing(detail)
         setDialogOpen(true)
       } catch (err) {
+        if (openEditIdRef.current !== role.id) return
         setError(err instanceof ApiError ? err.message : "Could not load the role.")
       }
     },
