@@ -13,3 +13,12 @@ def test_call_audit_events_exist() -> None:
     assert AuditEvent.CALL_PUBLISH.value == "call.publish"
     assert AuditEvent.CALL_INTERVENE_JOIN.value == "call.intervene.join"
     assert AuditEvent.CALL_INTERVENE_REVOKE.value == "call.intervene.revoke"
+
+
+def test_recordings_permissions_seeded() -> None:
+    assert "recordings:read" in DEFAULT_PERMISSIONS
+    assert "recordings:manage" in DEFAULT_PERMISSIONS
+    assert "recordings:read" in SYSTEM_ROLES["SUPERVISOR"]
+    assert "recordings:manage" not in SYSTEM_ROLES["SUPERVISOR"]
+    assert "recordings:read" in SYSTEM_ROLES["TENANT_ADMIN"]
+    assert "recordings:manage" in SYSTEM_ROLES["TENANT_ADMIN"]
