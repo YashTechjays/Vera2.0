@@ -136,10 +136,13 @@ async def create_api_key(
         # clean 409 instead of a 500 at commit time, after the audit is written.
         await session.flush()
     except IntegrityError as exc:
-        raise CustomAPIException(
-            DefaultExceptionCode.CONFLICT,
-            message=f"an active API key named '{body.name}' already exists",
-        ) from exc
+        # Only unique_violation means "name taken" — anything else is not a 409.
+        if getattr(exc.orig, "sqlstate", None) == "23505":
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT,
+                message=f"an active API key named '{body.name}' already exists",
+            ) from exc
+        raise BadRequestError(message="request rejected") from exc
     token = api_key.format_token(tenant_id, key_id, secret)
     await emit_auth_event(
         audit,
