@@ -165,7 +165,7 @@ per-patient PHI in key terms is impossible by construction.
 and auto-derivation from schema titles/enum values (implicit and noisy — it would
 sweep in "Yes"/"No"/"N/A"; an authoring helper can come later).
 
-**Initial IBV vocabulary** (authored in `catalog/ibv_standard.py`, ~40 terms):
+**Initial IBV vocabulary** (authored in `catalog/ibv_standard.py`, ~55 terms):
 
 - *Treatments:* intrauterine insemination, IUI, in vitro fertilization, IVF,
   ovulation induction, egg cryopreservation, embryo cryopreservation, frozen embryo
@@ -176,9 +176,15 @@ sweep in "Yes"/"No"/"N/A"; an authoring helper can come later).
   PCP referral, infertility plan mandate, cycle limit
 - *Admin:* pharmacy benefit manager, third party administrator, specialty pharmacy,
   member ID, group number, NPI, tax ID
+- *Common answers* (the enum values the extractor records — misrecognition here costs
+  a field): covered, not covered, in network, out of network, individual, family,
+  spouse, dependent, primary, secondary, tertiary, small group, large group,
+  no limit, unlimited
 
 CPT codes are deliberately excluded — they are spoken as digit strings, where keyterm
-boosting does not help.
+boosting does not help. The common-answer terms are ordinary English words, which
+keyterm prompting can over-trigger on; if live-call tuning shows over-recognition,
+prune from that group first.
 
 **Versioning.** Additive optional key; `_Model` is `extra="forbid"` but validator and
 documents ship together in-repo, so no `dsl_version` bump and no intake/review/
