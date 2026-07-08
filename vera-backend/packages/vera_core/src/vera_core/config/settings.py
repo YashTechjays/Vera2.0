@@ -133,6 +133,15 @@ class Settings(BaseSettings):
     audit_anchor_bucket: str | None = None
     audit_anchor_prefix: str = "audit-anchors"
     audit_anchor_local_dir: str = ".audit-anchors"
+    # --- call recording (LiveKit composite egress → GCS) --------------------
+    # Unset bucket → recording disabled end-to-end (no egress started, no
+    # Recording rows, playback 409s) — mirrors the langfuse_host no-op switch.
+    recording_bucket: str | None = None  # VERA_RECORDING_BUCKET
+    recording_prefix: str = "recordings"  # VERA_RECORDING_PREFIX
+    recording_retention_days_default: int = 90  # VERA_RECORDING_RETENTION_DAYS_DEFAULT
+    recording_signed_url_ttl_seconds: int = 600  # VERA_RECORDING_SIGNED_URL_TTL_SECONDS
+    recording_verify_interval_seconds: int = 30  # VERA_RECORDING_VERIFY_INTERVAL_SECONDS
+    retention_sweep_interval_seconds: int = 3600  # VERA_RETENTION_SWEEP_INTERVAL_SECONDS
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require

@@ -53,6 +53,14 @@ class AuditEvent(enum.StrEnum):
     # Queue expiry: the dispatcher marked a form expired because it exceeded the
     # tenant's queue_expiry_hours window. Records form id + tenant only.
     QUEUE_EXPIRED = "queue.expired"
+    # Recording lifecycle (call audio in GCS). Ids/hashes/sizes only — never audio,
+    # never PHI. RECORDING_DELETED is emitted twice per sweep: detail.phase="before"
+    # (object snapshot pre-delete) and "after" (verified-gone confirmation).
+    RECORDING_START_FAILED = "recording.start_failed"
+    RECORDING_FAILED = "recording.failed"
+    RECORDING_DISCARDED = "recording.discarded"
+    RECORDING_ACCESSED = "recording.accessed"
+    RECORDING_DELETED = "recording.deleted"
 
 
 class AuditLog(Base, TenantScopedMixin):

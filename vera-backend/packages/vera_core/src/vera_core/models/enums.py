@@ -64,6 +64,18 @@ class TranscriptSource(enum.StrEnum):
     SUPERVISOR = "supervisor"
 
 
+class RecordingStatus(enum.StrEnum):
+    """recording lifecycle. PENDING at egress start; AVAILABLE once the object is
+    sha256-verified; FAILED (egress start or run failed); DISCARDED (no-answer/busy
+    call — object deleted at verify time); DELETED (retention-sweep tombstone)."""
+
+    PENDING = "pending"
+    AVAILABLE = "available"
+    FAILED = "failed"
+    DISCARDED = "discarded"
+    DELETED = "deleted"
+
+
 class DisputeActionType(enum.StrEnum):
     ACCEPT = "accept"
     OVERRIDE = "override"

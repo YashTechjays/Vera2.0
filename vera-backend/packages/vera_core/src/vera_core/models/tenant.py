@@ -42,5 +42,10 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     queue_expiry_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
+    # Recording retention in days; NULL → the platform default
+    # (settings.recording_retention_days_default). Stamped onto
+    # recording.retention_until at verify time; changing it does NOT rewrite
+    # already-stamped recordings (spec decision).
+    recording_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
