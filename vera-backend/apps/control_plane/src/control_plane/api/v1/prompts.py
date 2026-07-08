@@ -97,32 +97,31 @@ async def list_prompts(
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _READ],
 ) -> ResponseModel[list[PromptSummary]]:
+    # Outer join, not N+1: uq_prompt_version_published_per_prompt guarantees at
+    # most one published row per prompt, so the join can't fan out.
     rows = (
         await session.execute(
-            select(Prompt.id, Prompt.name, FormSchema.insurance_type)
+            select(Prompt.id, Prompt.name, FormSchema.insurance_type, PromptVersion.version)
             .join(FormSchema, Prompt.schema_id == FormSchema.id)
+            .outerjoin(
+                PromptVersion,
+                (PromptVersion.prompt_id == Prompt.id)
+                & (PromptVersion.status == VersionStatus.PUBLISHED),
+            )
             .order_by(Prompt.name)
         )
     ).all()
-    summaries: list[PromptSummary] = []
-    for row in rows:
-        published_version = (
-            await session.execute(
-                select(PromptVersion.version).where(
-                    PromptVersion.prompt_id == row.id,
-                    PromptVersion.status == VersionStatus.PUBLISHED,
-                )
-            )
-        ).scalar_one_or_none()
-        summaries.append(
+    return ok(
+        [
             PromptSummary(
                 id=row.id,
                 name=row.name,
                 insurance_type=row.insurance_type,
-                published_version=published_version,
+                published_version=row.version,
             )
-        )
-    return ok(summaries)
+            for row in rows
+        ]
+    )
 
 
 @router.get(
