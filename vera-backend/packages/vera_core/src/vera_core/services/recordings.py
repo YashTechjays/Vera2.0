@@ -60,41 +60,44 @@ async def start_recording_for_call(
     audit: AuditSink | None = None,
 ) -> None:
     """Start egress + insert the Recording row. Never raises (fail-open)."""
-    room_name = room_name_for_call(tenant_id, call_id)
-    object_path = recording_object_path(config, tenant_id, call_id)
-    gcs_uri = f"gs://{config.bucket}/{object_path}"
     try:
-        egress_id = await livekit.start_room_audio_egress(
-            room_name, bucket=config.bucket, object_path=object_path
-        )
-    except Exception:
-        logger.exception("recording: egress start failed for call %s — call proceeds", call_id)
+        room_name = room_name_for_call(tenant_id, call_id)
+        object_path = recording_object_path(config, tenant_id, call_id)
+        gcs_uri = f"gs://{config.bucket}/{object_path}"
+        try:
+            egress_id = await livekit.start_room_audio_egress(
+                room_name, bucket=config.bucket, object_path=object_path
+            )
+        except Exception:
+            logger.exception("recording: egress start failed for call %s — call proceeds", call_id)
+            session.add(
+                Recording(
+                    tenant_id=tenant_id,
+                    call_id=call_id,
+                    gcs_uri=gcs_uri,
+                    status=RecordingStatus.FAILED.value,
+                )
+            )
+            if audit is not None:
+                await audit.emit(
+                    AuditRecord(
+                        tenant_id=tenant_id,
+                        actor_type=ActorType.SYSTEM,
+                        actor_label="recording-starter",
+                        event_type=AuditEvent.RECORDING_START_FAILED.value,
+                        resource_type="call",
+                        resource_id=str(call_id),
+                    )
+                )
+            return
         session.add(
             Recording(
                 tenant_id=tenant_id,
                 call_id=call_id,
                 gcs_uri=gcs_uri,
-                status=RecordingStatus.FAILED.value,
+                status=RecordingStatus.PENDING.value,
+                egress_id=egress_id,
             )
         )
-        if audit is not None:
-            await audit.emit(
-                AuditRecord(
-                    tenant_id=tenant_id,
-                    actor_type=ActorType.SYSTEM,
-                    actor_label="recording-starter",
-                    event_type=AuditEvent.RECORDING_START_FAILED.value,
-                    resource_type="call",
-                    resource_id=str(call_id),
-                )
-            )
-        return
-    session.add(
-        Recording(
-            tenant_id=tenant_id,
-            call_id=call_id,
-            gcs_uri=gcs_uri,
-            status=RecordingStatus.PENDING.value,
-            egress_id=egress_id,
-        )
-    )
+    except Exception:
+        logger.exception("recording: unexpected error for call %s — call proceeds", call_id)

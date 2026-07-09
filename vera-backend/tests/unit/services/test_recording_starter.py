@@ -42,6 +42,11 @@ class _BoomGateway:
         raise RuntimeError("egress unreachable")
 
 
+class _BoomAudit:
+    async def emit(self, record: AuditRecord) -> None:
+        raise RuntimeError("audit sink down")
+
+
 CONFIG = RecordingConfig(bucket="vera-rec", prefix="recordings")
 
 
@@ -71,3 +76,15 @@ async def test_failure_is_fail_open_with_failed_row_and_audit() -> None:
     assert row.status == RecordingStatus.FAILED.value
     assert row.egress_id is None
     assert audit.records[0].event_type == "recording.start_failed"
+
+
+async def test_failure_path_swallows_audit_errors() -> None:
+    session, t, c = _FakeSession(), uuid4(), uuid4()
+    # Egress fails AND the audit sink fails: still must not raise; the FAILED
+    # row is already added before the audit attempt.
+    await start_recording_for_call(
+        session, _BoomGateway(), config=CONFIG, tenant_id=t, call_id=c, audit=_BoomAudit()
+    )
+    (row,) = session.added
+    assert isinstance(row, Recording)
+    assert row.status == RecordingStatus.FAILED.value
