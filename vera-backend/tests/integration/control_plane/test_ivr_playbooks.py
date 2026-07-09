@@ -175,6 +175,111 @@ async def test_list_and_create_provider(
     assert created.json()["data"]["name"] == f"Cigna {w.name_suffix}"
 
 
+async def test_provider_get_update_soft_delete(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = playbooks_world
+    detail = await client.get(
+        f"/api/v1/insurance-providers/{w.provider_id}", headers=_auth(w.super_token)
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["data"]["status"] == "active"
+
+    updated = await client.patch(
+        f"/api/v1/insurance-providers/{w.provider_id}",
+        headers=_write_headers(w.super_token),
+        json={"name": f"Aetna {w.name_suffix}", "working_hour_start": "09:00:00"},
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()["data"]
+    assert body["name"] == f"Aetna {w.name_suffix}"
+    assert body["working_hour_start"] == "09:00:00"
+
+    # Soft delete deactivates rather than removing — the row is still fetchable, now inactive.
+    deleted = await client.delete(
+        f"/api/v1/insurance-providers/{w.provider_id}", headers=_write_headers(w.super_token)
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["data"]["status"] == "inactive"
+    still_there = await client.get(
+        f"/api/v1/insurance-providers/{w.provider_id}", headers=_auth(w.super_token)
+    )
+    assert still_there.status_code == 200
+    assert still_there.json()["data"]["status"] == "inactive"
+
+    # Deleting an already-inactive provider is an idempotent no-op success.
+    again = await client.delete(
+        f"/api/v1/insurance-providers/{w.provider_id}", headers=_write_headers(w.super_token)
+    )
+    assert again.status_code == 200, again.text
+
+
+async def test_provider_get_unknown_404(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = playbooks_world
+    resp = await client.get(f"/api/v1/insurance-providers/{uuid7()}", headers=_auth(w.super_token))
+    assert resp.status_code == 404, resp.text
+
+
+async def test_update_provider_unknown_404(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = playbooks_world
+    resp = await client.patch(
+        f"/api/v1/insurance-providers/{uuid7()}",
+        headers=_write_headers(w.super_token),
+        json={"name": "Nope"},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_update_provider_duplicate_name_409(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = playbooks_world
+    other = await client.post(
+        "/api/v1/insurance-providers",
+        headers=_write_headers(w.super_token),
+        json={"name": f"Humana {w.name_suffix}"},
+    )
+    assert other.status_code == 201, other.text
+    # Renaming the seed provider onto the just-created name (case-variant) hits the
+    # case-insensitive unique index → 409, not a 500.
+    clash = await client.patch(
+        f"/api/v1/insurance-providers/{w.provider_id}",
+        headers=_write_headers(w.super_token),
+        json={"name": f"humana {w.name_suffix}"},
+    )
+    assert clash.status_code == 409, clash.text
+
+
+async def test_provider_write_requires_idempotency_key(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = playbooks_world
+    resp = await client.patch(
+        f"/api/v1/insurance-providers/{w.provider_id}",
+        headers=_auth(w.super_token),
+        json={"name": "NoKey"},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+async def test_provider_routes_forbidden_for_tenant(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = playbooks_world
+    listed = await client.get("/api/v1/insurance-providers", headers=_auth(w.tenant_admin_token))
+    assert listed.status_code == 403
+    patched = await client.patch(
+        f"/api/v1/insurance-providers/{w.provider_id}",
+        headers=_write_headers(w.tenant_admin_token),
+        json={"name": "X"},
+    )
+    assert patched.status_code == 403
+
+
 async def test_playbook_crud_happy_path(
     playbooks_world: tuple[httpx.AsyncClient, World],
 ) -> None:
@@ -184,14 +289,14 @@ async def test_playbook_crud_happy_path(
         headers=_write_headers(w.super_token),
         json={
             "provider_id": str(w.provider_id),
-            "instructions": {"rep_keyword": "Advocate", "survey_answer": "Yes"},
+            "instructions": {"provider_subflows": "Press 3", "extra_rules": "Say Advocate"},
             "status": "active",
         },
     )
     assert created.status_code == 201, created.text
     pb = created.json()["data"]
     assert pb["status"] == "active"
-    assert pb["instructions"]["rep_keyword"] == "Advocate"
+    assert pb["instructions"]["provider_subflows"] == "Press 3"
 
     listed = await client.get(
         f"/api/v1/ivr-playbooks?provider_id={w.provider_id}", headers=_auth(w.super_token)
@@ -199,15 +304,15 @@ async def test_playbook_crud_happy_path(
     assert [p["id"] for p in listed.json()["data"]] == [pb["id"]]
 
     detail = await client.get(f"/api/v1/ivr-playbooks/{pb['id']}", headers=_auth(w.super_token))
-    assert detail.json()["data"]["instructions"]["survey_answer"] == "Yes"
+    assert detail.json()["data"]["instructions"]["extra_rules"] == "Say Advocate"
 
     updated = await client.patch(
         f"/api/v1/ivr-playbooks/{pb['id']}",
         headers=_auth(w.super_token),
-        json={"instructions": {"rep_keyword": "Live Agent"}},
+        json={"instructions": {"provider_subflows": "Press 5"}},
     )
     assert updated.status_code == 200, updated.text
-    assert updated.json()["data"]["instructions"]["rep_keyword"] == "Live Agent"
+    assert updated.json()["data"]["instructions"]["provider_subflows"] == "Press 5"
 
     deleted = await client.delete(f"/api/v1/ivr-playbooks/{pb['id']}", headers=_auth(w.super_token))
     assert deleted.status_code == 200
@@ -224,7 +329,7 @@ async def test_activating_second_playbook_demotes_the_first(
         await client.post(
             "/api/v1/ivr-playbooks",
             headers=_write_headers(w.super_token),
-            json={"provider_id": str(w.provider_id), "instructions": {"rep_keyword": "A"}},
+            json={"provider_id": str(w.provider_id), "instructions": {"provider_subflows": "A"}},
         )
     ).json()["data"]
     # A second active for the same provider is allowed — it demotes the first (one active max).
@@ -233,7 +338,7 @@ async def test_activating_second_playbook_demotes_the_first(
         headers=_write_headers(w.super_token),
         json={
             "provider_id": str(w.provider_id),
-            "instructions": {"rep_keyword": "B"},
+            "instructions": {"provider_subflows": "B"},
             "status": "active",
         },
     )
@@ -302,7 +407,7 @@ async def test_malformed_playbook_row_is_viewable_and_deletable(
                 IvrPlaybook(
                     id=playbook_id,
                     provider_id=w.provider_id,
-                    instructions={"legacy_key": "x", "rep_keyword": "Advocate"},
+                    instructions={"legacy_key": "x", "provider_subflows": "Press 3"},
                     status="inactive",
                 )
             )
@@ -310,7 +415,7 @@ async def test_malformed_playbook_row_is_viewable_and_deletable(
             f"/api/v1/ivr-playbooks/{playbook_id}", headers=_auth(w.super_token)
         )
         assert detail.status_code == 200, detail.text
-        assert detail.json()["data"]["instructions"]["rep_keyword"] == "Advocate"
+        assert detail.json()["data"]["instructions"]["provider_subflows"] == "Press 3"
 
         deleted = await client.delete(
             f"/api/v1/ivr-playbooks/{playbook_id}", headers=_auth(w.super_token)
@@ -372,7 +477,7 @@ async def test_voice_lab_injects_active_playbook_into_dispatch_metadata(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     provider_id, playbook_id = await _seed_provider_with_active_playbook(
-        admin_sessionmaker, {"rep_keyword": "Advocate"}
+        admin_sessionmaker, {"provider_subflows": "Press 3"}
     )
     try:
         resp = await client.post(
@@ -388,7 +493,7 @@ async def test_voice_lab_injects_active_playbook_into_dispatch_metadata(
         meta = fake_livekit.dispatch_metadata[-1]
         assert meta is not None
         assert meta["enable_ivr_navigation"] is True
-        assert meta["ivr_playbook"] == {"rep_keyword": "Advocate"}
+        assert meta["ivr_playbook"] == {"provider_subflows": "Press 3"}
     finally:
         async with admin_sessionmaker() as s, s.begin():
             await s.execute(
@@ -464,7 +569,7 @@ async def test_inactive_provider_never_steers_a_call(
     # gate lives in add_active_playbook_metadata, so Voice Lab (no provider check of its own) is
     # covered centrally.
     provider_id, playbook_id = await _seed_provider_with_active_playbook(
-        admin_sessionmaker, {"rep_keyword": "Advocate"}, provider_status="inactive"
+        admin_sessionmaker, {"provider_subflows": "Press 3"}, provider_status="inactive"
     )
     try:
         resp = await client.post(

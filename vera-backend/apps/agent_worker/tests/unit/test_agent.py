@@ -304,17 +304,17 @@ def test_build_agent_playbook_specializes_but_never_selects() -> None:
     boundary = PassthroughPHIBoundary()
     # With the flag on, the playbook specializes the navigator's instructions.
     nav = build_agent(
-        {"enable_ivr_navigation": True, "ivr_playbook": {"rep_keyword": "Advocate"}},
+        {"enable_ivr_navigation": True, "ivr_playbook": {"provider_subflows": "Press 3"}},
         boundary=boundary,
         session_id="s1",
     )
     assert isinstance(nav, IvrNavigatorAgent)
-    assert "<rep_keyword>Advocate</rep_keyword>" in nav.instructions
+    assert "<provider_subflows>Press 3</provider_subflows>" in nav.instructions
     # The flag is the sole selector: a playbook without it — even with the flag explicitly
     # false — never overrides the opt-out into a silent-on-connect navigator.
     for meta in (
-        {"ivr_playbook": {"rep_keyword": "Advocate"}},
-        {"enable_ivr_navigation": False, "ivr_playbook": {"rep_keyword": "Advocate"}},
+        {"ivr_playbook": {"provider_subflows": "Press 3"}},
+        {"enable_ivr_navigation": False, "ivr_playbook": {"provider_subflows": "Press 3"}},
     ):
         assert isinstance(build_agent(meta, boundary=boundary, session_id="s1"), VeraAgent)
     # A malformed playbook is fail-safe: the navigator still runs, just generic.
