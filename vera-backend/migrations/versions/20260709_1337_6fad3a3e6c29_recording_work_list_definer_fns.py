@@ -60,6 +60,11 @@ def upgrade() -> None:
     op.execute(_RETENTION_FN)
     op.execute(f"ALTER FUNCTION recording_pending_work() OWNER TO {DEFINER_ROLE}")
     op.execute(f"ALTER FUNCTION recording_retention_due() OWNER TO {DEFINER_ROLE}")
+    # SECURITY DEFINER runs the body AS vera_definer_owner. BYPASSRLS lets it skip
+    # row security, but table-level SELECT is still required — grant it explicitly
+    # (mirrors the audit_chain_heads grants in 0012/0015). Without this both fns
+    # raise "permission denied for table recording" on every verifier/sweeper tick.
+    op.execute(f"GRANT SELECT ON recording TO {DEFINER_ROLE}")
 
 
 def downgrade() -> None:
