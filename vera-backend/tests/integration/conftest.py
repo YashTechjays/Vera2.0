@@ -186,7 +186,10 @@ async def seeded_form_with_answers(
                 status="active",
             )
         )
-        # find-or-create to avoid UNIQUE collision on insurance_type
+        # find-or-create to avoid UNIQUE collision on insurance_type.
+        # FormSchema is a global catalog (no tenant_id); UNIQUE(insurance_type) ensures
+        # only one row per type, so parallel tests always reuse the same schema.
+        # Only delete on teardown if this fixture created it.
         existing_schema = (
             await session.execute(
                 select(FormSchema).where(
@@ -255,9 +258,9 @@ async def seeded_form_with_answers(
                 is_current=True,
             )
         )
+        # Explicit flush ensures all FieldAnswer FKs are persisted before adding FieldEvaluation.
+        await session.flush()
         # FieldEvaluation for the ai_call answer: supported=False
-        # No flush needed before this — answer_a_id is a locally generated uuid7(),
-        # not a DB-assigned key, so the FK can resolve at commit time.
         session.add(
             FieldEvaluation(
                 id=uuid7(),

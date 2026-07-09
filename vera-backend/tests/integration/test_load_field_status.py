@@ -14,6 +14,11 @@ async def test_load_field_status_maps_source_conf_supported(
     # fixture: form with ai_call(path=cov.a, conf=55, supported=False) + human(path=cov.b)
     ctx = seeded_form_with_answers
     status = await load_field_status(ctx.session, ctx.form_id)
-    assert status["cov.a"].source == "ai_call" and status["cov.a"].ai_confidence == 55
-    assert status["cov.a"].ai_supported is False and status["cov.a"].filled is True
-    assert status["cov.b"].source == "human" and status["cov.b"].ai_supported is None
+    # cov.a: ai_call answer with confidence=55
+    assert status["cov.a"].source == "ai_call"
+    assert status["cov.a"].ai_confidence == 55
+    assert status["cov.a"].ai_supported is False
+    assert status["cov.a"].filled is True
+    # cov.b: human answer with no evaluation
+    assert status["cov.b"].source == "human"
+    assert status["cov.b"].ai_supported is None

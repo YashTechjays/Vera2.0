@@ -18,7 +18,8 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
 
     The latest evaluation per answer is resolved in-DB via a subquery on
     MAX(created_at) so that multiple evaluations (e.g. LLM retries) never produce
-    duplicate rows for the same field path.
+    duplicate rows for the same field path. Concurrent evals within the same
+    database clock tick choose non-deterministically.
     """
     # Subquery: latest created_at per answer_id across all evaluations.
     latest_eval = (
