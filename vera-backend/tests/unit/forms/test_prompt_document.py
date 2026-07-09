@@ -70,6 +70,16 @@ class TestShape:
                 {"kind": "prompt_document", "session": {**SESSION, "persona": ""}}
             )
 
+    def test_empty_string_override_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PromptDocument.model_validate(
+                {
+                    "kind": "prompt_document",
+                    "session": SESSION,
+                    "task_overrides": {"main": {"intro": ""}},
+                }
+            )
+
     def test_factory_session_is_complete_and_placeholder_free(self) -> None:
         assert isinstance(FACTORY_SESSION, SessionBlock)
         for text in (

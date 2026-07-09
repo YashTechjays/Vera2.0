@@ -74,9 +74,9 @@ class SessionBlock(_Doc):
 class TaskTextOverride(_Doc):
     """Sparse patch over one task's schema-authored text; set fields win."""
 
-    intro: str | None = None
-    outro: str | None = None
-    prompt: str | None = None
+    intro: str | None = Field(default=None, min_length=1)
+    outro: str | None = Field(default=None, min_length=1)
+    prompt: str | None = Field(default=None, min_length=1)
 
 
 class PromptDocument(_Doc):
@@ -193,12 +193,12 @@ def render_task_prompts(
 
     flow_by_task: dict[str, list[FlowRule]] = {}
     for rule in doc.flow_rules or []:
-        key = _last_ref_task(rule.when, shared, order, section_to_task)
+        key = _last_ref_task(rule.when, shared, leaves, order, section_to_task)
         if key is not None:
             flow_by_task.setdefault(key, []).append(rule)
     contra_by_task: dict[str, list[Contradiction]] = {}
     for contra in doc.contradictions or []:
-        key = _last_ref_task(contra.when, shared, order, section_to_task)
+        key = _last_ref_task(contra.when, shared, leaves, order, section_to_task)
         if key is not None:
             contra_by_task.setdefault(key, []).append(contra)
 
@@ -267,14 +267,18 @@ def _anchor(
 def _last_ref_task(
     cond: Condition,
     shared: dict[str, Condition],
+    leaves: dict[str, Leaf],
     order: dict[str, int],
     section_to_task: dict[str, str],
 ) -> str | None:
     """The task where a rule can fire: task of the last-answered referenced field."""
     best: tuple[int, str] | None = None
     for ref in condition_field_paths(cond, shared):
+        leaf = leaves.get(ref)
+        if leaf is None or leaf.role not in ("ask", "confirm"):
+            continue
         task_key = section_to_task.get(ref.split(".")[1])
-        if task_key is None or ref not in order:
+        if task_key is None:
             continue
         if best is None or order[ref] > best[0]:
             best = (order[ref], task_key)

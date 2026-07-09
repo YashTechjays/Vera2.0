@@ -23,14 +23,22 @@ def build_condition_renderer(doc: FormSchemaDoc) -> Callable[[Condition], str]:
     leaves = dict(doc.leaf_items())
     title_counts = Counter(leaf.title for leaf in leaves.values())
     shared = doc.shared_conditions or {}
+    fields_by_path = dict(doc._iter_fields())  # groups + leaves; intra-package use
+    section_titles = {key: section.title for key, section in doc.sections.items()}
 
     def label(path: str) -> str:
         leaf = leaves.get(path)
         if leaf is None:
             return path
-        if title_counts[leaf.title] > 1:
-            return f'"{leaf.title}" ({path})'
-        return f'"{leaf.title}"'
+        if title_counts[leaf.title] == 1:
+            return f'"{leaf.title}"'
+        parts = path.split(".")  # ["sections", <section>, *groups, <leaf>]
+        ancestors = [section_titles.get(parts[1], parts[1])]
+        for depth in range(3, len(parts)):
+            group = fields_by_path.get(".".join(parts[:depth]))
+            if group is not None:
+                ancestors.append(group.title)
+        return f'"{leaf.title}" ({" › ".join(ancestors)})'  # noqa: RUF001 -- intentional glyph
 
     def resolve(cond: Condition, seen: frozenset[str]) -> Condition:
         """Follow ref chains (cycle-guarded) so wrapping sees the real shape."""

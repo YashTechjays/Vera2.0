@@ -120,6 +120,15 @@ class TestTaskText:
         out = render_task_prompts(disease)
         assert out.tasks and all(t.prompt for t in out.tasks)
 
+    def test_no_raw_paths_leak_into_any_prompt(self) -> None:
+        for t in RENDERED.tasks:
+            assert "sections." not in t.prompt, t.task_key
+
+    def test_multi_gate_or_condition_parenthesized(self) -> None:
+        coverage = task("coverage").prompt
+        assert " and (" in coverage
+        assert " or " in coverage.split(" and (", 1)[1]
+
 
 class TestSnapshots:
     """Golden files lock wording. To update intentionally:

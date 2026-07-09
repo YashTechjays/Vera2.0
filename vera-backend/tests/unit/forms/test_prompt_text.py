@@ -63,10 +63,10 @@ def test_comparison_ops() -> None:
     )
 
 
-def test_duplicate_titles_get_path_disambiguation() -> None:
+def test_duplicate_titles_get_ancestor_disambiguation() -> None:
     render = build_condition_renderer(doc_with())
     text = render(_cond({"field": "sections.b.dup", "op": "eq", "value": "1"}))
-    assert text == '"Copay" (sections.b.dup) is "1"'
+    assert text == '"Copay" (B) is "1"'
 
 
 def test_nesting_and_ref_expansion() -> None:
