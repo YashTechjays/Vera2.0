@@ -31,7 +31,6 @@ from vera_core.models import AppUser, UserIdentity, UserRole
 from vera_core.models.enums import ProviderKind
 
 PASSWORD = "correct horse battery staple"
-ENROLL_TOKEN = "bootstrap-enroll-secret-xyz"  # test fixture value, not a real secret
 _MASTER_KEY = b"a" * 32
 
 
@@ -80,7 +79,6 @@ async def enroll_world(
                 email=email,
                 hashed_password=hash_password(PASSWORD),
                 mfa_enabled=False,
-                enroll_token_hash=hash_password(ENROLL_TOKEN),
             )
         )
         session.add(UserRole(tenant_id=None, app_user_id=user_id, role_id=super_admin_role))
@@ -108,8 +106,7 @@ async def enroll_world(
 
 async def _login(client: httpx.AsyncClient, email: str) -> dict[str, Any]:
     resp = await client.post(
-        "/api/v1/platform/auth/login",
-        json={"email": email, "password": PASSWORD, "enroll_token": ENROLL_TOKEN},
+        "/api/v1/platform/auth/login", json={"email": email, "password": PASSWORD}
     )
     assert resp.status_code == 200, resp.text
     data: dict[str, Any] = resp.json()["data"]
@@ -149,45 +146,28 @@ async def test_repeat_login_reissues_same_seed(
     assert activated.status_code == 200, activated.text
 
 
-@pytest.mark.parametrize("payload_token", [None, "wrong-token"])
-async def test_first_login_without_valid_enroll_token_is_401(
-    enroll_world: tuple[httpx.AsyncClient, EnrollWorld],
-    payload_token: str | None,
-) -> None:
-    """The bootstrap password alone can't open the enrollment wall: a missing or wrong
-    one-time enroll token gets the uniform 401, and no seed/QR is handed out."""
-    client, world = enroll_world
-    body: dict[str, Any] = {"email": world.email, "password": PASSWORD}
-    if payload_token is not None:
-        body["enroll_token"] = payload_token
-    resp = await client.post("/api/v1/platform/auth/login", json=body)
-    assert resp.status_code == 401, resp.text
-    # The correct token still works afterwards — a failed attempt doesn't burn the token.
-    ok = await _login(client, world.email)
-    assert ok["mfa"] == "enroll"
-
-
-async def test_enroll_token_cleared_after_activation(
+async def test_first_login_after_window_closed_is_401(
     enroll_world: tuple[httpx.AsyncClient, EnrollWorld],
     database_url: str,
 ) -> None:
-    """Activation clears enroll_token_hash (one-time): the row shows NULL once enrolled."""
+    """Once the enrollment window has passed (operator created long ago), the bootstrap
+    password no longer opens the wall — uniform 401, no seed/QR handed out."""
     client, world = enroll_world
-    await _activate(client, await _login(client, world.email))
     engine = create_async_engine(database_url)
     try:
-        async with engine.connect() as conn:
-            token_hash = (
-                await conn.execute(
-                    text(
-                        "SELECT ui.enroll_token_hash FROM user_identity ui "
-                        "WHERE ui.app_user_id = :u"
-                    ).bindparams(u=world.user_id)
-                )
-            ).scalar_one()
-        assert token_hash is None
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE user_identity SET created_at = now() - interval '2 hours' "
+                    "WHERE app_user_id = :u"
+                ).bindparams(u=world.user_id)
+            )
     finally:
         await engine.dispose()
+    resp = await client.post(
+        "/api/v1/platform/auth/login", json={"email": world.email, "password": PASSWORD}
+    )
+    assert resp.status_code == 401, resp.text
 
 
 async def test_enroll_activate_completes_setup_and_logs_in(

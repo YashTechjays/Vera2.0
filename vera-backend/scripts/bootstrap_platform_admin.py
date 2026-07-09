@@ -3,11 +3,11 @@
 Platform endpoints require an existing SUPER_ADMIN, but none exists out of the box
 (`seed.py` makes only a TENANT_ADMIN). This run-once script seeds exactly the FIRST
 operator — a platform `app_user` (account_type='platform', tenant_id=NULL) + password
-`user_identity` (MFA left unenrolled) + a grant of the global SUPER_ADMIN role. It prints
-a one-time enroll token (only its bcrypt hash is stored); the operator sets up 2FA in the
-browser on first /platform/login (the enrollment wall), which requires that token so the
-shared bootstrap password alone can't bind a second factor. No terminal QR. From then on,
-operators add each other via the platform invite flow (separate plan).
+`user_identity` (MFA left unenrolled) + a grant of the global SUPER_ADMIN role. The operator
+sets up 2FA in the browser on first /platform/login, which is only open for a short window
+after this bootstrap (so a leaked password can't enroll long after setup; see
+`platform_enroll_window_seconds`). No terminal QR. From then on, operators add each other via
+the platform invite flow (separate plan).
 
 Runs as the DB user from VERA_DATABASE_URL (locally the superuser → bypasses RLS), exactly
 like seed.py — so the NULL-tenant inserts are permitted. NO-OP if any platform operator
@@ -18,7 +18,6 @@ already exists.
 
 import asyncio
 import os
-import secrets
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -46,16 +45,14 @@ async def bootstrap(
     *,
     email: str,
     password: str,
-) -> str | None:
-    """Create platform operator #1, returning the one-time enroll token; or None (no-op)
-    if a platform operator already exists. MFA is left unenrolled — the operator completes
-    the browser enrollment wall on first /platform/login, which requires this token so the
-    bootstrap password alone cannot bind a second factor (ADR-0006 §D)."""
+) -> bool:
+    """Create platform operator #1, returning True; or False (no-op) if a platform operator
+    already exists. MFA is left unenrolled — the operator completes the browser enrollment
+    wall on first /platform/login, which is only open for a short window after this bootstrap
+    (`platform_enroll_window_seconds`), so the password alone can't enroll later (ADR-0006 §D)."""
     async with sessionmaker() as session, session.begin():
         if await _platform_operator_exists(session):
-            return None
-
-        enroll_token = secrets.token_urlsafe(32)
+            return False
 
         super_admin = (
             await session.execute(
@@ -84,12 +81,11 @@ async def bootstrap(
             email=email,
             hashed_password=hash_password(password),
             mfa_enabled=False,
-            enroll_token_hash=hash_password(enroll_token),
         )
         session.add(identity)
         session.add(UserRole(tenant_id=None, app_user_id=user.id, role_id=super_admin.id))
 
-    return enroll_token
+    return True
 
 
 async def main() -> None:
@@ -99,14 +95,13 @@ async def main() -> None:
     engine = create_engine(settings)
     sessionmaker = create_sessionmaker(engine)
     try:
-        enroll_token = await bootstrap(sessionmaker, email=email, password=password)
-        if enroll_token is None:
+        created = await bootstrap(sessionmaker, email=email, password=password)
+        if not created:
             print("platform operator already exists — no-op")
         else:
             print(f"created platform operator {email!r} (SUPER_ADMIN)")
-            print("The operator sets up 2FA in the browser on first login at /platform/login.")
-            print("\nOne-time enrollment token (hand to the operator, required at first login):")
-            print(f"  {enroll_token}\n")
+            print("Set up 2FA in the browser at /platform/login within")
+            print(f"{settings.platform_enroll_window_seconds // 60} minutes of this bootstrap.")
     finally:
         await engine.dispose()
 

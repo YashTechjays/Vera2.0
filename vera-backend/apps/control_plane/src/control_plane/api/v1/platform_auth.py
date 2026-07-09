@@ -6,9 +6,9 @@ belongs to no tenant. Credentials + provider config resolve inside a `platform_s
 NULL-tenant `app_user` / `user_identity` / `platform_login_provider` rows and nothing else
 (zero PHI). MFA is mandatory: an enrolled operator gets a `verify` challenge completed at
 `/mfa/verify`; a not-yet-enrolled operator hits the first-login enrollment wall — login
-requires the one-time enroll token minted at bootstrap (so the shared bootstrap password
-alone can't bind a second factor), then mints the seed and returns an `enroll` challenge
-completed at `/mfa/enroll-activate`, which clears the token. Either path
+issues the seed + QR only while inside the time-boxed enrollment window after bootstrap
+(`platform_enroll_window_seconds`), so a leaked password can't bind a second factor once
+the window closes. Enrollment completes at `/mfa/enroll-activate`. Either path
 mints the `account_type='platform'`, `tenant_id=None` session. Failures
 return a uniform 401 (no operator/provider enumeration); outcomes are audited to
 auth_audit_log with `tenant_id=NULL`.
@@ -22,12 +22,14 @@ row and fail the strict WITH CHECK; `mfa.verify` accepts a current TOTP as a pur
 
 from dataclasses import replace
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.auth import (
+    LoginRequest,
     LoginResponse,
     MfaEnrollActivateRequest,
     MfaVerifyRequest,
@@ -52,19 +54,27 @@ from vera_core.models.enums import AccountType, AuthEvent, ProviderKind
 router = APIRouter(prefix="/platform/auth", tags=["platform-auth"])
 
 
-class PlatformLoginRequest(BaseModel):
-    """Platform-operator credentials. `enroll_token` is the one-time secret minted at
-    bootstrap and required only on the first-login enrollment wall (while unenrolled);
-    enrolled operators leave it unset and complete the normal verify flow."""
-
-    email: str
-    password: str
-    enroll_token: str | None = None
-
-
 Sessionmaker = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
 Store = Annotated[SessionStore, Depends(get_session_store)]
 KMS = Annotated[KeyManagementService, Depends(get_kms)]
+
+
+async def _enroll_window_open(
+    session: AsyncSession, identity_id: UUID, window_seconds: int
+) -> bool:
+    """True while the operator is still inside their first-login enrollment window,
+    measured on the DB clock from the identity's creation — a leaked bootstrap password
+    can't bind a second factor once the window closes (ADR-0006 §D)."""
+    return bool(
+        (
+            await session.execute(
+                text(
+                    "SELECT created_at + make_interval(secs => :secs) > now() "
+                    "FROM user_identity WHERE id = :id"
+                ).bindparams(secs=window_seconds, id=identity_id)
+            )
+        ).scalar_one()
+    )
 
 
 def _require_platform_challenge(data: SessionData | None) -> SessionData:
@@ -89,7 +99,7 @@ def _require_platform_challenge(data: SessionData | None) -> SessionData:
     ),
 )
 async def platform_login(
-    body: PlatformLoginRequest,
+    body: LoginRequest,
     request: Request,
     sessionmaker: Sessionmaker,
     store: Store,
@@ -149,20 +159,25 @@ async def platform_login(
     )
     # MFA is mandatory for platform operators: login NEVER mints a session directly.
     if not creds.mfa_enabled:
-        # First-login wall: require the one-time enroll token so the bootstrap password
-        # alone can't bind a second factor. Constant-work verify → uniform failure.
-        if not verify_password_or_dummy(body.enroll_token or "", creds.enroll_token_hash):
-            await emit_auth_event(
-                audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=creds.user_id
-            )
-            raise _unauthorized()
+        # First-login wall, time-boxed: only issue a QR while the operator is still inside
+        # the enrollment window (from bootstrap), so a leaked password can't enroll later.
         async with platform_session(sessionmaker) as session:
             ident = await _password_identity_row(session, creds.user_id)
             if ident is None:
                 raise _unauthorized()
-            provisioning_uri = await mfa.enroll_platform(
-                kms, session, identity=ident, account_email=creds.email
+            window_open = await _enroll_window_open(
+                session, ident.id, settings.platform_enroll_window_seconds
             )
+            provisioning_uri = (
+                await mfa.enroll_platform(kms, session, identity=ident, account_email=creds.email)
+                if window_open
+                else None
+            )
+        if not window_open:
+            await emit_auth_event(
+                audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=creds.user_id
+            )
+            raise _unauthorized()
         if provisioning_uri is None:  # already enrolled between check and write — retry as verify
             challenge = await store.put(MFA_NS, base, settings.mfa_challenge_ttl_seconds)
             await emit_auth_event(

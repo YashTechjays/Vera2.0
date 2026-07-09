@@ -77,11 +77,9 @@ describe("authSlice", () => {
     })
     const store = makeStore()
     const step = await store.dispatch(
-      platformLoginThunk({ email: "ops@vera.example", password: "x", enrollToken: "tok-123" }),
+      platformLoginThunk({ email: "ops@vera.example", password: "x" }),
     ).unwrap()
     expect(step).toBe("enroll")
-    // The one-time enroll token is forwarded to the login call.
-    expect(api.platformLogin).toHaveBeenCalledWith("ops@vera.example", "x", "tok-123")
     const mfa = selectMfa(store.getState())
     expect(mfa?.step).toBe("enroll")
     expect(mfa?.platform).toBe(true)

@@ -1,9 +1,9 @@
 """Idempotency of the platform-operator bootstrap (ADR-0006 §D) against live
 Postgres. Runs as superuser (like the real script) so the NULL-tenant inserts
-bypass FORCE RLS. The first call seeds operator #1 and returns the one-time enroll
-token; a second call is a no-op (None), leaving exactly one platform operator. MFA is
-left unenrolled (browser enrollment wall) but gated by the enroll token. SUPER_ADMIN is
-seeded first via the same helpers the script needs.
+bypass FORCE RLS. The first call seeds operator #1 and returns True; a second call
+is a no-op (False), leaving exactly one platform operator. MFA is left unenrolled
+(browser enrollment wall, time-boxed after bootstrap). SUPER_ADMIN is seeded first
+via the same helpers the script needs.
 """
 
 from collections.abc import AsyncGenerator
@@ -13,7 +13,6 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.auth.password import verify_password
 from scripts.bootstrap_platform_admin import bootstrap
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.models import AppUser
@@ -79,29 +78,26 @@ async def test_bootstrap_is_idempotent(
 ) -> None:
     sessionmaker, email = bootstrap_world
 
-    enroll_token = await bootstrap(sessionmaker, email=email, password=PASSWORD)
-    assert enroll_token  # the plaintext one-time token, handed to the operator
+    created = await bootstrap(sessionmaker, email=email, password=PASSWORD)
+    assert created is True
 
     async with sessionmaker() as session:
         assert await _platform_count(session) == 1
-        # MFA is left unenrolled — the operator sets it up in the browser — but the
-        # returned token's hash is stored to gate that first enrollment.
-        mfa_enabled, token_hash = (
+        # MFA is left unenrolled — the operator sets it up in the browser.
+        mfa_enabled = (
             await session.execute(
                 text(
-                    "SELECT mfa_enabled, enroll_token_hash FROM user_identity ui "
+                    "SELECT mfa_enabled FROM user_identity ui "
                     "JOIN app_user u ON u.id = ui.app_user_id "
                     "WHERE u.email = :e"
                 ).bindparams(e=email)
             )
-        ).one()
+        ).scalar_one()
         assert mfa_enabled is False
-        assert token_hash is not None
-        assert verify_password(enroll_token, token_hash)
 
-    # Second run is a no-op: no new operator, returns None.
+    # Second run is a no-op: no new operator, returns False.
     again = await bootstrap(sessionmaker, email=email, password=PASSWORD)
-    assert again is None
+    assert again is False
 
     async with sessionmaker() as session:
         assert await _platform_count(session) == 1

@@ -101,10 +101,10 @@ export const verifyMfaThunk = createAsyncThunk(
 export const platformLoginThunk = createAsyncThunk(
   "auth/platformLogin",
   async (
-    arg: { email: string; password: string; enrollToken?: string },
+    arg: { email: string; password: string },
     { dispatch },
   ): Promise<authApi.LoginResult["mfa"]> => {
-    const res = await authApi.platformLogin(arg.email, arg.password, arg.enrollToken)
+    const res = await authApi.platformLogin(arg.email, arg.password)
     // Persist the plane so a refresh mid-enrollment returns to /platform/login.
     setAuthPlane("platform")
     if (res.mfa === "enroll") {

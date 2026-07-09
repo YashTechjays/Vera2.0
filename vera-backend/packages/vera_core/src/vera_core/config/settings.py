@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # default 15 min, overridable via VERA_SESSION_TTL_SECONDS.
     session_ttl_seconds: int = 15 * 60
     mfa_challenge_ttl_seconds: int = 300
+    # First-login enrollment window for a platform operator: unenrolled login only issues
+    # a QR within this many seconds of the operator's creation, so a leaked bootstrap
+    # password can't bind a second factor long after setup (ADR-0006 §D).
+    platform_enroll_window_seconds: int = 30 * 60
     # Hard ceiling on total session lifetime regardless of activity. `session_ttl_seconds`
     # is the idle window (slid by /auth/session/keepalive); this is the absolute max set
     # once at login and never extended. Subject to compliance sign-off.
