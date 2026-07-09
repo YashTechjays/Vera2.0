@@ -218,6 +218,7 @@ class _PasswordCreds:
     mfa_enabled: bool
     account_type: str
     status: str
+    enroll_token_hash: str | None
 
 
 DEACTIVATED_MESSAGE = "Your account has been deactivated. Please contact your administrator."
@@ -256,6 +257,7 @@ async def _load_password_creds(
                 AppUser.status,
                 UserIdentity.hashed_password,
                 UserIdentity.mfa_enabled,
+                UserIdentity.enroll_token_hash,
             )
             .join(AppUser, AppUser.id == UserIdentity.app_user_id)
             .where(
@@ -274,6 +276,7 @@ async def _load_password_creds(
         mfa_enabled=row.mfa_enabled,
         account_type=row.account_type,
         status=row.status,
+        enroll_token_hash=row.enroll_token_hash,
     )
 
 

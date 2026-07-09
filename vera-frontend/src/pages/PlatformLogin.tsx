@@ -38,6 +38,7 @@ export function PlatformLogin() {
 
   const [email, setEmail] = useState(DEV_EMAIL)
   const [password, setPassword] = useState(DEV_PASSWORD)
+  const [enrollToken, setEnrollToken] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [touched, setTouched] = useState({ email: false, password: false })
@@ -58,7 +59,9 @@ export function PlatformLogin() {
     }
     setBusy(true)
     try {
-      const step = await dispatch(platformLoginThunk({ email, password })).unwrap()
+      const step = await dispatch(
+        platformLoginThunk({ email, password, enrollToken: enrollToken.trim() || undefined }),
+      ).unwrap()
       navigate(step === "enroll" ? "/mfa-enroll" : "/mfa")
     } catch (err) {
       setError(
@@ -118,6 +121,20 @@ export function PlatformLogin() {
                   {passwordErr}
                 </p>
               )}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="enroll-token">First-time setup token</Label>
+              <Input
+                id="enroll-token"
+                autoComplete="off"
+                placeholder="Only for your first sign-in"
+                value={enrollToken}
+                onChange={(e) => setEnrollToken(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Paste the one-time token from bootstrap the first time you set up 2FA. Leave blank
+                afterwards.
+              </p>
             </div>
             {error && (
               <p className="text-sm text-destructive" role="alert">

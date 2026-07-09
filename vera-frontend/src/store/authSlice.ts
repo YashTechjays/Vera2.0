@@ -93,10 +93,10 @@ export const verifyMfaThunk = createAsyncThunk(
 export const platformLoginThunk = createAsyncThunk(
   "auth/platformLogin",
   async (
-    arg: { email: string; password: string },
+    arg: { email: string; password: string; enrollToken?: string },
     { dispatch },
   ): Promise<authApi.LoginResult["mfa"]> => {
-    const res = await authApi.platformLogin(arg.email, arg.password)
+    const res = await authApi.platformLogin(arg.email, arg.password, arg.enrollToken)
     if (res.mfa === "enroll") {
       dispatch(
         setMfa({

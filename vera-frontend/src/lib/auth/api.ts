@@ -70,10 +70,12 @@ export function verifyMfa(slug: string, mfaToken: string, code: string) {
 // --- Platform-operator (super admin) auth: NO tenant slug. Login ALWAYS returns
 // an MFA challenge (mandatory); verify mints a platform session (tenant_id stays
 // NULL — the operator then elevates into a tenant). ---
-export function platformLogin(email: string, password: string) {
+// `enrollToken` is the one-time bootstrap secret, sent only on the first-login
+// enrollment wall; enrolled operators omit it. Left out of the body when unset.
+export function platformLogin(email: string, password: string, enrollToken?: string) {
   return apiRequest<LoginResult>(`/platform/auth/login`, {
     method: "POST",
-    body: { email, password },
+    body: { email, password, ...(enrollToken ? { enroll_token: enrollToken } : {}) },
     auth: false,
   })
 }

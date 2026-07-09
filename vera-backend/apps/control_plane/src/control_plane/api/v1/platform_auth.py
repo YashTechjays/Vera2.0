@@ -5,8 +5,10 @@ belongs to no tenant. Credentials + provider config resolve inside a `platform_s
 (`app.platform='on'`, no tenant GUC), which is exactly the RLS context that exposes the
 NULL-tenant `app_user` / `user_identity` / `platform_login_provider` rows and nothing else
 (zero PHI). MFA is mandatory: an enrolled operator gets a `verify` challenge completed at
-`/mfa/verify`; a not-yet-enrolled operator hits the first-login enrollment wall — login mints
-the seed and returns an `enroll` challenge completed at `/mfa/enroll-activate`. Either path
+`/mfa/verify`; a not-yet-enrolled operator hits the first-login enrollment wall — login
+requires the one-time enroll token minted at bootstrap (so the shared bootstrap password
+alone can't bind a second factor), then mints the seed and returns an `enroll` challenge
+completed at `/mfa/enroll-activate`, which clears the token. Either path
 mints the `account_type='platform'`, `tenant_id=None` session. Failures
 return a uniform 401 (no operator/provider enumeration); outcomes are audited to
 auth_audit_log with `tenant_id=NULL`.
@@ -22,10 +24,10 @@ from dataclasses import replace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.auth import (
-    LoginRequest,
     LoginResponse,
     MfaEnrollActivateRequest,
     MfaVerifyRequest,
@@ -49,6 +51,17 @@ from vera_core.models.enums import AccountType, AuthEvent, ProviderKind
 
 router = APIRouter(prefix="/platform/auth", tags=["platform-auth"])
 
+
+class PlatformLoginRequest(BaseModel):
+    """Platform-operator credentials. `enroll_token` is the one-time secret minted at
+    bootstrap and required only on the first-login enrollment wall (while unenrolled);
+    enrolled operators leave it unset and complete the normal verify flow."""
+
+    email: str
+    password: str
+    enroll_token: str | None = None
+
+
 Sessionmaker = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
 Store = Annotated[SessionStore, Depends(get_session_store)]
 KMS = Annotated[KeyManagementService, Depends(get_kms)]
@@ -64,7 +77,7 @@ KMS = Annotated[KeyManagementService, Depends(get_kms)]
     ),
 )
 async def platform_login(
-    body: LoginRequest,
+    body: PlatformLoginRequest,
     request: Request,
     sessionmaker: Sessionmaker,
     store: Store,
@@ -124,8 +137,17 @@ async def platform_login(
     )
     # MFA is mandatory for platform operators: login NEVER mints a session directly.
     if not creds.mfa_enabled:
-        # First-login enrollment wall: mint the seed via the definer path and hand back
-        # the QR. No session until /mfa/enroll-activate confirms a live code.
+        # First-login enrollment wall. Require the one-time enroll token minted at
+        # bootstrap so the shared bootstrap password alone can't bind a second factor
+        # (ADR-0006 §D). Constant-work verify (dummy when unset) keeps the failure
+        # indistinguishable from a wrong password — no enrollment-state enumeration.
+        if not verify_password_or_dummy(body.enroll_token or "", creds.enroll_token_hash):
+            await emit_auth_event(
+                audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=creds.user_id
+            )
+            raise _unauthorized()
+        # Mint the seed via the definer path and hand back the QR. No session until
+        # /mfa/enroll-activate confirms a live code.
         async with platform_session(sessionmaker) as session:
             ident = await _password_identity_row(session, creds.user_id)
             if ident is None:
@@ -233,6 +255,10 @@ async def platform_mfa_enroll_activate(
             activated = await mfa.activate_platform(kms, session, identity=ident, code=body.code)
 
     if not activated:
+        # No attempt cap on this route, so a live enroll token would otherwise be a
+        # full-TTL brute-force window against the operator's second factor. Burn the
+        # challenge on any failed code — a retry needs a fresh /platform/login.
+        await store.delete(MFA_ENROLL_NS, body.mfa_token)
         await emit_auth_event(
             audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=base.user_id
         )
