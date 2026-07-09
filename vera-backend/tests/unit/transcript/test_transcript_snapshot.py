@@ -4,7 +4,7 @@ from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 
 @pytest.mark.asyncio
-async def test_snapshot_returns_published_turns_in_order():
+async def test_snapshot_returns_published_turns_in_order() -> None:
     store = InMemoryTranscriptStore()
     svc = TranscriptService(store)
     await svc.publish_turn("room1", "user", "hello", ts=1)
@@ -17,6 +17,6 @@ async def test_snapshot_returns_published_turns_in_order():
 
 
 @pytest.mark.asyncio
-async def test_snapshot_of_missing_stream_is_empty():
+async def test_snapshot_of_missing_stream_is_empty() -> None:
     svc = TranscriptService(InMemoryTranscriptStore())
     assert await svc.snapshot("nope") == []

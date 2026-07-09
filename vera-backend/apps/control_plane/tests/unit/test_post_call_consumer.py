@@ -1,9 +1,11 @@
-import pytest
 from uuid import uuid4
-from vera_core.integrations.llm import TranscriptTurn
-from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
-from vera_core.observability.correlation import room_name_for_call
+
+import pytest
+
 from control_plane.post_call import build_turns
+from vera_core.integrations.llm import TranscriptTurn
+from vera_core.observability.correlation import room_name_for_call
+from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 
 @pytest.mark.asyncio

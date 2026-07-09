@@ -9,7 +9,7 @@ from vera_core.integrations.llm import (
 
 
 @pytest.mark.asyncio
-async def test_fake_llm_returns_canned_results():
+async def test_fake_llm_returns_canned_results() -> None:
     extracted = [ExtractedField("sections.cov.network_status", "in-network", 90, 2)]
     verdicts = [JudgeVerdict("sections.cov.network_status", True, 88, "in network")]
     client = FakeLLMClient(extracted=extracted, verdicts=verdicts)

@@ -8,30 +8,30 @@ from vera_core.services.post_call_eval import (
 FLOOR = 60
 
 
-def test_has_phi_token_detects_bracket_token():
+def test_has_phi_token_detects_bracket_token() -> None:
     assert has_phi_token("[[MEMBER_ID_1]]") is True
     assert has_phi_token("in-network") is False
 
 
-def test_needs_review_when_value_still_tokenized():
+def test_needs_review_when_value_still_tokenized() -> None:
     ef = ExtractedField("p", "[[MEMBER_ID_1]]", 95, 0)
     v = JudgeVerdict("p", True, 95, "e")
     assert needs_review(ef, v, floor=FLOOR) is True
 
 
-def test_needs_review_when_unsupported_or_low_confidence():
+def test_needs_review_when_unsupported_or_low_confidence() -> None:
     ef = ExtractedField("p", "in-network", 95, 0)
     assert needs_review(ef, JudgeVerdict("p", False, 95, "e"), floor=FLOOR) is True
     assert needs_review(ef, JudgeVerdict("p", True, 40, "e"), floor=FLOOR) is True
     assert needs_review(ef, None, floor=FLOOR) is True
 
 
-def test_no_review_when_supported_and_confident_and_clean():
+def test_no_review_when_supported_and_confident_and_clean() -> None:
     ef = ExtractedField("p", "in-network", 95, 0)
     assert needs_review(ef, JudgeVerdict("p", True, 80, "e"), floor=FLOOR) is False
 
 
-def test_evidence_text_safe_index():
+def test_evidence_text_safe_index() -> None:
     turns = [TranscriptTurn(0, "user", "hello"), TranscriptTurn(1, "agent", "in network")]
     assert evidence_text(turns, 1) == "in network"
     assert evidence_text(turns, 9) is None
