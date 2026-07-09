@@ -7,8 +7,8 @@
 
 const TOKEN_KEY = "vera.session_token"
 const TENANT_SLUG_KEY = "vera.tenant_slug"
-// Which login plane an in-flight MFA challenge belongs to — a non-sensitive hint (no
-// token) so a refresh mid-enrollment bounces back to the right login, not the tenant one.
+// Non-sensitive hint (no token) for which login plane an in-flight MFA challenge is on,
+// so a refresh bounces back to the right login.
 const AUTH_PLANE_KEY = "vera.auth_plane"
 
 let token: string | null = sessionStorage.getItem(TOKEN_KEY)

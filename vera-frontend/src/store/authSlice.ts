@@ -15,9 +15,8 @@ type MfaState = {
   platform?: boolean
 }
 
-// The login page an MFA page should bounce to when it has no active challenge. Uses the
-// in-memory plane when known, else the persisted hint so a hard refresh mid-enrollment
-// still lands a platform operator on /platform/login, not the tenant login.
+// Login page an MFA page bounces to: in-memory plane when known, else the persisted
+// hint so a refresh mid-enrollment still lands a platform operator on /platform/login.
 export function loginRedirectPath(mfa: Pick<MfaState, "platform"> | null): string {
   const platform = mfa ? mfa.platform === true : getAuthPlane() === "platform"
   return platform ? "/platform/login" : "/login"

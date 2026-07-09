@@ -73,10 +73,8 @@ async def enroll_platform(
     UPDATE a NULL-tenant row, so the seed is written via the `platform_store_mfa_seed`
     SECURITY DEFINER function (migration f066c667ddc1) rather than through the ORM.
     Returns the provisioning URI, or None if the identity is already enrolled.
-
-    Idempotent while unenrolled: if a seed already exists, its provisioning URI is
-    returned unchanged rather than re-minting, so a second login (reload, second tab)
-    can't overwrite the QR the operator already scanned."""
+    Idempotent while unenrolled: an existing seed's URI is returned rather than
+    re-minting, so a repeat login can't overwrite the QR already scanned."""
     existing_secret = await _decrypt_seed(kms, identity)
     if existing_secret is not None:
         return _provisioning_uri(existing_secret, account_email)
@@ -133,9 +131,8 @@ async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str
 
 
 async def _call_definer_bool(session: AsyncSession, sql: str, **params: object) -> bool:
-    """Run a platform-MFA SECURITY DEFINER function and return its boolean result. A
-    missing function means the migration isn't applied yet (e.g. code shipped ahead of
-    it) — surface a clear, actionable error instead of a raw UndefinedFunctionError."""
+    """Run a platform-MFA SECURITY DEFINER function → bool. A missing function (migration
+    not applied yet) surfaces a clear error, not a raw UndefinedFunctionError."""
     try:
         result = await session.execute(text(sql).bindparams(**params))
     except ProgrammingError as exc:

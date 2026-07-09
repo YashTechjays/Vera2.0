@@ -68,9 +68,8 @@ KMS = Annotated[KeyManagementService, Depends(get_kms)]
 
 
 def _require_platform_challenge(data: SessionData | None) -> SessionData:
-    """Return the challenge only if it's platform-plane: `account_type` says so AND
-    `tenant_id` is NULL. Both round-trip through Redis and can drift, so assert both
-    and fail closed on a mismatch (CLAUDE.md) rather than branching on `tenant_id` alone."""
+    """Fail closed unless the challenge is platform-plane — account_type AND tenant_id
+    IS NULL (both round-trip through Redis and can drift; CLAUDE.md)."""
     if (
         data is None
         or data.account_type != AccountType.PLATFORM.value
