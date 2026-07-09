@@ -623,3 +623,22 @@ async def test_stateless_preview_forbidden_for_tenant(
         json=VALID_PROMPT_DOC,
     )
     assert resp.status_code == 403
+
+
+async def test_stateless_preview_conflict_when_none_published(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, w, ids = prompts_world
+    async with admin_sessionmaker() as s, s.begin():
+        await s.execute(
+            text("UPDATE schema_version SET status='draft' WHERE id=:i").bindparams(
+                i=ids.schema_version_id
+            )
+        )
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview",
+        headers=_auth(w.super_token),
+        json=VALID_PROMPT_DOC,
+    )
+    assert resp.status_code == 409

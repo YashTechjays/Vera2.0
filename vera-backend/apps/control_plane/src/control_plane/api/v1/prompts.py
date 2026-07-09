@@ -375,6 +375,9 @@ async def preview_document(
     schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
     return ok(
         PromptPreview(
+            # Same joined, location-prefixed contract as create_draft's 400 message
+            # below (e.g. "session.persona: ...") — parsed by the frontend via
+            # vera-frontend/src/lib/prompts/document.ts parsePromptErrors.
             errors=validate_prompt_document(body, schema_doc),
             rendered=render_task_prompts(schema_doc, body),
         )
@@ -405,6 +408,10 @@ async def create_draft(
     schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
     content_errors = validate_prompt_document(body, schema_doc)
     if content_errors:
+        # "; "-joined, location-prefixed (e.g. "session.persona: ...") — this exact
+        # format is re-parsed by the frontend via
+        # vera-frontend/src/lib/prompts/document.ts parsePromptErrors, so don't
+        # reshape it without updating that parser too.
         raise BadRequestError(message="; ".join(content_errors))
     max_version = (
         await session.execute(
