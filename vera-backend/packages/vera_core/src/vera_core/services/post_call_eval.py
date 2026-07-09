@@ -122,6 +122,18 @@ async def evaluate_call(
         )
     ).scalar_one()
 
+    # (0) Form-state guard — if the form is not AI_PROCESSING the callback transaction
+    # rolled back after emitting the job, or the job is stale.  Transitioning out of any
+    # other state (e.g. IN_CALL → EXCEPTION_REVIEW) is illegal and would loop forever via
+    # XAUTOCLAIM.  ACK cleanly with a no-op outcome instead.
+    if FormStatus(form.status) != FormStatus.AI_PROCESSING:
+        logger.warning(
+            "post_call_eval: form %s is in status %r, not AI_PROCESSING — skipping (stale job)",
+            form_id,
+            form.status,
+        )
+        return EvalOutcome(status=FormStatus(form.status), answers_written=0)
+
     # (1) Idempotency guard — return early if this call was already processed.
     already = (
         await session.execute(
@@ -147,9 +159,24 @@ async def evaluate_call(
     prev_status = form.status
     sm = FormStateMachine()
 
-    async def _finish(target: FormStatus, *, written: int, reviewed: list[str]) -> EvalOutcome:
+    async def _finish(
+        target: FormStatus,
+        *,
+        written: int,
+        reviewed: list[str],
+        reason: str | None = None,
+    ) -> EvalOutcome:
         sm.transition(form, target, tenant_max_retries=tenant.max_retries)
         await session.flush()
+        detail: dict[str, object] = {
+            "from": prev_status,
+            "to": form.status,
+            "call_id": str(call_id),
+            "reviewed": len(reviewed),
+            "answers": written,
+            "trigger": "post_call_eval",
+            **({"reason": reason} if reason is not None else {}),
+        }
         await deps.audit.emit(
             AuditRecord(
                 tenant_id=tenant_id,
@@ -158,14 +185,7 @@ async def evaluate_call(
                 event_type=AuditEvent.FORM_STATUS_CHANGE.value,
                 resource_type="patient_form",
                 resource_id=str(form_id),
-                detail={
-                    "from": prev_status,
-                    "to": form.status,
-                    "call_id": str(call_id),
-                    "reviewed": len(reviewed),
-                    "answers": written,
-                    "trigger": "post_call_eval",
-                },
+                detail=detail,
             )
         )
         await try_dispatch(session, tenant_id, deps.livekit, audit=deps.audit)
@@ -173,7 +193,9 @@ async def evaluate_call(
 
     # (3) No transcript → route to EXCEPTION_REVIEW.
     if not turns:
-        return await _finish(FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[])
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="no_transcript"
+        )
 
     # (2) Parse schema — collection paths for extraction.
     doc = dsl.load_document(json.dumps(version.schema_json))
@@ -182,7 +204,18 @@ async def evaluate_call(
     # (4-5) Extract + persist (skip token-valued fields). Keep each written row so
     # its ID is in hand for the judge pass — the PK is client-minted (uuid7), so
     # `.id` is populated at construction and needs no re-query after flush.
-    extracted = await deps.llm.extract(field_paths=paths, turns=turns)
+    try:
+        extracted = await deps.llm.extract(field_paths=paths, turns=turns)
+    except Exception as exc:
+        logger.error(
+            "post_call_eval: LLM extract failed for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
+            form_id,
+            type(exc).__name__,
+            exc,
+        )
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="llm_error"
+        )
     reviewed: list[str] = []
     kept: list[tuple[ExtractedField, FieldAnswer]] = []
     for ef in extracted:
@@ -207,9 +240,22 @@ async def evaluate_call(
     await session.flush()
 
     # (6) Judge + write FieldEvaluation; collect further review candidates.
-    verdicts = {
-        v.field_path: v for v in await deps.llm.judge(extracted=[ef for ef, _ in kept], turns=turns)
-    }
+    try:
+        raw_verdicts = await deps.llm.judge(extracted=[ef for ef, _ in kept], turns=turns)
+    except Exception as exc:
+        logger.error(
+            "post_call_eval: LLM judge failed for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
+            form_id,
+            type(exc).__name__,
+            exc,
+        )
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW,
+            written=len(kept),
+            reviewed=[ef.field_path for ef, _ in kept],
+            reason="llm_error",
+        )
+    verdicts = {v.field_path: v for v in raw_verdicts}
     for ef, answer in kept:
         v = verdicts.get(ef.field_path)
         if v is not None:

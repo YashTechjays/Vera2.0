@@ -432,3 +432,106 @@ async def test_redelivery_is_a_noop(
         .all()
     )
     assert len(rows) == 1  # not doubled
+
+
+async def test_non_ai_processing_form_is_noop(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Fix A: a form not in AI_PROCESSING must be ACKed cleanly (no raise, no writes)."""
+    ctx = seeded_ai_processing_form
+
+    # Force the form into IN_CALL so the job is stale / callback-rollback case.
+    # ctx.session is a superuser session (bypasses RLS) — reuse it directly.
+    await ctx.session.execute(
+        text("UPDATE patient_form SET status = 'in_call' WHERE id = :fid").bindparams(
+            fid=ctx.form_id
+        )
+    )
+    await ctx.session.flush()
+
+    # Expire the cached object so the session sees the updated status.
+    ctx.session.expire_all()
+
+    turns = [TranscriptTurn(0, "user", "in network")]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    # Must return without raising (ACKable) and write nothing.
+    assert outcome.answers_written == 0
+    assert outcome.status == FormStatus.IN_CALL
+
+    rows = (
+        (
+            await ctx.session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == ctx.form_id,
+                    FieldAnswer.source == AnswerSource.AI_CALL.value,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == []
+
+
+async def test_llm_failure_routes_to_exception_review(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Fix B: an LLM extract error must route the form to EXCEPTION_REVIEW without raising."""
+    ctx = seeded_ai_processing_form
+    turns = [TranscriptTurn(0, "user", "in network")]
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[],
+        raise_on_extract=RuntimeError("Vertex quota exceeded"),
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    # Must not raise, must route to review, must write no ai_call answers.
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    assert outcome.answers_written == 0
+
+    rows = (
+        (
+            await ctx.session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == ctx.form_id,
+                    FieldAnswer.source == AnswerSource.AI_CALL.value,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == []
+
+    # Form status in DB should be exception_review.
+    form_row = (
+        await ctx.session.execute(
+            text("SELECT status FROM patient_form WHERE id = :fid").bindparams(fid=ctx.form_id)
+        )
+    ).one()
+    assert form_row.status == FormStatus.EXCEPTION_REVIEW.value

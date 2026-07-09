@@ -48,13 +48,22 @@ class LLMClient(Protocol):
 class FakeLLMClient:
     """Deterministic test double."""
 
-    def __init__(self, *, extracted: list[ExtractedField], verdicts: list[JudgeVerdict]) -> None:
+    def __init__(
+        self,
+        *,
+        extracted: list[ExtractedField],
+        verdicts: list[JudgeVerdict],
+        raise_on_extract: Exception | None = None,
+    ) -> None:
         self._extracted = extracted
         self._verdicts = verdicts
+        self._raise_on_extract = raise_on_extract
 
     async def extract(
         self, *, field_paths: list[str], turns: list[TranscriptTurn]
     ) -> list[ExtractedField]:
+        if self._raise_on_extract is not None:
+            raise self._raise_on_extract
         return list(self._extracted)
 
     async def judge(

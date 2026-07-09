@@ -1,10 +1,15 @@
+import pytest
+
 from control_plane.llm import (
+    VertexLLMClient,
     build_extract_prompt,
     build_judge_prompt,
     parse_extract_response,
     parse_judge_response,
 )
 from vera_core.integrations.llm import ExtractedField, TranscriptTurn
+
+_loads_response = VertexLLMClient._loads_response
 
 
 def test_extract_prompt_numbers_turns_and_lists_paths():
@@ -60,3 +65,22 @@ def test_build_judge_prompt_excludes_extractor_confidence():
     assert "77" not in prompt
     # confidence field must not appear in the extracted items JSON
     assert '"confidence": 77' not in prompt
+
+
+def test_loads_response_parses_valid_json() -> None:
+    """_loads_response returns parsed list for valid JSON text."""
+    data = '[{"field_path": "a.b", "value": "yes", "confidence": 90, "evidence_seq": 0}]'
+    result = _loads_response(data)
+    assert result[0]["field_path"] == "a.b"
+
+
+def test_loads_response_raises_on_none() -> None:
+    """_loads_response raises RuntimeError on None (safety-blocked response)."""
+    with pytest.raises(RuntimeError, match="empty LLM response"):
+        _loads_response(None)
+
+
+def test_loads_response_raises_on_empty_string() -> None:
+    """_loads_response raises RuntimeError on empty string."""
+    with pytest.raises(RuntimeError, match="empty LLM response"):
+        _loads_response("")

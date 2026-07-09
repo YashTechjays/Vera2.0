@@ -93,6 +93,17 @@ class VertexLLMClient(LLMClient):
         self._client = genai.Client(vertexai=True, project=project, location=location)
         self._model = model
 
+    @staticmethod
+    def _loads_response(text: str | None) -> list[dict[str, Any]]:
+        """Parse a JSON LLM response body.
+
+        Raises RuntimeError on None/empty text (safety block or empty finish) so the
+        caller gets a typed, descriptive error instead of a raw TypeError from json.loads.
+        """
+        if not text:
+            raise RuntimeError("empty LLM response (finish/safety block)")
+        return json.loads(text)  # type: ignore[no-any-return]
+
     async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
         resp = await self._client.aio.models.generate_content(
             model=self._model,
@@ -102,7 +113,7 @@ class VertexLLMClient(LLMClient):
                 response_schema=schema,
             ),
         )
-        return json.loads(resp.text)  # type: ignore[arg-type,no-any-return]
+        return self._loads_response(resp.text)
 
     async def extract(
         self, *, field_paths: list[str], turns: list[TranscriptTurn]
