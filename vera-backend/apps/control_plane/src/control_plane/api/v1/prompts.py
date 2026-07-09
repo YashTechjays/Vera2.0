@@ -22,12 +22,20 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import platform_require
 from control_plane.deps import platform_scoped_session
 from control_plane.exceptions import (
+    BadRequestError,
     ConflictError,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
 )
 from control_plane.responses import ResponseModel, ok
+from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.prompting import (
+    PromptDocument,
+    RenderedPrompts,
+    render_task_prompts,
+    validate_prompt_document,
+)
 from vera_core.models import FormSchema, Prompt, PromptVersion, SchemaVersion
 from vera_core.models.enums import VersionStatus
 
@@ -36,10 +44,6 @@ router = APIRouter(prefix="/prompts", tags=["prompts"])
 PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
 _READ = platform_require("platform:prompts:read")
 _WRITE = platform_require("platform:prompts:write")
-
-
-class CreateDraftRequest(BaseModel):
-    composite_json: dict[str, Any]
 
 
 class PromptSummary(BaseModel):
@@ -81,6 +85,32 @@ async def _require_prompt(session: AsyncSession, prompt_id: UUID) -> Prompt:
     if prompt is None:
         raise NotFoundError(message="unknown prompt")
     return prompt
+
+
+async def _require_version(
+    session: AsyncSession, prompt_id: UUID, version_id: UUID
+) -> PromptVersion:
+    version = (
+        await session.execute(
+            select(PromptVersion).where(
+                PromptVersion.id == version_id, PromptVersion.prompt_id == prompt_id
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        raise NotFoundError(message="unknown prompt version")
+    return version
+
+
+async def _published_schema_version(session: AsyncSession, schema_id: UUID) -> SchemaVersion | None:
+    return (
+        await session.execute(
+            select(SchemaVersion).where(
+                SchemaVersion.schema_id == schema_id,
+                SchemaVersion.status == VersionStatus.PUBLISHED,
+            )
+        )
+    ).scalar_one_or_none()
 
 
 @router.get(
@@ -174,16 +204,55 @@ async def get_version(
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _READ],
 ) -> ResponseModel[PromptVersionDetail]:
-    version = (
-        await session.execute(
-            select(PromptVersion).where(
-                PromptVersion.id == version_id, PromptVersion.prompt_id == prompt_id
+    return ok(_detail(await _require_version(session, prompt_id, version_id)))
+
+
+@router.get(
+    "/{prompt_id}/preview",
+    response_model=ResponseModel[RenderedPrompts],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+    ),
+)
+async def preview_prompt(
+    prompt_id: UUID,
+    session: PlatformSession,
+    _caller: Annotated[VerifiedIdentity, _READ],
+    version_id: UUID | None = None,
+) -> ResponseModel[RenderedPrompts]:
+    """Effective rendered prompts: the named version's document (or the published
+    one; none → factory + no overrides) over the schema document it pins."""
+    prompt = await _require_prompt(session, prompt_id)
+    version: PromptVersion | None
+    if version_id is not None:
+        version = await _require_version(session, prompt.id, version_id)
+    else:
+        version = (
+            await session.execute(
+                select(PromptVersion).where(
+                    PromptVersion.prompt_id == prompt.id,
+                    PromptVersion.status == VersionStatus.PUBLISHED,
+                )
             )
-        )
-    ).scalar_one_or_none()
-    if version is None:
-        raise NotFoundError(message="unknown prompt version")
-    return ok(_detail(version))
+        ).scalar_one_or_none()
+    schema_version: SchemaVersion | None
+    if version is not None:
+        schema_version = (
+            await session.execute(
+                select(SchemaVersion).where(SchemaVersion.id == version.schema_version_id)
+            )
+        ).scalar_one()
+        prompt_doc = PromptDocument.model_validate(version.composite_json)
+    else:
+        schema_version = await _published_schema_version(session, prompt.schema_id)
+        if schema_version is None:
+            raise ConflictError(message="no published schema to render against")
+        prompt_doc = None
+    schema_doc = FormSchemaDoc.model_validate(schema_version.schema_json)
+    return ok(render_task_prompts(schema_doc, prompt_doc))
 
 
 @router.post(
@@ -195,25 +264,23 @@ async def get_version(
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.NOT_FOUND,
         DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.BAD_REQUEST,
     ),
 )
 async def create_draft(
     prompt_id: UUID,
-    body: CreateDraftRequest,
+    body: PromptDocument,
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
     prompt = await _require_prompt(session, prompt_id)
-    published_schema_id = (
-        await session.execute(
-            select(SchemaVersion.id).where(
-                SchemaVersion.schema_id == prompt.schema_id,
-                SchemaVersion.status == VersionStatus.PUBLISHED,
-            )
-        )
-    ).scalar_one_or_none()
-    if published_schema_id is None:
+    published_schema = await _published_schema_version(session, prompt.schema_id)
+    if published_schema is None:
         raise ConflictError(message="no published schema to bind the prompt to")
+    schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
+    content_errors = validate_prompt_document(body, schema_doc)
+    if content_errors:
+        raise BadRequestError(message="; ".join(content_errors))
     max_version = (
         await session.execute(
             select(func.max(PromptVersion.version)).where(PromptVersion.prompt_id == prompt.id)
@@ -221,9 +288,9 @@ async def create_draft(
     ).scalar()
     draft = PromptVersion(
         prompt_id=prompt.id,
-        schema_version_id=published_schema_id,
+        schema_version_id=published_schema.id,
         version=(max_version or 0) + 1,
-        composite_json=body.composite_json,
+        composite_json=body.model_dump(mode="json"),
         status=VersionStatus.DRAFT,
     )
     session.add(draft)
@@ -252,15 +319,7 @@ async def publish_version(
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
-    target = (
-        await session.execute(
-            select(PromptVersion).where(
-                PromptVersion.id == version_id, PromptVersion.prompt_id == prompt_id
-            )
-        )
-    ).scalar_one_or_none()
-    if target is None:
-        raise NotFoundError(message="unknown prompt version")
+    target = await _require_version(session, prompt_id, version_id)
     if target.status == VersionStatus.PUBLISHED:
         return ok(_detail(target))  # idempotent no-op
     current = (
