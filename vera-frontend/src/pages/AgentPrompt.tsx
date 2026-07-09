@@ -99,14 +99,10 @@ export function AgentPrompt(): JSX.Element {
         merged[key] = [...(merged[key] ?? []), ...messages]
       }
     }
-    // Dedupe messages within each key, preserving order
+    // Dedupe messages within each key, preserving first-seen order (a Set keeps
+    // insertion order) — client + preview + save can report the same message.
     for (const key of Object.keys(merged)) {
-      const seen = new Set<string>()
-      merged[key] = merged[key].filter((msg) => {
-        if (seen.has(msg)) return false
-        seen.add(msg)
-        return true
-      })
+      merged[key] = [...new Set(merged[key])]
     }
     return merged
   }, [clientErrors, previewErrors.fields, saveErrors.fields])

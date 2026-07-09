@@ -127,6 +127,18 @@ async def _published_schema_version(session: AsyncSession, schema_id: UUID) -> S
     ).scalar_one_or_none()
 
 
+async def _require_published_schema(
+    session: AsyncSession, prompt_id: UUID, *, when_missing: str
+) -> tuple[Prompt, SchemaVersion]:
+    """The prompt plus its currently-published schema version. 404 if the prompt is
+    unknown; 409 (with `when_missing`) if the schema has no published version yet."""
+    prompt = await _require_prompt(session, prompt_id)
+    schema_version = await _published_schema_version(session, prompt.schema_id)
+    if schema_version is None:
+        raise ConflictError(message=when_missing)
+    return prompt, schema_version
+
+
 @router.get(
     "",
     response_model=ResponseModel[list[PromptSummary]],
@@ -261,10 +273,9 @@ async def get_prompt_schema(
     _caller: Annotated[VerifiedIdentity, _READ],
 ) -> ResponseModel[PromptSchemaDetail]:
     """The editor's source for task text defaults + the placeholder namespace."""
-    prompt = await _require_prompt(session, prompt_id)
-    schema_version = await _published_schema_version(session, prompt.schema_id)
-    if schema_version is None:
-        raise ConflictError(message="no published schema version")
+    prompt, schema_version = await _require_published_schema(
+        session, prompt_id, when_missing="no published schema version"
+    )
     form_schema = (
         await session.execute(select(FormSchema).where(FormSchema.id == prompt.schema_id))
     ).scalar_one()
@@ -358,10 +369,9 @@ async def preview_document(
 
     Read-gated: a dry run that mutates nothing (POST only because the document
     travels in the body). Deliberately NOT idempotency-gated — non-mutating."""
-    prompt = await _require_prompt(session, prompt_id)
-    published_schema = await _published_schema_version(session, prompt.schema_id)
-    if published_schema is None:
-        raise ConflictError(message="no published schema to render against")
+    _prompt, published_schema = await _require_published_schema(
+        session, prompt_id, when_missing="no published schema to render against"
+    )
     schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
     return ok(
         PromptPreview(
@@ -389,10 +399,9 @@ async def create_draft(
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
-    prompt = await _require_prompt(session, prompt_id)
-    published_schema = await _published_schema_version(session, prompt.schema_id)
-    if published_schema is None:
-        raise ConflictError(message="no published schema to bind the prompt to")
+    prompt, published_schema = await _require_published_schema(
+        session, prompt_id, when_missing="no published schema to bind the prompt to"
+    )
     schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
     content_errors = validate_prompt_document(body, schema_doc)
     if content_errors:
