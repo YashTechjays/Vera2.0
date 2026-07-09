@@ -1,11 +1,32 @@
 """Post-call re-read: extract collected fields from the (de-identified) transcript,
 persist them, judge each, and decide the form's terminal status. Pure helpers here;
-the DB orchestration (evaluate_call) is added in a later task.
+the DB orchestration lives in `evaluate_call` below.
 """
 
-from phi_codec.tokens.token import TOKEN_RE
+from __future__ import annotations
 
-from vera_core.integrations.llm import ExtractedField, JudgeVerdict, TranscriptTurn
+import json
+from dataclasses import dataclass, field
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from phi_codec.tokens.token import TOKEN_RE
+from vera_core.audit import AuditRecord, AuditSink
+from vera_core.forms import dsl
+from vera_core.forms.conditions import is_v2
+from vera_core.forms.review import completion_pct, completion_pct_v2
+from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
+from vera_core.models.audit_log import ActorType, AuditEvent
+from vera_core.models.authoring import SchemaVersion
+from vera_core.models.enums import AnswerSource, FormStatus
+from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
+from vera_core.models.patient_form import PatientForm
+from vera_core.models.tenant import Tenant
+from vera_core.services.form_state_machine import FormStateMachine
+from vera_core.services.queue_dispatcher import try_dispatch
 
 # A judge verdict below this confidence (or unsupported) routes the field to review.
 REVIEW_CONFIDENCE_FLOOR = 60
@@ -32,3 +53,199 @@ def evidence_text(turns: list[TranscriptTurn], evidence_seq: int) -> str | None:
     if 0 <= evidence_seq < len(turns):
         return turns[evidence_seq].text
     return None
+
+
+# ---------------------------------------------------------------------------
+# DTOs
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EvalDeps:
+    llm: LLMClient
+    audit: AuditSink
+    livekit: Any
+    floor: int = REVIEW_CONFIDENCE_FLOOR
+
+
+@dataclass
+class EvalOutcome:
+    status: FormStatus
+    answers_written: int
+    reviewed_fields: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _demote_current(session: AsyncSession, form_id: UUID, field_path: str) -> None:
+    """Demote any existing current answer for (form, path) — the merge invariant."""
+    await session.execute(
+        update(FieldAnswer)
+        .where(
+            FieldAnswer.form_id == form_id,
+            FieldAnswer.field_path == field_path,
+            FieldAnswer.is_current.is_(True),
+        )
+        .values(is_current=False)
+    )
+    await session.flush()
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+
+async def evaluate_call(
+    session: AsyncSession,
+    deps: EvalDeps,
+    *,
+    tenant_id: UUID,
+    form_id: UUID,
+    call_id: UUID,
+    turns: list[TranscriptTurn],
+) -> EvalOutcome:
+    """Extract, persist, judge, update status, and dispatch.
+
+    Runs inside a caller-provided tenant-scoped session. Idempotent on redelivery.
+    """
+    form: PatientForm = (
+        await session.execute(
+            select(PatientForm).where(PatientForm.id == form_id).with_for_update()
+        )
+    ).scalar_one()
+
+    # (1) Idempotency guard — return early if this call was already processed.
+    already = (
+        await session.execute(
+            select(FieldAnswer.id)
+            .where(
+                FieldAnswer.call_id == call_id,
+                FieldAnswer.source == AnswerSource.AI_CALL.value,
+            )
+            .limit(1)
+        )
+    ).first()
+    if already is not None:
+        return EvalOutcome(status=FormStatus(form.status), answers_written=0)
+
+    tenant: Tenant = (
+        await session.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one()
+    version: SchemaVersion = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    prev_status = form.status
+    sm = FormStateMachine()
+
+    async def _finish(target: FormStatus, *, written: int, reviewed: list[str]) -> EvalOutcome:
+        sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+        await session.flush()
+        await deps.audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.SERVICE,
+                actor_label="post-call-eval",
+                event_type=AuditEvent.FORM_STATUS_CHANGE.value,
+                resource_type="patient_form",
+                resource_id=str(form_id),
+                detail={
+                    "from": prev_status,
+                    "to": form.status,
+                    "call_id": str(call_id),
+                    "reviewed": len(reviewed),
+                    "answers": written,
+                    "trigger": "post_call_eval",
+                },
+            )
+        )
+        await try_dispatch(session, tenant_id, deps.livekit, audit=deps.audit)
+        return EvalOutcome(status=target, answers_written=written, reviewed_fields=reviewed)
+
+    # (3) No transcript → route to EXCEPTION_REVIEW.
+    if not turns:
+        return await _finish(FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[])
+
+    # (2) Parse schema — collection paths for extraction.
+    doc = dsl.load_document(json.dumps(version.schema_json))
+    paths = doc.collection_paths()
+
+    # (4-5) Extract + persist (skip token-valued fields). Keep each written row so
+    # its ID is in hand for the judge pass — the PK is client-minted (uuid7), so
+    # `.id` is populated at construction and needs no re-query after flush.
+    extracted = await deps.llm.extract(field_paths=paths, turns=turns)
+    reviewed: list[str] = []
+    kept: list[tuple[ExtractedField, FieldAnswer]] = []
+    for ef in extracted:
+        if has_phi_token(ef.value):
+            reviewed.append(ef.field_path)
+            continue
+        await _demote_current(session, form_id, ef.field_path)
+        answer = FieldAnswer(
+            tenant_id=tenant_id,
+            form_id=form_id,
+            call_id=call_id,
+            field_path=ef.field_path,
+            value={"value": ef.value},
+            source=AnswerSource.AI_CALL.value,
+            confidence=ef.confidence,
+            evidence_seq=ef.evidence_seq,
+            evidence=evidence_text(turns, ef.evidence_seq),
+            is_current=True,
+        )
+        session.add(answer)
+        kept.append((ef, answer))
+    await session.flush()
+
+    # (6) Judge + write FieldEvaluation; collect further review candidates.
+    verdicts = {
+        v.field_path: v for v in await deps.llm.judge(extracted=[ef for ef, _ in kept], turns=turns)
+    }
+    for ef, answer in kept:
+        v = verdicts.get(ef.field_path)
+        if v is not None:
+            session.add(
+                FieldEvaluation(
+                    tenant_id=tenant_id,
+                    answer_id=answer.id,
+                    confidence=v.confidence,
+                    evidence=v.evidence,
+                    supported=v.supported,
+                )
+            )
+        if needs_review(ef, v, floor=deps.floor):
+            reviewed.append(ef.field_path)
+    await session.flush()
+
+    # (7) Recompute completion % from the form's current answers.
+    current_rows = (
+        await session.execute(
+            select(FieldAnswer.field_path, FieldAnswer.value).where(
+                FieldAnswer.form_id == form_id,
+                FieldAnswer.is_current.is_(True),
+            )
+        )
+    ).all()
+    current_values = {row.field_path: row.value["value"] for row in current_rows}
+    form.completion_pct = (
+        completion_pct_v2(current_values, version.schema_json)
+        if is_v2(version.schema_json)
+        else completion_pct(set(current_values), version.schema_json)
+    )
+
+    # (8) Update call_form_snapshot.after_state (the before_state row was written
+    #     by the callback; here we fill in after_state).
+    await session.execute(
+        update(CallFormSnapshot)
+        .where(CallFormSnapshot.call_id == call_id)
+        .values(after_state=current_values)
+    )
+
+    # (9-12) Decide status, transition, audit, dispatch.
+    target = FormStatus.EXCEPTION_REVIEW if reviewed else FormStatus.COMPLETED
+    return await _finish(target, written=len(kept), reviewed=reviewed)

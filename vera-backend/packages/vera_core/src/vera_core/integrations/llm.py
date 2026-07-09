@@ -48,9 +48,7 @@ class LLMClient(Protocol):
 class FakeLLMClient:
     """Deterministic test double."""
 
-    def __init__(
-        self, *, extracted: list[ExtractedField], verdicts: list[JudgeVerdict]
-    ) -> None:
+    def __init__(self, *, extracted: list[ExtractedField], verdicts: list[JudgeVerdict]) -> None:
         self._extracted = extracted
         self._verdicts = verdicts
 

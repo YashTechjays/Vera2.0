@@ -1,5 +1,7 @@
 import types
+
 import pytest
+
 from vera_core.models.enums import FormStatus
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
