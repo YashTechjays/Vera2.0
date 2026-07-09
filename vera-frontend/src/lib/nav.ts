@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  Building2,
   PhoneCall,
   BarChart3,
   Database,
@@ -32,6 +33,7 @@ export const navItems: NavItem[] = [
   { title: "Analytics", to: "/analytics", icon: BarChart3, permission: "calls:read" },
   { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, superAdminOnly: true },
   { title: "Agent Prompt", to: "/agent-prompt", icon: Bot, superAdminOnly: true },
+  { title: "Insurance Providers", to: "/insurance-providers", icon: Building2, superAdminOnly: true },
   { title: "IVR Playbooks", to: "/ivr-playbooks", icon: ListTree, superAdminOnly: true },
   { title: "Users", to: "/users", icon: Users, permission: "users:read" },
   { title: "Settings", to: "/settings", icon: Settings },

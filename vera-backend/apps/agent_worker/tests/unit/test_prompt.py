@@ -57,7 +57,7 @@ def test_parse_persona_tweak_ignores_sibling_dispatch_keys() -> None:
     # IVR-enabled dispatches carry sibling keys; the nested tweak must survive them.
     metadata = (
         '{"persona_tweak": {"greeting": "Hi"}, "enable_ivr_navigation": true,'
-        ' "ivr_playbook": {"rep_keyword": "Advocate"}}'
+        ' "ivr_playbook": {"extra_rules": "Say Advocate to reach a human."}}'
     )
     assert parse_persona_tweak(metadata) == PersonaTweak(greeting="Hi")
     # no nested key (e.g. Voice Lab dispatch) → no-op tweak, not an error

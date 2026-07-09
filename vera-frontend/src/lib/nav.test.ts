@@ -28,6 +28,7 @@ describe("visibleNavFor", () => {
     expect(titles).not.toContain("Voice Lab") // voice_lab:sandbox missing
     expect(titles).not.toContain("Tenant Access") // platform-only
     expect(titles).not.toContain("Agent Prompt")
+    expect(titles).not.toContain("Insurance Providers")
     expect(titles).not.toContain("IVR Playbooks")
   })
 
@@ -47,7 +48,7 @@ describe("visibleNavFor", () => {
       isSuperAdmin: true,
       isElevated: false,
     }).map((i) => i.title)
-    expect(titles).toEqual(["Tenant Access", "Agent Prompt", "IVR Playbooks"])
+    expect(titles).toEqual(["Tenant Access", "Agent Prompt", "Insurance Providers", "IVR Playbooks"])
   })
 
   it("super admin, elevated: platform items first, then tenant items", () => {
@@ -56,7 +57,12 @@ describe("visibleNavFor", () => {
       isSuperAdmin: true,
       isElevated: true,
     }).map((i) => i.title)
-    expect(titles.slice(0, 3)).toEqual(["Tenant Access", "Agent Prompt", "IVR Playbooks"])
+    expect(titles.slice(0, 4)).toEqual([
+      "Tenant Access",
+      "Agent Prompt",
+      "Insurance Providers",
+      "IVR Playbooks",
+    ])
     expect(titles).toContain("Live Monitoring")
     expect(titles).toContain("Users")
   })

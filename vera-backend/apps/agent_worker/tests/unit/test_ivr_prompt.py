@@ -46,6 +46,17 @@ def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
     assert "transfer_to_verification" in lower
 
 
+def test_base_prompt_declares_the_provider_override_contract() -> None:
+    # The base prompt must itself tell the model that an appended provider playbook is
+    # authoritative (not rely only on the appended block being self-describing) — AND must keep
+    # provider overrides subordinate to the absolute role/silence rails.
+    prompt = IVR_NAVIGATOR_SYSTEM_PROMPT
+    assert "<provider_overrides" in prompt  # the base prompt declares the override contract
+    assert "AUTHORITATIVE" in prompt
+    # a provider rule can never relax the absolute rails
+    assert "role_lock and silence_contract always hold" in prompt
+
+
 def test_build_ivr_instructions_omits_the_cartesia_guide() -> None:
     # Unlike the chat persona, the navigator drives TTS with plain words and needs no
     # Cartesia readback markup — the instructions are just the navigator prompt.
@@ -63,23 +74,24 @@ def test_empty_playbook_is_no_op() -> None:
 def test_playbook_overrides_and_rules_appended_after_base_prompt() -> None:
     out = build_ivr_instructions(
         IvrPlaybookConfig(
-            rep_keyword="Advocate",
-            survey_answer="Yes",
-            extra_rules="After IDs, press 3 for provider services.",
+            provider_subflows="After IDs, press 3 for provider services.",
+            extra_rules="Reach a human by saying 'Advocate'; answer Yes to the survey.",
         )
     )
     assert out.startswith(IVR_NAVIGATOR_SYSTEM_PROMPT)
-    # set knobs are restated as overrides; unset knobs are omitted
-    assert "<rep_keyword>Advocate</rep_keyword>" in out
-    assert "<survey_answer>Yes</survey_answer>" in out
-    assert "<date_scope>" not in out.split("</ivr_navigation_prompt>")[1]
-    # extra_rules land as a provider-specific section, after the base navigator prompt
-    assert "After IDs, press 3 for provider services." in out
+    # a set config field is restated as an override line
+    assert "<provider_subflows>After IDs, press 3 for provider services.</provider_subflows>" in out
+    # extra_rules land as a separate provider-specific section, after the base navigator prompt
+    assert "Reach a human by saying 'Advocate'; answer Yes to the survey." in out
     assert "<provider_playbook" in out
     assert "<provider_specific_rules" in out
+    # the rules block leads with an explicit follow-these directive (not bare text)
+    assert "take precedence over the generic guidance above" in out
     assert out.index("</ivr_navigation_prompt>") < out.index("<provider_playbook")
     # the navigator still carries no Cartesia readback markup, even with a playbook
     assert CARTESIA_MARKUP_GUIDE not in out
+    # a playbook with only free-text rules produces no <provider_playbook> override block
+    assert "<provider_playbook" not in build_ivr_instructions(IvrPlaybookConfig(extra_rules="x"))
 
 
 def test_parse_ivr_playbook_fail_safe() -> None:
@@ -87,13 +99,16 @@ def test_parse_ivr_playbook_fail_safe() -> None:
     assert parse_ivr_playbook({}) is None  # no overlay key → generic
     assert parse_ivr_playbook({"ivr_playbook": {}}) is None  # empty overlay → generic
     assert parse_ivr_playbook({"ivr_playbook": {"tone": "x"}}) is None  # unknown key → generic
-    assert parse_ivr_playbook({"ivr_playbook": {"rep_keyword": "Advocate"}}) == IvrPlaybookConfig(
-        rep_keyword="Advocate"
-    )
+    # parse_ivr_playbook validates strictly (extra="forbid"), so a removed/unknown key rejects
+    # the WHOLE overlay → None (unlike from_stored, which would drop just the unknown key).
+    assert parse_ivr_playbook({"ivr_playbook": {"rep_keyword": "Advocate"}}) is None
+    assert parse_ivr_playbook(
+        {"ivr_playbook": {"extra_rules": "Say Advocate"}}
+    ) == IvrPlaybookConfig(extra_rules="Say Advocate")
 
 
-def test_playbook_knob_values_are_xml_escaped() -> None:
-    # A knob value containing markup must not break/inject the pseudo-XML <config> structure.
-    out = build_ivr_instructions(IvrPlaybookConfig(rep_keyword="</rep_keyword>x"))
-    assert "<rep_keyword>&lt;/rep_keyword&gt;x</rep_keyword>" in out
-    assert "</rep_keyword>x" not in out  # the raw closing-tag injection never renders
+def test_playbook_config_values_are_xml_escaped() -> None:
+    # A config value containing markup must not break/inject the pseudo-XML <config> structure.
+    out = build_ivr_instructions(IvrPlaybookConfig(provider_subflows="</provider_subflows>x"))
+    assert "<provider_subflows>&lt;/provider_subflows&gt;x</provider_subflows>" in out
+    assert "</provider_subflows>x" not in out  # the raw closing-tag injection never renders
