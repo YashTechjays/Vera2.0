@@ -13,6 +13,9 @@ from typing import Any
 
 from vera_core.models.enums import FormStatus
 
+# Statuses from which a retry (transition to IN_QUEUE) is possible.
+_RETRY_SOURCES = (FormStatus.CALL_FAILED, FormStatus.AI_PROCESSING)
+
 # The full transition map. Keys are source statuses; values are the set of
 # legal target statuses from that source.
 ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
@@ -24,7 +27,12 @@ ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
         {FormStatus.AI_PROCESSING, FormStatus.COMPLETED, FormStatus.CALL_FAILED}
     ),
     FormStatus.AI_PROCESSING: frozenset(
-        {FormStatus.COMPLETED, FormStatus.CALL_FAILED, FormStatus.EXCEPTION_REVIEW}
+        {
+            FormStatus.COMPLETED,
+            FormStatus.CALL_FAILED,
+            FormStatus.EXCEPTION_REVIEW,
+            FormStatus.IN_QUEUE,
+        }
     ),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
@@ -78,8 +86,8 @@ class FormStateMachine:
         if target not in allowed:
             raise InvalidTransitionError(current.value, target.value)
 
-        # Guard: retry cap on CALL_FAILED → IN_QUEUE.
-        if current == FormStatus.CALL_FAILED and target == FormStatus.IN_QUEUE:
+        # Guard: retry cap on any source in _RETRY_SOURCES → IN_QUEUE.
+        if target == FormStatus.IN_QUEUE and current in _RETRY_SOURCES:
             if form.retry_count >= tenant_max_retries:
                 raise InvalidTransitionError(
                     current.value, target.value, reason="retries exhausted"
