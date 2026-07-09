@@ -289,7 +289,12 @@ class RetentionSweeper:
         )
 
     async def _load_available(self, tenant_id: UUID, recording_id: UUID) -> Recording | None:
-        """Seam: load the recording only if still status=AVAILABLE (stub in tests)."""
+        """Seam: load the recording only if still status=AVAILABLE (stub in tests).
+
+        Returns the ORM row for use after the session closes; safe because the
+        shared sessionmaker sets expire_on_commit=False (db/engine.py), so the
+        detached instance keeps its loaded attributes (gcs_uri, sha256, ...).
+        """
         async with tenant_session(self._sessionmaker, tenant_id) as session:
             return (
                 await session.execute(
