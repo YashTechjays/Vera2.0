@@ -1,5 +1,8 @@
 from vera_core.forms.review import (
-    FieldStatus, is_field_satisfied, retryable_required_paths, field_labels,
+    FieldStatus,
+    field_labels,
+    is_field_satisfied,
+    retryable_required_paths,
 )
 
 FLOOR = 70
@@ -40,15 +43,22 @@ V2 = {
 }
 
 
-def _unfilled(): return FieldStatus(filled=False, source=None, ai_supported=None, ai_confidence=None)
-def _ai(conf, sup=True): return FieldStatus(filled=True, source="ai_call", ai_supported=sup, ai_confidence=conf)
-def _human(): return FieldStatus(filled=True, source="human", ai_supported=None, ai_confidence=None)
+def _unfilled():
+    return FieldStatus(filled=False, source=None, ai_supported=None, ai_confidence=None)
+
+
+def _ai(conf, sup=True):
+    return FieldStatus(filled=True, source="ai_call", ai_supported=sup, ai_confidence=conf)
+
+
+def _human():
+    return FieldStatus(filled=True, source="human", ai_supported=None, ai_confidence=None)
 
 
 def test_is_field_satisfied_rules():
-    assert is_field_satisfied(_human(), floor=FLOOR) is True          # trusted
-    assert is_field_satisfied(_ai(90), floor=FLOOR) is True           # ai supported, >=70
-    assert is_field_satisfied(_ai(60), floor=FLOOR) is False          # ai <70
+    assert is_field_satisfied(_human(), floor=FLOOR) is True  # trusted
+    assert is_field_satisfied(_ai(90), floor=FLOOR) is True  # ai supported, >=70
+    assert is_field_satisfied(_ai(60), floor=FLOOR) is False  # ai <70
     assert is_field_satisfied(_ai(90, sup=False), floor=FLOOR) is False  # unsupported
     assert is_field_satisfied(_unfilled(), floor=FLOOR) is False
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,7 @@ from phi_codec.tokens.token import TOKEN_RE
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.forms import dsl
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.review import completion_pct, completion_pct_v2
+from vera_core.forms.review import completion_pct, completion_pct_v2, retryable_required_paths
 from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import SchemaVersion
@@ -27,13 +27,14 @@ from vera_core.models.enums import AnswerSource, FormStatus
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
 
 logger = logging.getLogger("vera.post_call_eval")
 
 # A judge verdict below this confidence (or unsupported) routes the field to review.
-REVIEW_CONFIDENCE_FLOOR = 60
+REVIEW_CONFIDENCE_FLOOR = 70
 
 PHI_TOKEN_RE = TOKEN_RE
 
@@ -167,6 +168,8 @@ async def evaluate_call(
         reason: str | None = None,
     ) -> EvalOutcome:
         sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+        if target == FormStatus.IN_QUEUE:
+            form.enqueued_at = func.now()
         await session.flush()
         detail: dict[str, object] = {
             "from": prev_status,
@@ -216,11 +219,12 @@ async def evaluate_call(
         return await _finish(
             FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="llm_error"
         )
+    token_fields: list[str] = []
     reviewed: list[str] = []
     kept: list[tuple[ExtractedField, FieldAnswer]] = []
     for ef in extracted:
         if has_phi_token(ef.value):
-            reviewed.append(ef.field_path)
+            token_fields.append(ef.field_path)
             continue
         await _demote_current(session, form_id, ef.field_path)
         answer = FieldAnswer(
@@ -305,5 +309,22 @@ async def evaluate_call(
         )
 
     # (9-12) Decide status, transition, audit, dispatch.
-    target = FormStatus.EXCEPTION_REVIEW if reviewed else FormStatus.COMPLETED
-    return await _finish(target, written=len(kept), reviewed=reviewed)
+    status_by_path = await load_field_status(session, form_id)
+    retryable = retryable_required_paths(status_by_path, version.schema_json, floor=deps.floor)
+    if token_fields:
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW,
+            written=len(kept),
+            reviewed=token_fields,
+            reason="token_value",
+        )
+    if not retryable:
+        return await _finish(FormStatus.COMPLETED, written=len(kept), reviewed=[])
+    if form.retry_count < tenant.max_retries:
+        return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
+    return await _finish(
+        FormStatus.EXCEPTION_REVIEW,
+        written=len(kept),
+        reviewed=retryable,
+        reason="retries_exhausted",
+    )

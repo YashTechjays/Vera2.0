@@ -53,7 +53,7 @@ class PostCallConsumer:
         *,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
-        review_floor: int = 60,
+        review_floor: int = 70,
         consumer_name: str | None = None,
     ) -> None:
         self._redis = redis
