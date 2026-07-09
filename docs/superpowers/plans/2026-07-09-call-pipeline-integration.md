@@ -762,7 +762,9 @@ git commit -m "feat(dispatch): dial the payer via SIP with pacing, real-call met
 
 ### Task 5: Post-commit dispatch runner
 
-Dial + 1 s pacing must not ride inside the HTTP request transaction (held row locks, request latency, orphaned rooms on rollback). Run the dispatch pass as a FastAPI background task in its own committed session. (FastAPI ≥0.106 runs yield-dependency teardown — which commits `TenantSession` — before background tasks, so the IN_QUEUE row is committed and visible.)
+Dial + 1 s pacing must not ride inside the HTTP request transaction (held row locks, request latency, orphaned rooms on rollback). Run the dispatch pass in its own committed session, strictly after the request's transaction commits.
+
+> **EXECUTION DEVIATION (empirically verified):** the original mechanism here (FastAPI `BackgroundTasks`) is wrong for this repo's FastAPI 0.136 — a probe showed background tasks run BEFORE yield-dependency teardown (`dep-enter → handler-return → bg-ran → dep-exit`), i.e. before the `TenantSession` commit, so the pass saw an uncommitted, still-locked row and dispatched nothing (and any in-background wait for the commit would deadlock, since teardown runs only after background tasks finish). Built instead: `schedule_dispatch_pass(...)` spawns a **detached asyncio task** (strong-ref'd in a module `_PENDING` set) and `run_dispatch_pass` gains `wait_for_form_id` — its first statement is a plain (non-SKIP-LOCKED) `SELECT … FOR UPDATE` on the just-enqueued row, which Postgres queues behind the request's commit: a deterministic post-commit barrier with no polling. `drain_pending()` lets tests await detached dispatch work. The endpoint schedules with `wait_for_form_id=form_id`; the consumer/sweeper call `run_dispatch_pass` directly with no barrier (their transactions are already committed).
 
 **Files:**
 - Create: `apps/control_plane/src/control_plane/dispatch.py`
