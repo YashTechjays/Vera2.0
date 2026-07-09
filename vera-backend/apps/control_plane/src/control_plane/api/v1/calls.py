@@ -17,7 +17,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
-from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import Audit, Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit
@@ -430,6 +430,7 @@ async def update_call_status(
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
+    kms: Kms,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[CallSummary]:
     """Callback endpoint for the agent worker to report call terminal status.
@@ -531,6 +532,6 @@ async def update_call_status(
     )
 
     # Fire the dispatcher — a concurrency slot just freed up.
-    await try_dispatch(session, tenant_id, livekit, audit=audit)
+    await try_dispatch(session, tenant_id, livekit, kms, audit=audit)
 
     return ok(_summary(call, form.patient_name, caller.user_id))

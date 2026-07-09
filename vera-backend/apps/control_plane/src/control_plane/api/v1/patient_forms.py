@@ -904,7 +904,7 @@ async def update_patient_form_status(
     # form to afterwards — clients observe dispatch via the calls list. The
     # dispatcher itself attributes ownership from `form.enqueued_by_id`, set above.
     if target == FormStatus.IN_QUEUE:
-        await try_dispatch(session, tenant_id, livekit, audit=audit)
+        await try_dispatch(session, tenant_id, livekit, kms, audit=audit)
 
     return ok(
         PatientFormStatusResponse(id=form.id, status=target.value),
