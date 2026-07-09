@@ -4,6 +4,7 @@ Every endpoint is exercised against a live RLS-enforcing Postgres
 connection with a FakeLiveKit injected in the authz_app fixture (see conftest.py).
 """
 
+import json
 from collections.abc import AsyncGenerator
 from uuid import UUID, uuid4
 
@@ -706,11 +707,26 @@ async def _insert_call(
     return call_id
 
 
+async def _events_audit_rows(
+    admin_session: AsyncSession, call_id: UUID, *, decision: str
+) -> list[AuditLog]:
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.event_type == "phi.access",
+            AuditLog.resource_type == "call_events",
+            AuditLog.resource_id == str(call_id),
+            AuditLog.decision == decision,
+        )
+    )
+    return list(result.scalars().all())
+
+
 @pytest.mark.asyncio
 async def test_call_events_streams_envelope_frames_for_owner(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
+    admin_session: AsyncSession,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     call_stream_service: CallStreamService,
 ) -> None:
@@ -730,7 +746,45 @@ async def test_call_events_streams_envelope_frames_for_owner(
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"].startswith("text/event-stream")
     assert resp.headers["cache-control"] == "no-store"
-    assert '"type":"transcript"' in resp.text
+    assert resp.headers["x-accel-buffering"] == "no"
+
+    # Parse the body as SSE frames: each is "id: <entry>\ndata: <json>" and the
+    # data JSON is a full CallStreamEvent envelope.
+    frames = [f for f in resp.text.split("\n\n") if f]
+    assert frames, resp.text
+    id_line, data_line = frames[0].split("\n")
+    assert id_line.startswith("id: ")
+    assert data_line.startswith("data: ")
+    envelope = json.loads(data_line.removeprefix("data: "))
+    assert envelope["type"] == "transcript"
+    assert envelope["data"] == {"role": "agent", "text": "hello"}
+    assert isinstance(envelope["ts"], int)
+
+    # The disclosure is audited with decision=allow.
+    assert len(await _events_audit_rows(admin_session, call_id, decision="allow")) == 1
+
+
+@pytest.mark.asyncio
+async def test_call_events_visible_call_without_permission_403_and_audited_deny(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A VISIBLE (ownerless) call requested without calls:read is a 403 — not a
+    404, since visibility already passed — and the deny is audited."""
+    call_id = await _insert_call(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=seeded_form_id,
+        initiated_by_id=None,  # ownerless → tenant-visible, like join-token
+    )
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.norole_token)
+    )
+    assert resp.status_code == 403, resp.text
+    assert len(await _events_audit_rows(admin_session, call_id, decision="deny")) == 1
 
 
 @pytest.mark.asyncio
