@@ -99,7 +99,8 @@ def test_parse_ivr_playbook_fail_safe() -> None:
     assert parse_ivr_playbook({}) is None  # no overlay key → generic
     assert parse_ivr_playbook({"ivr_playbook": {}}) is None  # empty overlay → generic
     assert parse_ivr_playbook({"ivr_playbook": {"tone": "x"}}) is None  # unknown key → generic
-    # a removed structured key is now unknown → dropped → generic
+    # parse_ivr_playbook validates strictly (extra="forbid"), so a removed/unknown key rejects
+    # the WHOLE overlay → None (unlike from_stored, which would drop just the unknown key).
     assert parse_ivr_playbook({"ivr_playbook": {"rep_keyword": "Advocate"}}) is None
     assert parse_ivr_playbook(
         {"ivr_playbook": {"extra_rules": "Say Advocate"}}

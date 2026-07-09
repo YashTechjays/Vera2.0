@@ -10,12 +10,12 @@ import {
 import { ProviderFormDialog } from "@/components/insurance-providers/ProviderFormDialog"
 import { ApiError } from "@/lib/api/client"
 import {
-  deleteProvider, listProviders, type ProviderSummary,
+  deleteProvider, listProviders, type ProviderStatus, type ProviderSummary,
 } from "@/lib/api/insuranceProviders"
 import { useAppSelector } from "@/store/hooks"
 import { selectIsSuperAdmin } from "@/store/authSlice"
 
-const STATUS_VARIANT: Record<string, "default" | "outline"> = {
+const STATUS_VARIANT: Record<ProviderStatus, "default" | "outline"> = {
   active: "default",
   inactive: "outline",
 }
@@ -27,12 +27,13 @@ function formatDate(iso: string): string {
     : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
 }
 
-/** "HH:MM–HH:MM" when both hours are set, a single bound when only one is, else "—". */
+/** "HH:MM–HH:MM" when both are set, or one bound with a dash on the missing side
+ *  ("09:00–" / "–17:00") so a lone value never reads as the wrong bound; "—" when neither. */
 function formatHours(start: string | null, end: string | null): string {
   const s = start?.slice(0, 5)
   const e = end?.slice(0, 5)
-  if (s && e) return `${s}–${e}`
-  return s || e || "—"
+  if (!s && !e) return "—"
+  return `${s ?? ""}–${e ?? ""}`
 }
 
 export function InsuranceProviders() {
@@ -49,15 +50,22 @@ export function InsuranceProviders() {
   const [busy, setBusy] = useState(false)
   const [dialogError, setDialogError] = useState<string | null>(null)
 
+  // Refresh after a mutation. On error, drop out of the initial loading state (setProviders
+  // to [] only if still null) so the table never sticks on "Loading…" under the error banner,
+  // while an existing list survives a failed refresh.
   const load = useCallback(async () => {
     setError(null)
     try {
       setProviders(await listProviders())
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not load providers.")
+      setProviders((prev) => prev ?? [])
     }
   }, [])
 
+  // Initial load. setState only in the async callbacks (never synchronously in the effect body,
+  // per react-hooks/set-state-in-effect), with a cancelled flag to avoid a post-unmount update —
+  // the same pattern as Users.tsx / IvrPlaybooks.tsx.
   useEffect(() => {
     if (!isSuperAdmin) return
     let cancelled = false
@@ -66,9 +74,9 @@ export function InsuranceProviders() {
         if (!cancelled) setProviders(p)
       })
       .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof ApiError ? err.message : "Could not load providers.")
-        }
+        if (cancelled) return
+        setError(err instanceof ApiError ? err.message : "Could not load providers.")
+        setProviders((prev) => prev ?? [])  // else the table sticks on "Loading…"
       })
     return () => {
       cancelled = true
@@ -171,7 +179,7 @@ export function InsuranceProviders() {
                   {formatHours(p.working_hour_start, p.working_hour_end)}
                 </TableCell>
                 <TableCell>
-                  <Badge variant={STATUS_VARIANT[p.status] ?? "outline"} className="capitalize">
+                  <Badge variant={STATUS_VARIANT[p.status]} className="capitalize">
                     {p.status}
                   </Badge>
                 </TableCell>

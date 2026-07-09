@@ -11,6 +11,10 @@ that currently holds the matching `platform:ivr_playbooks:*` permission, so nobo
 (notably SUPER_ADMIN) loses access once api/v1/insurance_providers.py switches its
 platform_require() gate onto the new codes.
 
+It also refreshes the two `platform:ivr_playbooks:*` descriptions: rbac_defaults.py retitled
+them (they no longer mention insurance providers), so without this UPDATE every existing DB
+keeps the stale text and disagrees with the code wherever the catalog is read from the DB.
+
 Runs on the privileged migration connection (not RLS-bound), same as the voice_lab
 seed — the strict WITH CHECK on a NULL-tenant role_permission row does not block it.
 id columns are client-side defaulted (UUIDv7PKMixin) so every INSERT supplies one via
@@ -40,8 +44,16 @@ _PERMISSIONS: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
+# ivr_playbooks descriptions retitled in rbac_defaults.py (they now cover playbooks only);
+_RETITLED: tuple[tuple[str, str], ...] = (
+    ("platform:ivr_playbooks:read", "View IVR playbooks"),
+    ("platform:ivr_playbooks:write", "Create and manage IVR playbooks"),
+)
+
 
 def upgrade() -> None:
+    for code, description in _RETITLED:
+        op.execute(f"UPDATE permission SET description = '{description}' WHERE code = '{code}'")
     for code, description, source in _PERMISSIONS:
         op.execute(
             "INSERT INTO permission (id, code, description) "

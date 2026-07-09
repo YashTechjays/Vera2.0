@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
 import { ApiError } from "@/lib/api/client"
 import {
-  createProvider, updateProvider, type ProviderSummary,
+  createProvider, updateProvider, type ProviderStatus, type ProviderSummary,
 } from "@/lib/api/insuranceProviders"
 
 /** A native <input type="time"> speaks "HH:MM"; the API stores/returns "HH:MM:SS".
@@ -59,7 +59,7 @@ function ProviderForm({
   const [name, setName] = useState(provider?.name ?? "")
   const [start, setStart] = useState(toInputTime(provider?.working_hour_start ?? null))
   const [end, setEnd] = useState(toInputTime(provider?.working_hour_end ?? null))
-  const [status, setStatus] = useState(provider?.status ?? "active")
+  const [status, setStatus] = useState<ProviderStatus>(provider?.status ?? "active")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -142,7 +142,7 @@ function ProviderForm({
             <Select
               id="provider-status"
               value={status}
-              onChange={(e) => setStatus(e.target.value)}
+              onChange={(e) => setStatus(e.target.value as ProviderStatus)}
             >
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>

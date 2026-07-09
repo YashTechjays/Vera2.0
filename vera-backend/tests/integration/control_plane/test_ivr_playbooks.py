@@ -214,6 +214,60 @@ async def test_provider_get_update_soft_delete(
     assert again.status_code == 200, again.text
 
 
+async def test_provider_patch_omitted_vs_null_and_reactivation(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    # UpdateProviderRequest's whole reason to exist is distinguishing "field omitted" (leave
+    # unchanged) from "explicit null" (clear) on the nullable working-hour fields — plus the
+    # reactivation path the DELETE endpoint advertises. Cover both.
+    client, w = playbooks_world
+
+    async def _patch(payload: dict[str, object]) -> httpx.Response:
+        return await client.patch(
+            f"/api/v1/insurance-providers/{w.provider_id}",
+            headers=_write_headers(w.super_token),
+            json=payload,
+        )
+
+    seeded = await _patch({"working_hour_start": "09:00:00", "working_hour_end": "17:00:00"})
+    assert seeded.status_code == 200, seeded.text
+    assert seeded.json()["data"]["working_hour_start"] == "09:00:00"
+    assert seeded.json()["data"]["working_hour_end"] == "17:00:00"
+
+    # Explicit null clears ONLY that field; the omitted end is left untouched.
+    cleared = await _patch({"working_hour_start": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["data"]["working_hour_start"] is None
+    assert cleared.json()["data"]["working_hour_end"] == "17:00:00"
+
+    # A name-only PATCH leaves both hours untouched (neither field is in model_fields_set).
+    renamed = await _patch({"name": f"Renamed {w.name_suffix}"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["data"]["working_hour_start"] is None
+    assert renamed.json()["data"]["working_hour_end"] == "17:00:00"
+
+    # Reactivation: soft-delete (→ inactive), then PATCH status=active brings it back.
+    await client.delete(
+        f"/api/v1/insurance-providers/{w.provider_id}", headers=_write_headers(w.super_token)
+    )
+    reactivated = await _patch({"status": "active"})
+    assert reactivated.status_code == 200, reactivated.text
+    assert reactivated.json()["data"]["status"] == "active"
+
+
+async def test_provider_patch_rejects_blank_name(
+    playbooks_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    # A whitespace-only name is stripped and rejected at the edge (min_length=1), not stored.
+    client, w = playbooks_world
+    resp = await client.patch(
+        f"/api/v1/insurance-providers/{w.provider_id}",
+        headers=_write_headers(w.super_token),
+        json={"name": "   "},
+    )
+    assert resp.status_code == 422, resp.text
+
+
 async def test_provider_get_unknown_404(
     playbooks_world: tuple[httpx.AsyncClient, World],
 ) -> None:

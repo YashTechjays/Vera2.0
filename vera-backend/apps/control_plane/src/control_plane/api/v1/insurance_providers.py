@@ -11,7 +11,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,9 +41,12 @@ PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
 _READ = platform_require("platform:insurance_providers:read")
 _WRITE = platform_require("platform:insurance_providers:write")
 
+# Trim surrounding whitespace and reject an empty/whitespace-only name at the edge.
+_ProviderName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
 
 class CreateProviderRequest(BaseModel):
-    name: str
+    name: _ProviderName
     working_hour_start: time | None = None
     working_hour_end: time | None = None
     # A mis-cased status would silently drop the provider from every status == "active"
@@ -55,7 +58,7 @@ class UpdateProviderRequest(BaseModel):
     # All optional for PATCH. The nullable working-hour fields distinguish "omitted"
     # (left unchanged) from an explicit null (cleared) via model_fields_set; name and
     # status are non-null columns, so a provided null is treated as "leave unchanged".
-    name: str | None = None
+    name: _ProviderName | None = None
     working_hour_start: time | None = None
     working_hour_end: time | None = None
     status: ProviderStatus | None = None
@@ -91,8 +94,7 @@ async def _require_provider(session: AsyncSession, provider_id: UUID) -> Insuran
 
 
 async def _flush_or_name_conflict(session: AsyncSession) -> None:
-    """Flush, translating a uq_insurance_provider_name violation (a duplicate or
-    case-variant name) into a 409 instead of a 500."""
+    """Flush, mapping an IntegrityError to a 409. """
     try:
         await session.flush()
     except IntegrityError as exc:
