@@ -5,13 +5,17 @@ vi.mock("@/lib/auth/storage", () => ({
   getToken: () => null,
   setSession: vi.fn(),
   clearSession: vi.fn(),
+  getAuthPlane: vi.fn(() => null),
+  setAuthPlane: vi.fn(),
 }))
 
 import { configureStore } from "@reduxjs/toolkit"
 import * as api from "@/lib/auth/api"
+import * as storage from "@/lib/auth/storage"
 import authReducer, {
   forceLogout,
   loginThunk,
+  loginRedirectPath,
   platformLoginThunk,
   platformEnrollActivateThunk,
   fetchMe,
@@ -147,5 +151,16 @@ describe("authSlice", () => {
     expect(deadline).not.toBeNull()
     expect(deadline!).toBeGreaterThanOrEqual(before + 10 * 3600 * 1000)
     expect(deadline!).toBeLessThanOrEqual(after + 10 * 3600 * 1000)
+  })
+
+  it("loginRedirectPath is platform-aware from state, else the persisted plane", () => {
+    // In-memory challenge → trust its plane flag.
+    expect(loginRedirectPath({ platform: true })).toBe("/platform/login")
+    expect(loginRedirectPath({ platform: false })).toBe("/login")
+    // No challenge (refresh) → fall back to the persisted hint.
+    vi.mocked(storage.getAuthPlane).mockReturnValueOnce("platform")
+    expect(loginRedirectPath(null)).toBe("/platform/login")
+    vi.mocked(storage.getAuthPlane).mockReturnValueOnce(null)
+    expect(loginRedirectPath(null)).toBe("/login")
   })
 })

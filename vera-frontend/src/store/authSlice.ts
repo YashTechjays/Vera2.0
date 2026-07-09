@@ -3,7 +3,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 import * as authApi from "@/lib/auth/api"
 import type { MeResponse } from "@/lib/auth/api"
 import { apiErrorMessage, serializeApiError } from "@/lib/api/client"
-import { clearSession, getToken, setSession } from "@/lib/auth/storage"
+import { clearSession, getAuthPlane, getToken, setAuthPlane, setSession } from "@/lib/auth/storage"
 
 type Status = "loading" | "anonymous" | "authenticated"
 // `platform` marks a super-admin (platform-operator) challenge, so the verify step
@@ -13,6 +13,14 @@ type MfaState = {
   step: "verify" | "enroll"
   provisioningUri?: string
   platform?: boolean
+}
+
+// The login page an MFA page should bounce to when it has no active challenge. Uses the
+// in-memory plane when known, else the persisted hint so a hard refresh mid-enrollment
+// still lands a platform operator on /platform/login, not the tenant login.
+export function loginRedirectPath(mfa: Pick<MfaState, "platform"> | null): string {
+  const platform = mfa ? mfa.platform === true : getAuthPlane() === "platform"
+  return platform ? "/platform/login" : "/login"
 }
 
 type AuthState = {
@@ -63,6 +71,7 @@ export const loginThunk = createAsyncThunk(
     // Remember the workspace so the MFA step (which runs before a session exists)
     // can read it from the store instead of the URL.
     dispatch(setTenantSlug(arg.slug))
+    setAuthPlane("tenant")
     const res = await authApi.login(arg.slug, arg.email, arg.password)
     if (res.mfa === "none") {
       setSession(res.session_token ?? "", arg.slug)
@@ -97,6 +106,8 @@ export const platformLoginThunk = createAsyncThunk(
     { dispatch },
   ): Promise<authApi.LoginResult["mfa"]> => {
     const res = await authApi.platformLogin(arg.email, arg.password, arg.enrollToken)
+    // Persist the plane so a refresh mid-enrollment returns to /platform/login.
+    setAuthPlane("platform")
     if (res.mfa === "enroll") {
       dispatch(
         setMfa({

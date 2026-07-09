@@ -13,6 +13,7 @@ import {
   selectTenantSlug,
   enrollActivateThunk,
   platformEnrollActivateThunk,
+  loginRedirectPath,
 } from "@/store/authSlice"
 
 export function MfaEnroll() {
@@ -25,7 +26,7 @@ export function MfaEnroll() {
   const [busy, setBusy] = useState(false)
   const [recovery, setRecovery] = useState<string[] | null>(null)
 
-  if (!mfa || mfa.step !== "enroll") return <Navigate to="/login" replace />
+  if (!mfa || mfa.step !== "enroll") return <Navigate to={loginRedirectPath(mfa)} replace />
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
