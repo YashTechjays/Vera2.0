@@ -44,6 +44,7 @@ class TranscriptStore(Protocol):
     async def mark_ended(self, room_name: str) -> None: ...
     async def delete(self, room_name: str) -> None: ...
     def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]: ...
+    async def snapshot(self, room_name: str) -> list[tuple[str, TranscriptEvent]]: ...
 
 
 class InMemoryTranscriptStore:
@@ -95,6 +96,23 @@ class InMemoryTranscriptStore:
                     ts=int(fields["ts"]),
                 ),
             )
+
+    async def snapshot(self, room_name: str) -> list[tuple[str, TranscriptEvent]]:
+        key = transcript_stream_key(room_name)
+        out: list[tuple[str, TranscriptEvent]] = []
+        async with self._cond:
+            for entry_id, fields in self._entries.get(key, []):
+                if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
+                    continue
+                out.append(
+                    (
+                        entry_id,
+                        TranscriptEvent(
+                            role=fields["role"], text=fields["text"], ts=int(fields["ts"])
+                        ),
+                    )
+                )
+        return out
 
 
 class RedisTranscriptStore:
@@ -175,6 +193,24 @@ class RedisTranscriptStore:
                     ),
                 )
 
+    async def snapshot(self, room_name: str) -> list[tuple[str, TranscriptEvent]]:
+        key = transcript_stream_key(room_name)
+        entries = cast(
+            list[tuple[str, dict[str, str]]],
+            await self._redis.xrange(key),
+        )
+        out: list[tuple[str, TranscriptEvent]] = []
+        for entry_id, fields in entries:
+            if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
+                continue
+            out.append(
+                (
+                    entry_id,
+                    TranscriptEvent(role=fields["role"], text=fields["text"], ts=int(fields["ts"])),
+                )
+            )
+        return out
+
 
 class TranscriptService:
     """The reusable produce/consume API over a TranscriptStore. Producers
@@ -218,3 +254,8 @@ class TranscriptService:
 
     async def clear(self, room_name: str) -> None:
         await self._store.delete(room_name)
+
+    async def snapshot(self, room_name: str) -> list[TranscriptEvent]:
+        """One-shot, non-blocking drain of the current stream (post-call re-read).
+        Unlike consume()/collect(), returns even if the ended sentinel is absent."""
+        return [event for _id, event in await self._store.snapshot(room_name)]
