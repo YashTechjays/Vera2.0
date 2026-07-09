@@ -65,16 +65,15 @@ async def _enroll_window_open(
     """True while the operator is still inside their first-login enrollment window,
     measured on the DB clock from the identity's creation — a leaked bootstrap password
     can't bind a second factor once the window closes (ADR-0006 §D)."""
-    return bool(
-        (
-            await session.execute(
-                text(
-                    "SELECT created_at + make_interval(secs => :secs) > now() "
-                    "FROM user_identity WHERE id = :id"
-                ).bindparams(secs=window_seconds, id=identity_id)
-            )
-        ).scalar_one()
-    )
+    still_open = (
+        await session.execute(
+            text(
+                "SELECT created_at + make_interval(secs => :secs) > now() "
+                "FROM user_identity WHERE id = :id"
+            ).bindparams(secs=window_seconds, id=identity_id)
+        )
+    ).scalar_one()
+    return bool(still_open)
 
 
 def _require_platform_challenge(data: SessionData | None) -> SessionData:
