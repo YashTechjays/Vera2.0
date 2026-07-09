@@ -19,6 +19,8 @@ from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
+from control_plane.recording_jobs import RecordingVerifier
+from control_plane.recording_storage import GCSRecordingStorage, RecordingStorage
 from control_plane.request_context import RequestIdMiddleware
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import (
@@ -37,14 +39,14 @@ from vera_core.transcript import RedisTranscriptStore, TranscriptService
 logger = logging.getLogger("control_plane.main")
 
 
-def _log_consumer_exit(task: asyncio.Task[None]) -> None:
-    """Surface an unexpected exit of the worker-event consumer background task.
+def _log_background_exit(task: asyncio.Task[None]) -> None:
+    """Surface an unexpected exit of any background task.
 
     `run()` only returns via cancellation (shutdown) or an uncaught exception; without
     this callback the latter would die silently ("Task exception was never retrieved").
     """
     if not task.cancelled() and task.exception() is not None:
-        logger.error("worker-event consumer exited unexpectedly", exc_info=task.exception())
+        logger.error("background task exited unexpectedly", exc_info=task.exception())
 
 
 def create_app(
@@ -143,10 +145,34 @@ def create_app(
                 transcripts=_transcript_service,
             )
             worker_event_task = asyncio.create_task(consumer.run())
-            worker_event_task.add_done_callback(_log_consumer_exit)
+            worker_event_task.add_done_callback(_log_background_exit)
+
+        # Recording verifier: reconciles PENDING egresses → AVAILABLE (sha256) /
+        # FAILED / DISCARDED. Only runs when recording is configured AND LiveKit
+        # is available (it queries egress status).
+        recording_storage: RecordingStorage | None = None
+        verifier_task: asyncio.Task[None] | None = None
+        if settings.recording_bucket is not None:
+            recording_storage = GCSRecordingStorage()
+        app.state.recording_storage = recording_storage
+        if recording_storage is not None and app.state.livekit is not None:
+            verifier = RecordingVerifier(
+                sessionmaker,
+                app.state.livekit,
+                recording_storage,
+                app.state.audit,
+                interval_seconds=settings.recording_verify_interval_seconds,
+                retention_days_default=settings.recording_retention_days_default,
+            )
+            verifier_task = asyncio.create_task(verifier.run())
+            verifier_task.add_done_callback(_log_background_exit)
 
         configure_observability(settings)
         yield
+        if verifier_task is not None:
+            verifier_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await verifier_task
         if worker_event_task is not None:
             worker_event_task.cancel()
             with suppress(asyncio.CancelledError):
