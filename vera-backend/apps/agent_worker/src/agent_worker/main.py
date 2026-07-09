@@ -29,6 +29,7 @@ from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import ReorderingEmitter, attach_transcript_publisher
+from vera_core.call_stream import CallStreamService, RedisCallStreamStore
 from vera_core.config.settings import get_settings
 from vera_core.events import (
     CallAnsweredEvent,
@@ -269,6 +270,10 @@ async def entrypoint(ctx: JobContext) -> None:
         bus = WorkerEventBus(events_redis, maxlen=settings.worker_events_stream_maxlen)
         lifecycle = CallLifecycleEmitter(bus, room_name)
 
+    # Declared here (not inside try) so the except below can always safely reference it,
+    # even if setup fails before the publish_events block runs.
+    call_stream_redis: Redis | None = None
+
     try:
         # Attach correlation attributes to the active OTel span so every pipeline
         # span is grouped under langfuse.session.id = room_name in Langfuse. For a
@@ -330,7 +335,25 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             transcript_emitter = attach_transcript_publisher(session, transcript_service, room_name)
 
-        async def _on_shutdown() -> None:
+        # Real-call envelope stream (dispatcher opt-in via publish_events): transcript
+        # turns + call_status frames for the /calls/{id}/events SSE. Reuses the
+        # transcript TTL settings — same lifecycle, different stream.
+        call_stream: CallStreamService | None = None
+        call_stream_emitter: ReorderingEmitter | None = None
+        if meta.get("publish_events"):
+            call_stream_redis = create_redis(settings.redis_url)
+            call_stream = CallStreamService(
+                RedisCallStreamStore(
+                    call_stream_redis,
+                    ttl_seconds=settings.transcript_stream_ttl_seconds,
+                    end_grace_seconds=settings.transcript_end_grace_seconds,
+                )
+            )
+            call_stream_emitter = attach_transcript_publisher(session, call_stream, room_name)
+            if speaker is not None:  # the callee already answered during wait_for_speaker
+                await call_stream.publish_status(room_name, "active", ts=int(time.time() * 1000))
+
+        async def _flush_transcript_stream() -> None:
             # Order is load-bearing: flush held turns BEFORE end(). end() appends the sentinel
             # that stops readers, so a turn flushed after it would be stranded behind the sentinel.
             if transcript_emitter is not None:
@@ -348,6 +371,32 @@ async def entrypoint(ctx: JobContext) -> None:
                     await transcript_redis.aclose()
                 except Exception:
                     logger.exception("failed to close transcript redis for %s", room_name)
+
+        async def _flush_call_stream() -> None:
+            # Same flush-before-end ordering as the transcript stream, above.
+            if call_stream_emitter is not None:
+                try:
+                    await call_stream_emitter.aclose()
+                except Exception:
+                    logger.exception("failed to flush call stream for %s", room_name)
+            if call_stream is not None:
+                try:
+                    await call_stream.publish_status(room_name, "ended", ts=int(time.time() * 1000))
+                    await call_stream.end(room_name)
+                except Exception:
+                    logger.exception("failed to end call stream for %s", room_name)
+            if call_stream_redis is not None:
+                try:
+                    await call_stream_redis.aclose()
+                except Exception:
+                    logger.exception("failed to close call stream redis for %s", room_name)
+
+        async def _on_shutdown() -> None:
+            # The transcript and call-event streams are independent Redis keys with no
+            # ordering dependency between each other (each stream's own flush-before-end
+            # ordering is preserved internally), so flush both concurrently rather than
+            # paying for them back-to-back on the call-teardown critical path.
+            await asyncio.gather(_flush_transcript_stream(), _flush_call_stream())
             await boundary.close_session(session_id)
 
             # Last: signal call end (the consumer completes the form and refills the
@@ -365,12 +414,15 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx.add_shutdown_callback(_on_shutdown)
     except BaseException:
         # Setup failed before the shutdown callback took ownership of the events
-        # client — close it here so no connection outlives the job. (Once
-        # _on_shutdown is registered, it owns the close; session.start failures
-        # still run the registered shutdown callbacks.)
+        # (and call-stream) clients — close them here so no connection outlives the
+        # job. (Once _on_shutdown is registered, it owns the close; session.start
+        # failures still run the registered shutdown callbacks.)
         if events_redis is not None:
             with contextlib.suppress(Exception):
                 await events_redis.aclose()
+        if call_stream_redis is not None:
+            with contextlib.suppress(Exception):
+                await call_stream_redis.aclose()
         raise
     # record=False disables livekit-agents session recording. Left unset it defers to the
     # server's enable_recording flag, which uploads a session report — including call AUDIO

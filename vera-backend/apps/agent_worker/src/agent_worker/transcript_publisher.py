@@ -40,11 +40,21 @@ monotonically non-decreasing so the published order and the `ts` field never dis
 import asyncio
 import logging
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
-from vera_core.transcript import ROLE_AGENT, ROLE_USER, TranscriptService
+from vera_core.transcript import ROLE_AGENT, ROLE_USER
 
 logger = logging.getLogger("agent_worker")
+
+
+class TurnPublisher(Protocol):
+    """Anything that can receive ordered finalized turns (TranscriptService for the
+    voice-lab stream; CallStreamService for the real-call envelope stream)."""
+
+    async def publish_turn(
+        self, room_name: str, role: Literal["user", "agent"], text: str, *, ts: int
+    ) -> None: ...
+
 
 # Safety net: if a held caller turn is never released (the interrupted agent turn never
 # commits), flush it after this long so the live transcript never stalls.
@@ -72,7 +82,7 @@ class ReorderingEmitter:
     """
 
     def __init__(
-        self, service: TranscriptService, room_name: str, *, hold_timeout: float = _HOLD_TIMEOUT_S
+        self, service: TurnPublisher, room_name: str, *, hold_timeout: float = _HOLD_TIMEOUT_S
     ) -> None:
         self._service = service
         self._room = room_name
@@ -193,7 +203,7 @@ class ReorderingEmitter:
 
 
 def attach_transcript_publisher(
-    session: Any, service: TranscriptService, room_name: str
+    session: Any, service: TurnPublisher, room_name: str
 ) -> ReorderingEmitter:
     """Register session handlers that publish finalized user/agent turns in chronological
     order via `service`. Returns the emitter; `await emitter.aclose()` on shutdown (before
