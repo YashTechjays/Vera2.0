@@ -88,3 +88,16 @@ async def test_get_egress_status_maps_complete() -> None:
 async def test_get_egress_status_unknown_id_returns_none() -> None:
     gw = _gateway_with(_FakeEgress(list_items=[]))
     assert await gw.get_egress_status("EG_GONE") is None
+
+
+async def test_get_egress_status_maps_failed() -> None:
+    item = SimpleNamespace(
+        status=api.EgressStatus.EGRESS_FAILED,
+        file_results=[],
+    )
+    gw = _gateway_with(_FakeEgress(list_items=[item]))
+    state = await gw.get_egress_status("EG_F")
+    assert state is not None
+    assert state.failed and not state.complete
+    assert state.duration_ms is None
+    assert state.size_bytes is None
