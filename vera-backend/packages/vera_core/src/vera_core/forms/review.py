@@ -208,12 +208,13 @@ def retryable_required_paths(
     These are the fields a retry call should attempt to fill."""
     # applicability needs filled-ness only
     values = {p: "x" for p, s in status_by_path.items() if s.filled}
-    out: list[str] = []
-    for path in _required_askable_paths(schema_json, values):
-        st = status_by_path.get(path) or FieldStatus(False, None, None, None)
-        if not is_field_satisfied(st, floor=floor):
-            out.append(path)
-    return out
+    return [
+        path
+        for path in _required_askable_paths(schema_json, values)
+        if not is_field_satisfied(
+            status_by_path.get(path) or FieldStatus(False, None, None, None), floor=floor
+        )
+    ]
 
 
 def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[str]:
