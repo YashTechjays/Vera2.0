@@ -145,6 +145,16 @@ class Settings(BaseSettings):
     recording_signed_url_ttl_seconds: int = 600  # VERA_RECORDING_SIGNED_URL_TTL_SECONDS
     recording_verify_interval_seconds: int = 30  # VERA_RECORDING_VERIFY_INTERVAL_SECONDS
     retention_sweep_interval_seconds: int = 3600  # VERA_RETENTION_SWEEP_INTERVAL_SECONDS
+    # An orphan egress (no Recording row) is reaped only once it is older than this,
+    # so a just-started recording whose row is still committing is never killed.
+    recording_orphan_grace_seconds: int = 300  # VERA_RECORDING_ORPHAN_GRACE_SECONDS
+    # --- transcript reconciliation ------------------------------------------
+    # A crashed worker never emits call.ended, so the finalizer never runs and the
+    # turns expire from Redis. The reconciler sweeps stranded streams: it drains an
+    # un-finalized stream once it has been idle past the grace window (crash-orphaned),
+    # and clears streams whose call was already persisted.
+    transcript_reconcile_interval_seconds: int = 300  # VERA_TRANSCRIPT_RECONCILE_INTERVAL_SECONDS
+    transcript_reconcile_idle_seconds: int = 900  # VERA_TRANSCRIPT_RECONCILE_IDLE_SECONDS
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require

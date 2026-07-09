@@ -62,6 +62,16 @@ class EgressState(NamedTuple):
     size_bytes: int | None
 
 
+class ActiveEgress(NamedTuple):
+    """A currently-running egress, used by the verifier to detect orphans — an
+    egress still uploading audio for which no Recording row exists (its row was
+    rolled back with the caller transaction)."""
+
+    egress_id: str
+    room_name: str
+    started_at_ms: int | None
+
+
 class LiveKitGateway:
     def __init__(
         self,
@@ -246,6 +256,35 @@ class LiveKitGateway:
             ),
             size_bytes=(file_result.size or None) if file_result else None,
         )
+
+    async def list_active_egresses(self) -> list[ActiveEgress]:
+        """Every egress LiveKit is currently running (active=True filter). The
+        verifier cross-references these against Recording rows to find orphans —
+        egresses still uploading with no row to give them a retention lifecycle.
+        """
+        async with self._client() as lk:
+            resp = await lk.egress.list_egress(api.ListEgressRequest(active=True))
+        return [
+            ActiveEgress(
+                egress_id=str(item.egress_id),
+                room_name=item.room_name,
+                # proto started_at is unix nanoseconds, 0 when not yet reported.
+                started_at_ms=(item.started_at // 1_000_000) if item.started_at else None,
+            )
+            for item in resp.items
+        ]
+
+    async def stop_egress(self, egress_id: str) -> None:
+        """Stop a running egress (used to reap orphans). Idempotent: an egress
+        that already ended / no longer exists is a no-op, mirroring delete_room.
+        """
+        async with self._client() as lk:
+            try:
+                await lk.egress.stop_egress(api.StopEgressRequest(egress_id=egress_id))
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return  # already stopped / gone — nothing to reap
+                raise
 
     def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
         # Short TTL: the token is used immediately; the SDK default (~6h) would

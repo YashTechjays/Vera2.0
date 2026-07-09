@@ -9,6 +9,7 @@ only); every row mutation runs inside tenant_session(...) with full RLS.
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -25,13 +26,15 @@ from vera_core.db import tenant_session
 from vera_core.models import Call, Recording, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallStatus, RecordingStatus
+from vera_core.observability.correlation import parse_room_name
+from vera_core.services.recordings import RecordingConfig, recording_object_path
 
 logger = logging.getLogger("control_plane.recording_jobs")
 
 _DISCARD_CALL_STATUSES = frozenset({CallStatus.NO_ANSWER, CallStatus.BUSY})
 
 
-async def _run_forever(
+async def run_forever(
     label: str, tick: Callable[[], Awaitable[None]], interval_seconds: int
 ) -> None:
     """Never-die loop discipline shared by both jobs (WorkerEventConsumer style):
@@ -82,6 +85,8 @@ class RecordingVerifier:
         *,
         interval_seconds: int,
         retention_days_default: int,
+        recording_config: RecordingConfig | None = None,
+        orphan_grace_seconds: int = 300,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._livekit = livekit
@@ -89,9 +94,13 @@ class RecordingVerifier:
         self._audit = audit
         self._interval = interval_seconds
         self._retention_days_default = retention_days_default
+        # Reaping orphaned egresses needs the bucket/prefix to locate their partial
+        # object; None (recording disabled) turns orphan reconciliation off.
+        self._recording_config = recording_config
+        self._orphan_grace_ms = orphan_grace_seconds * 1000
 
     async def run(self) -> None:
-        await _run_forever("recording verifier", self.tick, self._interval)
+        await run_forever("recording verifier", self.tick, self._interval)
 
     async def tick(self) -> None:
         rows = await self._pending_rows()
@@ -102,6 +111,64 @@ class RecordingVerifier:
                 # One bad row must not starve the rest; state-guarded updates make
                 # a retry next tick safe.
                 logger.exception("verify failed for recording %s", row.recording_id)
+        # Reap egresses still uploading with no Recording row (caller txn rolled back
+        # after egress start): nothing else would ever give them a retention lifecycle.
+        try:
+            await self._reconcile_orphans(rows)
+        except Exception:
+            logger.exception("orphan-egress reconciliation failed")
+
+    async def _reconcile_orphans(self, known_rows: list[PendingRow]) -> None:
+        config = self._recording_config
+        if config is None:
+            return
+        active = await self._livekit.list_active_egresses()
+        if not active:
+            return
+        # A legitimate active egress always has a PENDING row (its row commits ~at
+        # request end and stays PENDING until this verifier completes it). Anything
+        # active that ISN'T in the pending set — and is old enough to have committed —
+        # is an orphan.
+        tracked = {row.egress_id for row in known_rows if row.egress_id is not None}
+        now_ms = time.time() * 1000  # operational age check, not a persisted timestamp
+        for egress in active:
+            if egress.egress_id in tracked:
+                continue
+            ref = parse_room_name(egress.room_name)
+            if ref is None:
+                continue  # a foreign (non-vera) egress — not ours to touch
+            if (
+                egress.started_at_ms is not None
+                and now_ms - egress.started_at_ms < self._orphan_grace_ms
+            ):
+                continue  # too new: its Recording row may still be committing
+            try:
+                await self._reap_orphan(config, ref.tenant_id, ref.call_id, egress.egress_id)
+            except Exception:
+                logger.exception("failed to reap orphan egress %s", egress.egress_id)
+
+    async def _reap_orphan(
+        self, config: RecordingConfig, tenant_id: UUID, call_id: UUID, egress_id: str
+    ) -> None:
+        await self._livekit.stop_egress(egress_id)
+        object_path = recording_object_path(config, tenant_id, call_id)
+        await self._storage.delete(config.bucket, object_path)
+        await self._audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.SYSTEM,
+                actor_label="recording-verifier",
+                event_type=AuditEvent.RECORDING_DISCARDED.value,
+                resource_type="call",
+                resource_id=str(call_id),
+                detail={"reason": "orphaned_egress", "egress_id": egress_id},
+            )
+        )
+        logger.warning(
+            "reaped orphan egress %s for call %s (no recording row — stopped + object deleted)",
+            egress_id,
+            call_id,
+        )
 
     async def _pending_rows(self) -> list[PendingRow]:
         async with self._sessionmaker() as session:
@@ -239,7 +306,7 @@ class RetentionSweeper:
         self._interval = interval_seconds
 
     async def run(self) -> None:
-        await _run_forever("retention sweep", self.tick, self._interval)
+        await run_forever("retention sweep", self.tick, self._interval)
 
     async def tick(self) -> None:
         async with self._sessionmaker() as session:

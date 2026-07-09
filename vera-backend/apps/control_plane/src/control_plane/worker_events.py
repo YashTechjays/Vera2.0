@@ -67,6 +67,33 @@ def build_transcript_rows(
     ]
 
 
+async def finalize_transcript(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    transcripts: TranscriptService,
+    tenant_id: UUID,
+    call_id: UUID,
+    room_name: str,
+) -> int:
+    """Drain a room's live transcript stream into the transcript table, returning
+    the number of turns persisted (0 = the stream was empty / already expired).
+
+    Idempotent under at-least-once delivery AND across the two finalize triggers
+    (the call.ended handler and the crash-recovery reconciler): UNIQUE(call_id, seq)
+    + ON CONFLICT DO NOTHING makes a redelivered or racing finalize a no-op.
+    """
+    events = await transcripts.drain(room_name)
+    if not events:
+        return 0
+    rows = build_transcript_rows(tenant_id, call_id, events)
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        await session.execute(
+            pg_insert(Transcript)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["call_id", "seq"])
+        )
+    return len(rows)
+
+
 type EventHandler = Callable[[WorkerEvent], Awaitable[None]]
 
 # The redis-py stubs type XREADGROUP/XAUTOCLAIM responses as broad unions (they
@@ -227,20 +254,13 @@ class WorkerEventConsumer:
         if ref is None:
             logger.warning("call.ended for non-vera room %s; ignoring", event.room_name)
             return
-        events = await self._transcripts.drain(event.room_name)
-        if not events:
+        count = await finalize_transcript(
+            self._sessionmaker, self._transcripts, ref.tenant_id, ref.call_id, event.room_name
+        )
+        if count == 0:
             # Expired stream (grace TTL elapsed before we ran) or a call with no
             # finalized turns. Nothing to persist; rows from an earlier delivery,
             # if any, are already in place.
             logger.warning("call.ended: no transcript entries for %s", event.room_name)
-            return
-        rows = build_transcript_rows(ref.tenant_id, ref.call_id, events)
-        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
-            # Idempotent under at-least-once delivery: UNIQUE(call_id, seq) +
-            # ON CONFLICT DO NOTHING makes a redelivered event a no-op.
-            await session.execute(
-                pg_insert(Transcript)
-                .values(rows)
-                .on_conflict_do_nothing(index_elements=["call_id", "seq"])
-            )
-        logger.info("persisted %d transcript rows for call %s", len(rows), ref.call_id)
+        else:
+            logger.info("persisted %d transcript rows for call %s", count, ref.call_id)

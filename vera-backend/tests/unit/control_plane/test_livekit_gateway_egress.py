@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from livekit import api
+from livekit.api.twirp_client import TwirpError
 
 from control_plane.livekit_gateway import EgressStartError, LiveKitGateway
 
@@ -21,11 +22,15 @@ class _FakeEgress:
         start_result: Any = None,
         list_items: list[Any] | None = None,
         raise_on_start: Exception | None = None,
+        raise_on_stop: Exception | None = None,
     ) -> None:
         self.start_result = start_result
         self.list_items = list_items or []
         self.raise_on_start = raise_on_start
+        self.raise_on_stop = raise_on_stop
         self.start_requests: list[Any] = []
+        self.list_requests: list[Any] = []
+        self.stopped: list[str] = []
 
     async def start_room_composite_egress(self, request: Any) -> Any:
         if self.raise_on_start:
@@ -34,7 +39,14 @@ class _FakeEgress:
         return self.start_result
 
     async def list_egress(self, request: Any) -> Any:
+        self.list_requests.append(request)
         return SimpleNamespace(items=self.list_items)
+
+    async def stop_egress(self, request: Any) -> Any:
+        if self.raise_on_stop:
+            raise self.raise_on_stop
+        self.stopped.append(request.egress_id)
+        return SimpleNamespace()
 
 
 def _gateway_with(egress: _FakeEgress) -> LiveKitGateway:
@@ -101,3 +113,33 @@ async def test_get_egress_status_maps_failed() -> None:
     assert state.failed and not state.complete
     assert state.duration_ms is None
     assert state.size_bytes is None
+
+
+async def test_list_active_egresses_filters_active_and_maps_room_and_start() -> None:
+    items = [
+        SimpleNamespace(egress_id="EG_1", room_name="call--t--c", started_at=5_000_000_000),
+        SimpleNamespace(egress_id="EG_2", room_name="call--t--d", started_at=0),
+    ]
+    egress = _FakeEgress(list_items=items)
+    gw = _gateway_with(egress)
+    active = await gw.list_active_egresses()
+    # Only active egresses are requested (server-side filter).
+    assert egress.list_requests[0].active is True
+    assert [(e.egress_id, e.room_name, e.started_at_ms) for e in active] == [
+        ("EG_1", "call--t--c", 5_000),  # ns → ms
+        ("EG_2", "call--t--d", None),  # 0 → not-yet-reported
+    ]
+
+
+async def test_stop_egress_sends_request() -> None:
+    egress = _FakeEgress()
+    gw = _gateway_with(egress)
+    await gw.stop_egress("EG_9")
+    assert egress.stopped == ["EG_9"]
+
+
+async def test_stop_egress_swallows_not_found() -> None:
+    egress = _FakeEgress(raise_on_stop=TwirpError(code="not_found", msg="gone", status=404))
+    gw = _gateway_with(egress)
+    # Idempotent: stopping an already-gone egress is a no-op, not a raise.
+    await gw.stop_egress("EG_GONE")

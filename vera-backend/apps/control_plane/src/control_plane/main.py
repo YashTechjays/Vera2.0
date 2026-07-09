@@ -22,6 +22,7 @@ from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
 from control_plane.recording_jobs import RecordingVerifier, RetentionSweeper
 from control_plane.recording_storage import GCSRecordingStorage, RecordingStorage
 from control_plane.request_context import RequestIdMiddleware
+from control_plane.transcript_jobs import TranscriptReconciler
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import (
     AuditSink,
@@ -34,6 +35,7 @@ from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.observability.otel import configure_observability
 from vera_core.redis import create_redis
+from vera_core.services.recordings import recording_config_from
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("control_plane.main")
@@ -47,6 +49,16 @@ def _log_background_exit(task: asyncio.Task[None]) -> None:
     """
     if not task.cancelled() and task.exception() is not None:
         logger.error("background task exited unexpectedly", exc_info=task.exception())
+
+
+async def _cancel_task(task: asyncio.Task[None] | None) -> None:
+    """Cancel a background task on shutdown and await its exit, swallowing the
+    expected CancelledError. No-op when the task was never started."""
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 def create_app(
@@ -133,6 +145,11 @@ def create_app(
         # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
         worker_events_redis: Redis | None = None
         worker_event_task: asyncio.Task[None] | None = None
+        # Recovers transcripts a hard worker crash would strand: call.ended (the only
+        # finalize trigger) is emitted from graceful shutdown only. Own Redis client —
+        # its SCAN/XREVRANGE must not share the tailing transcript connection.
+        transcript_reconcile_redis: Redis | None = None
+        transcript_reconcile_task: asyncio.Task[None] | None = None
         if settings.livekit_url is not None and app.state.livekit is not None:
             worker_events_redis = create_redis(settings.redis_url)
             consumer = WorkerEventConsumer(
@@ -146,6 +163,17 @@ def create_app(
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_background_exit)
+
+            transcript_reconcile_redis = create_redis(settings.redis_url)
+            reconciler = TranscriptReconciler(
+                transcript_reconcile_redis,
+                sessionmaker,
+                _transcript_service,
+                interval_seconds=settings.transcript_reconcile_interval_seconds,
+                idle_seconds=settings.transcript_reconcile_idle_seconds,
+            )
+            transcript_reconcile_task = asyncio.create_task(reconciler.run())
+            transcript_reconcile_task.add_done_callback(_log_background_exit)
 
         # Recording verifier: reconciles PENDING egresses → AVAILABLE (sha256) /
         # FAILED / DISCARDED. Only runs when recording is configured AND LiveKit
@@ -164,6 +192,8 @@ def create_app(
                 app.state.audit,
                 interval_seconds=settings.recording_verify_interval_seconds,
                 retention_days_default=settings.recording_retention_days_default,
+                recording_config=recording_config_from(settings),
+                orphan_grace_seconds=settings.recording_orphan_grace_seconds,
             )
             verifier_task = asyncio.create_task(verifier.run())
             verifier_task.add_done_callback(_log_background_exit)
@@ -181,18 +211,13 @@ def create_app(
 
         configure_observability(settings)
         yield
-        if sweeper_task is not None:
-            sweeper_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await sweeper_task
-        if verifier_task is not None:
-            verifier_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await verifier_task
-        if worker_event_task is not None:
-            worker_event_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_event_task
+        # Stop background loops in reverse start order before closing their clients.
+        await _cancel_task(sweeper_task)
+        await _cancel_task(verifier_task)
+        await _cancel_task(transcript_reconcile_task)
+        await _cancel_task(worker_event_task)
+        if transcript_reconcile_redis is not None:
+            await transcript_reconcile_redis.aclose()
         if worker_events_redis is not None:
             await worker_events_redis.aclose()
         if redis is not None:
