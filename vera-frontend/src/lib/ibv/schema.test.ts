@@ -40,10 +40,11 @@ describe("parseSchema", () => {
 })
 
 describe("sectionEntriesOf", () => {
-  it("returns all 23 sections in document order, including the formerly hidden ones", () => {
+  it("returns all 24 sections in document order, including the formerly hidden ones", () => {
     const keys = sectionEntriesOf(schema).map(([k]) => k)
-    expect(keys).toHaveLength(23)
+    expect(keys).toHaveLength(24)
     expect(keys[0]).toBe("patient_information")
+    expect(keys).toContain("patient_verification")
     expect(keys).toContain("insurance_representative")
     expect(keys).toContain("insurance_reference_information")
   })
