@@ -61,20 +61,27 @@ export function PlaceholderPicker(props: PlaceholderPickerProps): JSX.Element {
     [props.groups.context, query],
   )
 
+  function handleOpenChange(nextOpen: boolean): void {
+    setOpen(nextOpen)
+    if (!nextOpen) setQuery("")
+  }
+
   function pick(token: string): void {
     props.onInsert(token)
-    setOpen(false)
-    setQuery("")
+    handleOpenChange(false)
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button type="button" variant="outline" size="sm">
           Insert placeholder
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-h-[70vh] overflow-y-auto sm:max-w-md">
+      <DialogContent
+        className="max-h-[70vh] overflow-y-auto sm:max-w-md"
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         <DialogHeader>
           <DialogTitle>Insert placeholder</DialogTitle>
           <DialogDescription>
@@ -86,6 +93,7 @@ export function PlaceholderPicker(props: PlaceholderPickerProps): JSX.Element {
         <Input
           autoFocus
           placeholder="Search…"
+          aria-label="Search placeholders"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />

@@ -22,9 +22,17 @@ export function PromptTextarea(props: PromptTextareaProps): JSX.Element {
 
   function handleInsert(token: string): void {
     const caret = ref.current === null ? null : ref.current.selectionStart
-    const { next } = insertToken(props.value, token, caret)
+    const { next, caret: nextCaret } = insertToken(props.value, token, caret)
     props.onChange(next)
-    ref.current?.focus()
+    // Controlled textarea: wait for React to commit the new value before
+    // restoring focus/selection, otherwise the native caret snaps to the end.
+    requestAnimationFrame(() => {
+      const node = ref.current
+      if (node !== null) {
+        node.focus()
+        node.setSelectionRange(nextCaret, nextCaret)
+      }
+    })
   }
 
   return (
