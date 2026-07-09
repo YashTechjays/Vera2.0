@@ -29,7 +29,13 @@ from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import ReorderingEmitter, attach_transcript_publisher
 from vera_core.config.settings import get_settings
-from vera_core.events import CallFailedEvent, CallFailureReason, WorkerEventBus
+from vera_core.events import (
+    CallAnsweredEvent,
+    CallEndedEvent,
+    CallFailedEvent,
+    CallFailureReason,
+    WorkerEventBus,
+)
 from vera_core.observability.correlation import (
     call_trace_attributes,
     is_listen_only_identity,
@@ -198,6 +204,27 @@ async def _emit_call_failed(
     await bus.emit(CallFailedEvent(room_name=room_name, reason=reason, ts=now_ms))
 
 
+class CallLifecycleEmitter:
+    """Best-effort lifecycle signals to the control plane. A bus failure must never
+    break a live call — log and continue (mirrors the transcript publisher's posture)."""
+
+    def __init__(self, bus: WorkerEventBus, room_name: str) -> None:
+        self._bus = bus
+        self._room_name = room_name
+
+    async def answered(self, *, now_ms: int) -> None:
+        await self._emit(CallAnsweredEvent(room_name=self._room_name, ts=now_ms))
+
+    async def ended(self, *, now_ms: int) -> None:
+        await self._emit(CallEndedEvent(room_name=self._room_name, ts=now_ms))
+
+    async def _emit(self, event: CallAnsweredEvent | CallEndedEvent) -> None:
+        try:
+            await self._bus.emit(event)
+        except Exception:
+            logger.exception("failed to emit %s for %s", event.type, self._room_name)
+
+
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
     """Decide the correlation session id for a connected room, or None to reject it.
 
@@ -230,6 +257,17 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.warning("foreign room name %s — not a vera call room", room_name)
         return
 
+    # One worker-event bus per job for canonical rooms (real calls AND voice-lab
+    # rooms — the consumer no-ops when no Call row exists). Foreign/console rooms
+    # get none.
+    events_redis: Redis | None = None
+    bus: WorkerEventBus | None = None
+    lifecycle: CallLifecycleEmitter | None = None
+    if parse_room_name(room_name) is not None:
+        events_redis = create_redis(settings.redis_url)
+        bus = WorkerEventBus(events_redis, maxlen=settings.worker_events_stream_maxlen)
+        lifecycle = CallLifecycleEmitter(bus, room_name)
+
     # Attach correlation attributes to the active OTel span so every pipeline
     # span is grouped under langfuse.session.id = room_name in Langfuse. For a
     # console/connect mic test (foreign room) this sets only `vera.room`.
@@ -246,16 +284,17 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("wait_for_speaker: outcome for room %s = %s", room_name, type(outcome).__name__)
         if isinstance(outcome, CallFailed):
             logger.warning("outbound call failed for room %s: %s", room_name, outcome.reason.value)
-            failure_redis = create_redis(settings.redis_url)
-            try:
-                bus = WorkerEventBus(failure_redis, maxlen=settings.worker_events_stream_maxlen)
+            if events_redis is not None and bus is not None:
                 await _emit_call_failed(
                     bus, room_name, outcome.reason, now_ms=int(time.time() * 1000)
                 )
-            finally:
-                await failure_redis.aclose()
+                await events_redis.aclose()
             return
         speaker = outcome.participant
+        # The SIP callee answering is the "call is live" signal; a browser caller
+        # (voice-lab browser mode) is not an answered phone call.
+        if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            await lifecycle.answered(now_ms=int(time.time() * 1000))
 
     boundary = build_phi_boundary(settings)
     await boundary.open_session(session_id)
@@ -302,6 +341,18 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:
                 logger.exception("failed to close transcript redis for %s", room_name)
         await boundary.close_session(session_id)
+
+        # Last: signal call end (the consumer completes the form and refills the
+        # slot), then release the events client. A hard worker crash skips this —
+        # the control plane's pipeline sweeper reconciles that case (room gone +
+        # call still non-terminal → failed).
+        if lifecycle is not None:
+            await lifecycle.ended(now_ms=int(time.time() * 1000))
+        if events_redis is not None:
+            try:
+                await events_redis.aclose()
+            except Exception:
+                logger.exception("failed to close events redis for %s", room_name)
 
     ctx.add_shutdown_callback(_on_shutdown)
     # record=False disables livekit-agents session recording. Left unset it defers to the
