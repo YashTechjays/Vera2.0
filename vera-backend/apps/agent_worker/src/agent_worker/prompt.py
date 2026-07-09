@@ -92,14 +92,27 @@ Cartesia Sonic 3.5 sounds natural from plain prose, so keep writing plain senten
 Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature and will be read aloud). Never speak a tag name out loud. Never wrap a tool call in a tag."""
 
 
-def build_instructions(tweak: PersonaTweak | None = None) -> str:
+def build_instructions(tweak: PersonaTweak | None = None, *, retry_fields: list[str] | None = None) -> str:
     """Chat-only instructions: base persona (+ optional tenant extra instructions)
-    followed by the Cartesia readback guide (we use sonic-3.5)."""
-    parts = [SYSTEM_PROMPT]
+    followed by the Cartesia readback guide (we use sonic-3.5).
+
+    When retry_fields is a non-empty list, prepends a retry-focus block before the base.
+    """
+    base_parts = [SYSTEM_PROMPT]
     if tweak is not None and tweak.extra_instructions:
-        parts.append(tweak.extra_instructions)
-    parts.append(CARTESIA_MARKUP_GUIDE)
-    return "\n\n".join(parts)
+        base_parts.append(tweak.extra_instructions)
+    base_parts.append(CARTESIA_MARKUP_GUIDE)
+    base = "\n\n".join(base_parts)
+
+    if retry_fields:
+        focus = (
+            "RETRY CALL. A previous call already collected most of this verification. "
+            "You must collect ONLY the following still-missing data points, confirm them, "
+            "then politely close and end the call: " + ", ".join(retry_fields) + ". "
+            "Do not re-verify anything else.\n\n"
+        )
+        return focus + base
+    return base
 
 
 def resolve_greeting(tweak: PersonaTweak | None = None) -> str:
