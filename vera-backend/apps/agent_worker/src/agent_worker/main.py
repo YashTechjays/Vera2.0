@@ -6,6 +6,7 @@ room name IS the session id and the Langfuse correlation key.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -268,93 +269,109 @@ async def entrypoint(ctx: JobContext) -> None:
         bus = WorkerEventBus(events_redis, maxlen=settings.worker_events_stream_maxlen)
         lifecycle = CallLifecycleEmitter(bus, room_name)
 
-    # Attach correlation attributes to the active OTel span so every pipeline
-    # span is grouped under langfuse.session.id = room_name in Langfuse. For a
-    # console/connect mic test (foreign room) this sets only `vera.room`.
-    trace.get_current_span().set_attributes(call_trace_attributes(room_name))
+    try:
+        # Attach correlation attributes to the active OTel span so every pipeline
+        # span is grouped under langfuse.session.id = room_name in Langfuse. For a
+        # console/connect mic test (foreign room) this sets only `vera.room`.
+        trace.get_current_span().set_attributes(call_trace_attributes(room_name))
 
-    # Dispatch metadata gates greeting timing. The /calls path passes none, so it
-    # keeps the immediate behavior; Voice Lab passes {"wait_for_speaker": true} so
-    # the agent holds until the human/phone participant can actually hear it.
-    speaker: rtc.RemoteParticipant | None = None
-    meta = json.loads(ctx.job.metadata or "{}")
-    if meta.get("wait_for_speaker"):
-        logger.info("wait_for_speaker: entering for room %s (meta=%s)", room_name, meta)
-        outcome = await wait_for_speaker(ctx)
-        logger.info("wait_for_speaker: outcome for room %s = %s", room_name, type(outcome).__name__)
-        if isinstance(outcome, CallFailed):
-            logger.warning("outbound call failed for room %s: %s", room_name, outcome.reason.value)
-            if events_redis is not None and bus is not None:
-                await _emit_call_failed(
-                    bus, room_name, outcome.reason, now_ms=int(time.time() * 1000)
-                )
-                await events_redis.aclose()
-            return
-        speaker = outcome.participant
-        # The SIP callee answering is the "call is live" signal; a browser caller
-        # (voice-lab browser mode) is not an answered phone call.
-        if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
-            await lifecycle.answered(now_ms=int(time.time() * 1000))
-
-    boundary = build_phi_boundary(settings)
-    await boundary.open_session(session_id)
-
-    # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
-    # plane). Fail-safe: bad/missing metadata falls back to the base persona.
-    tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
-    instructions = build_instructions(tweak)
-    greeting = resolve_greeting(tweak)
-
-    session = build_session(vad=ctx.proc.userdata.get("vad"))
-
-    # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
-    transcript_redis: Redis | None = None
-    transcript_service: TranscriptService | None = None
-    transcript_emitter: ReorderingEmitter | None = None
-    if meta.get("publish_transcript"):
-        transcript_redis = create_redis(settings.redis_url)
-        transcript_service = TranscriptService(
-            RedisTranscriptStore(
-                transcript_redis,
-                ttl_seconds=settings.transcript_stream_ttl_seconds,
-                end_grace_seconds=settings.transcript_end_grace_seconds,
+        # Dispatch metadata gates greeting timing. The /calls path passes none, so it
+        # keeps the immediate behavior; Voice Lab passes {"wait_for_speaker": true} so
+        # the agent holds until the human/phone participant can actually hear it.
+        speaker: rtc.RemoteParticipant | None = None
+        meta = json.loads(ctx.job.metadata or "{}")
+        if meta.get("wait_for_speaker"):
+            logger.info("wait_for_speaker: entering for room %s (meta=%s)", room_name, meta)
+            outcome = await wait_for_speaker(ctx)
+            logger.info(
+                "wait_for_speaker: outcome for room %s = %s", room_name, type(outcome).__name__
             )
-        )
-        transcript_emitter = attach_transcript_publisher(session, transcript_service, room_name)
+            if isinstance(outcome, CallFailed):
+                logger.warning(
+                    "outbound call failed for room %s: %s", room_name, outcome.reason.value
+                )
+                if events_redis is not None and bus is not None:
+                    try:
+                        await _emit_call_failed(
+                            bus, room_name, outcome.reason, now_ms=int(time.time() * 1000)
+                        )
+                    finally:
+                        await events_redis.aclose()
+                return
+            speaker = outcome.participant
+            # The SIP callee answering is the "call is live" signal; a browser caller
+            # (voice-lab browser mode) is not an answered phone call.
+            if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+                await lifecycle.answered(now_ms=int(time.time() * 1000))
 
-    async def _on_shutdown() -> None:
-        # Order is load-bearing: flush held turns BEFORE end(). end() appends the sentinel
-        # that stops readers, so a turn flushed after it would be stranded behind the sentinel.
-        if transcript_emitter is not None:
-            try:
-                await transcript_emitter.aclose()
-            except Exception:  # best-effort; never block shutdown
-                logger.exception("failed to flush transcript for %s", room_name)
-        if transcript_service is not None:
-            try:
-                await transcript_service.end(room_name)
-            except Exception:  # best-effort; never block shutdown
-                logger.exception("failed to mark transcript ended for %s", room_name)
-        if transcript_redis is not None:
-            try:
-                await transcript_redis.aclose()
-            except Exception:
-                logger.exception("failed to close transcript redis for %s", room_name)
-        await boundary.close_session(session_id)
+        boundary = build_phi_boundary(settings)
+        await boundary.open_session(session_id)
 
-        # Last: signal call end (the consumer completes the form and refills the
-        # slot), then release the events client. A hard worker crash skips this —
-        # the control plane's pipeline sweeper reconciles that case (room gone +
-        # call still non-terminal → failed).
-        if lifecycle is not None:
-            await lifecycle.ended(now_ms=int(time.time() * 1000))
+        # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
+        # plane). Fail-safe: bad/missing metadata falls back to the base persona.
+        tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
+        instructions = build_instructions(tweak)
+        greeting = resolve_greeting(tweak)
+
+        session = build_session(vad=ctx.proc.userdata.get("vad"))
+
+        # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
+        transcript_redis: Redis | None = None
+        transcript_service: TranscriptService | None = None
+        transcript_emitter: ReorderingEmitter | None = None
+        if meta.get("publish_transcript"):
+            transcript_redis = create_redis(settings.redis_url)
+            transcript_service = TranscriptService(
+                RedisTranscriptStore(
+                    transcript_redis,
+                    ttl_seconds=settings.transcript_stream_ttl_seconds,
+                    end_grace_seconds=settings.transcript_end_grace_seconds,
+                )
+            )
+            transcript_emitter = attach_transcript_publisher(session, transcript_service, room_name)
+
+        async def _on_shutdown() -> None:
+            # Order is load-bearing: flush held turns BEFORE end(). end() appends the sentinel
+            # that stops readers, so a turn flushed after it would be stranded behind the sentinel.
+            if transcript_emitter is not None:
+                try:
+                    await transcript_emitter.aclose()
+                except Exception:  # best-effort; never block shutdown
+                    logger.exception("failed to flush transcript for %s", room_name)
+            if transcript_service is not None:
+                try:
+                    await transcript_service.end(room_name)
+                except Exception:  # best-effort; never block shutdown
+                    logger.exception("failed to mark transcript ended for %s", room_name)
+            if transcript_redis is not None:
+                try:
+                    await transcript_redis.aclose()
+                except Exception:
+                    logger.exception("failed to close transcript redis for %s", room_name)
+            await boundary.close_session(session_id)
+
+            # Last: signal call end (the consumer completes the form and refills the
+            # slot), then release the events client. A hard worker crash skips this —
+            # the control plane's pipeline sweeper reconciles that case (room gone +
+            # call still non-terminal → failed).
+            if lifecycle is not None:
+                await lifecycle.ended(now_ms=int(time.time() * 1000))
+            if events_redis is not None:
+                try:
+                    await events_redis.aclose()
+                except Exception:
+                    logger.exception("failed to close events redis for %s", room_name)
+
+        ctx.add_shutdown_callback(_on_shutdown)
+    except BaseException:
+        # Setup failed before the shutdown callback took ownership of the events
+        # client — close it here so no connection outlives the job. (Once
+        # _on_shutdown is registered, it owns the close; session.start failures
+        # still run the registered shutdown callbacks.)
         if events_redis is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await events_redis.aclose()
-            except Exception:
-                logger.exception("failed to close events redis for %s", room_name)
-
-    ctx.add_shutdown_callback(_on_shutdown)
+        raise
     # record=False disables livekit-agents session recording. Left unset it defers to the
     # server's enable_recording flag, which uploads a session report — including call AUDIO
     # and the transcript (PHI) — to the LiveKit Cloud observability endpoint at call end. That
