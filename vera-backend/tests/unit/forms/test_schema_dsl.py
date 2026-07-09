@@ -250,3 +250,19 @@ class TestDocumentValidation:
         doc = self._context_confirm({"task_key": "ghost", "confirm_immediate": False})
         with pytest.raises(ValidationError, match="unknown task"):
             FormSchemaDoc.model_validate(doc)
+
+    def test_context_leaf_path_placeholder_accepted(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["bg"] = {
+            "type": "text",
+            "title": "Background",
+            "role": "context",
+        }
+        doc["tasks"][0]["intro"] = "About {{sections.basics.bg}}."
+        FormSchemaDoc.model_validate(doc)
+
+    def test_non_context_leaf_path_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["intro"] = "About {{sections.basics.plan_type}}."
+        with pytest.raises(ValidationError, match="unknown placeholder"):
+            FormSchemaDoc.model_validate(doc)

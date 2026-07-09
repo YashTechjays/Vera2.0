@@ -25,8 +25,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-# {{token}} placeholders in task-level text; token must be a system_fields key.
-PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
+# {{token}} placeholders in task-level text; token = a system_fields key or the
+# root-anchored path of a context-role leaf (2026-07-08 spec §4).
+PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
 PATH_PREFIX = "sections."
 MAX_PATH_LENGTH = 255
 MAX_STT_KEY_TERMS = 100  # Deepgram keyterm-prompting limit
@@ -485,6 +486,7 @@ class FormSchemaDoc(_Model):
 
         # tasks: every collect section in exactly one task
         assigned: list[str] = []
+        context_paths = {p for p, leaf in leaves.items() if leaf.role == "context"}
         for task in self.tasks:
             check_key(f"task {task.task_key}", task.task_key)
             if task.applicable_when is not None:
@@ -505,10 +507,10 @@ class FormSchemaDoc(_Model):
             for attr in ("intro", "outro", "prompt"):
                 text: str | None = getattr(task, attr)
                 for token in PLACEHOLDER_RE.findall(text or ""):
-                    if token not in (self.system_fields or {}):
+                    if token not in (self.system_fields or {}) and token not in context_paths:
                         errors.append(
                             f"task {task.task_key}.{attr}: unknown placeholder "
-                            f"{{{{{token}}}}} (not a system_fields key)"
+                            f"{{{{{token}}}}} (not a system_fields key or context-leaf path)"
                         )
         if len(set(task_keys)) != len(task_keys):
             errors.append("duplicate task_key")
