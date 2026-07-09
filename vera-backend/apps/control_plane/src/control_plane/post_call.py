@@ -106,7 +106,8 @@ class PostCallConsumer:
             start_id="0-0",
             count=16,
         )
-        _, entries, _ = cast("tuple[str, _StreamEntries, list[str]]", result)
+        # _cursor ignored: any stale entries beyond `count` drain on the next run() pass.
+        _cursor, entries, _deleted = cast("tuple[str, _StreamEntries, list[str]]", result)
         await self._dispatch(entries)
 
     async def _dispatch(self, entries: _StreamEntries) -> None:
