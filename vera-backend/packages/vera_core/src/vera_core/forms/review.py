@@ -14,13 +14,13 @@ derived purely from `field_answer` history — `field_evaluation` plays no part,
 values — callers never log them.
 """
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from vera_core.forms.conditions import is_applicable, is_required, leaf_gates
-from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.conditions import is_applicable, is_required, is_v2, leaf_gates
+from vera_core.forms.dsl import COLLECTED_ROLES, FormSchemaDoc
 from vera_core.models.enums import AnswerSource, DisputeActionType
 
 
@@ -160,3 +160,66 @@ def build_field_views(
             }
         )
     return views
+
+
+@dataclass(frozen=True)
+class FieldStatus:
+    """Immutable snapshot of a field's satisfaction state: filled, source, and AI confidence."""
+
+    filled: bool
+    source: str | None
+    ai_supported: bool | None
+    ai_confidence: int | None
+
+
+def is_field_satisfied(status: FieldStatus, *, floor: int) -> bool:
+    """True when a field's status meets retry-gate requirements: human/intake-sourced
+    (trusted), or AI-sourced with supported language and confidence >= floor."""
+    if not status.filled:
+        return False
+    if status.source in (AnswerSource.INTAKE.value, AnswerSource.HUMAN.value):
+        return True
+    if status.source == AnswerSource.AI_CALL.value:
+        return bool(status.ai_supported) and (status.ai_confidence or 0) >= floor
+    return True  # unknown source but filled — treat as satisfied
+
+
+def _required_askable_paths(schema_json: Mapping[str, Any], values: Mapping[str, Any]) -> list[str]:
+    """Paths of required, applicable, collectible (ask/confirm role) leaves.
+    v2: filters by role + applicability. v1: returns all required paths."""
+    if is_v2(schema_json):
+        doc = FormSchemaDoc.model_validate(schema_json)
+        shared = doc.shared_conditions or {}
+        return [
+            path
+            for path, leaf, gates in leaf_gates(doc)
+            if leaf.role in COLLECTED_ROLES
+            and is_applicable(gates, values, shared)
+            and is_required(leaf, values, shared)
+        ]
+    # v1: no role concept — all required paths are candidates.
+    return all_required_paths(schema_json)
+
+
+def retryable_required_paths(
+    status_by_path: Mapping[str, FieldStatus], schema_json: Mapping[str, Any], *, floor: int
+) -> list[str]:
+    """Paths of required, applicable, askable fields that are not yet satisfied.
+    These are the fields a retry call should attempt to fill."""
+    # applicability needs filled-ness only
+    values = {p: "x" for p, s in status_by_path.items() if s.filled}
+    out: list[str] = []
+    for path in _required_askable_paths(schema_json, values):
+        st = status_by_path.get(path) or FieldStatus(False, None, None, None)
+        if not is_field_satisfied(st, floor=floor):
+            out.append(path)
+    return out
+
+
+def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[str]:
+    """Human-readable labels for field paths: leaf titles in v2, else the paths themselves."""
+    if not is_v2(schema_json):
+        return list(paths)
+    doc = FormSchemaDoc.model_validate(schema_json)
+    titles = {path: leaf.title for path, leaf, _ in leaf_gates(doc)}
+    return [titles.get(p, p) for p in paths]
