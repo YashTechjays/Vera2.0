@@ -62,6 +62,10 @@ type IbvContextValue = {
   status: PatientFormStatus | null
   /** Change the form's status via the dedicated endpoint (status-only). */
   changeStatus: (next: PatientFormStatus) => Promise<void>
+  /** Voice-lab-style opt-out: run the IVR navigator on this form's calls.
+   *  Pre-loaded from the form detail; sent only alongside an in_queue change. */
+  ivrNavigation: boolean
+  setIvrNavigation: (v: boolean) => void
   /** A rejected status change (e.g. open disputes block completion) — shown inline. */
   statusError: string | null
   statusChanging: boolean
@@ -142,6 +146,7 @@ export function IbvProvider({
   const [statusError, setStatusError] = useState<string | null>(null)
   const [statusChanging, setStatusChanging] = useState(false)
   const [insuranceType, setInsuranceType] = useState<string | null>(null)
+  const [ivrNavigation, setIvrNavigation] = useState(true)
 
   const errors = useMemo(
     () => (schema ? validateAll(schema, values) : {}),
@@ -170,6 +175,7 @@ export function IbvProvider({
     setStatus(null)
     setStatusError(null)
     setInsuranceType(null)
+    setIvrNavigation(true)
     setSchema(demoSchema)
     seed({ ...mockValues, ...seedValues(mockDisputes) }, mockDisputes, "Demo Patient")
     setModalOpen(true)
@@ -193,6 +199,7 @@ export function IbvProvider({
       setStatus(null)
       setStatusError(null)
       setInsuranceType(null)
+      setIvrNavigation(true)
       setSchema(null)
       getPatientForm(id)
         .then(async (detail) => {
@@ -204,6 +211,7 @@ export function IbvProvider({
           setSchema(loaded)
           setStatus(detail.status)
           setInsuranceType(detail.insurance_type)
+          setIvrNavigation(detail.ivr_navigation_enabled)
         })
         .catch((err) => {
           // ApiError and the parseSchema dsl_version guard both carry a
@@ -277,7 +285,11 @@ export function IbvProvider({
       }
       setStatusChanging(true)
       try {
-        const res = await updatePatientFormStatus(formId, next)
+        const res = await updatePatientFormStatus(
+          formId,
+          next,
+          next === "in_queue" ? { enableIvrNavigation: ivrNavigation } : undefined,
+        )
         setStatus(res.status)
         setSavedTick((t) => t + 1) // worklist refetches the new status
       } catch (err) {
@@ -289,7 +301,7 @@ export function IbvProvider({
         setStatusChanging(false)
       }
     },
-    [mode, formId],
+    [mode, formId, ivrNavigation],
   )
 
   const save = useCallback(async () => {
@@ -352,6 +364,8 @@ export function IbvProvider({
     patientName,
     status,
     changeStatus,
+    ivrNavigation,
+    setIvrNavigation,
     statusError,
     statusChanging,
     insuranceType,

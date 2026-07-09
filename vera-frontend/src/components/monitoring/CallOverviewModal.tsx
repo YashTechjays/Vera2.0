@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
+import { CallTranscript } from "./CallTranscript"
 import type { LiveCall } from "@/lib/mock-data"
 
 function confidenceColor(score: number): string {
@@ -199,7 +200,12 @@ export function CallOverviewModal({
               </Button>
             </div>
             {call?.id ? (
-              <LiveCallRoom key={call.id} callId={call.id} />
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="shrink-0 border-b border-border">
+                  <LiveCallRoom key={call.id} callId={call.id} />
+                </div>
+                <CallTranscript key={`t-${call.id}`} callId={call.id} />
+              </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
                 <MessageSquare className="size-10 opacity-30" />

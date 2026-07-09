@@ -77,6 +77,8 @@ export type PatientFormDetail = {
   appointment_date: string | null
   member_id: string | null
   fields: PatientFormField[]
+  /** Stored queue-time choice: run the IVR navigator on this form's calls. */
+  ivr_navigation_enabled: boolean
 }
 
 /** Paginated worklist envelope `data`. */

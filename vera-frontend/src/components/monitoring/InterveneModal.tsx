@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
+import { CallTranscript } from "./CallTranscript"
 import type { LiveCall } from "@/lib/mock-data"
 
 type TabKey = "info" | "transcript"
@@ -142,7 +143,10 @@ export function InterveneModal({
               </div>
               {call?.id ? (
                 <div className="flex min-h-[240px] flex-1 flex-col rounded-lg border border-border">
-                  <LiveCallRoom key={call.id} callId={call.id} microphone />
+                  <div className="shrink-0 border-b border-border">
+                    <LiveCallRoom key={call.id} callId={call.id} microphone />
+                  </div>
+                  <CallTranscript key={`t-${call.id}`} callId={call.id} />
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">

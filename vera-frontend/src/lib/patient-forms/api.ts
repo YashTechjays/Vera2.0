@@ -53,13 +53,24 @@ export function resolveDisputes(
 }
 
 /** PUT /patient-forms/{id}/status — change lifecycle status (status only).
- *  Rejects illegal transitions (422) and completing with open disputes (409). */
+ *  Rejects illegal transitions (422) and completing with open disputes (409).
+ *  `enableIvrNavigation` rides only with an in_queue change (voice-lab-style
+ *  toggle); omitted → the backend keeps the form's stored choice. */
 export function updatePatientFormStatus(
   formId: string,
   status: PatientFormStatus,
+  opts?: { enableIvrNavigation?: boolean },
 ): Promise<PatientFormStatusResult> {
   return apiRequest<PatientFormStatusResult>(
     `/patient-forms/${encodeURIComponent(formId)}/status`,
-    { method: "PUT", body: { status } },
+    {
+      method: "PUT",
+      body: {
+        status,
+        ...(opts?.enableIvrNavigation !== undefined
+          ? { enable_ivr_navigation: opts.enableIvrNavigation }
+          : {}),
+      },
+    },
   )
 }
