@@ -18,7 +18,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -27,6 +27,7 @@ from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit, get_sessionmaker
+from control_plane.dispatch import run_dispatch_pass
 from control_plane.exceptions import (
     CustomAPIException,
     CustomAPIResponse,
@@ -68,7 +69,6 @@ from vera_core.models.enums import (
     FormStatus,
 )
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
-from vera_core.services.queue_dispatcher import try_dispatch
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -805,6 +805,7 @@ async def update_patient_form_status(
     tenant_id: TenantId,
     livekit: LiveKit,
     kms: Kms,
+    background: BackgroundTasks,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -899,12 +900,14 @@ async def update_patient_form_status(
         )
     )
 
-    # Fire the dispatcher if a form was just enqueued. The response acknowledges
-    # the manual transition (target), not whatever the dispatcher advanced the
-    # form to afterwards — clients observe dispatch via the calls list. The
-    # dispatcher itself attributes ownership from `form.enqueued_by_id`, set above.
+    # Kick a dispatch pass AFTER this transaction commits (yield-dependency teardown
+    # runs before background tasks) — dial + pacing must not ride the request
+    # transaction. The response acknowledges the manual transition only; clients
+    # observe dispatch via the calls list.
     if target == FormStatus.IN_QUEUE:
-        await try_dispatch(session, tenant_id, livekit, kms, audit=audit)
+        background.add_task(
+            run_dispatch_pass, get_sessionmaker(request), tenant_id, livekit, kms, audit
+        )
 
     return ok(
         PatientFormStatusResponse(id=form.id, status=target.value),
