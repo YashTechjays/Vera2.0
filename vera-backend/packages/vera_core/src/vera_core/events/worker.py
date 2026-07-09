@@ -8,9 +8,9 @@ or transcript text.
 """
 
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
@@ -36,9 +36,30 @@ class CallFailedEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
-# Widen to a discriminated `Union[...]` on `type` when a second event type lands.
-type WorkerEvent = CallFailedEvent
-_ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(CallFailedEvent)
+class CallAnsweredEvent(BaseModel):
+    """Emitted when the SIP callee answered — the call is live."""
+
+    type: Literal["call.answered"] = "call.answered"
+    room_name: str
+    ts: int  # epoch milliseconds
+
+
+class CallEndedEvent(BaseModel):
+    """Emitted from the worker's shutdown callback — the session finished after
+    the call was live (hangup by either side, or the agent's end_call tool)."""
+
+    type: Literal["call.ended"] = "call.ended"
+    room_name: str
+    ts: int  # epoch milliseconds
+
+
+type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent
+_ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
+    Annotated[
+        CallFailedEvent | CallAnsweredEvent | CallEndedEvent,
+        Field(discriminator="type"),
+    ]
+)
 
 
 def parse_worker_event(raw: str) -> WorkerEvent:
