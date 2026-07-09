@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CallSummary(BaseModel):
@@ -59,3 +59,22 @@ class VoiceSessionResponse(BaseModel):
     url: str  # settings.livekit_url, for the browser SDK
     token: str  # browser join JWT
     mode: str
+
+
+class _RetentionDays(BaseModel):
+    """Shared retention knob. None → the tenant reverts to the platform default;
+    otherwise bounded to 1 day..10 years."""
+
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class RetentionPolicy(_RetentionDays):
+    """Tenant recording-retention knob. retention_days=None → the platform
+    default applies (surfaced as default_days so the UI can render the
+    effective value)."""
+
+    default_days: int
+
+
+class RetentionPolicyUpdate(_RetentionDays):
+    """PATCH body: None retention_days reverts the tenant to the platform default."""

@@ -193,6 +193,8 @@ class AuthEvent(enum.StrEnum):
     # Token-scoped self-logout (/auth/logout). Tenant users write a tenant-scoped
     # row; platform operators (tenant_id IS NULL) go through log_auth_event.
     LOGOUT = "logout"
+    # Tenant-level recording retention policy updated (old/new day counts, no PHI).
+    RETENTION_POLICY_UPDATED = "retention_policy_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:
