@@ -6,11 +6,13 @@ the DB orchestration lives in `evaluate_call` below.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phi_codec.tokens.token import TOKEN_RE
@@ -27,6 +29,8 @@ from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
+
+logger = logging.getLogger("vera.post_call_eval")
 
 # A judge verdict below this confidence (or unsupported) routes the field to review.
 REVIEW_CONFIDENCE_FLOOR = 60
@@ -240,11 +244,19 @@ async def evaluate_call(
 
     # (8) Update call_form_snapshot.after_state (the before_state row was written
     #     by the callback; here we fill in after_state).
-    await session.execute(
-        update(CallFormSnapshot)
-        .where(CallFormSnapshot.call_id == call_id)
-        .values(after_state=current_values)
+    result = cast(
+        CursorResult[Any],
+        await session.execute(
+            update(CallFormSnapshot)
+            .where(CallFormSnapshot.call_id == call_id)
+            .values(after_state=current_values)
+        ),
     )
+    if result.rowcount == 0:
+        logger.warning(
+            "post_call_eval: no call_form_snapshot row for call_id=%s — after_state not written",
+            call_id,
+        )
 
     # (9-12) Decide status, transition, audit, dispatch.
     target = FormStatus.EXCEPTION_REVIEW if reviewed else FormStatus.COMPLETED

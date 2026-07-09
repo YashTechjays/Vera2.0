@@ -28,7 +28,7 @@ from vera_core.integrations.llm import ExtractedField, FakeLLMClient, JudgeVerdi
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.call import Call
 from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, InsuranceType
-from vera_core.models.field_answer import FieldAnswer, FieldEvaluation
+from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
 from vera_core.services.post_call_eval import EvalDeps, evaluate_call
@@ -215,6 +215,17 @@ async def seeded_ai_processing_form(
                 mode="full",
             )
         )
+        await session.flush()
+        # Mirror what the callback writes in production: a snapshot row with
+        # before_state already populated so step-8 UPDATE matches a real row.
+        session.add(
+            CallFormSnapshot(
+                tenant_id=tenant_id,
+                call_id=call_id,
+                before_state={},
+                after_state={},
+            )
+        )
 
     # -- open a tenant-pinned session for the test ---------------------------
     # `tenant_session` opens the session, begins the transaction, and pins the
@@ -331,6 +342,14 @@ async def test_evaluate_call_writes_answers_and_completes(
     )
     assert len(evals) == 1
     assert evals[0].supported is True
+
+    # Step 8: verify after_state was written into the snapshot row.
+    snapshot = (
+        await ctx.session.execute(
+            select(CallFormSnapshot).where(CallFormSnapshot.call_id == ctx.call_id)
+        )
+    ).scalar_one()
+    assert snapshot.after_state == {path: "in-network"}
 
 
 async def test_token_valued_field_routes_to_review(
