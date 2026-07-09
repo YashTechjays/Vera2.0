@@ -13,6 +13,7 @@ import authReducer, {
   forceLogout,
   loginThunk,
   platformLoginThunk,
+  platformEnrollActivateThunk,
   fetchMe,
   selectStatus,
   selectMfa,
@@ -80,6 +81,19 @@ describe("authSlice", () => {
     expect(mfa?.platform).toBe(true)
     expect(mfa?.provisioningUri).toBe("otpauth://totp/Vera:ops?secret=ABC")
     expect(selectStatus(store.getState())).toBe("anonymous")
+  })
+
+  it("platform enroll-activate mints the session and clears mfa (no recovery codes)", async () => {
+    vi.mocked(api.platformEnrollActivate).mockResolvedValue({ session_token: "tok" })
+    vi.mocked(api.getMe).mockResolvedValue({
+      ...me, account_type: "platform", tenant_id: null, tenant_slug: null,
+    })
+    const store = makeStore()
+    await store.dispatch(
+      platformEnrollActivateThunk({ mfaToken: "et", code: "123456" }),
+    ).unwrap()
+    expect(selectStatus(store.getState())).toBe("authenticated")
+    expect(selectMfa(store.getState())).toBeNull()
   })
 
   it("platform login with verify goes to the verify step", async () => {

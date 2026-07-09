@@ -8,14 +8,15 @@ The tenant enroll()/activate()/verify() functions mutate the `UserIdentity`
 object in-place; the caller's session commits on exit from `tenant_session(...)`.
 The platform variants (enroll_platform/activate_platform) instead write through
 SECURITY DEFINER functions, because a NULL-tenant platform identity can't be
-UPDATEd by the RLS-bound app role (migration f066c667ddc1).
+UPDATEd by the RLS-bound app role (migration f066c667ddc1). Platform MFA is
+TOTP-only — no recovery codes (consuming one would need a definer write on an
+already-enrolled row, breaking the enrollment-window guarantee).
 
 Flow: enroll() mints and seals the seed; activate() confirms with a live code
 and hands back recovery codes ONCE; verify() gates each MFA login, consuming a
 recovery code on use.
 """
 
-import json
 import secrets
 
 import pyotp
@@ -86,25 +87,22 @@ async def activate_platform(
     *,
     identity: UserIdentity,
     code: str,
-) -> tuple[str, ...] | None:
+) -> bool:
     """Confirm a NULL-tenant platform enrollment with a live TOTP code, then flip
-    mfa_enabled + store recovery hashes via the `platform_activate_mfa` SECURITY
-    DEFINER function. Returns the recovery codes ONCE, or None on a bad code."""
+    mfa_enabled via the `platform_activate_mfa` SECURITY DEFINER function. TOTP-only —
+    no recovery codes. The seed ciphertext is passed as a compare-and-set, so a seed
+    re-minted by a concurrent login can't be activated against a stale QR."""
     totp_secret = await _decrypt_seed(kms, identity)
     if totp_secret is None or not pyotp.TOTP(totp_secret).verify(code, valid_window=1):
-        return None
-    recovery_codes = tuple(secrets.token_hex(5) for _ in range(_RECOVERY_CODE_COUNT))
-    hashes = [hash_password(c) for c in recovery_codes]
+        return False
     activated = (
         await session.execute(
-            text("SELECT platform_activate_mfa(CAST(:id AS uuid), CAST(:h AS jsonb))").bindparams(
-                id=identity.id, h=json.dumps(hashes)
+            text("SELECT platform_activate_mfa(CAST(:id AS uuid), :seed)").bindparams(
+                id=identity.id, seed=identity.totp_seed_ct
             )
         )
     ).scalar_one()
-    if not activated:
-        return None
-    return recovery_codes
+    return bool(activated)
 
 
 async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str) -> bool:

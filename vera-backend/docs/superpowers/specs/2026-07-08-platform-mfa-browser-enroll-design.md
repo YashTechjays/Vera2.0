@@ -51,9 +51,14 @@ enrolled, behave exactly as today (`mfa="verify"`).
 ### 3. New endpoint — confirm the first code + finish setup
 `POST /platform/auth/mfa/enroll-activate`: mirror the tenant `mfa_enroll_activate`.
 Unauthenticated, gated by the enrollment `mfa_token` from step 2. Confirms a live TOTP
-code against the seed, sets `mfa_enabled=True`, mints the platform session
-(`tenant_id=None`, `account_type='platform'`), returns recovery codes once. On a wrong
+code against the seed, sets `mfa_enabled=True` (compare-and-set on the seed ciphertext),
+mints the platform session (`tenant_id=None`, `account_type='platform'`). On a wrong
 code: audited `LOGIN_FAILURE`, 401, no session.
+
+**TOTP-only — no recovery codes** (revised at review, 2026-07-09): consuming a recovery
+code would need a definer write on an *enrolled* row, breaking the enrollment-window
+guarantee (`mfa_enabled=false`) that keeps the definer functions narrow. A lost
+authenticator is recovered by a manual DB reset (adr/devops-todo.md #9).
 
 ### 4. Frontend — render the QR on the platform login
 - `authSlice.platformLoginThunk`: branch on the response like `loginThunk` does — when
@@ -75,7 +80,7 @@ Operator browser: /platform/login  (email + password)
    Browser shows QR (from provisioning_uri)
    Operator scans, enters 6-digit code
    POST /platform/auth/mfa/enroll-activate  (mfa_token + code)
-        -> session_token + recovery_codes (shown once)
+        -> session_token (TOTP-only; no recovery codes)
         -> mfa_enabled now True
 
 Next login: POST /platform/auth/login -> mfa="verify" (asks for code only)
@@ -102,7 +107,7 @@ Next login: POST /platform/auth/login -> mfa="verify" (asks for code only)
 
 Backend (mirror the tenant enroll tests):
 - first platform login (unenrolled) returns `mfa="enroll"` + a provisioning_uri
-- enroll-activate with a valid TOTP code mints a session + recovery codes, sets
+- enroll-activate with a valid TOTP code mints a session (no recovery codes), sets
   `mfa_enabled=True`
 - enroll-activate with a wrong code: 401, no session, audited failure
 - a second login now returns `mfa="verify"`

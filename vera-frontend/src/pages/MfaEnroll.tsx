@@ -32,10 +32,14 @@ export function MfaEnroll() {
     setError(null)
     setBusy(true)
     try {
+      if (mfa!.platform) {
+        // Platform enrollment is TOTP-only — no recovery codes to show, straight in.
+        await dispatch(platformEnrollActivateThunk({ mfaToken: mfa!.token, code })).unwrap()
+        navigate("/", { replace: true })
+        return
+      }
       const codes = await dispatch(
-        mfa!.platform
-          ? platformEnrollActivateThunk({ mfaToken: mfa!.token, code })
-          : enrollActivateThunk({ slug, mfaToken: mfa!.token, code }),
+        enrollActivateThunk({ slug, mfaToken: mfa!.token, code }),
       ).unwrap()
       setRecovery(codes)
     } catch (err) {

@@ -28,7 +28,6 @@ from control_plane.api.v1.auth import (
     LoginRequest,
     LoginResponse,
     MfaEnrollActivateRequest,
-    MfaEnrollActivateResponse,
     MfaVerifyRequest,
     SessionResponse,
     _load_password_creds,
@@ -136,6 +135,9 @@ async def platform_login(
             )
         if provisioning_uri is None:  # already enrolled between check and write — retry as verify
             challenge = await store.put(MFA_NS, base, settings.mfa_challenge_ttl_seconds)
+            await emit_auth_event(
+                audit, tenant_id=None, event=AuthEvent.MFA_CHALLENGE, ip=ip, user_id=creds.user_id
+            )
             return ok(LoginResponse(mfa="verify", mfa_token=challenge))
         enrollment = await store.put(MFA_ENROLL_NS, base, settings.mfa_challenge_ttl_seconds)
         await emit_auth_event(
@@ -200,7 +202,7 @@ async def platform_mfa_verify(
 
 @router.post(
     "/mfa/enroll-activate",
-    response_model=ResponseModel[MfaEnrollActivateResponse],
+    response_model=ResponseModel[SessionResponse],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.VALIDATION_ERROR,
@@ -214,22 +216,23 @@ async def platform_mfa_enroll_activate(
     kms: KMS,
     audit: AuthAudit,
     settings: AppSettings,
-) -> ResponseModel[MfaEnrollActivateResponse]:
+) -> ResponseModel[SessionResponse]:
     """Complete the platform first-login enrollment wall: confirm a live TOTP code
-    against the seed minted at login, flip mfa_enabled via the definer path, mint the
-    session, and return recovery codes once. Gated by the enrollment `mfa_token`."""
+    against the seed minted at login, flip mfa_enabled via the definer path, and mint
+    the session. TOTP-only — no recovery codes (see module docstring). Gated by the
+    enrollment `mfa_token`."""
     ip = client_ip(request)
     base = await store.get(MFA_ENROLL_NS, body.mfa_token)
     if base is None or base.account_type != AccountType.PLATFORM.value:
         raise _unauthorized()
 
-    codes: tuple[str, ...] | None = None
+    activated = False
     async with platform_session(sessionmaker) as session:
         ident = await _password_identity_row(session, base.user_id)
         if ident is not None:
-            codes = await mfa.activate_platform(kms, session, identity=ident, code=body.code)
+            activated = await mfa.activate_platform(kms, session, identity=ident, code=body.code)
 
-    if codes is None:
+    if not activated:
         await emit_auth_event(
             audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=base.user_id
         )
@@ -244,4 +247,4 @@ async def platform_mfa_enroll_activate(
     await emit_auth_event(
         audit, tenant_id=None, event=AuthEvent.LOGIN_SUCCESS, ip=ip, user_id=base.user_id
     )
-    return ok(MfaEnrollActivateResponse(session_token=token, recovery_codes=list(codes)))
+    return ok(SessionResponse(session_token=token))

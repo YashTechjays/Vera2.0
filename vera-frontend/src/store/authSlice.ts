@@ -116,12 +116,11 @@ export const platformLoginThunk = createAsyncThunk(
 
 export const platformEnrollActivateThunk = createAsyncThunk(
   "auth/platformEnrollActivate",
-  async (arg: { mfaToken: string; code: string }, { dispatch }): Promise<string[]> => {
+  async (arg: { mfaToken: string; code: string }, { dispatch }) => {
     const res = await authApi.platformEnrollActivate(arg.mfaToken, arg.code)
     // Platform session belongs to no tenant — store with an empty slug.
     setSession(res.session_token, "")
     await dispatch(fetchMe()).unwrap()
-    return res.recovery_codes
   },
   keepApiError,
 )
@@ -269,6 +268,10 @@ const authSlice = createSlice({
       .addCase(enrollActivateThunk.rejected, (s, a) => {
         s.loading = false
         s.error = apiErrorMessage(a.error, "Enrollment failed.")
+      })
+      .addCase(platformEnrollActivateThunk.pending, (s) => {
+        s.loading = true
+        s.error = null
       })
       .addCase(platformEnrollActivateThunk.fulfilled, (s) => {
         s.loading = false
