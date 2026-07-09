@@ -15,6 +15,9 @@ from livekit.api.twirp_client import TwirpError
 from vera_core.config import SecretProvider
 from vera_core.config.settings import Settings
 from vera_core.observability.correlation import SIP_CALLEE_IDENTITY
+from vera_core.telephony import LiveKitUnavailable, OutboundDialError
+
+__all__ = ["LiveKitGateway", "LiveKitUnavailable", "OutboundDialError", "build_livekit_gateway"]
 
 AGENT_NAME = "vera-agent"
 
@@ -22,18 +25,6 @@ AGENT_NAME = "vera-agent"
 # connection failure. Caught at this gateway boundary and re-raised as domain errors so
 # SDK exception types never leak to the routers.
 _LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError)
-
-
-class LiveKitUnavailable(Exception):
-    """The LiveKit SIP service could not be reached (or errored) while we probed it —
-    e.g. verifying a trunk id exists before storing the credential. Distinct from
-    "trunk not found": this means we could not get an answer, so we fail closed."""
-
-
-class OutboundDialError(Exception):
-    """Placing an outbound SIP call failed at the LiveKit / telephony seam — a
-    bad/deleted trunk, the provider rejecting the call, or LiveKit being unreachable.
-    The router translates this into a clean upstream-error response, never a raw 500."""
 
 
 class LiveKitGateway:

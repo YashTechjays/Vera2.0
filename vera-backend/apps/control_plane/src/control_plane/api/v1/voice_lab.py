@@ -34,7 +34,6 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
-from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.livekit_gateway import OutboundDialError
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
@@ -51,6 +50,7 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.schemas import StartVoiceSessionRequest, VoiceSessionResponse
+from vera_core.services.ivr_selection import add_active_playbook_metadata
 from vera_core.transcript import TranscriptEvent, TranscriptService
 
 router = APIRouter(tags=["voice-lab"])

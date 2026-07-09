@@ -27,7 +27,6 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
-from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
@@ -43,6 +42,7 @@ from vera_core.schemas import (
     StartCallRequest,
 )
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.ivr_selection import add_active_playbook_metadata
 from vera_core.services.queue_dispatcher import try_dispatch
 
 logger = logging.getLogger(__name__)
