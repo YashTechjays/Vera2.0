@@ -131,10 +131,6 @@ export function PlatformLogin() {
                 value={enrollToken}
                 onChange={(e) => setEnrollToken(e.target.value)}
               />
-              <p className="text-xs text-muted-foreground">
-                Paste the one-time token from bootstrap the first time you set up 2FA. Leave blank
-                afterwards.
-              </p>
             </div>
             {error && (
               <p className="text-sm text-destructive" role="alert">
