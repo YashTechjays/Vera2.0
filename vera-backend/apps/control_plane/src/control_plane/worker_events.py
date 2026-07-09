@@ -10,24 +10,62 @@ import logging
 import os
 import socket
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import cast
+from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.livekit_gateway import LiveKitGateway
+from vera_core.db import tenant_session
+from vera_core.db.base import uuid7
 from vera_core.events import (
     WORKER_EVENTS_GROUP,
     WORKER_EVENTS_STREAM,
+    CallEndedEvent,
     CallFailedEvent,
     WorkerEvent,
     WorkerEventBus,
     parse_worker_event,
 )
+from vera_core.models import Transcript
+from vera_core.models.enums import TranscriptSource
 from vera_core.observability.correlation import parse_room_name
+from vera_core.transcript import ROLE_USER, TranscriptEvent, TranscriptService
 
 logger = logging.getLogger("control_plane.worker_events")
+
+
+def build_transcript_rows(
+    tenant_id: UUID, call_id: UUID, events: list[TranscriptEvent]
+) -> list[dict[str, object]]:
+    """Bulk-insert payloads for the transcript table. seq is the stream order
+    (the producer already guarantees chronological order — see
+    TranscriptService.consume); text is tokenized and persisted AS-IS (spec
+    decision 3 — never hydrate). Explicit ids: executemany INSERTs bypass the
+    ORM client-side default."""
+    return [
+        {
+            "id": uuid7(),
+            "tenant_id": tenant_id,
+            "call_id": call_id,
+            "seq": seq,
+            "source": (
+                TranscriptSource.REP.value
+                if event.role == ROLE_USER
+                else TranscriptSource.BOT.value
+            ),
+            "role": event.role,
+            "message": event.text,
+            "spoke_at": datetime.fromtimestamp(event.ts / 1000, tz=UTC),
+        }
+        for seq, event in enumerate(events)
+    ]
+
 
 type EventHandler = Callable[[WorkerEvent], Awaitable[None]]
 
@@ -47,6 +85,8 @@ class WorkerEventConsumer:
         reclaim_idle_ms: int = 60_000,
         teardown_grace_ms: int = 1_500,
         consumer_name: str | None = None,
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        transcripts: TranscriptService | None = None,
     ) -> None:
         self._redis = redis
         self._livekit = livekit
@@ -55,7 +95,13 @@ class WorkerEventConsumer:
         self._teardown_grace_ms = teardown_grace_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._bus = WorkerEventBus(redis)
+        self._sessionmaker = sessionmaker
+        self._transcripts = transcripts
         self._handlers: dict[str, EventHandler] = {"call.failed": self._handle_call_failed}
+        # Persistence finalizer is opt-in: only when the control plane hands us a
+        # DB sessionmaker + transcript service (tests / minimal wiring skip it).
+        if sessionmaker is not None and transcripts is not None:
+            self._handlers["call.ended"] = self._handle_call_ended
 
     async def run(self) -> None:
         """Ensure the group exists, then loop: reclaim stragglers, read new, dispatch.
@@ -171,3 +217,30 @@ class WorkerEventConsumer:
         if self._teardown_grace_ms:
             await asyncio.sleep(self._teardown_grace_ms / 1000)
         await self._livekit.delete_room(event.room_name)
+
+    async def _handle_call_ended(self, event: WorkerEvent) -> None:
+        if not isinstance(event, CallEndedEvent):
+            return
+        if self._sessionmaker is None or self._transcripts is None:  # pragma: no cover
+            return
+        ref = parse_room_name(event.room_name)
+        if ref is None:
+            logger.warning("call.ended for non-vera room %s; ignoring", event.room_name)
+            return
+        events = await self._transcripts.drain(event.room_name)
+        if not events:
+            # Expired stream (grace TTL elapsed before we ran) or a call with no
+            # finalized turns. Nothing to persist; rows from an earlier delivery,
+            # if any, are already in place.
+            logger.warning("call.ended: no transcript entries for %s", event.room_name)
+            return
+        rows = build_transcript_rows(ref.tenant_id, ref.call_id, events)
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            # Idempotent under at-least-once delivery: UNIQUE(call_id, seq) +
+            # ON CONFLICT DO NOTHING makes a redelivered event a no-op.
+            await session.execute(
+                pg_insert(Transcript)
+                .values(rows)
+                .on_conflict_do_nothing(index_elements=["call_id", "seq"])
+            )
+        logger.info("persisted %d transcript rows for call %s", len(rows), ref.call_id)

@@ -139,6 +139,8 @@ def create_app(
                 block_ms=settings.worker_events_block_ms,
                 reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
+                sessionmaker=sessionmaker,
+                transcripts=_transcript_service,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_consumer_exit)
