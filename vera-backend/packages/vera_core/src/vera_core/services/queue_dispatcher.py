@@ -30,11 +30,13 @@ from vera_core.models.enums import (
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import PersonaTweak
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.recordings import start_recording_for_call
 
 if TYPE_CHECKING:
     from uuid import UUID
 
     from vera_core.audit import AuditSink
+    from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,7 @@ async def try_dispatch(
     livekit: Any,
     *,
     audit: AuditSink | None = None,
+    recording: RecordingConfig | None = None,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -86,6 +89,10 @@ async def try_dispatch(
     audit:
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
+    recording:
+        Optional ``RecordingConfig``. When provided, audio egress is started
+        for each dispatched call (fail-open — a recording failure never rolls
+        back a successfully dispatched call).
     """
     # 1. Load tenant config.
     tenant = (
@@ -185,6 +192,7 @@ async def try_dispatch(
         else PersonaTweak()
     )
     metadata = tweak.model_dump(exclude_none=True)
+    metadata["publish_transcript"] = True
 
     for form in candidates:
         # 4b. Working-hours check.
@@ -225,6 +233,17 @@ async def try_dispatch(
                     )
                 )
             dispatched += 1
+            if recording is not None:
+                # Fail-open and OUTSIDE the savepoint: a recording failure must not
+                # undo a successfully dispatched call.
+                await start_recording_for_call(
+                    session,
+                    livekit,
+                    config=recording,
+                    tenant_id=tenant_id,
+                    call_id=call.id,
+                    audit=audit,
+                )
             logger.info(
                 "dispatch: initiated call %s for form %s (mode=%s)",
                 call.id,

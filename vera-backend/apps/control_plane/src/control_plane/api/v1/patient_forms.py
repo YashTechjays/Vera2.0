@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import AppSettings, LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -68,6 +68,7 @@ from vera_core.models.enums import (
 )
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
+from vera_core.services.recordings import recording_config_from
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -795,6 +796,7 @@ async def update_patient_form_status(
     session: TenantSession,
     tenant_id: TenantId,
     livekit: LiveKit,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -884,7 +886,9 @@ async def update_patient_form_status(
     # form to afterwards — clients observe dispatch via the calls list. The
     # dispatcher itself attributes ownership from `form.enqueued_by_id`, set above.
     if target == FormStatus.IN_QUEUE:
-        await try_dispatch(session, tenant_id, livekit, audit=audit)
+        await try_dispatch(
+            session, tenant_id, livekit, audit=audit, recording=recording_config_from(settings)
+        )
 
     return ok(
         PatientFormStatusResponse(id=form.id, status=target.value),

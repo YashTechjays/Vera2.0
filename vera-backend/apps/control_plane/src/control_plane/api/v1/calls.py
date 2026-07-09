@@ -17,7 +17,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
-from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import AppSettings, Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit
@@ -44,6 +44,7 @@ from vera_core.schemas import (
 )
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
+from vera_core.services.recordings import recording_config_from, start_recording_for_call
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,8 @@ async def start_call(
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
+    audit: Audit,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
 ) -> ResponseModel[CallSummary]:
     form = (
@@ -165,6 +168,9 @@ async def start_call(
     if body.enable_ivr_navigation:
         metadata["enable_ivr_navigation"] = True
         await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
+    # Real calls always publish the tokenized live transcript — the persistence
+    # finalizer (worker_events call.ended handler) drains it into Postgres.
+    metadata["publish_transcript"] = True
     await livekit.create_call_room(room_name, metadata=metadata)
     session.add(
         CallEvent(
@@ -174,6 +180,10 @@ async def start_call(
             event_value=CallStatus.INITIATED,
         )
     )
+    if (rec_config := recording_config_from(settings)) is not None:
+        await start_recording_for_call(
+            session, livekit, config=rec_config, tenant_id=tenant_id, call_id=call.id, audit=audit
+        )
     return ok(_summary(call, form.patient_name, caller.user_id))
 
 
@@ -430,6 +440,7 @@ async def update_call_status(
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[CallSummary]:
     """Callback endpoint for the agent worker to report call terminal status.
@@ -531,6 +542,8 @@ async def update_call_status(
     )
 
     # Fire the dispatcher — a concurrency slot just freed up.
-    await try_dispatch(session, tenant_id, livekit, audit=audit)
+    await try_dispatch(
+        session, tenant_id, livekit, audit=audit, recording=recording_config_from(settings)
+    )
 
     return ok(_summary(call, form.patient_name, caller.user_id))
