@@ -266,3 +266,42 @@ class TestDocumentValidation:
         doc["tasks"][0]["intro"] = "About {{sections.basics.plan_type}}."
         with pytest.raises(ValidationError, match="unknown placeholder"):
             FormSchemaDoc.model_validate(doc)
+
+    def test_confirm_immediate_anchor_through_nested_group_gate(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["panel"] = {
+            "type": "group",
+            "title": "Panel",
+            "applicable_when": {
+                "field": "sections.basics.plan_type",
+                "op": "eq",
+                "value": "PPO",
+            },
+            "fields": {
+                "inner": {
+                    "type": "text",
+                    "title": "Inner",
+                    "role": "ask",
+                    "prompt": {"ask": "Inner?"},
+                }
+            },
+        }
+        doc["sections"]["ctx"] = {
+            "title": "Ctx",
+            "role": "context",
+            "fields": {
+                "spouse": {
+                    "type": "text",
+                    "title": "Spouse",
+                    "role": "confirm",
+                    "applicable_when": {
+                        "field": "sections.basics.panel.inner",
+                        "op": "eq",
+                        "value": "x",
+                    },
+                    "confirm_in_task": {"task_key": "main", "confirm_immediate": True},
+                    "prompt": {"confirm": "Spouse is {{value}}?"},
+                }
+            },
+        }
+        FormSchemaDoc.model_validate(doc)  # anchor found via the group-gated leaf

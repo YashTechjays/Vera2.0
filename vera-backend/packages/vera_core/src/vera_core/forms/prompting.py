@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
     PLACEHOLDER_RE,
+    Codes,
     Condition,
     ConfirmInTask,
     Contradiction,
@@ -288,6 +289,15 @@ def _last_ref_task(
     return best[1] if best else None
 
 
+def _codes_text(codes: Codes) -> str:
+    parts: list[str] = []
+    if codes.cpt:
+        parts.append(f"CPT {', '.join(codes.cpt)}")
+    if codes.icd10:
+        parts.append(f"ICD-10 {', '.join(codes.icd10)}")
+    return "; ".join(parts)
+
+
 def _question_lines(
     idx: int,
     path: str,
@@ -310,6 +320,14 @@ def _question_lines(
         lines.append(f"   - Hint: {hint}")
     if leaf.validation is not None and leaf.validation.date_format is not None:
         lines.append(f"   - Expected date format: {leaf.validation.date_format}")
+    if leaf.validation is not None and leaf.validation.range is not None:
+        rng = leaf.validation.range
+        if rng.min is not None and rng.max is not None:
+            lines.append(f"   - Expected numeric range: {rng.min} to {rng.max}.")
+        elif rng.min is not None:
+            lines.append(f"   - Expected numeric range: at least {rng.min}.")
+        else:
+            lines.append(f"   - Expected numeric range: at most {rng.max}.")
     if gates:
         conds = _join_gates(gates, render_cond)
         skip = (
@@ -327,8 +345,10 @@ def _question_lines(
         lines.append("   - Optional; skip gracefully if the representative has nothing.")
     elif not isinstance(leaf.required, bool):
         lines.append(f"   - Required only when {render_cond(leaf.required.when)}.")
-    if leaf.codes is not None and leaf.codes.cpt:
-        lines.append(f"   - CPT: {', '.join(leaf.codes.cpt)}")
+    if leaf.codes is not None:
+        codes_text = _codes_text(leaf.codes)
+        if codes_text:
+            lines.append(f"   - Codes: {codes_text}")
     if immediate:
         lines.append("   - Immediately after this answer:")
         for _cpath, cleaf, cgates in immediate:
@@ -364,13 +384,15 @@ def _task_text(
         lines = [f"### {section.title}"]
         if section.prompt is not None:
             lines.append(section.prompt.intro)
-        if section.codes is not None and section.codes.cpt:
-            speak = (
-                "Read these CPT codes aloud when asking"
-                if section.codes.speak_cpt
-                else "Provide these codes only if the representative asks"
-            )
-            lines.append(f"{speak}: {', '.join(section.codes.cpt)}.")
+        if section.codes is not None:
+            codes_text = _codes_text(section.codes)
+            if codes_text:
+                speak = (
+                    "Read these codes aloud when asking"
+                    if section.codes.speak_cpt
+                    else "Provide these codes only if the representative asks"
+                )
+                lines.append(f"{speak}: {codes_text}.")
         for path, leaf, gates in questions.get(section_key, []):
             lines.extend(
                 _question_lines(

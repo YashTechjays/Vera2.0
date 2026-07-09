@@ -129,6 +129,15 @@ class TestTaskText:
         assert " and (" in coverage
         assert " or " in coverage.split(" and (", 1)[1]
 
+    def test_numeric_range_note_renders(self) -> None:
+        coverage = task("coverage").prompt
+        assert "Expected numeric range: 0 to 100." in coverage
+        assert "Expected numeric range: at least 0." in coverage
+
+    def test_icd10_codes_render_for_speak_sections(self) -> None:
+        coverage = task("coverage").prompt
+        assert "ICD-10 Z31.41" in coverage
+
 
 class TestSnapshots:
     """Golden files lock wording. To update intentionally:

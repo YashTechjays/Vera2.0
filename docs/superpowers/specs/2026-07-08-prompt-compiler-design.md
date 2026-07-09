@@ -122,14 +122,18 @@ into the `prompt` string. The IR is no longer stored anywhere.
    task runs only when …" preamble (condition-to-text, §3.2).
 2. **Task instructions** — the task's `prompt` (override-merged) leads the text.
 3. **Questions** — per section in document order: section title, optional section
-   `prompt.intro`, section codes (`speak_cpt: true` → "read these codes aloud",
-   else "provide if asked"); then numbered questions from `ask`/`confirm` leaves
-   carrying: the ask/confirm text (`{{value}}` left un-hydrated), expected enum
-   vocabulary, `special_values`, `hints`, validation notes (date format, numeric
-   range), `derive` notes ("when <condition>, record <value> without asking"),
-   `inapplicable_value` skip-fill notes, and requiredness. Leaf gate chains render
-   as "Ask only if …" clauses. `ask_groups` render as one combined question
-   replacing its members on the first pass; `alternatives` render as either/or
+   `prompt.intro`, section codes (both CPT and ICD-10 codes render, joined; the
+   same `speak_cpt: true` → "read these codes aloud" / else "provide if asked"
+   split applies to whichever codes are present); then numbered questions from
+   `ask`/`confirm` leaves carrying: the ask/confirm text (`{{value}}` left
+   un-hydrated), expected enum vocabulary, `special_values`, `hints`, validation
+   notes (date format, numeric range), `derive` notes ("when <condition>, record
+   <value> without asking"), `inapplicable_value` skip-fill notes, and
+   requiredness. Leaf gate chains render as "Ask only if …" clauses. `ask_groups`
+   render as one combined question ("Ask together on the first pass: …") *alongside*
+   the numbered member questions, not replacing them — the members still carry
+   their own per-question nuances (vocabulary, gates, validation notes, etc.) that
+   the combined question doesn't restate; `alternatives` render as either/or
    ("once one is answered, record N/A for the others"). `confirm_in_task` leaves
    render per their `confirm_immediate` flag (§3.4): immediate ones attach to
    their anchor question ("if the answer is Family, immediately confirm: …", all
@@ -142,8 +146,11 @@ into the `prompt` string. The IR is no longer stored anywhere.
    introduction; `no_out_of_network_coverage` → insurance_basics.
 5. **Consistency checks** — each contradiction attaches to the task containing the
    *last* referenced field in document order (the earliest point both sides are
-   known; both IBV contradictions land in `coverage`): condition in words, the
-   `reason`, the `clarify` script, and the fields to re-confirm (by title).
+   known; for the IBV schema, `small_group_self_insured_conflict` — whose fields
+   live in `benefit_coverage` — lands in `insurance_basics`, while
+   `mandate_requires_infertility_coverage` lands in `coverage`): condition in
+   words, the `reason`, the `clarify` script, and the fields to re-confirm (by
+   title).
 
 Formatting: plain-text sections with headers and numbered questions — readable in
 the future editor preview. The formatter is one module; switching to XML-tag style
@@ -366,7 +373,8 @@ seams).
 
 - **Condition-to-text**: each op, nested `all`/`any`/`not_`, shared-condition refs.
 - **Placement**: flow rules and contradictions attach to the right IBV tasks
-  (`patient_not_on_plan` → introduction; both contradictions → coverage).
+  (`patient_not_on_plan` → introduction; `small_group_self_insured_conflict` →
+  insurance_basics; `mandate_requires_infertility_coverage` → coverage).
 - **Merge**: override field wins, absent falls through, unknown key ignored by the
   renderer but rejected by the API; session text passes through verbatim and is
   never folded into task `prompt` strings.
