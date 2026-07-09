@@ -21,6 +21,7 @@ import secrets
 
 import pyotp
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.auth.password import hash_password, verify_password
@@ -29,6 +30,7 @@ from vera_core.models import UserIdentity
 
 _RECOVERY_CODE_COUNT = 10
 _ISSUER = "Vera"
+_UNDEFINED_FUNCTION = "42883"  # Postgres SQLSTATE for a missing function
 
 
 async def enroll(kms: KeyManagementService, *, identity: UserIdentity, account_email: str) -> str:
@@ -76,13 +78,14 @@ async def enroll_platform(
         return pyotp.TOTP(existing_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
     totp_secret = pyotp.random_base32()
     seed_ct, dek_ct, key_ref = await seal(kms, totp_secret.encode())
-    stored = (
-        await session.execute(
-            text("SELECT platform_store_mfa_seed(CAST(:id AS uuid), :seed, :dek, :ref)").bindparams(
-                id=identity.id, seed=seed_ct, dek=dek_ct, ref=key_ref
-            )
-        )
-    ).scalar_one()
+    stored = await _call_definer_bool(
+        session,
+        "SELECT platform_store_mfa_seed(CAST(:id AS uuid), :seed, :dek, :ref)",
+        id=identity.id,
+        seed=seed_ct,
+        dek=dek_ct,
+        ref=key_ref,
+    )
     if not stored:
         return None
     return pyotp.TOTP(totp_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
@@ -102,14 +105,12 @@ async def activate_platform(
     totp_secret = await _decrypt_seed(kms, identity)
     if totp_secret is None or not pyotp.TOTP(totp_secret).verify(code, valid_window=1):
         return False
-    activated = (
-        await session.execute(
-            text("SELECT platform_activate_mfa(CAST(:id AS uuid), :seed)").bindparams(
-                id=identity.id, seed=identity.totp_seed_ct
-            )
-        )
-    ).scalar_one()
-    return bool(activated)
+    return await _call_definer_bool(
+        session,
+        "SELECT platform_activate_mfa(CAST(:id AS uuid), :seed)",
+        id=identity.id,
+        seed=identity.totp_seed_ct,
+    )
 
 
 async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str) -> bool:
@@ -125,6 +126,22 @@ async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str
             identity.recovery_code_hashes = hashes[:i] + hashes[i + 1 :]
             return True
     return False
+
+
+async def _call_definer_bool(session: AsyncSession, sql: str, **params: object) -> bool:
+    """Run a platform-MFA SECURITY DEFINER function and return its boolean result. A
+    missing function means the migration isn't applied yet (e.g. code shipped ahead of
+    it) — surface a clear, actionable error instead of a raw UndefinedFunctionError."""
+    try:
+        result = await session.execute(text(sql).bindparams(**params))
+    except ProgrammingError as exc:
+        if getattr(getattr(exc, "orig", None), "sqlstate", None) == _UNDEFINED_FUNCTION:
+            raise RuntimeError(
+                "platform MFA definer functions missing — apply migrations "
+                "f066c667ddc1 and 3f7a9c2e8b41"
+            ) from exc
+        raise
+    return bool(result.scalar_one())
 
 
 async def _decrypt_seed(kms: KeyManagementService, identity: UserIdentity) -> str | None:
