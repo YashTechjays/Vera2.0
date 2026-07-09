@@ -231,6 +231,56 @@ async def get_version(
     return ok(_detail(version, schema_version))
 
 
+class PromptSchemaDetail(BaseModel):
+    """The published schema version the next draft will pin. Platform mirror of
+    patient_forms' SchemaVersionDetail — that route is tenant-gated, so a platform
+    operator without an elevation grant cannot use it (spec 2026-07-09 §2.2)."""
+
+    id: UUID
+    schema_id: UUID
+    version: int
+    status: str
+    insurance_type: str
+    name: str
+    document: dict[str, Any]
+
+
+@router.get(
+    "/{prompt_id}/schema",
+    response_model=ResponseModel[PromptSchemaDetail],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+    ),
+)
+async def get_prompt_schema(
+    prompt_id: UUID,
+    session: PlatformSession,
+    _caller: Annotated[VerifiedIdentity, _READ],
+) -> ResponseModel[PromptSchemaDetail]:
+    """The editor's source for task text defaults + the placeholder namespace."""
+    prompt = await _require_prompt(session, prompt_id)
+    schema_version = await _published_schema_version(session, prompt.schema_id)
+    if schema_version is None:
+        raise ConflictError(message="no published schema version")
+    form_schema = (
+        await session.execute(select(FormSchema).where(FormSchema.id == prompt.schema_id))
+    ).scalar_one()
+    return ok(
+        PromptSchemaDetail(
+            id=schema_version.id,
+            schema_id=schema_version.schema_id,
+            version=schema_version.version,
+            status=schema_version.status,
+            insurance_type=form_schema.insurance_type,
+            name=form_schema.name,
+            document=schema_version.schema_json,
+        )
+    )
+
+
 @router.get(
     "/{prompt_id}/preview",
     response_model=ResponseModel[RenderedPrompts],

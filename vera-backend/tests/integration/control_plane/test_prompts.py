@@ -524,3 +524,42 @@ async def test_versions_expose_pinned_schema_version(
     ).json()["data"]
     assert detail["schema_version_id"] == str(ids.schema_version_id)
     assert detail["schema_version"] == 1
+
+
+async def test_get_prompt_schema_returns_published_document(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.get(f"/api/v1/prompts/{ids.prompt_id}/schema", headers=_auth(w.super_token))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["id"] == str(ids.schema_version_id)
+    assert data["version"] == 1
+    assert data["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
+    assert data["document"]["system_fields"] == {"member_id": "sections.basics.plan_type"}
+    assert data["document"]["tasks"][0]["task_key"] == "main"
+
+
+async def test_get_prompt_schema_conflict_when_none_published(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, w, ids = prompts_world
+    async with admin_sessionmaker() as s, s.begin():
+        await s.execute(
+            text("UPDATE schema_version SET status='draft' WHERE id=:i").bindparams(
+                i=ids.schema_version_id
+            )
+        )
+    resp = await client.get(f"/api/v1/prompts/{ids.prompt_id}/schema", headers=_auth(w.super_token))
+    assert resp.status_code == 409
+
+
+async def test_get_prompt_schema_forbidden_for_tenant(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.get(
+        f"/api/v1/prompts/{ids.prompt_id}/schema", headers=_auth(w.tenant_admin_token)
+    )
+    assert resp.status_code == 403
