@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -33,6 +33,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.queueability import ensure_queueable
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
@@ -275,6 +276,9 @@ class PatientFormDetail(BaseModel):
     chart_number: str | None
     appointment_date: date | None
     member_id: str | None
+    # Voice-lab-style toggle stored on the form (default True) — the UI's re-queue
+    # toggle pre-loads from here so an operator's earlier choice round-trips.
+    ivr_navigation_enabled: bool
     fields: list[FieldView]
 
 
@@ -391,6 +395,7 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         chart_number=form.chart_number,
         appointment_date=form.appointment_date,
         member_id=form.member_id,
+        ivr_navigation_enabled=form.ivr_navigation_enabled,
         fields=[FieldView(**view) for view in views],
     )
 
@@ -767,6 +772,10 @@ _MANUAL_TARGETS: dict[FormStatus, frozenset[FormStatus]] = {
 
 class UpdateStatusRequest(BaseModel):
     status: FormStatus  # validated against the lifecycle enum (unknown value → 422)
+    # Voice-lab-style toggle, meaningful only on → IN_QUEUE: should the dispatched
+    # call run the IVR navigator? None keeps the form's stored choice (so a requeue
+    # without the field preserves the operator's earlier decision).
+    enable_ivr_navigation: bool | None = None
 
 
 class PatientFormStatusResponse(BaseModel):
@@ -795,6 +804,7 @@ async def update_patient_form_status(
     session: TenantSession,
     tenant_id: TenantId,
     livekit: LiveKit,
+    kms: Kms,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -831,6 +841,10 @@ async def update_patient_form_status(
             data={"from": current.value, "to": target.value},
         )
 
+    # Hard dialability gate: a form that can never be dialed must not enter the queue.
+    if target == FormStatus.IN_QUEUE:
+        await ensure_queueable(session, kms, form)
+
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
         remaining = await _unresolved_dispute_count(session, form_id)
@@ -861,10 +875,16 @@ async def update_patient_form_status(
         # (`initiated_by_id`) even when the call is created later by a different
         # actor (freed-slot dispatch, retry-at-callback).
         form.enqueued_by_id = caller.user_id
+        if body.enable_ivr_navigation is not None:
+            form.ivr_navigation_enabled = body.enable_ivr_navigation
 
     await session.flush()
 
     # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
+    detail: dict[str, Any] = {"from": current.value, "to": target.value}
+    if target == FormStatus.IN_QUEUE:
+        detail["ivr_navigation"] = form.ivr_navigation_enabled
+
     audit = get_audit(request)
     await audit.emit(
         AuditRecord(
@@ -875,7 +895,7 @@ async def update_patient_form_status(
             event_type=AuditEvent.FORM_STATUS_CHANGE.value,
             resource_type="patient_form",
             resource_id=str(form_id),
-            detail={"from": current.value, "to": target.value},
+            detail=detail,
         )
     )
 

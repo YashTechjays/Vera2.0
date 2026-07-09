@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.patient_forms import _unresolved_dispute_count
 from scripts.seed import _seed_form_schemas
-from tests.integration.control_plane.conftest import RBACWorld
+from tests.integration.control_plane.conftest import RBACWorld, seed_outbound_trunk
+from vera_core.config.kms import LocalDevKMS
 from vera_core.models import (
     DisputeAction,
     FieldAnswer,
@@ -1029,6 +1030,7 @@ async def _make_plain_form(
     tenant_id: UUID,
     schema_version_id: UUID,
     status: FormStatus,
+    phone: str | None = None,
 ) -> UUID:
     """A bare form in `status` with no field answers (so no disputes)."""
     async with sm() as s, s.begin():
@@ -1040,6 +1042,7 @@ async def _make_plain_form(
             patient_name="jane doe",
             completion_pct=0,
             retry_count=0,
+            insurance_provider_phone_number=phone,
         )
         s.add(form)
         await s.flush()
@@ -1059,12 +1062,17 @@ async def test_status_queues_a_ready_form(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     schema_version_id: UUID,
     cleanup_forms: None,
+    trunk_integration_type: None,
 ) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
     form_id = await _make_plain_form(
         admin_sessionmaker,
         tenant_id=rbac_world.tenant_id,
         schema_version_id=schema_version_id,
         status=FormStatus.READY_FOR_PROCESSING,
+        phone="+15551234567",
     )
     resp = await client.put(
         f"/api/v1/patient-forms/{form_id}/status",

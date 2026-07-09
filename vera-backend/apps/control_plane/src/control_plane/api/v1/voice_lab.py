@@ -12,7 +12,6 @@ VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
 import logging
-import re
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 from uuid import UUID
@@ -35,6 +34,7 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.livekit_gateway import OutboundDialError
+from control_plane.queueability import E164_RE
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord, AuditSink
@@ -56,9 +56,6 @@ from vera_core.transcript import TranscriptEvent, TranscriptService
 router = APIRouter(tags=["voice-lab"])
 
 logger = logging.getLogger("control_plane.voice_lab")
-
-# E.164: a leading + and 1-15 digits, first digit non-zero.
-_E164 = re.compile(r"^\+[1-9]\d{1,14}$")
 
 
 class ProviderOption(BaseModel):
@@ -124,7 +121,7 @@ async def start_voice_session(
     # both values as a typed pair so the dial site needs no None-narrowing asserts.
     outbound: tuple[str, str] | None = None
     if is_outbound:
-        if body.phone_number is None or not _E164.match(body.phone_number):
+        if body.phone_number is None or not E164_RE.match(body.phone_number):
             raise CustomAPIException(
                 DefaultExceptionCode.VALIDATION_ERROR,
                 message="phone_number must be E.164 for an outbound call",

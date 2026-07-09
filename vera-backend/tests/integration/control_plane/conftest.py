@@ -22,8 +22,9 @@ from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, Ou
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import EnvSecretProvider, Settings
-from vera_core.config.kms import LocalDevKMS
+from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
+from vera_core.integrations.credentials import seal_credentials
 from vera_core.models import AppUser, Integration, IntegrationType, Tenant, UserRole
 from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
@@ -396,3 +397,47 @@ async def trunk_integration_type(
                 await session.execute(
                     delete(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
                 )
+
+
+# The trunk id value tests assert against when they check what got dialed
+# (test_voice_lab's outbound-call assertions).
+TEST_TRUNK_ID = "ST_test_trunk"
+
+
+async def seed_outbound_trunk(
+    sessionmaker: async_sessionmaker[AsyncSession], kms: KeyManagementService, tenant_id: UUID
+) -> None:
+    """Seal a `livekit_outbound_trunk_id` credential for `tenant_id` so any outbound-dial
+    seam (voice-lab, the queueability gate) resolves a trunk from the DB. Requires the
+    `trunk_integration_type` catalog-type fixture to already exist. The single seeding
+    mechanism shared by every test that needs a configured trunk — mirrors
+    `seal_credentials`'s envelope-encryption scheme (see its module docstring)."""
+    async with sessionmaker() as session, session.begin():
+        type_id = (
+            await session.execute(
+                select(IntegrationType.id).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+            )
+        ).scalar_one()
+        integration = Integration(
+            tenant_id=tenant_id,
+            integration_type_id=type_id,
+            status="active",
+        )
+        await seal_credentials(
+            kms, integration=integration, credentials={"trunk_id": TEST_TRUNK_ID}
+        )
+        session.add(integration)
+
+
+@pytest.fixture
+async def trunk_configured(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_integration_type: None,
+) -> None:
+    """Seal the test tenant's outbound-trunk credential so any dial seam (voice-lab,
+    the queueability gate) resolves it. Uses the same LocalDevKMS master key as the app
+    under test (`authz_app`), so `get_integration_credentials` can open what we seal."""
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )

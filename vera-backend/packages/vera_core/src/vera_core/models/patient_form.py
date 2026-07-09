@@ -14,7 +14,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -91,4 +91,13 @@ class PatientForm(Base, TenantScopedMixin):
     # dispatch). Never overwritten on retry, so ownership survives re-enqueue.
     enqueued_by_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    # Operator's per-form choice at queue time (voice-lab-style toggle): should the
+    # dispatched worker boot the IVR navigator for this call? Defaults TRUE — every
+    # real payer call must navigate the IVR; turning it off is a test-phase escape
+    # hatch (to be hidden behind a feature flag later). Persisted on the row because
+    # dispatch runs later (freed slot / sweeper / auto-retry) and retries keep the
+    # choice. Non-PHI config.
+    ivr_navigation_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
     )
