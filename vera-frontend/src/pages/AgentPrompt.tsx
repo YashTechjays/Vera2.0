@@ -99,6 +99,15 @@ export function AgentPrompt(): JSX.Element {
         merged[key] = [...(merged[key] ?? []), ...messages]
       }
     }
+    // Dedupe messages within each key, preserving order
+    for (const key of Object.keys(merged)) {
+      const seen = new Set<string>()
+      merged[key] = merged[key].filter((msg) => {
+        if (seen.has(msg)) return false
+        seen.add(msg)
+        return true
+      })
+    }
     return merged
   }, [clientErrors, previewErrors.fields, saveErrors.fields])
   const generalErrors = useMemo(
@@ -111,6 +120,11 @@ export function AgentPrompt(): JSX.Element {
     return Object.keys(doc.task_overrides).filter((key) => !known.has(key))
   }, [doc, tasks])
   const loadedVersion = versions.find((v) => v.id === loadedVersionId) ?? null
+
+  function applyDocChange(next: PromptDocument): void {
+    setDoc(next)
+    setSaveErrors(NO_ERRORS)
+  }
 
   const loadVersionIntoBuffer = useCallback(async (pid: string, versionId: string) => {
     const detail = await getPromptVersion(pid, versionId)
@@ -341,17 +355,17 @@ export function AgentPrompt(): JSX.Element {
 
   function onSessionChange(field: keyof SessionBlock, text: string): void {
     if (doc === null) return
-    setDoc({ ...doc, session: { ...doc.session, [field]: text } })
+    applyDocChange({ ...doc, session: { ...doc.session, [field]: text } })
   }
 
   function onOverrideSet(taskKey: string, field: OverrideField, text: string): void {
     if (doc === null) return
-    setDoc(setOverrideField(doc, taskKey, field, text))
+    applyDocChange(setOverrideField(doc, taskKey, field, text))
   }
 
   function onOverrideClear(taskKey: string, field: OverrideField): void {
     if (doc === null) return
-    setDoc(clearOverrideField(doc, taskKey, field))
+    applyDocChange(clearOverrideField(doc, taskKey, field))
   }
 
   const selectedTask =
@@ -476,7 +490,7 @@ export function AgentPrompt(): JSX.Element {
                       type="button"
                       variant="ghost"
                       size="sm"
-                      onClick={() => doc !== null && setDoc(removeOverrideEntry(doc, key))}
+                      onClick={() => doc !== null && applyDocChange(removeOverrideEntry(doc, key))}
                     >
                       Remove
                     </Button>
