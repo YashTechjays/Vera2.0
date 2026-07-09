@@ -3,7 +3,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 import * as authApi from "@/lib/auth/api"
 import type { MeResponse } from "@/lib/auth/api"
 import { apiErrorMessage, serializeApiError } from "@/lib/api/client"
-import { clearSession, getToken, setSession } from "@/lib/auth/storage"
+import { clearSession, getAuthPlane, getToken, setAuthPlane, setSession } from "@/lib/auth/storage"
 
 type Status = "loading" | "anonymous" | "authenticated"
 // `platform` marks a super-admin (platform-operator) challenge, so the verify step
@@ -13,6 +13,13 @@ type MfaState = {
   step: "verify" | "enroll"
   provisioningUri?: string
   platform?: boolean
+}
+
+// Login page an MFA page bounces to: in-memory plane when known, else the persisted
+// hint so a refresh mid-enrollment still lands a platform operator on /platform/login.
+export function loginRedirectPath(mfa: Pick<MfaState, "platform"> | null): string {
+  const platform = mfa ? mfa.platform === true : getAuthPlane() === "platform"
+  return platform ? "/platform/login" : "/login"
 }
 
 type AuthState = {
@@ -63,6 +70,7 @@ export const loginThunk = createAsyncThunk(
     // Remember the workspace so the MFA step (which runs before a session exists)
     // can read it from the store instead of the URL.
     dispatch(setTenantSlug(arg.slug))
+    setAuthPlane("tenant")
     const res = await authApi.login(arg.slug, arg.email, arg.password)
     if (res.mfa === "none") {
       setSession(res.session_token ?? "", arg.slug)
@@ -87,13 +95,42 @@ export const verifyMfaThunk = createAsyncThunk(
   keepApiError,
 )
 
-// --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory,
-// so login never mints a session — it always hands back a verify challenge. ---
+// --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory, so login
+// never mints a session — it hands back a verify challenge, or an enroll challenge (the
+// first-login enrollment wall) when the operator hasn't set up MFA yet. ---
 export const platformLoginThunk = createAsyncThunk(
   "auth/platformLogin",
-  async (arg: { email: string; password: string }, { dispatch }) => {
+  async (
+    arg: { email: string; password: string },
+    { dispatch },
+  ): Promise<authApi.LoginResult["mfa"]> => {
     const res = await authApi.platformLogin(arg.email, arg.password)
-    dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
+    // Persist the plane so a refresh mid-enrollment returns to /platform/login.
+    setAuthPlane("platform")
+    if (res.mfa === "enroll") {
+      dispatch(
+        setMfa({
+          token: res.mfa_token ?? "",
+          step: "enroll",
+          platform: true,
+          provisioningUri: res.provisioning_uri ?? undefined,
+        }),
+      )
+    } else {
+      dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
+    }
+    return res.mfa
+  },
+  keepApiError,
+)
+
+export const platformEnrollActivateThunk = createAsyncThunk(
+  "auth/platformEnrollActivate",
+  async (arg: { mfaToken: string; code: string }, { dispatch }) => {
+    const res = await authApi.platformEnrollActivate(arg.mfaToken, arg.code)
+    // Platform session belongs to no tenant — store with an empty slug.
+    setSession(res.session_token, "")
+    await dispatch(fetchMe()).unwrap()
   },
   keepApiError,
 )
@@ -239,6 +276,18 @@ const authSlice = createSlice({
         s.mfa = null
       })
       .addCase(enrollActivateThunk.rejected, (s, a) => {
+        s.loading = false
+        s.error = apiErrorMessage(a.error, "Enrollment failed.")
+      })
+      .addCase(platformEnrollActivateThunk.pending, (s) => {
+        s.loading = true
+        s.error = null
+      })
+      .addCase(platformEnrollActivateThunk.fulfilled, (s) => {
+        s.loading = false
+        s.mfa = null
+      })
+      .addCase(platformEnrollActivateThunk.rejected, (s, a) => {
         s.loading = false
         s.error = apiErrorMessage(a.error, "Enrollment failed.")
       })
