@@ -37,6 +37,16 @@ class TranscriptEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
+def _entries_to_events(entries: list[tuple[str, dict[str, str]]]) -> list[TranscriptEvent]:
+    """Turn raw stream entries into events, dropping the ended sentinel. The
+    non-blocking snapshot both stores share for read_all()."""
+    return [
+        TranscriptEvent(role=fields["role"], text=fields["text"], ts=int(fields["ts"]))
+        for _entry_id, fields in entries
+        if fields.get(_ENDED_FIELD) != _ENDED_VALUE
+    ]
+
+
 class TranscriptStore(Protocol):
     """Low-level transport. Callers use TranscriptService, not this directly."""
 
@@ -98,12 +108,7 @@ class InMemoryTranscriptStore:
             )
 
     async def read_all(self, room_name: str) -> list[TranscriptEvent]:
-        entries = self._entries.get(transcript_stream_key(room_name), [])
-        return [
-            TranscriptEvent(role=f["role"], text=f["text"], ts=int(f["ts"]))
-            for _id, f in entries
-            if f.get(_ENDED_FIELD) != _ENDED_VALUE
-        ]
+        return _entries_to_events(self._entries.get(transcript_stream_key(room_name), []))
 
 
 class RedisTranscriptStore:
@@ -189,12 +194,7 @@ class RedisTranscriptStore:
         # never-created stream returns []. This is the finalizer's read; the SSE
         # path keeps the tailing read().
         raw = await self._redis.xrange(transcript_stream_key(room_name))
-        entries = cast(list[tuple[str, dict[str, str]]], raw)
-        return [
-            TranscriptEvent(role=fields["role"], text=fields["text"], ts=int(fields["ts"]))
-            for _entry_id, fields in entries
-            if fields.get(_ENDED_FIELD) != _ENDED_VALUE
-        ]
+        return _entries_to_events(cast(list[tuple[str, dict[str, str]]], raw))
 
 
 class TranscriptService:

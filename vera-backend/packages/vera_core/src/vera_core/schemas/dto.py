@@ -61,23 +61,19 @@ class VoiceSessionResponse(BaseModel):
     mode: str
 
 
-class _RetentionDays(BaseModel):
-    """Shared retention knob. None → the tenant reverts to the platform default;
-    otherwise bounded to 1 day..10 years."""
-
-    retention_days: int | None = Field(default=None, ge=1, le=3650)
-
-
-class RetentionPolicy(_RetentionDays):
+class RetentionPolicy(BaseModel):
     """Tenant recording-retention knob. retention_days=None → the platform
     default applies (surfaced as default_days so the UI can render the
-    effective value)."""
+    effective value); otherwise bounded to 1 day..10 years."""
 
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
     default_days: int
 
 
-class RetentionPolicyUpdate(_RetentionDays):
+class RetentionPolicyUpdate(BaseModel):
     """PATCH body: None retention_days reverts the tenant to the platform default."""
+
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class RecordingPlayback(BaseModel):

@@ -12,7 +12,7 @@ only ids/sizes/hashes.
 import asyncio
 import hashlib
 from datetime import timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 _GCS_SCHEME = "gs://"
 _CHUNK = 1 << 20  # 1 MiB read chunks for hashing
@@ -36,21 +36,28 @@ class RecordingStorage(Protocol):
 
 
 class GCSRecordingStorage:
+    def _blob_sync(self, bucket: str, object_path: str) -> Any:
+        from google.cloud import storage  # type: ignore[attr-defined]  # lazy prod-only dep
+
+        return storage.Client().bucket(bucket).blob(object_path)
+
     async def sha256_and_size(self, bucket: str, object_path: str) -> tuple[str, int] | None:
         return await asyncio.to_thread(self._sha256_sync, bucket, object_path)
 
     def _sha256_sync(self, bucket: str, object_path: str) -> tuple[str, int] | None:
-        from google.cloud import storage  # type: ignore[attr-defined]  # lazy prod-only dep
+        from google.api_core.exceptions import NotFound
 
-        blob = storage.Client().bucket(bucket).blob(object_path)
-        if not blob.exists():
-            return None
         digest = hashlib.sha256()
         size = 0
-        with blob.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(_CHUNK), b""):
-                digest.update(chunk)
-                size += len(chunk)
+        # Stream straight into the hash; a NotFound on open means the object is not
+        # visible yet (caller retries next tick) — one GCS round-trip, no exists() HEAD.
+        try:
+            with self._blob_sync(bucket, object_path).open("rb") as fh:
+                for chunk in iter(lambda: fh.read(_CHUNK), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+        except NotFound:
+            return None
         return digest.hexdigest(), size
 
     async def delete(self, bucket: str, object_path: str) -> None:
@@ -58,10 +65,9 @@ class GCSRecordingStorage:
 
     def _delete_sync(self, bucket: str, object_path: str) -> None:
         from google.api_core.exceptions import NotFound
-        from google.cloud import storage  # type: ignore[attr-defined]
 
         try:
-            storage.Client().bucket(bucket).blob(object_path).delete()
+            self._blob_sync(bucket, object_path).delete()
         except NotFound:
             return  # already gone — sweep retries / replica races are no-ops
 
@@ -69,9 +75,7 @@ class GCSRecordingStorage:
         return await asyncio.to_thread(self._exists_sync, bucket, object_path)
 
     def _exists_sync(self, bucket: str, object_path: str) -> bool:
-        from google.cloud import storage  # type: ignore[attr-defined]
-
-        return bool(storage.Client().bucket(bucket).blob(object_path).exists())
+        return bool(self._blob_sync(bucket, object_path).exists())
 
     async def signed_url(self, bucket: str, object_path: str, *, ttl_seconds: int) -> str:
         return await asyncio.to_thread(self._signed_url_sync, bucket, object_path, ttl_seconds)
