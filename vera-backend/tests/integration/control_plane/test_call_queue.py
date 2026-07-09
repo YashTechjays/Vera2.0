@@ -714,3 +714,64 @@ async def test_full_dispatch_does_not_carry_retry_fields(
         assert md is None or "retry_fields" not in md, (
             f"FULL dispatch must not carry retry_fields; got: {md}"
         )
+
+
+@pytest.mark.asyncio
+async def test_retry_dispatch_with_no_unsatisfied_fields_omits_retry_fields(
+    retry_form_ctx: _RetryFormCtx,
+) -> None:
+    """RETRY dispatch when all required askable fields are already satisfied (e.g.,
+    a human filled them between eval and dispatch) must proceed BUT omit the
+    retry_fields key from metadata. Worker falls back to the full script when the
+    key is absent. Lineage is still written (independent of labels)."""
+    from vera_core.models import FieldAnswer
+    from vera_core.models.enums import AnswerSource
+    from vera_core.services.queue_dispatcher import try_dispatch
+
+    # Insert a human answer (trusted, not retryable) for the required field so
+    # retryable_required_paths computes no unsatisfied fields → empty labels.
+    async with retry_form_ctx.sessionmaker() as session, session.begin():
+        session.add(
+            FieldAnswer(
+                tenant_id=retry_form_ctx.tenant_id,
+                form_id=retry_form_ctx.form_id,
+                field_path="sections.benefits.lifetime_max",
+                value={"text": "500000"},
+                source=AnswerSource.HUMAN.value,
+                is_current=True,
+            )
+        )
+
+    capture = _CaptureLiveKit()
+
+    async with tenant_session(retry_form_ctx.sessionmaker, retry_form_ctx.tenant_id) as session:
+        dispatched = await try_dispatch(session, retry_form_ctx.tenant_id, capture)
+
+    assert dispatched == 1, "expected exactly one call dispatched"
+
+    md = capture.last_metadata
+    assert md is not None, "create_call_room must receive metadata"
+    # Empty labels ⇒ retry_fields key omitted ⇒ worker uses the full script.
+    assert "retry_fields" not in md, (
+        f"retry_fields must be omitted when no unsatisfied fields: {md}"
+    )
+
+    # Verify the new call has retry mode.
+    async with retry_form_ctx.sessionmaker() as session:
+        new_call = (
+            await session.execute(
+                select(Call)
+                .where(
+                    Call.form_id == retry_form_ctx.form_id,
+                    Call.id != retry_form_ctx.prior_call_id,
+                )
+                .order_by(Call.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    assert new_call is not None
+    assert new_call.mode == "retry"
+
+    # Lineage still exists (independent of labels).
+    lineage = await retry_form_ctx.get_lineage()
+    assert lineage.parent_call_id == retry_form_ctx.prior_call_id
