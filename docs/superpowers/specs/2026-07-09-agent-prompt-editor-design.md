@@ -133,7 +133,8 @@ auth, no react-query, no new deps). Route/gating unchanged: `/agent-prompt` unde
     are intentionally absent).
 - **`src/components/agent-prompt/`** — `SessionEditor.tsx`,
   `TaskOverrideEditor.tsx`, `OverrideFieldRow.tsx`, `PreviewPane.tsx`,
-  `VersionRail.tsx`, `PlaceholderPicker.tsx`.
+  `VersionList.tsx`, `PlaceholderPicker.tsx`, plus a shared
+  `PromptTextarea.tsx` (label + help + textarea + picker + inline errors).
 - **`src/pages/AgentPrompt.tsx` (rewrite)** — orchestration + layout.
   `agentPrompt.helpers.ts` keeps `pickInitialVersion` (unchanged semantics).
 
