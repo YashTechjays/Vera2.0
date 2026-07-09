@@ -11,6 +11,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.patient_forms import _unresolved_dispute_count
+from control_plane.dispatch import drain_pending
 from scripts.seed import _seed_form_schemas
 from tests.integration.control_plane.conftest import RBACWorld, seed_outbound_trunk
 from vera_core.config.kms import LocalDevKMS
@@ -88,6 +89,9 @@ async def cleanup_forms(
     admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
 ) -> AsyncGenerator[None]:
     yield
+    # Enqueueing schedules a detached dispatch task — let it finish before purging,
+    # or its call insert races the deletes below.
+    await drain_pending()
     async with admin_sessionmaker() as s, s.begin():
         # Enqueueing a form fires the dispatcher, which creates call rows that
         # FK-reference the form — clear them (and their events) first.
@@ -1081,8 +1085,10 @@ async def test_status_queues_a_ready_form(
     )
     assert resp.status_code == 200, resp.text
     # The response acknowledges the manual transition; the dispatcher then fires
-    # synchronously and (with free slots and FakeLiveKit) dispatches the form.
+    # as a detached post-commit task and (with free slots and FakeLiveKit)
+    # dispatches the form — drain it before asserting on its effects.
     assert resp.json()["data"]["status"] == "in_queue"
+    await drain_pending()
     assert await _status(admin_sessionmaker, form_id) == "in_call"
 
 

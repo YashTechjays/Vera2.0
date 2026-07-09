@@ -2,14 +2,18 @@
 
 The dispatcher makes external calls (LiveKit room + SIP dial) and sleeps between
 dials for carrier pacing — none of that may hold an HTTP request's transaction or
-row locks. Hosts: the status endpoint's post-commit background task and the
+row locks. Hosts: the status endpoint's post-commit detached task and the
 worker-event consumer (a call ended → a slot freed).
 """
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import select
+
 from vera_core.db.rls import tenant_session
+from vera_core.models import PatientForm
 from vera_core.services.queue_dispatcher import try_dispatch
 
 if TYPE_CHECKING:
@@ -21,6 +25,39 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Detached dispatch tasks in flight. Strong refs (a bare create_task result can be
+# GC'd mid-flight); tests drain this set to await post-commit dispatch work.
+_PENDING: set[asyncio.Task[None]] = set()
+
+
+def schedule_dispatch_pass(
+    sessionmaker: "async_sessionmaker[AsyncSession]",
+    tenant_id: "UUID",
+    livekit: Any,
+    kms: Any,
+    audit: "AuditSink | None",
+    *,
+    wait_for_form_id: "UUID | None" = None,
+) -> None:
+    """Fire-and-forget a dispatch pass on the running loop. See run_dispatch_pass
+    for why this is a detached task and not fastapi.BackgroundTasks: background
+    tasks run BEFORE yield-dependency teardown, i.e. before the request's
+    transaction commits — the pass would see (and skip) the still-locked row."""
+    task = asyncio.create_task(
+        run_dispatch_pass(
+            sessionmaker, tenant_id, livekit, kms, audit, wait_for_form_id=wait_for_form_id
+        )
+    )
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)
+
+
+async def drain_pending() -> None:
+    """Await every in-flight detached dispatch task (test hook; also usable at
+    shutdown). Exceptions are already swallowed inside run_dispatch_pass."""
+    while _PENDING:
+        await asyncio.gather(*list(_PENDING), return_exceptions=True)
+
 
 async def run_dispatch_pass(
     sessionmaker: "async_sessionmaker[AsyncSession]",
@@ -28,11 +65,25 @@ async def run_dispatch_pass(
     livekit: Any,
     kms: Any,
     audit: "AuditSink | None",
+    *,
+    wait_for_form_id: "UUID | None" = None,
 ) -> None:
     """One dispatch pass in a fresh tenant-scoped session; commits on success.
     Exception-safe: a failed pass logs and returns — queued forms are retried on
     the next triggering event."""
     try:
+        if wait_for_form_id is not None:
+            # Post-commit barrier: the scheduling request still holds the enqueued
+            # row's FOR UPDATE lock until its transaction commits. A plain (non-
+            # SKIP LOCKED) FOR UPDATE on that one row makes Postgres queue us
+            # behind the commit — when it returns, the IN_QUEUE write is committed
+            # and visible. The barrier transaction is closed before the pass runs.
+            async with tenant_session(sessionmaker, tenant_id) as session:
+                await session.execute(
+                    select(PatientForm.id)
+                    .where(PatientForm.id == wait_for_form_id)
+                    .with_for_update()
+                )
         async with tenant_session(sessionmaker, tenant_id) as session:
             await try_dispatch(session, tenant_id, livekit, kms, audit=audit)
     except Exception:

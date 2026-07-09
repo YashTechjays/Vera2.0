@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from control_plane.auth.invitations import InMemoryInvitationStore
 from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import InMemorySessionStore, SessionData
+from control_plane.dispatch import drain_pending
 from control_plane.email import InMemoryEmailSender
 from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
@@ -111,6 +112,15 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.dial_error = False
     fake_livekit.remove_not_found = False
     yield
+
+
+@pytest.fixture(autouse=True)
+async def drain_dispatch_tasks() -> AsyncIterator[None]:
+    """Enqueue endpoints schedule detached post-commit dispatch tasks
+    (control_plane.dispatch). Never let one cross a test boundary — a stray task
+    would insert call rows mid-teardown or pollute the next test's tenant."""
+    yield
+    await drain_pending()
 
 
 @pytest.fixture(scope="session")

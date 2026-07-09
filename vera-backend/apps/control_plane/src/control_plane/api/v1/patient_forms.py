@@ -18,7 +18,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Query, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -27,7 +27,7 @@ from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit, get_sessionmaker
-from control_plane.dispatch import run_dispatch_pass
+from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
     CustomAPIException,
     CustomAPIResponse,
@@ -805,7 +805,6 @@ async def update_patient_form_status(
     tenant_id: TenantId,
     livekit: LiveKit,
     kms: Kms,
-    background: BackgroundTasks,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -900,13 +899,20 @@ async def update_patient_form_status(
         )
     )
 
-    # Kick a dispatch pass AFTER this transaction commits (yield-dependency teardown
-    # runs before background tasks) — dial + pacing must not ride the request
-    # transaction. The response acknowledges the manual transition only; clients
-    # observe dispatch via the calls list.
+    # Kick a dispatch pass strictly AFTER this transaction commits: a detached
+    # task whose first statement lock-waits on the enqueued row (see
+    # control_plane.dispatch). NOT fastapi.BackgroundTasks — those run before
+    # yield-dependency teardown, i.e. before this transaction's commit. The
+    # response acknowledges the manual transition only; clients observe dispatch
+    # via the calls list.
     if target == FormStatus.IN_QUEUE:
-        background.add_task(
-            run_dispatch_pass, get_sessionmaker(request), tenant_id, livekit, kms, audit
+        schedule_dispatch_pass(
+            get_sessionmaker(request),
+            tenant_id,
+            livekit,
+            kms,
+            audit,
+            wait_for_form_id=form_id,
         )
 
     return ok(

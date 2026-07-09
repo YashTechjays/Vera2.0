@@ -12,6 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth import api_key as apikey
+from control_plane.dispatch import drain_pending
 from scripts.seed import _seed_form_schemas
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import tenant_session, uuid7
@@ -71,6 +72,9 @@ async def cleanup_forms(
     admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
 ) -> AsyncGenerator[None]:
     yield
+    # An in-flight detached dispatch task could insert a call row FK-referencing
+    # a form mid-delete — let it finish first.
+    await drain_pending()
     async with admin_sessionmaker() as session, session.begin():
         # field_answer cascades on the form delete.
         await session.execute(

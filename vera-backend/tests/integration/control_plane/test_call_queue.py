@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from control_plane.dispatch import drain_pending
 from tests.integration.control_plane.conftest import RBACWorld
 from tests.integration.control_plane.test_patient_forms_intake import (
     INTAKE_PAYLOAD,
@@ -109,6 +110,10 @@ async def _seed_ready_form(
 
     yield patient_form_id
 
+    # An enqueue during the test schedules a detached dispatch task — let it
+    # finish before purging, or its call insert races the deletes (FK errors,
+    # leaked rows).
+    await drain_pending()
     async with sessionmaker() as session, session.begin():
         await _purge_form(session, patient_form_id)
         if created_schema:
@@ -167,8 +172,9 @@ async def test_enqueue_form_triggers_dispatch(
         json={"status": "in_queue"},
     )
     assert resp.status_code == 200, resp.text
-    # The status endpoint returns the form status BEFORE dispatch runs
-    # (dispatch runs after flush). Check via the calls list.
+    # Dispatch runs as a detached post-commit task — drain it before asserting
+    # on its effects. Check via the calls list.
+    await drain_pending()
     calls_resp = await client.get(
         "/api/v1/calls",
         headers=_auth(rbac_world.admin_token),
@@ -195,6 +201,7 @@ async def test_completed_callback_moves_form_to_completed(
         headers=_auth(rbac_world.admin_token),
         json={"status": "in_queue"},
     )
+    await drain_pending()  # dispatch is a detached post-commit task
     call_id = (await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))).json()[
         "data"
     ][0]["id"]
@@ -323,6 +330,7 @@ async def test_dispatched_call_carries_queuer_as_owner(
         json={"status": "in_queue"},
     )
     assert resp.status_code == 200, resp.text
+    await drain_pending()  # dispatch is a detached post-commit task
 
     async with admin_sessionmaker() as session:
         initiated_by_id = (
@@ -350,6 +358,7 @@ async def test_queue_started_call_is_publishable_by_queuer(
         json={"status": "in_queue"},
     )
     assert resp.status_code == 200, resp.text
+    await drain_pending()  # dispatch is a detached post-commit task
 
     calls = (await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))).json()[
         "data"
@@ -417,6 +426,7 @@ async def test_manual_call_form_not_redispatched(
             json={"status": "in_queue"},
         )
         assert resp.status_code == 200, resp.text
+        await drain_pending()  # dispatch is a detached post-commit task
 
         async with admin_sessionmaker() as session:
             x_calls = (
