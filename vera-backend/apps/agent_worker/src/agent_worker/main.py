@@ -392,11 +392,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     logger.exception("failed to close call stream redis for %s", room_name)
 
         async def _on_shutdown() -> None:
-            # The transcript and call-event streams are independent Redis keys with no
-            # ordering dependency between each other (each stream's own flush-before-end
-            # ordering is preserved internally), so flush both concurrently rather than
-            # paying for them back-to-back on the call-teardown critical path.
-            await asyncio.gather(_flush_transcript_stream(), _flush_call_stream())
+            # Sequential, spec-pinned order: transcript-stream teardown, then
+            # call-stream teardown, then the PHI boundary. Each step inside the helpers
+            # is best-effort (own try/except), so a failure never skips the rest.
+            await _flush_transcript_stream()
+            await _flush_call_stream()
             await boundary.close_session(session_id)
 
             # Last: signal call end (the consumer completes the form and refills the
