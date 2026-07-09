@@ -46,6 +46,17 @@ def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
     assert "transfer_to_verification" in lower
 
 
+def test_base_prompt_declares_the_provider_override_contract() -> None:
+    # The base prompt must itself tell the model that an appended provider playbook is
+    # authoritative (not rely only on the appended block being self-describing) — AND must keep
+    # provider overrides subordinate to the absolute role/silence rails.
+    prompt = IVR_NAVIGATOR_SYSTEM_PROMPT
+    assert "<provider_overrides" in prompt  # the base prompt declares the override contract
+    assert "AUTHORITATIVE" in prompt
+    # a provider rule can never relax the absolute rails
+    assert "role_lock and silence_contract always hold" in prompt
+
+
 def test_build_ivr_instructions_omits_the_cartesia_guide() -> None:
     # Unlike the chat persona, the navigator drives TTS with plain words and needs no
     # Cartesia readback markup — the instructions are just the navigator prompt.
@@ -74,6 +85,8 @@ def test_playbook_overrides_and_rules_appended_after_base_prompt() -> None:
     assert "Reach a human by saying 'Advocate'; answer Yes to the survey." in out
     assert "<provider_playbook" in out
     assert "<provider_specific_rules" in out
+    # the rules block leads with an explicit follow-these directive (not bare text)
+    assert "take precedence over the generic guidance above" in out
     assert out.index("</ivr_navigation_prompt>") < out.index("<provider_playbook")
     # the navigator still carries no Cartesia readback markup, even with a playbook
     assert CARTESIA_MARKUP_GUIDE not in out
