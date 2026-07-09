@@ -29,9 +29,7 @@ def test_build_judge_prompt_includes_extracted_and_transcript():
 
 
 def test_parse_judge_response_maps_verdicts():
-    data = [
-        {"field_path": "a.b", "supported": True, "confidence": 95, "evidence": "yes, covered"}
-    ]
+    data = [{"field_path": "a.b", "supported": True, "confidence": 95, "evidence": "yes, covered"}]
     out = parse_judge_response(data)
     assert out[0].field_path == "a.b"
     assert out[0].supported is True
@@ -56,7 +54,7 @@ def test_build_judge_prompt_excludes_extractor_confidence():
     assert "in-network" in prompt
     assert "sections.cov.network_status" in prompt
     assert "evidence_seq" in prompt  # evidence_seq key must be present
-    assert '"1"' in prompt or ': 1' in prompt  # evidence_seq value (1) must be present
+    assert '"1"' in prompt or ": 1" in prompt  # evidence_seq value (1) must be present
 
     # The prompt MUST NOT include the extraction confidence (77)
     assert "77" not in prompt

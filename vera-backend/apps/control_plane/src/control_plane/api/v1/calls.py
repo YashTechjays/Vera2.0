@@ -559,9 +559,7 @@ async def update_call_status(
 
     # Enqueue the post-call eval job when the form reached AI_PROCESSING.
     if form.status == FormStatus.AI_PROCESSING.value:
-        await post_call_bus.emit(
-            PostCallJob(tenant_id=tenant_id, form_id=form.id, call_id=call.id)
-        )
+        await post_call_bus.emit(PostCallJob(tenant_id=tenant_id, form_id=form.id, call_id=call.id))
 
     # Fire the dispatcher — a concurrency slot just freed up.
     await try_dispatch(session, tenant_id, livekit, audit=audit)
