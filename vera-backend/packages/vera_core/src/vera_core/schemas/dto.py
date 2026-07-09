@@ -78,3 +78,11 @@ class RetentionPolicy(_RetentionDays):
 
 class RetentionPolicyUpdate(_RetentionDays):
     """PATCH body: None retention_days reverts the tenant to the platform default."""
+
+
+class RecordingPlayback(BaseModel):
+    """A short-lived signed URL for one recording. The URL itself is the
+    credential — never logged, never cached (Cache-Control: no-store)."""
+
+    url: str
+    expires_at: datetime

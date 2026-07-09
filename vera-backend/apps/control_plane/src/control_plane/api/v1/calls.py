@@ -11,13 +11,21 @@ in each handler.
 
 import contextlib
 import logging
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
-from control_plane.api.v1.common import AppSettings, Audit, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import (
+    AppSettings,
+    Audit,
+    LiveKit,
+    RecordingStorageDep,
+    TenantId,
+    TenantSession,
+)
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit
@@ -28,17 +36,25 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.ivr_selection import add_active_playbook_metadata
+from control_plane.recording_storage import parse_gcs_uri
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
-from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Recording, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
+from vera_core.models.enums import (
+    CallEventType,
+    CallStatus,
+    FormStatus,
+    ProviderStatus,
+    RecordingStatus,
+)
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import (
     CallSummary,
     JoinTokenResponse,
     PersonaTweak,
+    RecordingPlayback,
     RevokeAccessRequest,
     StartCallRequest,
 )
@@ -77,6 +93,19 @@ def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSumma
         published=call.published,
         is_owner=call.initiated_by_id == caller_id,
     )
+
+
+def _assert_call_visible(call: Call, caller: VerifiedIdentity) -> None:
+    """Raise NotFoundError if the caller cannot see the call.
+
+    Owners always pass. Non-owners are denied on a revoked-user-list hit or an
+    unpublished call — same 404 shape as an absent call (no enumeration).
+    """
+    if call.initiated_by_id == caller.user_id:
+        return
+    revoked = str(caller.user_id) in call.revoked_user_ids
+    if revoked or (call.initiated_by_id is not None and not call.published):
+        raise NotFoundError(message="call not found")
 
 
 @router.post(
@@ -211,12 +240,9 @@ async def join_token(
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
-    if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
-        # Ownerless calls are joinable tenant-wide; revoked users get the same
-        # 404 as a private call (no enumeration).
-        revoked = str(caller.user_id) in call.revoked_user_ids
-        if revoked or (call.initiated_by_id is not None and not call.published):
-            raise NotFoundError(message="call not found")  # don't reveal a private call
+    _assert_call_visible(call, caller)
+    if call.initiated_by_id != caller.user_id:  # non-owner who passed visibility
+        # Audit the cross-user join: the non-owner can now hear the live call.
         await audit.emit(
             AuditRecord(
                 tenant_id=tenant_id,
@@ -409,6 +435,83 @@ async def revoke_access(
         )
     )
     return ok(None, message="Access revoked.")
+
+
+@router.get(
+    "/calls/{call_id}/recording",
+    response_model=ResponseModel[RecordingPlayback],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+    ),
+)
+async def get_recording_playback(
+    call_id: UUID,
+    request: Request,
+    response: Response,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: Audit,
+    settings: AppSettings,
+    storage: RecordingStorageDep,
+    caller: VerifiedIdentity = require("recordings:read"),
+) -> ResponseModel[RecordingPlayback]:
+    """Mint a TTL-bounded signed URL for the call's recording.
+
+    Authorization is permission AND call visibility (spec decision 6): the
+    recording is never more visible than the call itself. Every issuance is a
+    PHI disclosure → RECORDING_ACCESSED on the append-only audit trail.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    call = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one_or_none()
+    if call is None:
+        raise NotFoundError(message="call not found")
+    _assert_call_visible(call, caller)
+
+    recording = (
+        await session.execute(
+            select(Recording)
+            .where(Recording.call_id == call_id)
+            .order_by(Recording.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if recording is None:
+        raise NotFoundError(message="no recording for this call")
+    if recording.status != RecordingStatus.AVAILABLE:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message=f"recording is not available (status: {recording.status})",
+        )
+
+    bucket, object_path = parse_gcs_uri(recording.gcs_uri)
+    ttl = settings.recording_signed_url_ttl_seconds
+    url = await storage.signed_url(bucket, object_path, ttl_seconds=ttl)
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.RECORDING_ACCESSED.value,
+            resource_type="recording",
+            resource_id=str(recording.id),
+            permission_key="recordings:read",
+            decision="allow",
+            request_id=current_request_id(request),
+            detail={"call_id": str(call_id), "ttl_seconds": ttl},
+        )
+    )
+    # expires_at is informational for the client; the URL's own signature is the
+    # enforcement (GCS rejects after expiry regardless of this field).
+    return ok(
+        RecordingPlayback(
+            url=url,
+            expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
+        )
+    )
 
 
 class UpdateCallStatusRequest(BaseModel):
