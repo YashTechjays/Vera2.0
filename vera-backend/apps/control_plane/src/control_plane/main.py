@@ -19,7 +19,7 @@ from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
-from control_plane.recording_jobs import RecordingVerifier
+from control_plane.recording_jobs import RecordingVerifier, RetentionSweeper
 from control_plane.recording_storage import GCSRecordingStorage, RecordingStorage
 from control_plane.request_context import RequestIdMiddleware
 from control_plane.worker_events import WorkerEventConsumer
@@ -152,6 +152,7 @@ def create_app(
         # is available (it queries egress status).
         recording_storage: RecordingStorage | None = None
         verifier_task: asyncio.Task[None] | None = None
+        sweeper_task: asyncio.Task[None] | None = None
         if settings.recording_bucket is not None:
             recording_storage = GCSRecordingStorage()
         app.state.recording_storage = recording_storage
@@ -166,9 +167,24 @@ def create_app(
             )
             verifier_task = asyncio.create_task(verifier.run())
             verifier_task.add_done_callback(_log_background_exit)
+        # Retention sweeper: deletes recordings past retention_until with before/after
+        # audit snapshots. Needs storage but NOT LiveKit (no egress queries).
+        if recording_storage is not None:
+            sweeper = RetentionSweeper(
+                sessionmaker,
+                recording_storage,
+                app.state.audit,
+                interval_seconds=settings.retention_sweep_interval_seconds,
+            )
+            sweeper_task = asyncio.create_task(sweeper.run())
+            sweeper_task.add_done_callback(_log_background_exit)
 
         configure_observability(settings)
         yield
+        if sweeper_task is not None:
+            sweeper_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper_task
         if verifier_task is not None:
             verifier_task.cancel()
             with suppress(asyncio.CancelledError):

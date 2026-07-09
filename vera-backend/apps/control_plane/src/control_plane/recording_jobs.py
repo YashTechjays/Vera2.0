@@ -1,6 +1,6 @@
-"""Recording background jobs: the egress-reconciliation verifier (this task) and
-the retention sweeper (Task 9). Both are control-plane lifespan tasks following
-the WorkerEventConsumer loop discipline (never die: log + sleep on error).
+"""Recording background jobs: the egress-reconciliation verifier and the
+retention sweeper. Both are control-plane lifespan tasks following the
+WorkerEventConsumer loop discipline (never die: log + sleep on error).
 
 Cross-tenant discovery goes through SECURITY DEFINER work-list functions
 (recording_pending_work / recording_retention_due — ids and non-PHI pointers
@@ -9,6 +9,7 @@ only); every row mutation runs inside tenant_session(...) with full RLS.
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -28,6 +29,38 @@ from vera_core.models.enums import CallStatus, RecordingStatus
 logger = logging.getLogger("control_plane.recording_jobs")
 
 _DISCARD_CALL_STATUSES = frozenset({CallStatus.NO_ANSWER, CallStatus.BUSY})
+
+
+async def _run_forever(
+    label: str, tick: Callable[[], Awaitable[None]], interval_seconds: int
+) -> None:
+    """Never-die loop discipline shared by both jobs (WorkerEventConsumer style):
+    an uncaught tick error is logged and the loop sleeps on; only cancellation exits."""
+    while True:
+        try:
+            await tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("%s tick failed; continuing", label)
+        await asyncio.sleep(interval_seconds)
+
+
+async def _guarded_recording_update(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    recording_id: UUID,
+    *,
+    expected: str,
+    values: dict[str, Any],
+) -> None:
+    """State-guarded UPDATE: a replica that already transitioned the row wins; ours no-ops."""
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        await session.execute(
+            update(Recording)
+            .where(Recording.id == recording_id, Recording.status == expected)
+            .values(**values)
+        )
 
 
 @dataclass(frozen=True)
@@ -58,14 +91,7 @@ class RecordingVerifier:
         self._retention_days_default = retention_days_default
 
     async def run(self) -> None:
-        while True:
-            try:
-                await self.tick()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("recording verifier tick failed; continuing")
-            await asyncio.sleep(self._interval)
+        await _run_forever("recording verifier", self.tick, self._interval)
 
     async def tick(self) -> None:
         rows = await self._pending_rows()
@@ -176,13 +202,9 @@ class RecordingVerifier:
     async def _apply_update(
         self, row: PendingRow, *, expected: str, values: dict[str, Any]
     ) -> None:
-        # State-guarded: a replica that already transitioned the row wins; ours no-ops.
-        async with tenant_session(self._sessionmaker, row.tenant_id) as session:
-            await session.execute(
-                update(Recording)
-                .where(Recording.id == row.recording_id, Recording.status == expected)
-                .values(**values)
-            )
+        await _guarded_recording_update(
+            self._sessionmaker, row.tenant_id, row.recording_id, expected=expected, values=values
+        )
 
     async def _emit(self, row: PendingRow, event: AuditEvent, detail: dict[str, Any]) -> None:
         await self._audit.emit(
@@ -194,5 +216,111 @@ class RecordingVerifier:
                 resource_type="recording",
                 resource_id=str(row.recording_id),
                 detail={"call_id": str(row.call_id), **detail},
+            )
+        )
+
+
+class RetentionSweeper:
+    """Deletes recordings past retention_until with before/after audit snapshots
+    (spec decision 5). GCS delete is idempotent (absent → no-op) and the tombstone
+    update is state-guarded, so replicas and retries are safe."""
+
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        storage: RecordingStorage,
+        audit: AuditSink,
+        *,
+        interval_seconds: int,
+    ) -> None:
+        self._sessionmaker = sessionmaker
+        self._storage = storage
+        self._audit = audit
+        self._interval = interval_seconds
+
+    async def run(self) -> None:
+        await _run_forever("retention sweep", self.tick, self._interval)
+
+    async def tick(self) -> None:
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                text("SELECT tenant_id, recording_id FROM recording_retention_due()")
+            )
+            due = [(UUID(str(t)), UUID(str(r))) for t, r in result.all()]
+        for tenant_id, recording_id in due:
+            try:
+                await self._sweep_one(tenant_id, recording_id)
+            except Exception:
+                # One bad row must not starve the rest; the delete is idempotent and
+                # the tombstone is state-guarded, so a retry next tick is safe.
+                logger.exception("sweep failed for recording %s", recording_id)
+
+    async def _sweep_one(self, tenant_id: UUID, recording_id: UUID) -> None:
+        rec = await self._load_available(tenant_id, recording_id)
+        if rec is None:
+            return  # already swept (replica) or state changed — nothing to do
+
+        # BEFORE snapshot: evidence survives in the append-only audit_log even if
+        # we crash mid-delete, so recovery can confirm what was destroyed.
+        await self._emit_deleted(
+            tenant_id,
+            recording_id,
+            call_id=rec.call_id,
+            detail={
+                "phase": "before",
+                "gcs_uri": rec.gcs_uri,
+                "size_bytes": rec.size_bytes,
+                "sha256": rec.sha256,
+                "retention_until": rec.retention_until.isoformat() if rec.retention_until else None,
+            },
+        )
+        bucket, object_path = parse_gcs_uri(rec.gcs_uri)
+        await self._storage.delete(bucket, object_path)
+        if await self._storage.exists(bucket, object_path):
+            logger.error("recording %s object still present after delete; will retry", recording_id)
+            return  # no AFTER record, no tombstone — retried next tick
+
+        await self._apply_tombstone(tenant_id, recording_id)
+        await self._emit_deleted(
+            tenant_id,
+            recording_id,
+            call_id=rec.call_id,
+            detail={"phase": "after", "verified_gone": True},
+        )
+
+    async def _load_available(self, tenant_id: UUID, recording_id: UUID) -> Recording | None:
+        """Seam: load the recording only if still status=AVAILABLE (stub in tests)."""
+        async with tenant_session(self._sessionmaker, tenant_id) as session:
+            return (
+                await session.execute(
+                    select(Recording).where(
+                        Recording.id == recording_id,
+                        Recording.status == RecordingStatus.AVAILABLE.value,
+                    )
+                )
+            ).scalar_one_or_none()
+
+    async def _apply_tombstone(self, tenant_id: UUID, recording_id: UUID) -> None:
+        """Seam: AVAILABLE → DELETED tombstone; sha256/size evidence columns retained."""
+        await _guarded_recording_update(
+            self._sessionmaker,
+            tenant_id,
+            recording_id,
+            expected=RecordingStatus.AVAILABLE.value,
+            values={"status": RecordingStatus.DELETED.value, "deleted_at": func.now()},
+        )
+
+    async def _emit_deleted(
+        self, tenant_id: UUID, recording_id: UUID, *, call_id: UUID, detail: dict[str, Any]
+    ) -> None:
+        await self._audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.SYSTEM,
+                actor_label="retention-sweeper",
+                event_type=AuditEvent.RECORDING_DELETED.value,
+                resource_type="recording",
+                resource_id=str(recording_id),
+                detail={"call_id": str(call_id), **detail},
             )
         )
