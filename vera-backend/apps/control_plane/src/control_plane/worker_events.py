@@ -10,21 +10,32 @@ import logging
 import os
 import socket
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from control_plane.call_closeout import TERMINAL_VALUES, close_call
+from control_plane.dispatch import run_dispatch_pass
 from control_plane.livekit_gateway import LiveKitGateway
+from vera_core.audit import AuditSink
+from vera_core.db.rls import tenant_session
 from vera_core.events import (
     WORKER_EVENTS_GROUP,
     WORKER_EVENTS_STREAM,
+    CallAnsweredEvent,
+    CallEndedEvent,
     CallFailedEvent,
+    CallFailureReason,
     WorkerEvent,
     WorkerEventBus,
     parse_worker_event,
 )
+from vera_core.models import Call, CallEvent
+from vera_core.models.enums import CallEventType, CallStatus
 from vera_core.observability.correlation import parse_room_name
 
 logger = logging.getLogger("control_plane.worker_events")
@@ -36,12 +47,21 @@ type EventHandler = Callable[[WorkerEvent], Awaitable[None]]
 # no `justid`, both always return this shape at runtime.
 type _StreamEntries = list[tuple[str, dict[str, str]]]
 
+_FAILURE_STATUS: dict[CallFailureReason, CallStatus] = {
+    CallFailureReason.NO_ANSWER: CallStatus.NO_ANSWER,
+    CallFailureReason.BUSY_OR_DECLINED: CallStatus.BUSY,
+    CallFailureReason.FAILED: CallStatus.FAILED,
+}
+
 
 class WorkerEventConsumer:
     def __init__(
         self,
         redis: Redis,
         livekit: LiveKitGateway,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        kms: Any,
+        audit: AuditSink,
         *,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
@@ -50,12 +70,19 @@ class WorkerEventConsumer:
     ) -> None:
         self._redis = redis
         self._livekit = livekit
+        self._sessionmaker = sessionmaker
+        self._kms = kms
+        self._audit = audit
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
         self._teardown_grace_ms = teardown_grace_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._bus = WorkerEventBus(redis)
-        self._handlers: dict[str, EventHandler] = {"call.failed": self._handle_call_failed}
+        self._handlers: dict[str, EventHandler] = {
+            "call.failed": self._handle_call_failed,
+            "call.answered": self._handle_call_answered,
+            "call.ended": self._handle_call_ended,
+        }
 
     async def run(self) -> None:
         """Ensure the group exists, then loop: reclaim stragglers, read new, dispatch.
@@ -171,3 +198,45 @@ class WorkerEventConsumer:
         if self._teardown_grace_ms:
             await asyncio.sleep(self._teardown_grace_ms / 1000)
         await self._livekit.delete_room(event.room_name)
+        await self._close_and_refill(
+            event.room_name, _FAILURE_STATUS[event.reason], trigger="call.failed"
+        )
+
+    async def _handle_call_answered(self, event: WorkerEvent) -> None:
+        if not isinstance(event, CallAnsweredEvent):
+            return
+        ref = parse_room_name(event.room_name)
+        if ref is None:
+            return
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id).with_for_update())
+            ).scalar_one_or_none()
+            if call is None or call.current_status in TERMINAL_VALUES:
+                return  # voice-lab room, or a stale redelivery after terminal
+            if call.current_status == CallStatus.ACTIVE.value:
+                return  # idempotent redelivery
+            call.current_status = CallStatus.ACTIVE.value
+            call.started_at = func.now()
+            session.add(
+                CallEvent(
+                    tenant_id=ref.tenant_id,
+                    call_id=call.id,
+                    event_type=CallEventType.STATUS.value,
+                    event_value=CallStatus.ACTIVE.value,
+                )
+            )
+
+    async def _handle_call_ended(self, event: WorkerEvent) -> None:
+        if not isinstance(event, CallEndedEvent):
+            return
+        await self._close_and_refill(event.room_name, CallStatus.COMPLETED, trigger="call.ended")
+
+    async def _close_and_refill(self, room_name: str, status: CallStatus, *, trigger: str) -> None:
+        """Terminal closeout via the shared path, then refill the freed slot
+        (dispatch runs AFTER close_call's transaction committed)."""
+        ref = await close_call(self._sessionmaker, self._audit, room_name, status, trigger=trigger)
+        if ref is not None:
+            await run_dispatch_pass(
+                self._sessionmaker, ref.tenant_id, self._livekit, self._kms, self._audit
+            )

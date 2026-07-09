@@ -136,6 +136,9 @@ def create_app(
             consumer = WorkerEventConsumer(
                 worker_events_redis,
                 app.state.livekit,
+                sessionmaker,
+                app.state.kms,
+                app.state.audit,
                 block_ms=settings.worker_events_block_ms,
                 reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
