@@ -19,6 +19,8 @@ from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
+from control_plane.llm import VertexLLMClient
+from control_plane.post_call import PostCallConsumer
 from control_plane.request_context import RequestIdMiddleware
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import (
@@ -30,6 +32,7 @@ from vera_core.audit import (
 from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_settings
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
+from vera_core.events import PostCallJobBus
 from vera_core.observability.otel import configure_observability
 from vera_core.redis import create_redis
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
@@ -38,13 +41,24 @@ logger = logging.getLogger("control_plane.main")
 
 
 def _log_consumer_exit(task: asyncio.Task[None]) -> None:
-    """Surface an unexpected exit of the worker-event consumer background task.
+    """Surface an unexpected exit of a consumer background task (worker-events, post-call).
 
     `run()` only returns via cancellation (shutdown) or an uncaught exception; without
     this callback the latter would die silently ("Task exception was never retrieved").
     """
     if not task.cancelled() and task.exception() is not None:
-        logger.error("worker-event consumer exited unexpectedly", exc_info=task.exception())
+        logger.error("consumer exited unexpectedly", exc_info=task.exception())
+
+
+async def _stop_consumer(task: asyncio.Task[None] | None, redis: Redis | None) -> None:
+    """Cancel a consumer task and close its dedicated Redis client (both may be unset
+    when the consumer never started, e.g. LiveKit/GCP unconfigured in tests)."""
+    if task is not None:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    if redis is not None:
+        await redis.aclose()
 
 
 def create_app(
@@ -125,13 +139,15 @@ def create_app(
         )
         app.state.invitation_store = invitation_store or RedisInvitationStore(_redis())
 
-        # Worker→control-plane event consumer. Needs a real LiveKit gateway (to tear
-        # rooms down) and a dedicated Redis client (a blocking XREADGROUP pins a
-        # connection — same reason the transcript stream gets its own client). Not
-        # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
+        # Both stream consumers need a real LiveKit gateway (to tear rooms down) and are
+        # skipped when SIP/LiveKit is unconfigured (tests / local without a trunk).
+        livekit_ready = settings.livekit_url is not None and app.state.livekit is not None
+
+        # Worker→control-plane event consumer. Uses a dedicated Redis client (a blocking
+        # XREADGROUP pins a connection — same reason the transcript stream gets its own).
         worker_events_redis: Redis | None = None
         worker_event_task: asyncio.Task[None] | None = None
-        if settings.livekit_url is not None and app.state.livekit is not None:
+        if livekit_ready:
             worker_events_redis = create_redis(settings.redis_url)
             consumer = WorkerEventConsumer(
                 worker_events_redis,
@@ -143,14 +159,36 @@ def create_app(
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_consumer_exit)
 
+        # Post-call eval bus: always set so the callback and tests can enqueue through it.
+        # The consumer itself also requires a GCP project (the LLM needs it).
+        post_call_redis: Redis | None = None
+        post_call_task: asyncio.Task[None] | None = None
+        app.state.post_call_bus = PostCallJobBus(_redis())
+        if livekit_ready and settings.gcp_project is not None:
+            post_call_redis = create_redis(settings.redis_url)
+            llm = VertexLLMClient(
+                project=settings.gcp_project,
+                location=settings.vertex_location,
+                model=settings.gemini_flash_model,
+            )
+            post_call_consumer = PostCallConsumer(
+                post_call_redis,
+                sessionmaker,
+                _transcript_service,
+                llm,
+                app.state.audit,
+                app.state.livekit,
+                block_ms=settings.post_call_block_ms,
+                reclaim_idle_ms=settings.post_call_reclaim_idle_ms,
+                review_floor=settings.post_call_review_floor,
+            )
+            post_call_task = asyncio.create_task(post_call_consumer.run())
+            post_call_task.add_done_callback(_log_consumer_exit)
+
         configure_observability(settings)
         yield
-        if worker_event_task is not None:
-            worker_event_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_event_task
-        if worker_events_redis is not None:
-            await worker_events_redis.aclose()
+        await _stop_consumer(post_call_task, post_call_redis)
+        await _stop_consumer(worker_event_task, worker_events_redis)
         if redis is not None:
             await redis.aclose()
         if transcript_redis is not None:
