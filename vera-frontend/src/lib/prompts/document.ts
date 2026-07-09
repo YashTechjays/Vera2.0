@@ -142,6 +142,14 @@ export function clientValidationErrors(doc: PromptDocument): Record<string, stri
   return errors
 }
 
+/** True when any field-error key falls under `prefix` (e.g. "session." or
+ *  "task_overrides.<task_key>.") — drives the rail's per-entry error dot
+ *  (spec §3.6): a field-mapped server error on a non-selected task/Session
+ *  must stay visible, not just the overridden-state dot. */
+export function hasErrorsFor(fieldErrors: Record<string, string[]>, prefix: string): boolean {
+  return Object.keys(fieldErrors).some((key) => key.startsWith(prefix))
+}
+
 const FIELD_LOCATION_RE =
   /^(session\.(?:persona|goal|base_instructions)|task_overrides\.[^\s.:]+\.(?:intro|outro|prompt)): (.*)$/
 

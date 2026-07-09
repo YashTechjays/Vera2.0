@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type JSX } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react"
 import { Bot, Loader2 } from "lucide-react"
 
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -39,6 +39,7 @@ import {
   clearOverrideField,
   clientValidationErrors,
   documentsEqual,
+  hasErrorsFor,
   normalizeDocument,
   parsePromptErrors,
   placeholderGroupsOf,
@@ -53,12 +54,65 @@ import { selectIsSuperAdmin } from "@/store/authSlice"
 import { pickInitialVersion } from "@/pages/agentPrompt.helpers"
 
 type Selection = { kind: "session" } | { kind: "task"; taskKey: string }
-type PendingAction = { kind: "load"; versionId: string } | { kind: "switch-prompt"; promptId: string }
+type PendingAction =
+  | { kind: "load"; versionId: string }
+  | { kind: "switch-prompt"; promptId: string }
+  | { kind: "publish"; versionId: string }
+
+type PendingActionCopy = {
+  title: string
+  description: string
+  confirmLabel: string
+  cancelLabel: string
+  confirmVariant: "default" | "destructive"
+}
 
 const NO_ERRORS: ParsedErrors = { fields: {}, general: [] }
+const DISCARD_COPY = {
+  description:
+    "Switching away replaces your unsaved edits. Save a draft first if you want to keep them.",
+  cancelLabel: "Keep editing",
+  confirmVariant: "destructive",
+} as const
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : fallback
+}
+
+/** Shared class for a left-rail entry (Session + each task) so the selected/unselected
+ *  styling stays in lockstep across both. */
+function railItemClass(active: boolean): string {
+  return active
+    ? "flex w-full items-center justify-between rounded-md bg-muted px-2 py-1.5 text-left text-sm font-medium"
+    : "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+}
+
+/** Dialog copy per pending-action kind (spec §3.2: publish confirms via dialog too). */
+function pendingActionCopyFor(
+  action: PendingAction,
+  versions: PromptVersionSummary[],
+): PendingActionCopy {
+  switch (action.kind) {
+    case "publish": {
+      const version = versions.find((v) => v.id === action.versionId)
+      return {
+        title: `Publish v${version?.version ?? "?"}?`,
+        description:
+          "This becomes the live prompt for new calls; the currently published version is demoted.",
+        confirmLabel: "Publish",
+        cancelLabel: "Cancel",
+        confirmVariant: "default",
+      }
+    }
+    case "load":
+      return { title: "Discard unsaved changes?", confirmLabel: "Discard and load", ...DISCARD_COPY }
+    case "switch-prompt":
+      return {
+        title: "Discard unsaved changes?",
+        confirmLabel: "Discard and switch",
+        ...DISCARD_COPY,
+      }
+  }
 }
 
 export function AgentPrompt(): JSX.Element {
@@ -81,6 +135,11 @@ export function AgentPrompt(): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [publishingId, setPublishingId] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+  // The prompt whose in-flight async writes are still allowed to land. Updated
+  // synchronously alongside every setPromptId call so loadVersionIntoBuffer/onSave/
+  // onPublish/bootstrap can bail post-await if the user switched prompts mid-flight
+  // (a stale write would otherwise land prompt A's document in prompt B's editor).
+  const activePromptIdRef = useRef<string | null>(null)
 
   const tasks = useMemo(() => (schema === null ? [] : taskDefaultsOf(schema.document)), [schema])
   const groups = useMemo(
@@ -122,13 +181,27 @@ export function AgentPrompt(): JSX.Element {
     setSaveErrors(NO_ERRORS)
   }
 
+  /** The only place promptId changes — keeps activePromptIdRef in lockstep so
+   *  in-flight async work for the prior prompt can detect it's now stale. */
+  const selectPrompt = useCallback((nextPromptId: string | null) => {
+    activePromptIdRef.current = nextPromptId
+    setPromptId(nextPromptId)
+  }, [])
+
   const loadVersionIntoBuffer = useCallback(async (pid: string, versionId: string) => {
     const detail = await getPromptVersion(pid, versionId)
+    if (activePromptIdRef.current !== pid) return
     const normalized = normalizeDocument(detail.composite_json)
     setDoc(normalized)
     setBaseline(normalized)
     setLoadedVersionId(versionId)
     setSaveErrors(NO_ERRORS)
+  }, [])
+
+  const refreshVersions = useCallback(async (pid: string) => {
+    const vs = await listPromptVersions(pid)
+    if (activePromptIdRef.current !== pid) return
+    setVersions(vs)
   }, [])
 
   // Load the catalog once.
@@ -139,7 +212,7 @@ export function AgentPrompt(): JSX.Element {
       .then((list) => {
         if (cancelled) return
         setPrompts(list)
-        setPromptId(list[0]?.id ?? null)
+        selectPrompt(list[0]?.id ?? null)
         if (list.length === 0) setLoading(false)
       })
       .catch((err) => {
@@ -150,7 +223,7 @@ export function AgentPrompt(): JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [isSuperAdmin])
+  }, [isSuperAdmin, selectPrompt])
 
   // (Re)load versions + schema + initial buffer when the selected prompt changes.
   useEffect(() => {
@@ -175,9 +248,16 @@ export function AgentPrompt(): JSX.Element {
       setSaveErrors(NO_ERRORS)
     }
     resetForPrompt()
+    // Bails on `activePromptIdRef` in addition to the usual `cancelled` flag: `cancelled`
+    // only guards this effect's own direct writes, but the delegated call to
+    // loadVersionIntoBuffer below has its own post-await writes that `cancelled` can't
+    // reach — the ref is the one check both this effect and that shared function honor.
+    function stale(pid: string): boolean {
+      return cancelled || activePromptIdRef.current !== pid
+    }
     async function bootstrap(pid: string): Promise<void> {
       const [vs, schemaDetail] = await Promise.all([listPromptVersions(pid), getPromptSchema(pid)])
-      if (cancelled) return
+      if (stale(pid)) return
       setVersions(vs)
       setSchema(schemaDetail)
       const initial = pickInitialVersion(vs)
@@ -187,7 +267,7 @@ export function AgentPrompt(): JSX.Element {
       }
       // Bootstrap gap: no versions — seed the session from the factory render.
       const factory = await previewPromptVersion(pid)
-      if (cancelled) return
+      if (stale(pid)) return
       const seeded: PromptDocument = {
         kind: "prompt_document",
         session: {
@@ -217,12 +297,14 @@ export function AgentPrompt(): JSX.Element {
   useEffect(() => {
     if (promptId === null || doc === null) return
     let cancelled = false
-    // See resetForPrompt() above for why this is wrapped rather than inline.
+    // See resetForPrompt() above for why these are wrapped rather than inline.
     function beginPreview(): void {
       setPreviewLoading(true)
       setPreviewError(null)
     }
-    beginPreview()
+    function stopQuietly(): void {
+      setPreviewLoading(false)
+    }
     const buffer = doc
 
     async function renderPristine(pid: string, versionId: string): Promise<void> {
@@ -241,7 +323,10 @@ export function AgentPrompt(): JSX.Element {
     function run(task: Promise<void>): void {
       task
         .catch((err) => {
-          if (!cancelled) setPreviewError(errorMessage(err, "Could not render the preview."))
+          if (!cancelled) {
+            setPreviewError(errorMessage(err, "Could not render the preview."))
+            setPreviewErrors(NO_ERRORS)
+          }
         })
         .finally(() => {
           if (!cancelled) setPreviewLoading(false)
@@ -251,60 +336,77 @@ export function AgentPrompt(): JSX.Element {
     // A pristine loaded version (unmodified, has a version id) uses the authoritative
     // GET; anything else is a dirty buffer rendered via the debounced POST below.
     if (!dirty && loadedVersionId !== null) {
+      beginPreview()
       run(renderPristine(promptId, loadedVersionId))
       return () => {
         cancelled = true
       }
     }
+    // A dirty buffer that already fails client-side validation (e.g. a freshly-added
+    // empty override) would only 422 — skip the doomed POST rather than duplicate the
+    // inline "cannot be empty" error as a destructive alert. Quietly keep the last
+    // preview: no loading spinner, no previewError.
+    if (Object.keys(clientErrors).length > 0) {
+      stopQuietly()
+      return () => {
+        cancelled = true
+      }
+    }
+    beginPreview()
     const timer = setTimeout(() => run(renderBuffer(promptId)), 500)
     return () => {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [promptId, doc, dirty, loadedVersionId])
+  }, [promptId, doc, dirty, loadedVersionId, clientErrors])
 
   if (!isSuperAdmin) {
     return <p className="text-sm text-muted-foreground">This page is only available to platform operators.</p>
   }
 
-  async function refreshVersions(pid: string): Promise<void> {
-    setVersions(await listPromptVersions(pid))
-  }
-
   async function onSave(): Promise<void> {
     if (promptId === null || doc === null || Object.keys(clientErrors).length > 0) return
+    const pid = promptId
     setBusy(true)
     setError(null)
     try {
-      const created = await createPromptDraft(promptId, normalizeDocument(doc))
+      const created = await createPromptDraft(pid, normalizeDocument(doc))
+      if (activePromptIdRef.current !== pid) return
       // Refresh the version list before pointing loadedVersionId at the new draft, so
       // `loadedVersion` (looked up by id in `versions`) resolves on the same render
       // instead of momentarily missing and flashing the "unsaved changes" caption.
-      await refreshVersions(promptId)
+      await refreshVersions(pid)
+      if (activePromptIdRef.current !== pid) return
       const normalized = normalizeDocument(created.composite_json)
       setDoc(normalized)
       setBaseline(normalized)
       setLoadedVersionId(created.id)
       setSaveErrors(NO_ERRORS)
     } catch (err) {
+      if (activePromptIdRef.current !== pid) return
       if (err instanceof ApiError && err.httpStatus === 400) {
         setSaveErrors(parsePromptErrors(err.message))
       } else {
         setError(errorMessage(err, "Could not save the draft."))
       }
     } finally {
+      // Always clear the loading flag, even for a stale prompt — it gates the Select
+      // itself (disabled={busy}), so leaving it set would lock the UI.
       setBusy(false)
     }
   }
 
   async function onPublish(versionId: string): Promise<void> {
     if (promptId === null) return
+    const pid = promptId
     setPublishingId(versionId)
     setError(null)
     try {
-      await publishPromptVersion(promptId, versionId)
-      await refreshVersions(promptId)
+      await publishPromptVersion(pid, versionId)
+      if (activePromptIdRef.current !== pid) return
+      await refreshVersions(pid)
     } catch (err) {
+      if (activePromptIdRef.current !== pid) return
       setError(errorMessage(err, "Could not publish."))
     } finally {
       setPublishingId(null)
@@ -336,7 +438,11 @@ export function AgentPrompt(): JSX.Element {
       setPendingAction({ kind: "switch-prompt", promptId: nextPromptId })
       return
     }
-    setPromptId(nextPromptId)
+    selectPrompt(nextPromptId)
+  }
+
+  function onPublishRequest(versionId: string): void {
+    setPendingAction({ kind: "publish", versionId })
   }
 
   function onPendingActionConfirmed(): void {
@@ -345,8 +451,13 @@ export function AgentPrompt(): JSX.Element {
       void onLoadConfirmed(pendingAction.versionId)
       return
     }
+    if (pendingAction.kind === "publish") {
+      setPendingAction(null)
+      void onPublish(pendingAction.versionId)
+      return
+    }
     setPendingAction(null)
-    setPromptId(pendingAction.promptId)
+    selectPrompt(pendingAction.promptId)
   }
 
   function onSessionChange(field: keyof SessionBlock, text: string): void {
@@ -387,6 +498,7 @@ export function AgentPrompt(): JSX.Element {
       ? `v${loadedVersion.version} · pinned schema v${loadedVersion.schema_version}`
       : `unsaved changes · renders against schema v${schema?.version ?? "?"} (published)`
   const saveDisabled = busy || !dirty || Object.keys(clientErrors).length > 0 || schema === null
+  const dialogCopy = pendingAction === null ? null : pendingActionCopyFor(pendingAction, versions)
 
   return (
     <div className="space-y-6">
@@ -400,7 +512,11 @@ export function AgentPrompt(): JSX.Element {
         <div className="flex items-center gap-2">
           {prompts.length > 1 && (
             <div className="w-56">
-              <Select value={promptId ?? ""} onChange={(e) => onPromptSelect(e.target.value)}>
+              <Select
+                value={promptId ?? ""}
+                onChange={(e) => onPromptSelect(e.target.value)}
+                disabled={busy}
+              >
                 {prompts.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
@@ -446,31 +562,30 @@ export function AgentPrompt(): JSX.Element {
                 <button
                   type="button"
                   onClick={() => setSelection({ kind: "session" })}
-                  className={
-                    selection.kind === "session"
-                      ? "w-full rounded-md bg-muted px-2 py-1.5 text-left text-sm font-medium"
-                      : "w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
-                  }
+                  className={railItemClass(selection.kind === "session")}
                 >
-                  Session
+                  <span>Session</span>
+                  {hasErrorsFor(fieldErrors, "session.") && (
+                    <span className="size-1.5 shrink-0 rounded-full bg-destructive" />
+                  )}
                 </button>
                 <p className="px-2 pt-2 text-xs font-medium text-muted-foreground">Tasks</p>
                 {tasks.map((task) => {
                   const active = selection.kind === "task" && selection.taskKey === task.task_key
                   const overridden = doc !== null && task.task_key in doc.task_overrides
+                  const hasError = hasErrorsFor(fieldErrors, `task_overrides.${task.task_key}.`)
                   return (
                     <button
                       key={task.task_key}
                       type="button"
                       onClick={() => setSelection({ kind: "task", taskKey: task.task_key })}
-                      className={
-                        active
-                          ? "flex w-full items-center justify-between rounded-md bg-muted px-2 py-1.5 text-left text-sm font-medium"
-                          : "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
-                      }
+                      className={railItemClass(active)}
                     >
                       <span className="truncate">{task.title}</span>
-                      {overridden && <span className="size-1.5 shrink-0 rounded-full bg-primary" />}
+                      <span className="flex shrink-0 items-center gap-1">
+                        {overridden && <span className="size-1.5 rounded-full bg-primary" />}
+                        {hasError && <span className="size-1.5 rounded-full bg-destructive" />}
+                      </span>
                     </button>
                   )
                 })}
@@ -505,7 +620,7 @@ export function AgentPrompt(): JSX.Element {
                   busy={busy || publishingId !== null}
                   publishingId={publishingId}
                   onLoad={onLoadRequest}
-                  onPublish={(id) => void onPublish(id)}
+                  onPublish={onPublishRequest}
                 />
               </CardContent>
             </Card>
@@ -556,18 +671,19 @@ export function AgentPrompt(): JSX.Element {
       <Dialog open={pendingAction !== null} onOpenChange={(open) => !open && setPendingAction(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Discard unsaved changes?</DialogTitle>
-            <DialogDescription>
-              Switching away replaces your unsaved edits. Save a draft first if you want to keep
-              them.
-            </DialogDescription>
+            <DialogTitle>{dialogCopy?.title}</DialogTitle>
+            <DialogDescription>{dialogCopy?.description}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setPendingAction(null)}>
-              Keep editing
+              {dialogCopy?.cancelLabel}
             </Button>
-            <Button type="button" variant="destructive" onClick={onPendingActionConfirmed}>
-              Discard and load
+            <Button
+              type="button"
+              variant={dialogCopy?.confirmVariant ?? "default"}
+              onClick={onPendingActionConfirmed}
+            >
+              {dialogCopy?.confirmLabel}
             </Button>
           </DialogFooter>
         </DialogContent>

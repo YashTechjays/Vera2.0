@@ -5,6 +5,7 @@ import {
   clearOverrideField,
   clientValidationErrors,
   documentsEqual,
+  hasErrorsFor,
   insertToken,
   normalizeDocument,
   overrideStateOf,
@@ -108,6 +109,17 @@ describe("validation", () => {
       "An override cannot be empty — use Reset to remove it.",
     ])
     expect(Object.keys(clientValidationErrors(doc())).length).toBe(0)
+  })
+
+  it("hasErrorsFor matches by field-error key prefix (rail error dots)", () => {
+    const fieldErrors = {
+      "session.persona": ["Required."],
+      "task_overrides.wrap_up.outro": ["unknown placeholder {{a}}"],
+    }
+    expect(hasErrorsFor(fieldErrors, "session.")).toBe(true)
+    expect(hasErrorsFor(fieldErrors, "task_overrides.wrap_up.")).toBe(true)
+    expect(hasErrorsFor(fieldErrors, "task_overrides.main.")).toBe(false)
+    expect(hasErrorsFor({}, "session.")).toBe(false)
   })
 
   it("parsePromptErrors maps location-prefixed messages onto fields", () => {
