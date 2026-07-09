@@ -53,6 +53,7 @@ import { selectIsSuperAdmin } from "@/store/authSlice"
 import { pickInitialVersion } from "@/pages/agentPrompt.helpers"
 
 type Selection = { kind: "session" } | { kind: "task"; taskKey: string }
+type PendingAction = { kind: "load"; versionId: string } | { kind: "switch-prompt"; promptId: string }
 
 const NO_ERRORS: ParsedErrors = { fields: {}, general: [] }
 
@@ -79,14 +80,17 @@ export function AgentPrompt(): JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [publishingId, setPublishingId] = useState<string | null>(null)
-  const [pendingLoadId, setPendingLoadId] = useState<string | null>(null)
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
 
   const tasks = useMemo(() => (schema === null ? [] : taskDefaultsOf(schema.document)), [schema])
   const groups = useMemo(
     () => (schema === null ? { system: [], context: [] } : placeholderGroupsOf(schema.document)),
     [schema],
   )
-  const dirty = doc !== null && baseline !== null && !documentsEqual(doc, baseline)
+  const dirty = useMemo(
+    () => doc !== null && baseline !== null && !documentsEqual(doc, baseline),
+    [doc, baseline],
+  )
   const clientErrors = useMemo(() => (doc === null ? {} : clientValidationErrors(doc)), [doc])
   const fieldErrors = useMemo(() => {
     const merged: Record<string, string[]> = { ...clientErrors }
@@ -156,6 +160,8 @@ export function AgentPrompt(): JSX.Element {
       setSelection({ kind: "session" })
       setPreview(null)
       setPreviewErrors(NO_ERRORS)
+      setPreviewLoading(false)
+      setPreviewError(null)
       setSaveErrors(NO_ERRORS)
     }
     resetForPrompt()
@@ -261,12 +267,15 @@ export function AgentPrompt(): JSX.Element {
     setError(null)
     try {
       const created = await createPromptDraft(promptId, normalizeDocument(doc))
+      // Refresh the version list before pointing loadedVersionId at the new draft, so
+      // `loadedVersion` (looked up by id in `versions`) resolves on the same render
+      // instead of momentarily missing and flashing the "unsaved changes" caption.
+      await refreshVersions(promptId)
       const normalized = normalizeDocument(created.composite_json)
       setDoc(normalized)
       setBaseline(normalized)
       setLoadedVersionId(created.id)
       setSaveErrors(NO_ERRORS)
-      await refreshVersions(promptId)
     } catch (err) {
       if (err instanceof ApiError && err.httpStatus === 400) {
         setSaveErrors(parsePromptErrors(err.message))
@@ -294,7 +303,7 @@ export function AgentPrompt(): JSX.Element {
 
   function onLoadRequest(versionId: string): void {
     if (dirty) {
-      setPendingLoadId(versionId)
+      setPendingAction({ kind: "load", versionId })
       return
     }
     void onLoadConfirmed(versionId)
@@ -302,13 +311,32 @@ export function AgentPrompt(): JSX.Element {
 
   async function onLoadConfirmed(versionId: string): Promise<void> {
     if (promptId === null) return
-    setPendingLoadId(null)
+    setPendingAction(null)
     setError(null)
     try {
       await loadVersionIntoBuffer(promptId, versionId)
     } catch (err) {
       setError(errorMessage(err, "Could not load the version."))
     }
+  }
+
+  function onPromptSelect(nextPromptId: string): void {
+    if (nextPromptId === promptId) return
+    if (dirty) {
+      setPendingAction({ kind: "switch-prompt", promptId: nextPromptId })
+      return
+    }
+    setPromptId(nextPromptId)
+  }
+
+  function onPendingActionConfirmed(): void {
+    if (pendingAction === null) return
+    if (pendingAction.kind === "load") {
+      void onLoadConfirmed(pendingAction.versionId)
+      return
+    }
+    setPendingAction(null)
+    setPromptId(pendingAction.promptId)
   }
 
   function onSessionChange(field: keyof SessionBlock, text: string): void {
@@ -362,7 +390,7 @@ export function AgentPrompt(): JSX.Element {
         <div className="flex items-center gap-2">
           {prompts.length > 1 && (
             <div className="w-56">
-              <Select value={promptId ?? ""} onChange={(e) => setPromptId(e.target.value)}>
+              <Select value={promptId ?? ""} onChange={(e) => onPromptSelect(e.target.value)}>
                 {prompts.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
@@ -515,24 +543,20 @@ export function AgentPrompt(): JSX.Element {
         </div>
       )}
 
-      <Dialog open={pendingLoadId !== null} onOpenChange={(open) => !open && setPendingLoadId(null)}>
+      <Dialog open={pendingAction !== null} onOpenChange={(open) => !open && setPendingAction(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Discard unsaved changes?</DialogTitle>
             <DialogDescription>
-              Loading another version replaces your unsaved edits. Save a draft first if you want
-              to keep them.
+              Switching away replaces your unsaved edits. Save a draft first if you want to keep
+              them.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setPendingLoadId(null)}>
+            <Button type="button" variant="outline" onClick={() => setPendingAction(null)}>
               Keep editing
             </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => pendingLoadId !== null && void onLoadConfirmed(pendingLoadId)}
-            >
+            <Button type="button" variant="destructive" onClick={onPendingActionConfirmed}>
               Discard and load
             </Button>
           </DialogFooter>
