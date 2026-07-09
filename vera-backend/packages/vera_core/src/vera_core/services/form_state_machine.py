@@ -23,7 +23,9 @@ ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.IN_CALL: frozenset(
         {FormStatus.AI_PROCESSING, FormStatus.COMPLETED, FormStatus.CALL_FAILED}
     ),
-    FormStatus.AI_PROCESSING: frozenset({FormStatus.COMPLETED, FormStatus.CALL_FAILED}),
+    FormStatus.AI_PROCESSING: frozenset(
+        {FormStatus.COMPLETED, FormStatus.CALL_FAILED, FormStatus.EXCEPTION_REVIEW}
+    ),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
 }
