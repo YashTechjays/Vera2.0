@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from tests.integration.control_plane.conftest import RBACWorld
+from tests.integration.control_plane.conftest import FakePostCallBus, RBACWorld
 from vera_core.db import uuid7
 from vera_core.models import PatientForm
 from vera_core.models.authoring import FormSchema, SchemaVersion
@@ -141,14 +141,15 @@ async def test_enqueue_form_triggers_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_completed_callback_moves_form_to_completed(
+async def test_completed_callback_moves_form_to_ai_processing(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     queue_form_id: UUID,
 ) -> None:
-    """Worker reporting COMPLETED on an IN_CALL form succeeds (no 500) and the
-    form reaches COMPLETED — the IN_CALL → COMPLETED edge the worker drives."""
+    """Worker reporting COMPLETED on an IN_CALL form succeeds (no 500): the call
+    status becomes completed, the form transitions to AI_PROCESSING (not COMPLETED),
+    a CallFormSnapshot row is written, and a PostCallJob is emitted."""
     # Enqueue → dispatcher creates the call (form is now IN_CALL).
     await client.put(
         f"/api/v1/patient-forms/{queue_form_id}/status",
@@ -165,17 +166,26 @@ async def test_completed_callback_moves_form_to_completed(
         json={"status": "completed"},
     )
     assert resp.status_code == 200, resp.text
+    # The *call* status is completed; the *form* goes to ai_processing (not completed).
     assert resp.json()["data"]["status"] == "completed"
 
     async with admin_sessionmaker() as session:
-        status = (
+        form_status = (
             await session.execute(
                 text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
                     fid=queue_form_id
                 )
             )
         ).scalar_one()
-    assert status == "completed"
+        snapshot_exists = (
+            await session.execute(
+                text("SELECT 1 FROM call_form_snapshot WHERE call_id = :cid").bindparams(
+                    cid=UUID(call_id)
+                )
+            )
+        ).scalar_one_or_none()
+    assert form_status == "ai_processing"
+    assert snapshot_exists is not None
 
 
 @pytest.mark.asyncio
@@ -208,8 +218,9 @@ async def test_manual_call_then_completed_callback(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     queue_form_id: UUID,
 ) -> None:
-    """A voice-lab call's terminal callback must succeed (not 500) and complete
-    the form: POST /calls puts the form IN_CALL, giving COMPLETED a legal edge."""
+    """A voice-lab call's terminal callback must succeed (not 500): POST /calls
+    puts the form IN_CALL, giving COMPLETED a legal edge; the call status becomes
+    completed and the form transitions to AI_PROCESSING (post-call eval pipeline)."""
     created = await client.post(
         "/api/v1/calls",
         headers=_auth(rbac_world.admin_token),
@@ -384,3 +395,60 @@ async def test_manual_call_form_not_redispatched(
     finally:
         async with admin_sessionmaker() as session, session.begin():
             await _purge_form(session, form_y_id)
+
+
+@pytest.mark.asyncio
+async def test_completed_callback_emits_post_call_job(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    queue_form_id: UUID,
+    fake_post_call_bus: FakePostCallBus,
+) -> None:
+    """COMPLETED worker callback on an IN_CALL form:
+    - form status → ai_processing (not completed)
+    - a CallFormSnapshot row is written for the call
+    - exactly one PostCallJob is emitted via the bus
+    """
+    # Enqueue → dispatcher creates the call (form is now IN_CALL).
+    await client.put(
+        f"/api/v1/patient-forms/{queue_form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    call_id = (await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))).json()[
+        "data"
+    ][0]["id"]
+
+    resp = await client.post(
+        f"/api/v1/calls/{call_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "completed"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["status"] == "completed"  # call is completed
+
+    async with admin_sessionmaker() as session:
+        form_status = (
+            await session.execute(
+                text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
+                    fid=queue_form_id
+                )
+            )
+        ).scalar_one()
+        snapshot_row = (
+            await session.execute(
+                text("SELECT before_state FROM call_form_snapshot WHERE call_id = :cid").bindparams(
+                    cid=UUID(call_id)
+                )
+            )
+        ).one_or_none()
+
+    assert form_status == "ai_processing"
+    assert snapshot_row is not None, "CallFormSnapshot must be written at call end"
+
+    assert len(fake_post_call_bus.emitted) == 1
+    job = fake_post_call_bus.emitted[0]
+    assert str(job.call_id) == call_id
+    assert job.form_id == queue_form_id
+    assert job.tenant_id == rbac_world.tenant_id
