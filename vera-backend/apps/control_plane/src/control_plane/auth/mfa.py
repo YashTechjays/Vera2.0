@@ -33,6 +33,10 @@ _ISSUER = "Vera"
 _UNDEFINED_FUNCTION = "42883"  # Postgres SQLSTATE for a missing function
 
 
+def _provisioning_uri(totp_secret: str, account_email: str) -> str:
+    return pyotp.TOTP(totp_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
+
+
 async def enroll(kms: KeyManagementService, *, identity: UserIdentity, account_email: str) -> str:
     """Mint a fresh TOTP seed, envelope-encrypt it onto `identity`, return provisioning URI."""
     totp_secret = pyotp.random_base32()
@@ -41,7 +45,7 @@ async def enroll(kms: KeyManagementService, *, identity: UserIdentity, account_e
     identity.totp_dek_ct = dek_ct
     identity.totp_key_ref = key_ref
     identity.recovery_code_hashes = []
-    return pyotp.TOTP(totp_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
+    return _provisioning_uri(totp_secret, account_email)
 
 
 async def activate(
@@ -75,7 +79,7 @@ async def enroll_platform(
     can't overwrite the QR the operator already scanned."""
     existing_secret = await _decrypt_seed(kms, identity)
     if existing_secret is not None:
-        return pyotp.TOTP(existing_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
+        return _provisioning_uri(existing_secret, account_email)
     totp_secret = pyotp.random_base32()
     seed_ct, dek_ct, key_ref = await seal(kms, totp_secret.encode())
     stored = await _call_definer_bool(
@@ -88,7 +92,7 @@ async def enroll_platform(
     )
     if not stored:
         return None
-    return pyotp.TOTP(totp_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
+    return _provisioning_uri(totp_secret, account_email)
 
 
 async def activate_platform(

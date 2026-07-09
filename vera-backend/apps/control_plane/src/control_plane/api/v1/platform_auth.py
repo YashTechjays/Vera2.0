@@ -67,6 +67,19 @@ Store = Annotated[SessionStore, Depends(get_session_store)]
 KMS = Annotated[KeyManagementService, Depends(get_kms)]
 
 
+def _require_platform_challenge(data: SessionData | None) -> SessionData:
+    """Return the challenge only if it's platform-plane: `account_type` says so AND
+    `tenant_id` is NULL. Both round-trip through Redis and can drift, so assert both
+    and fail closed on a mismatch (CLAUDE.md) rather than branching on `tenant_id` alone."""
+    if (
+        data is None
+        or data.account_type != AccountType.PLATFORM.value
+        or data.tenant_id is not None
+    ):
+        raise _unauthorized()
+    return data
+
+
 @router.post(
     "/login",
     response_model=ResponseModel[LoginResponse],
@@ -190,15 +203,7 @@ async def platform_mfa_verify(
     settings: AppSettings,
 ) -> ResponseModel[SessionResponse]:
     ip = client_ip(request)
-    challenge = await store.get(MFA_NS, body.mfa_token)
-    # Assert tenant_id nullability alongside account_type and fail closed (CLAUDE.md):
-    # the challenge round-trips through Redis and the two can drift.
-    if (
-        challenge is None
-        or challenge.account_type != AccountType.PLATFORM.value
-        or challenge.tenant_id is not None
-    ):
-        raise _unauthorized()
+    challenge = _require_platform_challenge(await store.get(MFA_NS, body.mfa_token))
 
     verified = False
     async with platform_session(sessionmaker) as session:
@@ -246,15 +251,7 @@ async def platform_mfa_enroll_activate(
     the session. TOTP-only — no recovery codes (see module docstring). Gated by the
     enrollment `mfa_token`."""
     ip = client_ip(request)
-    base = await store.get(MFA_ENROLL_NS, body.mfa_token)
-    # Fail closed if tenant_id isn't NULL, not on account_type alone (CLAUDE.md): the
-    # challenge round-trips through Redis and the two can drift.
-    if (
-        base is None
-        or base.account_type != AccountType.PLATFORM.value
-        or base.tenant_id is not None
-    ):
-        raise _unauthorized()
+    base = _require_platform_challenge(await store.get(MFA_ENROLL_NS, body.mfa_token))
 
     activated = False
     async with platform_session(sessionmaker) as session:
