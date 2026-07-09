@@ -6,6 +6,7 @@ Mirrors the build_kms factory shape.
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import aiohttp
 from livekit import api
@@ -41,10 +42,12 @@ class LiveKitGateway:
         url: str,
         api_key: str,
         api_secret: str,
+        agent_name: str = AGENT_NAME,
     ) -> None:
         self._url = url
         self._api_key = api_key
         self._api_secret = api_secret
+        self._agent_name = agent_name
 
     @property
     def url(self) -> str:
@@ -69,7 +72,7 @@ class LiveKitGateway:
             # (e.g. {"wait_for_speaker": true}); None → "" → existing callers unchanged.
             await lk.agent_dispatch.create_dispatch(
                 api.CreateAgentDispatchRequest(
-                    agent_name=AGENT_NAME,
+                    agent_name=self._agent_name,
                     room=room_name,
                     metadata=json.dumps(metadata) if metadata else "",
                 )
@@ -140,12 +143,41 @@ class LiveKitGateway:
                     return  # room already gone — agent's close path deleted it first
                 raise
 
-    def mint_join_token(self, room_name: str, identity: str) -> str:
-        grants = api.VideoGrants(room_join=True, room=room_name)
+    async def remove_participant(self, room_name: str, identity: str) -> None:
+        """Eject a participant from a room (owner revoking an intervener's access).
+        Idempotent: revoking a participant who already left / never joined is a
+        no-op instead of raising.
+        """
+        async with self._client() as lk:
+            try:
+                await lk.room.remove_participant(
+                    api.RoomParticipantIdentity(room=room_name, identity=identity)
+                )
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return  # participant/room already gone — nothing to revoke
+                raise
+
+    async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
+        """Set room-level metadata (JSON-encoded). LiveKit pushes it to every
+        participant as a RoomMetadataChanged event, so the browser can read
+        session status (e.g. a failed outbound call) before the room is torn down.
+        """
+        async with self._client() as lk:
+            await lk.room.update_room_metadata(
+                api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
+            )
+
+    def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
+        # Short TTL: the token is used immediately; the SDK default (~6h) would
+        # let a revoked user's old token keep working. can_publish=False makes
+        # watch-only viewers server-side mute — the client can't override it.
+        grants = api.VideoGrants(room_join=True, room=room_name, can_publish=can_publish)
         return (
             api.AccessToken(self._api_key, self._api_secret)
             .with_identity(identity)
             .with_grants(grants)
+            .with_ttl(timedelta(minutes=5))
             .to_jwt()
         )
 
@@ -157,4 +189,5 @@ def build_livekit_gateway(settings: Settings, secrets: SecretProvider) -> LiveKi
         url=settings.livekit_url,
         api_key=secrets.get("LIVEKIT_API_KEY"),
         api_secret=secrets.get("LIVEKIT_API_SECRET"),
+        agent_name=settings.livekit_agent_name,
     )

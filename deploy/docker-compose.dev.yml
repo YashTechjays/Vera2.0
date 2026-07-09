@@ -54,9 +54,12 @@ services:
       - "80:80"
     # So `docker compose up --wait` (in remote-deploy.sh) verifies nginx
     # actually serves, not just that the container exists. busybox wget
-    # ships in the nginx:alpine image.
+    # ships in the nginx:alpine image. Hit 127.0.0.1 (not localhost): nginx
+    # binds IPv4 only (see nginx.conf `listen 80;`), so localhost resolving to
+    # ::1 first would make the probe fail while the SPA serves fine. /health is
+    # the dedicated liveness route (nginx.conf), unlogged and shell-independent.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/health"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -23,6 +23,13 @@ TENANT_GUC = "app.tenant_id"
 # rows — never any tenant PHI row, which stays gated on a matching TENANT_GUC.
 PLATFORM_GUC = "app.platform"
 
+# Platform sessions pin TENANT_GUC to this sentinel instead of leaving it unset: a
+# pooled connection that ever set the GUC later reads back '' (not NULL), and RLS's
+# ::uuid cast raises on ''. The nil UUID always casts cleanly and can never match a
+# real tenant — ck_tenant_id_not_nil (migration efa94eaaf3f9) guarantees no tenant
+# row ever carries this id.
+NIL_TENANT_ID = UUID(int=0)
+
 
 async def set_current_tenant(session: AsyncSession, tenant_id: UUID) -> None:
     """Apply SET LOCAL app.tenant_id for the session's current transaction.
@@ -55,12 +62,14 @@ async def platform_session(
 ) -> AsyncGenerator[AsyncSession]:
     """A SUPER_ADMIN's no-tenant session for global catalog/identity reads.
 
-    Sets app.platform='on' but NO tenant GUC, so platform-readable policies expose
-    the global (NULL-tenant) rows of `app_user`/`user_role`/`role`/`role_permission`
-    and nothing else: every PHI/tenant table uses the strict policy, which needs a
-    matching tenant GUC this session never sets (fail-closed → zero tenant rows).
+    Sets app.platform='on' and pins TENANT_GUC to NIL_TENANT_ID (never a real
+    tenant), so platform-readable policies expose the global (NULL-tenant) rows of
+    `app_user`/`user_role`/`role`/`role_permission` and nothing else: every
+    PHI/tenant table's strict policy compares against a tenant GUC that can never
+    match a real row (fail-closed → zero tenant rows) instead of an unset one.
     Cross-tenant PHI access requires `elevated_session` and an active grant."""
     async with sessionmaker() as session, session.begin():
+        await set_current_tenant(session, NIL_TENANT_ID)
         await set_platform(session)
         yield session
 
@@ -92,6 +101,11 @@ def rls_policy_ddl(table: str, *, tenant_column: str = "tenant_id") -> list[str]
     connection that never called set_current_tenant sees zero rows (fail
     closed). FORCE makes the policy apply to the table owner too, which is
     what the app role is on Cloud SQL.
+
+    Caveat: on a pooled connection previously touched by a tenant session, the GUC is
+    no longer unset but '' (its reset value), and `::uuid` raises rather than reading
+    NULL — still fail-closed, but as an error, not zero rows. `platform_session` avoids
+    this by pinning the GUC to `NIL_TENANT_ID` instead of leaving it unset.
     """
     policy = f"{table}_tenant_isolation"
     using = f"{tenant_column} = current_setting('{TENANT_GUC}', true)::uuid"
@@ -138,8 +152,9 @@ def platform_readable_rls_policy_ddl(table: str, *, tenant_column: str = "tenant
 
       * a tenant session (flag unset) sees ONLY `tenant_id = GUC` — NULL rows stay
         invisible to it, preserving the NullableTenantColumnMixin fail-closed rule;
-      * a platform session (`platform_session`: flag on, no tenant GUC) sees ONLY
-        the NULL-tenant rows;
+      * a platform session (`platform_session`: flag on, tenant GUC pinned to
+        `NIL_TENANT_ID` rather than left unset — see that sentinel's docstring) sees
+        ONLY the NULL-tenant rows;
       * an `elevated_session` (flag on + tenant GUC) sees both — the operator's own
         global grant and the target tenant's rows.
 

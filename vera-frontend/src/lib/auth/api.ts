@@ -176,3 +176,16 @@ export function deactivateUser(userId: string) {
     method: "POST",
   })
 }
+
+export type RoleSummary = {
+  id: string
+  name: string
+  description: string
+  is_system: boolean
+}
+
+/** List roles assignable in the caller's tenant (global system roles + this
+ *  tenant's custom roles). Requires `roles:manage`. */
+export function listRoles() {
+  return apiRequest<RoleSummary[]>(`/roles`)
+}

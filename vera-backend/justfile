@@ -31,12 +31,22 @@ test *args:
 # Full local gate — what CI runs
 check: lint typecheck test
 
-# Local infra (Postgres + Redis)
+# Core local infra (Postgres + Redis + sendria + livekit). The Langfuse stack is
+# behind the "langfuse" compose profile, so it is NOT started here.
 up:
     docker compose up -d --wait
 
 down:
     docker compose down
+
+# Langfuse v3 observability stack — opt-in, heavy. Gated behind the "langfuse"
+# compose profile so it never rides along with `just up`. Web UI: http://localhost:4000
+langfuse-up:
+    docker compose --profile langfuse up -d
+
+# `down` needs the profile too, else the langfuse containers are treated as orphans.
+langfuse-down:
+    docker compose --profile langfuse down
 
 # Database
 migrate:

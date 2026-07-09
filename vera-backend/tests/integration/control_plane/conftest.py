@@ -10,6 +10,7 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi import FastAPI
+from livekit.api.twirp_client import TwirpError
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -43,11 +44,15 @@ class FakeLiveKit(LiveKitGateway):
         self.dispatch_metadata: list[dict[str, object] | None] = []
         self.sip_calls: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
+        self.removed: list[tuple[str, str]] = []
+        self.room_metadata: list[tuple[str, dict[str, object]]] = []
+        self.minted: list[tuple[str, str, bool]] = []
         self._url = "ws://fake:7880"
         # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
+        self.remove_not_found = False  # remove_participant raises TwirpError(not_found)
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -70,7 +75,24 @@ class FakeLiveKit(LiveKitGateway):
     async def delete_room(self, room_name: str) -> None:
         self.deleted.append(room_name)
 
-    def mint_join_token(self, room_name: str, identity: str) -> str:
+    async def remove_participant(self, room_name: str, identity: str) -> None:
+        # Mirrors LiveKitGateway.remove_participant's except-pattern: the knob
+        # simulates the underlying SDK raising a not-found TwirpError, and this
+        # swallows it the same way, so callers see the same idempotent no-op.
+        try:
+            if self.remove_not_found:
+                raise TwirpError(code="not_found", msg="participant not found", status=404)
+            self.removed.append((room_name, identity))
+        except TwirpError as exc:
+            if exc.code == "not_found":
+                return
+            raise
+
+    async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
+        self.room_metadata.append((room_name, metadata))
+
+    def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
+        self.minted.append((room_name, identity, can_publish))
         return f"faketoken:{room_name}:{identity}"
 
 
@@ -86,6 +108,7 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.known_trunks = set()
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
+    fake_livekit.remove_not_found = False
     yield
 
 
@@ -98,10 +121,14 @@ class RBACWorld:
     def __init__(self, tenant_id: UUID, other_tenant_id: UUID) -> None:
         self.tenant_id = tenant_id
         self.other_tenant_id = other_tenant_id
+        # Filled once the admin AppUser row is created (see rbac_world).
+        self.admin_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
         self.ghost_token = ""
+        self.supervisor_token = ""
+        self.virtual_assistant_token = ""
 
 
 async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
@@ -168,6 +195,11 @@ async def rbac_world(
                 text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'TENANT_ADMIN'")
             )
         ).scalar_one()
+        virtual_assistant_role = (
+            await session.execute(
+                text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'VIRTUAL_ASSISTANT'")
+            )
+        ).scalar_one()
         admin = AppUser(
             tenant_id=tenant_id,
             gcip_uid=None,
@@ -182,16 +214,59 @@ async def rbac_world(
             name="No Role",
             status="active",
         )
-        session.add_all([admin, norole])
+        virtual_assistant = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="virtual_assistant@test.example",
+            name="Virtual Assistant",
+            status="active",
+        )
+        session.add_all([admin, norole, virtual_assistant])
         await session.flush()
         session.add(UserRole(tenant_id=tenant_id, app_user_id=admin.id, role_id=admin_role))
-        admin_id, norole_id = admin.id, norole.id
+        session.add(
+            UserRole(
+                tenant_id=tenant_id,
+                app_user_id=virtual_assistant.id,
+                role_id=virtual_assistant_role,
+            )
+        )
+        admin_id, norole_id, virtual_assistant_id = admin.id, norole.id, virtual_assistant.id
+        world.admin_id = admin_id
+
+        supervisor_role = (
+            await session.execute(
+                text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'SUPERVISOR'")
+            )
+        ).scalar_one()
+        supervisor = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="supervisor@test.example",
+            name="Supervisor",
+            status="active",
+        )
+        session.add(supervisor)
+        await session.flush()
+        session.add(
+            UserRole(tenant_id=tenant_id, app_user_id=supervisor.id, role_id=supervisor_role)
+        )
+        supervisor_id = supervisor.id
 
     world.admin_token = await _mint(
         session_store, user_id=admin_id, tenant_id=tenant_id, email="admin@test.example"
     )
     world.norole_token = await _mint(
         session_store, user_id=norole_id, tenant_id=tenant_id, email="norole@test.example"
+    )
+    world.supervisor_token = await _mint(
+        session_store, user_id=supervisor_id, tenant_id=tenant_id, email="supervisor@test.example"
+    )
+    world.virtual_assistant_token = await _mint(
+        session_store,
+        user_id=virtual_assistant_id,
+        tenant_id=tenant_id,
+        email="virtual_assistant@test.example",
     )
     # A valid session whose user_id has no app_user row -> "unknown user" deny.
     world.ghost_token = await _mint(
