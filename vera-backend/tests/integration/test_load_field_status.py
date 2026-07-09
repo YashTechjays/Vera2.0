@@ -2,14 +2,13 @@
 
 import pytest
 
+from tests.integration.conftest import _FieldStatusCtx
 from vera_core.services.field_status import load_field_status
-
-pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
 async def test_load_field_status_maps_source_conf_supported(
-    seeded_form_with_answers,
+    seeded_form_with_answers: _FieldStatusCtx,
 ) -> None:
     # fixture: form with ai_call(path=cov.a, conf=55, supported=False) + human(path=cov.b)
     ctx = seeded_form_with_answers

@@ -43,19 +43,19 @@ V2 = {
 }
 
 
-def _unfilled():
+def _unfilled() -> FieldStatus:
     return FieldStatus(filled=False, source=None, ai_supported=None, ai_confidence=None)
 
 
-def _ai(conf, sup=True):
+def _ai(conf: int, sup: bool = True) -> FieldStatus:
     return FieldStatus(filled=True, source="ai_call", ai_supported=sup, ai_confidence=conf)
 
 
-def _human():
+def _human() -> FieldStatus:
     return FieldStatus(filled=True, source="human", ai_supported=None, ai_confidence=None)
 
 
-def test_is_field_satisfied_rules():
+def test_is_field_satisfied_rules() -> None:
     assert is_field_satisfied(_human(), floor=FLOOR) is True  # trusted
     assert is_field_satisfied(_ai(90), floor=FLOOR) is True  # ai supported, >=70
     assert is_field_satisfied(_ai(60), floor=FLOOR) is False  # ai <70
@@ -63,7 +63,7 @@ def test_is_field_satisfied_rules():
     assert is_field_satisfied(_unfilled(), floor=FLOOR) is False
 
 
-def test_retryable_only_unsatisfied_askable_required():
+def test_retryable_only_unsatisfied_askable_required() -> None:
     p = "sections.cov.network_status"
     # unfilled required askable -> retryable
     assert retryable_required_paths({p: _unfilled()}, V2, floor=FLOOR) == [p]
@@ -75,5 +75,5 @@ def test_retryable_only_unsatisfied_askable_required():
     assert "sections.cov.plan_name" not in retryable_required_paths({p: _ai(90)}, V2, floor=FLOOR)
 
 
-def test_field_labels_uses_titles():
+def test_field_labels_uses_titles() -> None:
     assert field_labels(V2, ["sections.cov.network_status"]) == ["Network status"]
