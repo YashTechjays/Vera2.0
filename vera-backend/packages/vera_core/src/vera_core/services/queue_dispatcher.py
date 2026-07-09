@@ -195,6 +195,7 @@ async def try_dispatch(
             pass
 
     dispatched = 0
+    dial_attempted = False
 
     # Tenant-level persona overlay — computed once, nested per-call below.
     tweak = (
@@ -285,9 +286,11 @@ async def try_dispatch(
 
         # 4d. Dial OUTSIDE the savepoint: a failed dial keeps the Call row as
         # evidence (FAILED + retry accounting) instead of rolling it back. Pace
-        # dials ~1/s (carrier CPS limit) — sleep between dials, never before the first.
-        if dispatched > 0:
+        # every dial attempt ~1/s (carrier CPS limit) — failed dials still consume
+        # carrier capacity — sleep between attempts, never before the first.
+        if dial_attempted:
             await asyncio.sleep(dial_pacing_s)
+        dial_attempted = True
         try:
             await livekit.create_sip_participant(
                 room_name, form.insurance_provider_phone_number, trunk_id

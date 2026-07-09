@@ -356,3 +356,40 @@ async def test_dials_are_paced_one_second_apart(
 
     assert dispatched == 2
     assert list(sleeps) == [1.0]
+
+
+async def test_pacing_applies_to_failed_dial_attempts(
+    _stub_credentials: dict[str, dict[str, Any] | None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = _tenant(max_agents_per_va=5)
+    form_a = _form(tenant.id)  # This one will fail to dial
+    form_b = _form(tenant.id)  # This one will succeed
+    session = FakeSession(tenant=tenant, candidates=[form_a, form_b])
+    livekit = FakeLiveKit()
+
+    sleeps: deque[float] = deque()
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(queue_dispatcher.asyncio, "sleep", _fake_sleep)  # type: ignore[attr-defined]
+
+    # First dial attempt fails, second succeeds.
+    call_count = {"count": 0}
+
+    async def _create_sip_with_error_toggle(
+        room_name: str, phone_number: str, trunk_id: str
+    ) -> None:
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            raise OutboundDialError("fake provider rejected the call")
+        livekit.sip_dials.append((room_name, phone_number, trunk_id))
+
+    livekit.create_sip_participant = _create_sip_with_error_toggle  # type: ignore[method-assign]
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    # Only the second dial succeeds, so dispatched == 1.
+    # But pacing should still have occurred between attempts, so sleeps == [1.0].
+    assert dispatched == 1
+    assert list(sleeps) == [1.0]
