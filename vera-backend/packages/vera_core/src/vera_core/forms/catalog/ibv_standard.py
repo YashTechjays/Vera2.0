@@ -30,6 +30,7 @@ from vera_core.forms.dsl import (
     AskGroup,
     Codes,
     Comparison,
+    ConfirmInTask,
     Contradiction,
     Derive,
     FieldPrompt,
@@ -47,6 +48,7 @@ from vera_core.forms.dsl import (
 
 _FAMILY = ref("family_coverage")
 _REQUIRED_WHEN_FAMILY = RequiredWhen(when=_FAMILY)
+_CONFIRM_IN_INSURANCE_BASICS = ConfirmInTask(task_key="insurance_basics", confirm_immediate=True)
 
 _DEDUCTIBLE_NOOPS = ["$0", "None", "No Deductible", "Unlimited", "No Limit"]
 _OOP_NOOPS = ["$0", "None", "Unlimited", "No Limit"]
@@ -183,7 +185,7 @@ def _context_sections() -> dict[str, Section]:
                     title="Spouse / Partner Name",
                     role="confirm",
                     default="N/A",
-                    confirm_in_task="insurance_basics",
+                    confirm_in_task=_CONFIRM_IN_INSURANCE_BASICS,
                     applicable_when=_FAMILY,
                     required=_REQUIRED_WHEN_FAMILY,
                     prompt=FieldPrompt(
@@ -199,7 +201,7 @@ def _context_sections() -> dict[str, Section]:
                     title="Spouse / Partner Date of Birth",
                     role="confirm",
                     default="N/A",
-                    confirm_in_task="insurance_basics",
+                    confirm_in_task=_CONFIRM_IN_INSURANCE_BASICS,
                     applicable_when=_FAMILY,
                     required=_REQUIRED_WHEN_FAMILY,
                     prompt=FieldPrompt(

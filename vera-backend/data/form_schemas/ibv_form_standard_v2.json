@@ -301,7 +301,10 @@
           "applicable_when": {
             "ref": "family_coverage"
           },
-          "confirm_in_task": "insurance_basics",
+          "confirm_in_task": {
+            "task_key": "insurance_basics",
+            "confirm_immediate": true
+          },
           "prompt": {
             "confirm": "Can we also check the spouse on the plan? I have the spouse listed as {{value}} — can you confirm that is correct?"
           }
@@ -322,7 +325,10 @@
           "applicable_when": {
             "ref": "family_coverage"
           },
-          "confirm_in_task": "insurance_basics",
+          "confirm_in_task": {
+            "task_key": "insurance_basics",
+            "confirm_immediate": true
+          },
           "prompt": {
             "confirm": "And the spouse's date of birth I have is {{value}} — is that right?"
           }

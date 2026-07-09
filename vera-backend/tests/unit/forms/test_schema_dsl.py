@@ -203,3 +203,50 @@ class TestDocumentValidation:
         doc = minimal_doc()
         doc["tasks"].insert(0, {"task_key": "ritual", "title": "Ritual", "sections": []})
         FormSchemaDoc.model_validate(doc)
+
+    @staticmethod
+    def _context_confirm(cit: object) -> dict[str, Any]:
+        """minimal_doc + a context section holding one confirm_in_task field."""
+        doc = minimal_doc()
+        doc["sections"]["ctx"] = {
+            "title": "Ctx",
+            "role": "context",
+            "fields": {
+                "spouse": {
+                    "type": "text",
+                    "title": "Spouse",
+                    "role": "confirm",
+                    "applicable_when": {
+                        "field": "sections.basics.plan_type",
+                        "op": "eq",
+                        "value": "PPO",
+                    },
+                    "confirm_in_task": cit,
+                    "prompt": {"confirm": "Spouse is {{value}} — correct?"},
+                }
+            },
+        }
+        return doc
+
+    def test_confirm_in_task_object_form_required(self) -> None:
+        with pytest.raises(ValidationError):
+            FormSchemaDoc.model_validate(self._context_confirm("main"))
+        FormSchemaDoc.model_validate(
+            self._context_confirm({"task_key": "main", "confirm_immediate": True})
+        )
+
+    def test_confirm_immediate_requires_in_task_anchor(self) -> None:
+        doc = self._context_confirm({"task_key": "main", "confirm_immediate": True})
+        del doc["sections"]["ctx"]["fields"]["spouse"]["applicable_when"]
+        with pytest.raises(ValidationError, match="needs an anchor"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_confirm_at_task_end_needs_no_anchor(self) -> None:
+        doc = self._context_confirm({"task_key": "main", "confirm_immediate": False})
+        del doc["sections"]["ctx"]["fields"]["spouse"]["applicable_when"]
+        FormSchemaDoc.model_validate(doc)
+
+    def test_confirm_in_task_unknown_task_rejected(self) -> None:
+        doc = self._context_confirm({"task_key": "ghost", "confirm_immediate": False})
+        with pytest.raises(ValidationError, match="unknown task"):
+            FormSchemaDoc.model_validate(doc)

@@ -109,7 +109,7 @@ def compile_prompt_document(doc: FormSchemaDoc) -> dict[str, Any]:
     for path, leaf, gates in leaf_gates(doc):
         section_key = path.split(".")[1]
         if leaf.confirm_in_task is not None:
-            confirms_by_task.setdefault(leaf.confirm_in_task, []).append(
+            confirms_by_task.setdefault(leaf.confirm_in_task.task_key, []).append(
                 _question(path, leaf, gates)
             )
         elif leaf.role in ("ask", "confirm"):
