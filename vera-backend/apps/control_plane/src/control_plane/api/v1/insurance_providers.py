@@ -94,7 +94,7 @@ async def _require_provider(session: AsyncSession, provider_id: UUID) -> Insuran
 
 
 async def _flush_or_name_conflict(session: AsyncSession) -> None:
-    """Flush, mapping an IntegrityError to a 409. """
+    """Flush, mapping an IntegrityError to a 409."""
     try:
         await session.flush()
     except IntegrityError as exc:
