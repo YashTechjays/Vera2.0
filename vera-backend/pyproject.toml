@@ -90,7 +90,7 @@ ignore_missing_imports = true
 # Tests
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["tests", "packages/phi_codec/tests", "apps/agent_worker/tests"]
+testpaths = ["tests", "packages/phi_codec/tests", "apps/agent_worker/tests", "apps/control_plane/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
