@@ -6,6 +6,7 @@ Runs against live RLS-enforcing Postgres with FakeLiveKit.
 """
 
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from uuid import UUID
 
 import httpx
@@ -14,10 +15,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import FakePostCallBus, RBACWorld
-from vera_core.db import uuid7
-from vera_core.models import PatientForm
+from vera_core.db import tenant_session, uuid7
+from vera_core.models import Call, CallLineage, PatientForm, Tenant
 from vera_core.models.authoring import FormSchema, SchemaVersion
-from vera_core.models.enums import InsuranceType
+from vera_core.models.enums import CallStatus, FormStatus, InsuranceType
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -462,3 +463,254 @@ async def test_completed_callback_emits_post_call_job(
     assert str(job.call_id) == call_id
     assert job.form_id == queue_form_id
     assert job.tenant_id == rbac_world.tenant_id
+
+
+# ---------------------------------------------------------------------------
+# RETRY dispatch — retry_fields metadata + call_lineage
+# ---------------------------------------------------------------------------
+
+# A v2 schema with one required ask field (unfilled → drives retry_fields label).
+_RETRY_SCHEMA: dict[str, object] = {
+    "dsl_version": "2.1",
+    "name": "Retry Dispatch Test Schema",
+    "insurance_type": "infertility_treatment",
+    "sections": {
+        "benefits": {
+            "title": "Benefits",
+            "role": "collect",
+            "fields": {
+                "lifetime_max": {
+                    "type": "text",
+                    "title": "Lifetime Maximum",
+                    "role": "ask",
+                    "required": True,
+                    "prompt": {"ask": "What is the lifetime maximum benefit?"},
+                },
+            },
+        }
+    },
+    "tasks": [{"task_key": "main", "title": "Main", "sections": ["benefits"]}],
+}
+
+
+class _CaptureLiveKit:
+    """Fake LiveKit that records the last metadata passed to create_call_room."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
+
+    async def create_call_room(
+        self, room_name: str, metadata: dict[str, object] | None = None
+    ) -> None:
+        self.calls.append((room_name, metadata))
+
+    @property
+    def last_metadata(self) -> dict[str, object] | None:
+        return self.calls[-1][1] if self.calls else None
+
+
+@dataclass
+class _RetryFormCtx:
+    tenant_id: UUID
+    form_id: UUID
+    prior_call_id: UUID
+    sessionmaker: async_sessionmaker[AsyncSession]
+
+    async def get_lineage(self) -> CallLineage:
+        """Return the CallLineage row for the new (retry) call on this form."""
+        async with self.sessionmaker() as session:
+            # Find the new call (not the prior one) for the form.
+            new_call_id = (
+                await session.execute(
+                    select(Call.id)
+                    .where(Call.form_id == self.form_id, Call.id != self.prior_call_id)
+                    .order_by(Call.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+            return (
+                await session.execute(
+                    select(CallLineage).where(CallLineage.retry_call_id == new_call_id)
+                )
+            ).scalar_one()
+
+
+@pytest.fixture
+async def retry_form_ctx(database_url: str) -> AsyncGenerator[_RetryFormCtx]:
+    """Seed a tenant + form with retry_count=1 (IN_QUEUE) and one prior completed
+    call, against a v2 schema with one unfilled required ask field.
+
+    Tears down in FK order on exit. Uses the superuser engine so RLS is bypassed
+    during seeding/teardown; try_dispatch runs inside a tenant_session."""
+    tenant_id = uuid7()
+    form_id = uuid7()
+    prior_call_id = uuid7()
+    schema_version_id = uuid7()
+
+    engine = create_async_engine(database_url)
+    sm: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
+
+    created_schema = False
+    schema_id: UUID
+
+    async with sm() as session, session.begin():
+        session.add(
+            Tenant(
+                id=tenant_id,
+                slug=str(tenant_id),
+                name="Retry Dispatch Test Tenant",
+                status="active",
+            )
+        )
+        await session.flush()
+
+        # Find-or-create: FormSchema has UNIQUE(insurance_type).
+        existing = (
+            await session.execute(
+                select(FormSchema).where(
+                    FormSchema.insurance_type == InsuranceType.INFERTILITY_TREATMENT.value
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            fs = FormSchema(
+                id=uuid7(),
+                insurance_type=InsuranceType.INFERTILITY_TREATMENT.value,
+                name="Retry Dispatch Test Schema",
+            )
+            session.add(fs)
+            await session.flush()
+            schema_id = fs.id
+            created_schema = True
+        else:
+            schema_id = existing.id
+
+        session.add(
+            SchemaVersion(
+                id=schema_version_id,
+                schema_id=schema_id,
+                version=997,
+                schema_json=_RETRY_SCHEMA,
+            )
+        )
+        await session.flush()
+
+        session.add(
+            PatientForm(
+                id=form_id,
+                tenant_id=tenant_id,
+                schema_version_id=schema_version_id,
+                patient_name="Retry Patient",
+                status=FormStatus.IN_QUEUE.value,
+                retry_count=1,
+            )
+        )
+        await session.flush()
+
+        # Prior completed call — provides the parent for CallLineage.
+        session.add(
+            Call(
+                id=prior_call_id,
+                tenant_id=tenant_id,
+                form_id=form_id,
+                current_status=CallStatus.COMPLETED.value,
+                mode="full",
+            )
+        )
+
+    try:
+        yield _RetryFormCtx(
+            tenant_id=tenant_id,
+            form_id=form_id,
+            prior_call_id=prior_call_id,
+            sessionmaker=sm,
+        )
+    finally:
+        async with sm() as session, session.begin():
+            await session.execute(
+                text(
+                    "DELETE FROM call_lineage WHERE tenant_id = :tid"
+                ).bindparams(tid=tenant_id)
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM call_event WHERE call_id IN "
+                    "(SELECT id FROM call WHERE tenant_id = :tid)"
+                ).bindparams(tid=tenant_id)
+            )
+            await session.execute(
+                text("DELETE FROM call WHERE tenant_id = :tid").bindparams(tid=tenant_id)
+            )
+            await session.execute(
+                text("DELETE FROM patient_form WHERE tenant_id = :tid").bindparams(tid=tenant_id)
+            )
+            await session.execute(
+                text("DELETE FROM schema_version WHERE id = :sid").bindparams(
+                    sid=schema_version_id
+                )
+            )
+            if created_schema:
+                await session.execute(
+                    text("DELETE FROM form_schema WHERE id = :fsid").bindparams(fsid=schema_id)
+                )
+            await session.execute(
+                text("DELETE FROM tenant WHERE id = :tid").bindparams(tid=tenant_id)
+            )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_dispatch_attaches_retry_fields_and_lineage(
+    retry_form_ctx: _RetryFormCtx,
+    database_url: str,
+) -> None:
+    """RETRY dispatch embeds retry_fields labels in room metadata and creates a
+    CallLineage row linking the new call to the prior completed call."""
+    from vera_core.services.queue_dispatcher import try_dispatch
+
+    capture = _CaptureLiveKit()
+
+    async with tenant_session(retry_form_ctx.sessionmaker, retry_form_ctx.tenant_id) as session:
+        dispatched = await try_dispatch(session, retry_form_ctx.tenant_id, capture)
+
+    assert dispatched == 1, "expected exactly one call dispatched"
+
+    md = capture.last_metadata
+    assert md is not None, "create_call_room must receive metadata"
+    assert "retry_fields" in md, f"retry_fields missing from metadata: {md}"
+    assert md["retry_fields"], "retry_fields must be non-empty"
+
+    lineage = await retry_form_ctx.get_lineage()
+    assert lineage.parent_call_id == retry_form_ctx.prior_call_id
+
+
+@pytest.mark.asyncio
+async def test_full_dispatch_does_not_carry_retry_fields(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    queue_form_id: UUID,
+    fake_livekit: object,
+) -> None:
+    """A FULL dispatch (retry_count=0) must NOT include retry_fields in metadata.
+
+    Uses the session-scoped FakeLiveKit that is wired into the app; records the
+    dispatch_metadata index before/after enqueueing to isolate the metadata for
+    this particular call."""
+    from tests.integration.control_plane.conftest import FakeLiveKit
+
+    lk: FakeLiveKit = fake_livekit  # type: ignore[assignment]
+    calls_before = len(lk.dispatch_metadata)
+
+    resp = await client.put(
+        f"/api/v1/patient-forms/{queue_form_id}/status",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    new_metadata = lk.dispatch_metadata[calls_before:]
+    assert len(new_metadata) >= 1, "expected at least one dispatch"
+    for md in new_metadata:
+        assert md is None or "retry_fields" not in md, (
+            f"FULL dispatch must not carry retry_fields; got: {md}"
+        )

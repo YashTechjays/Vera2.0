@@ -19,7 +19,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
-from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.forms.review import field_labels, retryable_required_paths
+from vera_core.models import (
+    Call,
+    CallEvent,
+    CallLineage,
+    InsuranceProvider,
+    PatientForm,
+    SchemaVersion,
+    Tenant,
+)
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import (
     CallEventType,
@@ -29,6 +38,7 @@ from vera_core.models.enums import (
 )
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import PersonaTweak
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -39,6 +49,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EASTERN = ZoneInfo("America/New_York")
+
+# Maximum number of field labels to embed in RETRY room metadata.
+MAX_RETRY_FIELDS = 25
 
 # Form statuses that count toward the tenant's concurrency cap.
 _ACTIVE_FORM_STATUSES = (
@@ -69,6 +82,7 @@ async def try_dispatch(
     livekit: Any,
     *,
     audit: AuditSink | None = None,
+    retry_floor: int = 70,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -86,6 +100,12 @@ async def try_dispatch(
     audit:
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
+    retry_floor:
+        Confidence floor used to determine which field labels to embed in the
+        RETRY room metadata.  Best-effort prompt guidance only — the
+        authoritative retry-vs-review decision happened earlier in
+        ``evaluate_call``; this floor only shapes which labels are listed.
+        Defaults to 70, matching ``settings.post_call_review_floor``.
     """
     # 1. Load tenant config.
     tenant = (
@@ -213,8 +233,36 @@ async def try_dispatch(
                 session.add(call)
                 await session.flush()
 
+                # For RETRY calls: compute unsatisfied field labels and find the
+                # most-recent prior call so we can write a CallLineage row.
+                call_metadata = metadata
+                parent_call_id = None
+                if call_mode == CallMode.RETRY:
+                    version = (
+                        await session.execute(
+                            select(SchemaVersion).where(
+                                SchemaVersion.id == form.schema_version_id
+                            )
+                        )
+                    ).scalar_one()
+                    status_by_path = await load_field_status(session, form.id)
+                    paths = retryable_required_paths(
+                        status_by_path, version.schema_json, floor=retry_floor
+                    )
+                    labels = field_labels(version.schema_json, paths)[:MAX_RETRY_FIELDS]
+                    if labels:
+                        call_metadata = {**metadata, "retry_fields": labels}
+                    parent_call_id = (
+                        await session.execute(
+                            select(Call.id)
+                            .where(Call.form_id == form.id, Call.id != call.id)
+                            .order_by(Call.created_at.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+
                 room_name = room_name_for_call(tenant_id, call.id)
-                await livekit.create_call_room(room_name, metadata=metadata)
+                await livekit.create_call_room(room_name, metadata=call_metadata)
 
                 session.add(
                     CallEvent(
@@ -224,6 +272,15 @@ async def try_dispatch(
                         event_value=CallStatus.INITIATED.value,
                     )
                 )
+
+                if parent_call_id is not None:
+                    session.add(
+                        CallLineage(
+                            tenant_id=tenant_id,
+                            parent_call_id=parent_call_id,
+                            retry_call_id=call.id,
+                        )
+                    )
             dispatched += 1
             logger.info(
                 "dispatch: initiated call %s for form %s (mode=%s)",
