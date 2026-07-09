@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from typing import NamedTuple
 
 import aiohttp
 from livekit import api
@@ -23,6 +24,16 @@ AGENT_NAME = "vera-agent"
 # SDK exception types never leak to the routers.
 _LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError)
 
+# Terminal-failure egress statuses used by get_egress_status. Members are plain
+# ints at runtime (protobuf enum wrapper); frozenset gives O(1) membership tests.
+_FAILED_EGRESS_STATUSES: frozenset[int] = frozenset(
+    {
+        api.EgressStatus.EGRESS_FAILED,
+        api.EgressStatus.EGRESS_ABORTED,
+        api.EgressStatus.EGRESS_LIMIT_REACHED,
+    }
+)
+
 
 class LiveKitUnavailable(Exception):
     """The LiveKit SIP service could not be reached (or errored) while we probed it —
@@ -34,6 +45,21 @@ class OutboundDialError(Exception):
     """Placing an outbound SIP call failed at the LiveKit / telephony seam — a
     bad/deleted trunk, the provider rejecting the call, or LiveKit being unreachable.
     The router translates this into a clean upstream-error response, never a raw 500."""
+
+
+class EgressStartError(Exception):
+    """Starting the room-composite recording egress failed (LiveKit unreachable or
+    the egress service rejected the request). Callers fail OPEN: the call proceeds
+    unrecorded and the failure is audited (spec decision 2)."""
+
+
+class EgressState(NamedTuple):
+    """Reconciled egress status for the recording verifier."""
+
+    complete: bool
+    failed: bool
+    duration_ms: int | None
+    size_bytes: int | None
 
 
 class LiveKitGateway:
@@ -167,6 +193,59 @@ class LiveKitGateway:
             await lk.room.update_room_metadata(
                 api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
             )
+
+    async def start_room_audio_egress(
+        self, room_name: str, *, bucket: str, object_path: str
+    ) -> str:
+        """Start an audio-only room-composite egress uploading straight to GCS.
+
+        Empty GCPUpload credentials → the egress service signs with its own
+        service account (Workload Identity; devops-todo). Returns the egress id
+        the verifier later reconciles with ListEgress.
+
+        SDK note: the installed livekit-api exposes GCPUpload / field ``gcp`` on
+        EncodedFileOutput, not GCSUpload / ``gcs`` as named in the spec brief.
+        """
+        try:
+            async with self._client() as lk:
+                info = await lk.egress.start_room_composite_egress(
+                    api.RoomCompositeEgressRequest(
+                        room_name=room_name,
+                        audio_only=True,
+                        file_outputs=[
+                            api.EncodedFileOutput(
+                                file_type=api.EncodedFileType.OGG,
+                                filepath=object_path,
+                                gcp=api.GCPUpload(bucket=bucket),
+                            )
+                        ],
+                    )
+                )
+        except _LIVEKIT_TRANSPORT_ERRORS as e:
+            raise EgressStartError(str(e)) from e
+        return str(info.egress_id)
+
+    async def get_egress_status(self, egress_id: str) -> EgressState | None:
+        """Current state of one egress; None when LiveKit no longer lists the id
+        (server restarted / id expired) — the verifier marks such rows FAILED.
+        """
+        async with self._client() as lk:
+            resp = await lk.egress.list_egress(api.ListEgressRequest(egress_id=egress_id))
+        if not resp.items:
+            return None
+        item = resp.items[0]
+        file_result = item.file_results[0] if item.file_results else None
+        return EgressState(
+            complete=item.status == api.EgressStatus.EGRESS_COMPLETE,
+            failed=item.status in _FAILED_EGRESS_STATUSES,
+            # proto duration / size are 0 when not yet reported; treat 0 as absent.
+            duration_ms=(
+                (file_result.duration // 1_000_000)
+                if file_result and file_result.duration
+                else None
+            ),
+            size_bytes=(file_result.size or None) if file_result else None,
+        )
 
     def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
         # Short TTL: the token is used immediately; the SDK default (~6h) would
