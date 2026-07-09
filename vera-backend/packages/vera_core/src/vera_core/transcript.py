@@ -44,6 +44,7 @@ class TranscriptStore(Protocol):
     async def mark_ended(self, room_name: str) -> None: ...
     async def delete(self, room_name: str) -> None: ...
     def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]: ...
+    async def read_all(self, room_name: str) -> list[TranscriptEvent]: ...
 
 
 class InMemoryTranscriptStore:
@@ -95,6 +96,14 @@ class InMemoryTranscriptStore:
                     ts=int(fields["ts"]),
                 ),
             )
+
+    async def read_all(self, room_name: str) -> list[TranscriptEvent]:
+        entries = self._entries.get(transcript_stream_key(room_name), [])
+        return [
+            TranscriptEvent(role=f["role"], text=f["text"], ts=int(f["ts"]))
+            for _id, f in entries
+            if f.get(_ENDED_FIELD) != _ENDED_VALUE
+        ]
 
 
 class RedisTranscriptStore:
@@ -175,6 +184,18 @@ class RedisTranscriptStore:
                     ),
                 )
 
+    async def read_all(self, room_name: str) -> list[TranscriptEvent]:
+        # XRANGE full-range: non-blocking, no sentinel dependency — an expired or
+        # never-created stream returns []. This is the finalizer's read; the SSE
+        # path keeps the tailing read().
+        raw = await self._redis.xrange(transcript_stream_key(room_name))
+        entries = cast(list[tuple[str, dict[str, str]]], raw)
+        return [
+            TranscriptEvent(role=fields["role"], text=fields["text"], ts=int(fields["ts"]))
+            for _entry_id, fields in entries
+            if fields.get(_ENDED_FIELD) != _ENDED_VALUE
+        ]
+
 
 class TranscriptService:
     """The reusable produce/consume API over a TranscriptStore. Producers
@@ -212,6 +233,12 @@ class TranscriptService:
         coroutine blocks indefinitely (it tails until the ended sentinel).
         """
         return [event async for _id, event in self._store.read(room_name)]
+
+    async def drain(self, room_name: str) -> list[TranscriptEvent]:
+        """Non-blocking snapshot of everything currently in the stream (the
+        persistence finalizer). Unlike collect(), never blocks: a missing or
+        already-expired stream yields []."""
+        return await self._store.read_all(room_name)
 
     async def end(self, room_name: str) -> None:
         await self._store.mark_ended(room_name)

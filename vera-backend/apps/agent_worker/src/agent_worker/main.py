@@ -29,7 +29,7 @@ from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import ReorderingEmitter, attach_transcript_publisher
 from vera_core.config.settings import get_settings
-from vera_core.events import CallFailedEvent, CallFailureReason, WorkerEventBus
+from vera_core.events import CallEndedEvent, CallFailedEvent, CallFailureReason, WorkerEventBus
 from vera_core.observability.correlation import (
     call_trace_attributes,
     is_listen_only_identity,
@@ -296,6 +296,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 await transcript_service.end(room_name)
             except Exception:  # best-effort; never block shutdown
                 logger.exception("failed to mark transcript ended for %s", room_name)
+        if transcript_service is not None and parse_room_name(room_name) is not None:
+            events_redis = create_redis(settings.redis_url)
+            try:
+                bus = WorkerEventBus(events_redis, maxlen=settings.worker_events_stream_maxlen)
+                await bus.emit(CallEndedEvent(room_name=room_name, ts=int(time.time() * 1000)))
+            except Exception:  # best-effort; never block shutdown
+                logger.exception("failed to emit call.ended for %s", room_name)
+            finally:
+                await events_redis.aclose()
         if transcript_redis is not None:
             try:
                 await transcript_redis.aclose()

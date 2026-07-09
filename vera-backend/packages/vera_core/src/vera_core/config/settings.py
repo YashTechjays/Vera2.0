@@ -33,8 +33,11 @@ class Settings(BaseSettings):
     # Live-transcript Redis stream lifetime (Voice Lab / SSE). The rolling backstop
     # TTL is refreshed on every publish so an abandoned stream self-clears; the end
     # grace TTL lets connected readers drain the `ended` sentinel before it clears.
+    # The grace window is also the persistence-finalizer's durability budget: the
+    # control plane must consume call.ended and drain the stream before it expires,
+    # so it is sized to ride out a control-plane restart, not just an SSE drain.
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
-    transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
+    transcript_end_grace_seconds: int = 900  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
     # Worker→control-plane event bus (Redis Streams + consumer group). Stream is
     # MAXLEN-trimmed; the consumer blocks for block_ms, reclaims entries a crashed

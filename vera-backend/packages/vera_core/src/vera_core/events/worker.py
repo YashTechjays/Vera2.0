@@ -8,9 +8,9 @@ or transcript text.
 """
 
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
@@ -36,9 +36,20 @@ class CallFailedEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
-# Widen to a discriminated `Union[...]` on `type` when a second event type lands.
-type WorkerEvent = CallFailedEvent
-_ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(CallFailedEvent)
+class CallEndedEvent(BaseModel):
+    """Emitted by the worker at session shutdown for a canonical call room, AFTER
+    the transcript ended-sentinel is written — the control plane's trigger to
+    persist the tokenized transcript to Postgres. PHI-free: room name + ts only."""
+
+    type: Literal["call.ended"] = "call.ended"
+    room_name: str
+    ts: int  # epoch milliseconds
+
+
+type WorkerEvent = CallFailedEvent | CallEndedEvent
+_ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
+    Annotated[CallFailedEvent | CallEndedEvent, Field(discriminator="type")]
+)
 
 
 def parse_worker_event(raw: str) -> WorkerEvent:
