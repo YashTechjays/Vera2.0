@@ -2,7 +2,6 @@
 Flash by default. Consumes only the de-identified transcript — no raw PHI."""
 
 import json
-from dataclasses import asdict
 from typing import Any
 
 from google import genai
@@ -38,7 +37,10 @@ def parse_extract_response(data: list[dict[str, Any]]) -> list[ExtractedField]:
 
 
 def build_judge_prompt(extracted: list[ExtractedField], turns: list[TranscriptTurn]) -> str:
-    items = [asdict(e) for e in extracted]
+    items = [
+        {"field_path": e.field_path, "value": e.value, "evidence_seq": e.evidence_seq}
+        for e in extracted
+    ]
     return (
         "For each extracted field, decide whether the transcript SUPPORTS the value. "
         "Return supported (bool), 0-100 confidence, and a short evidence quote.\n\n"
