@@ -26,7 +26,6 @@ from control_plane.auth.identity import InvalidTokenError, TokenVerifier, Verifi
 from control_plane.auth.invitations import InvitationStore
 from control_plane.auth.session import SessionStore
 from control_plane.email import EmailSender
-from control_plane.exceptions import CustomAPIException, DefaultExceptionCode
 from control_plane.idempotency import IdempotencyStore
 from vera_core.audit import AuditSink, AuthAuditSink
 from vera_core.config import Settings
@@ -37,7 +36,6 @@ from vera_core.transcript import TranscriptService
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
-    from control_plane.recording_storage import RecordingStorage
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -246,15 +244,3 @@ async def self_scoped_session(
     else:
         async with platform_session(sessionmaker) as session:
             yield session
-
-
-def get_recording_storage(request: Request) -> RecordingStorage:
-    """Return the process-wide RecordingStorage, or raise 409 when recording is
-    disabled platform-wide (no bucket configured)."""
-    storage: RecordingStorage | None = request.app.state.recording_storage
-    if storage is None:
-        # Recording disabled platform-wide (no bucket configured).
-        raise CustomAPIException(
-            DefaultExceptionCode.CONFLICT, message="call recording is not configured"
-        )
-    return storage

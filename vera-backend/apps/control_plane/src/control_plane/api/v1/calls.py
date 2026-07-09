@@ -22,7 +22,6 @@ from control_plane.api.v1.common import (
     AppSettings,
     Audit,
     LiveKit,
-    RecordingStorageDep,
     TenantId,
     TenantSession,
 )
@@ -455,7 +454,6 @@ async def get_recording_playback(
     session: TenantSession,
     audit: Audit,
     settings: AppSettings,
-    storage: RecordingStorageDep,
     caller: VerifiedIdentity = require("recordings:read"),
 ) -> ResponseModel[RecordingPlayback]:
     """Mint a TTL-bounded signed URL for the call's recording.
@@ -469,6 +467,12 @@ async def get_recording_playback(
     if call is None:
         raise NotFoundError(message="call not found")
     _assert_call_visible(call, caller)
+
+    storage = request.app.state.recording_storage
+    if storage is None:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT, message="call recording is not configured"
+        )
 
     recording = (
         await session.execute(

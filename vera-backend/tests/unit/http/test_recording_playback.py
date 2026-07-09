@@ -285,3 +285,14 @@ async def test_missing_recordings_read_permission_returns_403() -> None:
         resp = await c.get(_PATH)
 
     assert resp.status_code == 403
+
+
+async def test_storage_unconfigured_returns_409() -> None:
+    """Permissioned caller + visible call but storage=None → 409 config error."""
+    app = _build_app(permissions=_READ, call=_FakeCall(), recording=_FakeRecording())
+    app.state.recording_storage = None
+
+    async with _client(app) as c:
+        resp = await c.get(_PATH)
+
+    assert resp.status_code == 409

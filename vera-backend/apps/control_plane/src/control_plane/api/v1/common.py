@@ -27,7 +27,6 @@ from control_plane.deps import (
     get_invitation_store,
     get_kms,
     get_livekit,
-    get_recording_storage,
     get_settings_state,
     self_scoped_session,
     tenant_scoped_session,
@@ -41,7 +40,6 @@ from vera_core.models.enums import AuthEvent
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
-    from control_plane.recording_storage import RecordingStorage
 
 # Platform-tier permissions are namespaced `platform:*` (rbac_defaults). They must
 # never reach the tenant tier — not in a tenant-owned custom role, not in any grant
@@ -66,7 +64,6 @@ Email = Annotated[EmailSender, Depends(get_email_sender)]
 Resolver = Annotated[PermissionResolver, Depends(get_resolver)]
 LiveKit = Annotated["LiveKitGateway", Depends(get_livekit)]
 Kms = Annotated[KeyManagementService, Depends(get_kms)]
-RecordingStorageDep = Annotated["RecordingStorage", Depends(get_recording_storage)]
 
 
 async def emit_auth_event(
