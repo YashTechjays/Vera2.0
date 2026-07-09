@@ -1,0 +1,153 @@
+"""Post-call eval consumer: drains vera:post-call, re-reads each finished call's
+transcript, and runs evaluate_call. Mirrors worker_events.WorkerEventConsumer for the
+group/ack/reclaim + idle-TimeoutError discipline."""
+
+import asyncio
+import logging
+import os
+import socket
+from typing import Any, cast
+from uuid import UUID
+
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from vera_core.audit import AuditSink
+from vera_core.db.rls import tenant_session
+from vera_core.events import (
+    POST_CALL_GROUP,
+    POST_CALL_STREAM,
+    PostCallJob,
+    PostCallJobBus,
+    parse_post_call_job,
+)
+from vera_core.integrations.llm import LLMClient, TranscriptTurn
+from vera_core.observability.correlation import room_name_for_call
+from vera_core.services.post_call_eval import EvalDeps, evaluate_call
+from vera_core.transcript import TranscriptService
+
+logger = logging.getLogger("control_plane.post_call")
+
+type _StreamEntries = list[tuple[str, dict[str, str]]]
+
+
+async def build_turns(
+    transcript: TranscriptService, tenant_id: UUID, call_id: UUID
+) -> list[TranscriptTurn]:
+    room = room_name_for_call(tenant_id, call_id)
+    events = await transcript.snapshot(room)
+    return [TranscriptTurn(seq=i, role=e.role, text=e.text) for i, e in enumerate(events)]
+
+
+class PostCallConsumer:
+    def __init__(
+        self,
+        redis: Redis,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        transcript: TranscriptService,
+        llm: LLMClient,
+        audit: AuditSink,
+        livekit: Any,
+        *,
+        block_ms: int = 5_000,
+        reclaim_idle_ms: int = 60_000,
+        review_floor: int = 60,
+        consumer_name: str | None = None,
+    ) -> None:
+        self._redis = redis
+        self._sessionmaker = sessionmaker
+        self._transcript = transcript
+        self._block_ms = block_ms
+        self._reclaim_idle_ms = reclaim_idle_ms
+        self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
+        self._bus = PostCallJobBus(redis)
+        self._deps = EvalDeps(llm=llm, audit=audit, livekit=livekit, floor=review_floor)
+
+    async def run(self) -> None:
+        group_ready = False
+        while True:
+            try:
+                if not group_ready:
+                    await self._bus.ensure_group()
+                    group_ready = True
+                await self._reclaim_stale()
+                await self._read_once()
+            except asyncio.CancelledError:
+                raise
+            except RedisError:
+                logger.exception("post-call consumer Redis error; backing off")
+                await asyncio.sleep(1.0)
+
+    async def _read_once(self) -> None:
+        try:
+            resp = await self._redis.xreadgroup(
+                POST_CALL_GROUP,
+                self._consumer,
+                {POST_CALL_STREAM: ">"},
+                count=16,
+                block=self._block_ms,
+            )
+        except RedisTimeoutError:
+            return  # idle tick — see CLAUDE.md
+        if not resp:
+            return
+        streams = cast("list[tuple[str, _StreamEntries]]", resp)
+        _, entries = streams[0]
+        await self._dispatch(entries)
+
+    async def _reclaim_stale(self) -> None:
+        result = await self._redis.xautoclaim(
+            POST_CALL_STREAM,
+            POST_CALL_GROUP,
+            self._consumer,
+            min_idle_time=self._reclaim_idle_ms,
+            start_id="0-0",
+            count=16,
+        )
+        _, entries, _ = cast("tuple[str, _StreamEntries, list[str]]", result)
+        await self._dispatch(entries)
+
+    async def _dispatch(self, entries: _StreamEntries) -> None:
+        await asyncio.gather(*(self._process(eid, f) for eid, f in entries))
+
+    async def _process(self, entry_id: str, fields: dict[str, str]) -> None:
+        raw = fields.get("job")
+        if raw is None:
+            await self._ack(entry_id)
+            return
+        try:
+            job = parse_post_call_job(raw)
+        except Exception:
+            logger.exception("dropping unparseable post-call job %s", entry_id)
+            await self._ack(entry_id)
+            return
+        try:
+            await self._process_job(job)
+        except Exception:
+            logger.exception("post-call job %s failed; leaving unacked for reclaim", entry_id)
+            return  # do NOT ack → XAUTOCLAIM retries (at-least-once)
+        await self._ack(entry_id)
+
+    async def _process_job(self, job: PostCallJob) -> None:
+        turns = await build_turns(self._transcript, job.tenant_id, job.call_id)
+        async with tenant_session(self._sessionmaker, job.tenant_id) as session:
+            outcome = await evaluate_call(
+                session,
+                self._deps,
+                tenant_id=job.tenant_id,
+                form_id=job.form_id,
+                call_id=job.call_id,
+                turns=turns,
+            )
+        logger.info(
+            "post-call eval form=%s -> %s (%d answers, %d reviewed)",
+            job.form_id,
+            outcome.status.value,
+            outcome.answers_written,
+            len(outcome.reviewed_fields),
+        )
+
+    async def _ack(self, entry_id: str) -> None:
+        await self._redis.xack(POST_CALL_STREAM, POST_CALL_GROUP, entry_id)
