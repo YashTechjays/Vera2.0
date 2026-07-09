@@ -563,3 +563,63 @@ async def test_get_prompt_schema_forbidden_for_tenant(
         f"/api/v1/prompts/{ids.prompt_id}/schema", headers=_auth(w.tenant_admin_token)
     )
     assert resp.status_code == 403
+
+
+async def test_stateless_preview_renders_without_saving(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    headers = _auth(w.super_token)
+    body = {**VALID_PROMPT_DOC, "task_overrides": {"main": {"prompt": "DRY RUN."}}}
+    resp = await client.post(f"/api/v1/prompts/{ids.prompt_id}/preview", headers=headers, json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["errors"] == []
+    main = next(t for t in data["rendered"]["tasks"] if t["task_key"] == "main")
+    assert main["prompt"].startswith("DRY RUN.")
+
+    versions = (
+        await client.get(f"/api/v1/prompts/{ids.prompt_id}/versions", headers=headers)
+    ).json()["data"]
+    assert len(versions) == 1  # no draft row was created
+
+
+async def test_stateless_preview_reports_content_errors_but_still_renders(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    body = {
+        **VALID_PROMPT_DOC,
+        "session": {**VALID_PROMPT_DOC["session"], "persona": "Hi {{ghost}}."},
+        "task_overrides": {"phantom": {"prompt": "x"}},
+    }
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview", headers=_auth(w.super_token), json=body
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert "session.persona: unknown placeholder {{ghost}}" in data["errors"]
+    assert "task_overrides.phantom: unknown task_key" in data["errors"]
+    assert data["rendered"]["persona"] == "Hi {{ghost}}."  # rendered anyway
+
+
+async def test_stateless_preview_shape_error_is_422(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview", headers=_auth(w.super_token), json={"nope": 1}
+    )
+    assert resp.status_code == 422
+
+
+async def test_stateless_preview_forbidden_for_tenant(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview",
+        headers=_auth(w.tenant_admin_token),
+        json=VALID_PROMPT_DOC,
+    )
+    assert resp.status_code == 403

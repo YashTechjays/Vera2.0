@@ -329,6 +329,48 @@ async def preview_prompt(
     return ok(render_task_prompts(schema_doc, prompt_doc))
 
 
+class PromptPreview(BaseModel):
+    """Stateless dry-run render. `errors` uses the exact save-time 400 strings
+    (same validate_prompt_document); 200 even when non-empty because the renderer
+    tolerates content errors and the editor polls this while typing (spec §2.3)."""
+
+    errors: list[str]
+    rendered: RenderedPrompts
+
+
+@router.post(
+    "/{prompt_id}/preview",
+    response_model=ResponseModel[PromptPreview],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+    ),
+)
+async def preview_document(
+    prompt_id: UUID,
+    body: PromptDocument,
+    session: PlatformSession,
+    _caller: Annotated[VerifiedIdentity, _READ],
+) -> ResponseModel[PromptPreview]:
+    """Render an unsaved document against the published schema; persist nothing.
+
+    Read-gated: a dry run that mutates nothing (POST only because the document
+    travels in the body). Deliberately NOT idempotency-gated — non-mutating."""
+    prompt = await _require_prompt(session, prompt_id)
+    published_schema = await _published_schema_version(session, prompt.schema_id)
+    if published_schema is None:
+        raise ConflictError(message="no published schema to render against")
+    schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
+    return ok(
+        PromptPreview(
+            errors=validate_prompt_document(body, schema_doc),
+            rendered=render_task_prompts(schema_doc, body),
+        )
+    )
+
+
 @router.post(
     "/{prompt_id}/versions",
     status_code=status.HTTP_201_CREATED,
