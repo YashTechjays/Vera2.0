@@ -27,6 +27,7 @@ from vera_core.audit import (
     DatabaseAuditWriter,
     DatabaseAuthAuditWriter,
 )
+from vera_core.call_stream import CallStreamService, RedisCallStreamStore
 from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_settings
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
@@ -62,6 +63,7 @@ def create_app(
     livekit: LiveKitGateway | None = None,
     secrets: SecretProvider | None = None,
     transcript_service: TranscriptService | None = None,
+    call_stream_service: CallStreamService | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -83,6 +85,7 @@ def create_app(
         # handed (tests inject both and never touch Redis).
         redis: Redis | None = None
         transcript_redis: Redis | None = None
+        call_stream_redis: Redis | None = None
 
         def _redis() -> Redis:
             nonlocal redis
@@ -117,6 +120,19 @@ def create_app(
                 )
             )
         app.state.transcript_service = _transcript_service
+        # Same dedicated-client reasoning as the transcript stream above: a tailing
+        # SSE pins a connection, so this must not draw from the shared pool.
+        _call_stream_service = call_stream_service
+        if _call_stream_service is None:
+            call_stream_redis = create_redis(settings.redis_url)
+            _call_stream_service = CallStreamService(
+                RedisCallStreamStore(
+                    call_stream_redis,
+                    ttl_seconds=settings.transcript_stream_ttl_seconds,
+                    end_grace_seconds=settings.transcript_end_grace_seconds,
+                )
+            )
+        app.state.call_stream_service = _call_stream_service
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)
@@ -158,6 +174,8 @@ def create_app(
             await redis.aclose()
         if transcript_redis is not None:
             await transcript_redis.aclose()
+        if call_stream_redis is not None:
+            await call_stream_redis.aclose()
         await engine.dispose()
 
     app = FastAPI(title="Vera Control Plane", version="0.1.0", lifespan=lifespan)

@@ -13,11 +13,12 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
+from vera_core.call_stream import CallStreamService
 from vera_core.db import uuid7
 from vera_core.models import AppUser, AuditLog, Call, InsuranceProvider, PatientForm
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
-from vera_core.observability.correlation import parse_room_name
+from vera_core.observability.correlation import parse_room_name, room_name_for_call
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -674,3 +675,89 @@ async def test_owner_revoke_of_departed_intervener_is_noop_but_audited(
         )
     )
     assert len(result.scalars().all()) == 1
+
+
+# ---------------------------------------------------------------------------
+# GET /calls/{call_id}/events — live envelope SSE
+#
+# These tests insert the Call row directly via the DB session rather than
+# through POST /calls: that manual-creation endpoint is being removed in a
+# later task, so new tests must not depend on it.
+# ---------------------------------------------------------------------------
+
+
+async def _insert_call(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    form_id: UUID,
+    initiated_by_id: UUID | None,
+) -> UUID:
+    call_id = uuid7()
+    async with admin_sessionmaker() as s, s.begin():
+        s.add(
+            Call(
+                id=call_id,
+                tenant_id=tenant_id,
+                form_id=form_id,
+                initiated_by_id=initiated_by_id,
+            )
+        )
+    return call_id
+
+
+@pytest.mark.asyncio
+async def test_call_events_streams_envelope_frames_for_owner(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+) -> None:
+    call_id = await _insert_call(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    await call_stream_service.publish_turn(room, "agent", "hello", ts=1)
+    await call_stream_service.end(room)
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert resp.headers["cache-control"] == "no-store"
+    assert '"type":"transcript"' in resp.text
+
+
+@pytest.mark.asyncio
+async def test_call_events_hidden_for_private_call_non_owner(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    call_id = await _insert_call(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        form_id=seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_call_events_unknown_call_returns_404(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    resp = await client.get(
+        f"/api/v1/calls/{uuid4()}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 404, resp.text

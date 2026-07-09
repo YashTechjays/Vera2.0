@@ -22,6 +22,7 @@ from control_plane.email import InMemoryEmailSender
 from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
+from vera_core.call_stream import CallStreamEvent, CallStreamService
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
@@ -126,6 +127,35 @@ async def drain_dispatch_tasks() -> AsyncIterator[None]:
 @pytest.fixture(scope="session")
 def transcript_service() -> TranscriptService:
     return TranscriptService(InMemoryTranscriptStore())
+
+
+class _MemCallStreamStore:
+    """In-memory CallStreamStore fake, keyed by room_name (mirrors the room-keying
+    InMemoryTranscriptStore uses, not the flat _MemStore in the Task 9 unit tests) —
+    this fixture is session-scoped like transcript_service, so it must not let one
+    test's preloaded events bleed into another's; every test uses a distinct room_name."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, list[tuple[str, CallStreamEvent]]] = {}
+
+    async def publish(self, room_name: str, event: CallStreamEvent) -> None:
+        entries = self._entries.setdefault(room_name, [])
+        entries.append((f"{len(entries)}-0", event))
+
+    async def mark_ended(self, room_name: str) -> None:
+        self._entries.setdefault(room_name, [])
+
+    async def delete(self, room_name: str) -> None:
+        self._entries.pop(room_name, None)
+
+    async def read(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        for entry_id, event in list(self._entries.get(room_name, [])):
+            yield entry_id, event
+
+
+@pytest.fixture(scope="session")
+def call_stream_service() -> CallStreamService:
+    return CallStreamService(_MemCallStreamStore())
 
 
 class RBACWorld:
@@ -330,6 +360,7 @@ async def authz_app(
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
     transcript_service: TranscriptService,
+    call_stream_service: CallStreamService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
     the whole request path, including the audit writer. The session store is the
@@ -347,6 +378,7 @@ async def authz_app(
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
         transcript_service=transcript_service,
+        call_stream_service=call_stream_service,
     )
     async with app.router.lifespan_context(app):
         yield app

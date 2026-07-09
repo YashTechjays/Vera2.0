@@ -11,16 +11,25 @@ in each handler.
 
 import contextlib
 import logging
+from collections.abc import AsyncIterator
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import Audit, Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import require
-from control_plane.deps import get_audit
+from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.deps import (
+    current_identity,
+    get_audit,
+    get_call_stream_service,
+    get_sessionmaker,
+)
 from control_plane.exceptions import (
     CustomAPIException,
     CustomAPIResponse,
@@ -30,6 +39,8 @@ from control_plane.exceptions import (
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
+from vera_core.call_stream import CallStreamService
+from vera_core.db.rls import tenant_session
 from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
@@ -227,6 +238,71 @@ async def join_token(
     # Watch-only tokens are server-side mute; only ?intervene=true may publish.
     token = livekit.mint_join_token(room_name=room_name, identity=identity, can_publish=intervene)
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
+
+
+@router.get("/calls/{call_id}/events")
+async def stream_call_events(
+    call_id: UUID,
+    request: Request,
+    identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
+    audit: Audit,
+    service: Annotated[CallStreamService, Depends(get_call_stream_service)],
+) -> StreamingResponse:
+    """Live per-call event stream (transcript turns, call_status frames; form-fill
+    later) for Live Monitoring. Same visibility rule as join-token: owner, or a
+    published/ownerless call, minus revoked users. Authorization runs in a
+    SHORT-LIVED tenant session released before streaming (an SSE is long-lived and
+    must not pin a DB connection — mirrors voice_lab.stream_transcript)."""
+    if identity.account_type != "tenant" or identity.tenant_id is None:
+        raise NotFoundError(message="call not found")
+    tenant_id = identity.tenant_id
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        user_id, permissions = await resolver.effective_permissions(
+            session, tenant_id, identity.user_id
+        )
+        call = (
+            await session.execute(select(Call).where(Call.id == call_id))
+        ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
+    if call is None:
+        raise NotFoundError(message="call not found")
+    if call.initiated_by_id != user_id:
+        revoked = str(user_id) in call.revoked_user_ids
+        if revoked or (call.initiated_by_id is not None and not call.published):
+            raise NotFoundError(message="call not found")  # don't reveal a private call
+    allowed = "calls:read" in permissions
+    # Transcript text is tokenized/de-identified, but the disclosure is still audited
+    # (mirrors the voice-lab transcript endpoint).
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=user_id,
+            actor_label=identity.email or identity.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type="call_events",
+            resource_id=str(call_id),
+            permission_key="calls:read",
+            decision="allow" if allowed else "deny",
+            request_id=current_request_id(request),
+        )
+    )
+    if not allowed:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="missing permission calls:read"
+        )
+    room_name = room_name_for_call(tenant_id, call.id)
+
+    async def _events() -> AsyncIterator[str]:
+        async for entry_id, event in service.consume(room_name):
+            yield f"id: {entry_id}\ndata: {event.model_dump_json()}\n\n"
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(
