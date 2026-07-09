@@ -130,7 +130,9 @@ def get_invitation_store(request: Request) -> InvitationStore:
 
 
 def get_post_call_bus(request: Request) -> PostCallJobBus:
-    bus: PostCallJobBus = request.app.state.post_call_bus
+    bus: PostCallJobBus | None = getattr(request.app.state, "post_call_bus", None)
+    if bus is None:
+        raise RuntimeError("PostCallJobBus not configured")
     return bus
 
 

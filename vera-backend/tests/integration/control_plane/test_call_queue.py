@@ -247,6 +247,16 @@ async def test_manual_call_then_completed_callback(
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"]["status"] == "completed"
 
+    async with admin_sessionmaker() as session:
+        form_status = (
+            await session.execute(
+                text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
+                    fid=queue_form_id
+                )
+            )
+        ).scalar_one()
+    assert form_status == "ai_processing"
+
 
 @pytest.mark.asyncio
 async def test_enqueue_stamps_enqueued_by_id(
