@@ -504,3 +504,23 @@ async def test_preview_forbidden_for_tenant(
         f"/api/v1/prompts/{ids.prompt_id}/preview", headers=_auth(world.tenant_admin_token)
     )
     assert resp.status_code == 403
+
+
+async def test_versions_expose_pinned_schema_version(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    versions = (
+        await client.get(f"/api/v1/prompts/{ids.prompt_id}/versions", headers=_auth(w.super_token))
+    ).json()["data"]
+    assert versions[0]["schema_version_id"] == str(ids.schema_version_id)
+    assert versions[0]["schema_version"] == 1
+
+    detail = (
+        await client.get(
+            f"/api/v1/prompts/{ids.prompt_id}/versions/{ids.version_id}",
+            headers=_auth(w.super_token),
+        )
+    ).json()["data"]
+    assert detail["schema_version_id"] == str(ids.schema_version_id)
+    assert detail["schema_version"] == 1

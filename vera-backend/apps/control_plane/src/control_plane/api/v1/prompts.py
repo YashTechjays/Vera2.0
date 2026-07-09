@@ -58,6 +58,8 @@ class PromptVersionSummary(BaseModel):
     version: int
     status: str
     created_at: datetime
+    schema_version_id: UUID
+    schema_version: int
 
 
 class PromptVersionDetail(BaseModel):
@@ -65,17 +67,29 @@ class PromptVersionDetail(BaseModel):
     version: int
     status: str
     created_at: datetime
+    schema_version_id: UUID
+    schema_version: int
     composite_json: dict[str, Any]
 
 
-def _detail(v: PromptVersion) -> PromptVersionDetail:
+def _detail(v: PromptVersion, schema_version: int) -> PromptVersionDetail:
     return PromptVersionDetail(
         id=v.id,
         version=v.version,
         status=v.status,
         created_at=v.created_at,
+        schema_version_id=v.schema_version_id,
+        schema_version=schema_version,
         composite_json=v.composite_json,
     )
+
+
+async def _schema_version_number(session: AsyncSession, schema_version_id: UUID) -> int:
+    return (
+        await session.execute(
+            select(SchemaVersion.version).where(SchemaVersion.id == schema_version_id)
+        )
+    ).scalar_one()
 
 
 async def _require_prompt(session: AsyncSession, prompt_id: UUID) -> Prompt:
@@ -174,7 +188,10 @@ async def list_versions(
                 PromptVersion.version,
                 PromptVersion.status,
                 PromptVersion.created_at,
+                PromptVersion.schema_version_id,
+                SchemaVersion.version.label("schema_version"),
             )
+            .join(SchemaVersion, SchemaVersion.id == PromptVersion.schema_version_id)
             .where(PromptVersion.prompt_id == prompt_id)
             .order_by(PromptVersion.version.desc())
         )
@@ -182,7 +199,12 @@ async def list_versions(
     return ok(
         [
             PromptVersionSummary(
-                id=r.id, version=r.version, status=r.status, created_at=r.created_at
+                id=r.id,
+                version=r.version,
+                status=r.status,
+                created_at=r.created_at,
+                schema_version_id=r.schema_version_id,
+                schema_version=r.schema_version,
             )
             for r in rows
         ]
@@ -204,7 +226,9 @@ async def get_version(
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, _READ],
 ) -> ResponseModel[PromptVersionDetail]:
-    return ok(_detail(await _require_version(session, prompt_id, version_id)))
+    version = await _require_version(session, prompt_id, version_id)
+    schema_version = await _schema_version_number(session, version.schema_version_id)
+    return ok(_detail(version, schema_version))
 
 
 @router.get(
@@ -300,7 +324,7 @@ async def create_draft(
         # A concurrent create raced the (prompt_id, version) unique constraint —
         # both computed the same next version. Surface a retryable 409, not a 500.
         raise ConflictError(message="version changed concurrently, please retry") from exc
-    return ok(_detail(draft))
+    return ok(_detail(draft, published_schema.version))
 
 
 @router.post(
@@ -320,8 +344,9 @@ async def publish_version(
     _caller: Annotated[VerifiedIdentity, _WRITE],
 ) -> ResponseModel[PromptVersionDetail]:
     target = await _require_version(session, prompt_id, version_id)
+    schema_version = await _schema_version_number(session, target.schema_version_id)
     if target.status == VersionStatus.PUBLISHED:
-        return ok(_detail(target))  # idempotent no-op
+        return ok(_detail(target, schema_version))  # idempotent no-op
     current = (
         await session.execute(
             select(PromptVersion).where(
@@ -343,4 +368,4 @@ async def publish_version(
         raise ConflictError(
             message="another version was published concurrently, please retry"
         ) from exc
-    return ok(_detail(target))
+    return ok(_detail(target, schema_version))
