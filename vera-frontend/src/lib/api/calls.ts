@@ -33,11 +33,6 @@ export function listCalls(): Promise<CallSummary[]> {
   return apiRequest<CallSummary[]>("/calls")
 }
 
-/** POST /calls — start a call for a patient form; the caller becomes the owner. */
-export function startCall(formId: string): Promise<CallSummary> {
-  return apiRequest<CallSummary>("/calls", { method: "POST", body: { form_id: formId } })
-}
-
 /** POST /calls/{id}/publish — owner-only, one-way, idempotent. */
 export function publishCall(callId: string): Promise<CallSummary> {
   return apiRequest<CallSummary>(`/calls/${encodeURIComponent(callId)}/publish`, {

@@ -186,46 +186,6 @@ async def test_enqueue_form_triggers_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_completed_callback_moves_form_to_completed(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-    admin_sessionmaker: async_sessionmaker[AsyncSession],
-    queue_form_id: UUID,
-    trunk_configured: None,
-) -> None:
-    """Worker reporting COMPLETED on an IN_CALL form succeeds (no 500) and the
-    form reaches COMPLETED — the IN_CALL → COMPLETED edge the worker drives."""
-    # Enqueue → dispatcher creates the call (form is now IN_CALL).
-    await client.put(
-        f"/api/v1/patient-forms/{queue_form_id}/status",
-        headers=_auth(rbac_world.admin_token),
-        json={"status": "in_queue"},
-    )
-    await drain_pending()  # dispatch is a detached post-commit task
-    call_id = (await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))).json()[
-        "data"
-    ][0]["id"]
-
-    resp = await client.post(
-        f"/api/v1/calls/{call_id}/status",
-        headers=_auth(rbac_world.admin_token),
-        json={"status": "completed"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["status"] == "completed"
-
-    async with admin_sessionmaker() as session:
-        status = (
-            await session.execute(
-                text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
-                    fid=queue_form_id
-                )
-            )
-        ).scalar_one()
-    assert status == "completed"
-
-
-@pytest.mark.asyncio
 async def test_enqueue_blocked_transition_returns_422(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -239,50 +199,6 @@ async def test_enqueue_blocked_transition_returns_422(
         json={"status": "completed"},
     )
     assert resp.status_code == 422, resp.text
-
-
-# ---------------------------------------------------------------------------
-# Manual (voice-lab) call vs queue machinery interplay.
-# POST /calls must put the form IN_CALL: the callback needs a legal edge to a
-# terminal status, the dispatcher must not treat the form as queue-eligible,
-# and the form must count against the tenant's concurrency slots.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_manual_call_then_completed_callback(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-    admin_sessionmaker: async_sessionmaker[AsyncSession],
-    queue_form_id: UUID,
-) -> None:
-    """A voice-lab call's terminal callback must succeed (not 500) and complete
-    the form: POST /calls puts the form IN_CALL, giving COMPLETED a legal edge."""
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(queue_form_id)},
-    )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
-
-    async with admin_sessionmaker() as session:
-        status = (
-            await session.execute(
-                text("SELECT status FROM patient_form WHERE id = :fid").bindparams(
-                    fid=queue_form_id
-                )
-            )
-        ).scalar_one()
-    assert status == "in_call"  # not "in_queue" — the call is live
-
-    resp = await client.post(
-        f"/api/v1/calls/{call_id}/status",
-        headers=_auth(rbac_world.admin_token),
-        json={"status": "completed"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -379,67 +295,6 @@ async def test_queue_started_call_is_publishable_by_queuer(
     )
     assert pub.status_code == 200, pub.text
     assert pub.json()["data"]["published"] is True
-
-
-@pytest.mark.asyncio
-async def test_manual_call_form_not_redispatched(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-    admin_sessionmaker: async_sessionmaker[AsyncSession],
-    queue_form_id: UUID,
-    trunk_configured: None,
-) -> None:
-    """A form with a live manual call must not be picked up by the dispatcher
-    when another enqueue fires it — exactly one call per form."""
-    # Manual call on form X.
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(queue_form_id)},
-    )
-    assert created.status_code == 200, created.text
-
-    # Second form Y in the same tenant (same schema chain as X).
-    form_y_id = uuid7()
-    async with admin_sessionmaker() as session, session.begin():
-        schema_version_id = (
-            await session.execute(
-                text("SELECT schema_version_id FROM patient_form WHERE id = :fid").bindparams(
-                    fid=queue_form_id
-                )
-            )
-        ).scalar_one()
-        session.add(
-            PatientForm(
-                id=form_y_id,
-                tenant_id=rbac_world.tenant_id,
-                schema_version_id=schema_version_id,
-                patient_name="Second Queue Patient",
-                insurance_provider_phone_number=_DIALABLE_PHONE,
-            )
-        )
-    try:
-        # Enqueue Y — fires the dispatcher, which must skip X (IN_CALL, not queued).
-        resp = await client.put(
-            f"/api/v1/patient-forms/{form_y_id}/status",
-            headers=_auth(rbac_world.admin_token),
-            json={"status": "in_queue"},
-        )
-        assert resp.status_code == 200, resp.text
-        await drain_pending()  # dispatch is a detached post-commit task
-
-        async with admin_sessionmaker() as session:
-            x_calls = (
-                await session.execute(
-                    text("SELECT count(*) FROM call WHERE form_id = :fid").bindparams(
-                        fid=queue_form_id
-                    )
-                )
-            ).scalar_one()
-        assert x_calls == 1  # no second (dispatcher-created) call for X
-    finally:
-        async with admin_sessionmaker() as session, session.begin():
-            await _purge_form(session, form_y_id)
 
 
 # ---------------------------------------------------------------------------

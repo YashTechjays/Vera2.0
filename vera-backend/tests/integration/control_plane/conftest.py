@@ -26,8 +26,9 @@ from vera_core.call_stream import CallStreamEvent, CallStreamService
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
+from vera_core.db.rls import tenant_session
 from vera_core.integrations.credentials import seal_credentials
-from vera_core.models import AppUser, Integration, IntegrationType, Tenant, UserRole
+from vera_core.models import AppUser, Call, Integration, IntegrationType, Tenant, UserRole
 from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
@@ -469,6 +470,30 @@ async def seed_outbound_trunk(
             kms, integration=integration, credentials={"trunk_id": TEST_TRUNK_ID}
         )
         session.add(integration)
+
+
+async def seed_call(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    form_id: UUID,
+    *,
+    initiated_by_id: UUID | None = None,
+    status: str = "initiated",
+    published: bool = False,
+) -> UUID:
+    """Insert a Call row directly — the manual start-call endpoint is gone; tests
+    seed call state the way the dispatcher would."""
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        call = Call(
+            tenant_id=tenant_id,
+            form_id=form_id,
+            current_status=status,
+            initiated_by_id=initiated_by_id,
+            published=published,
+        )
+        session.add(call)
+        await session.flush()
+        return call.id
 
 
 @pytest.fixture

@@ -35,7 +35,7 @@ from vera_core.db.base import (
 from vera_core.models.enums import CallEventType, CallMode, CallStatus, check_in
 
 # Terminal call statuses — a call in one of these will never become live again.
-# Keep in sync with the callback's accepted statuses (api/v1/calls.py).
+# Keep in sync with the consumer's accepted statuses (control_plane/call_closeout.py).
 TERMINAL_CALL_STATUSES = (
     CallStatus.COMPLETED,
     CallStatus.FAILED,

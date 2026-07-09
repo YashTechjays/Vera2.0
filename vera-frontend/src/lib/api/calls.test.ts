@@ -22,7 +22,6 @@ import {
   listCalls,
   publishCall,
   revokeAccess,
-  startCall,
   type CallSummary,
   type JoinTokenResponse,
 } from "./calls"
@@ -53,15 +52,6 @@ describe("calls API client", () => {
     const out = await listCalls()
     expect(out).toEqual([call])
     expect(apiRequest).toHaveBeenCalledWith("/calls")
-  })
-
-  it("starts a call by POSTing the form id", async () => {
-    vi.mocked(apiRequest).mockResolvedValue(call)
-    await startCall("f1")
-    expect(apiRequest).toHaveBeenCalledWith("/calls", {
-      method: "POST",
-      body: { form_id: "f1" },
-    })
   })
 
   it("publishes a call (POST, no body)", async () => {

@@ -1,15 +1,14 @@
-"""Verification-call endpoints: create, join-token, active-list, publish,
-revoke-access, and the agent-worker status callback.
+"""Verification-call endpoints: join-token, active-list, live event stream,
+publish, and revoke-access.
 
-Auth note (acknowledged stopgap): create / join-token / active-list guard
-with `require("calls:read")` for now — the SPA has no real auth yet, and
-the spec flags this. `publish` and `revoke-access` are owner-only actions
+Auth note (acknowledged stopgap): join-token / active-list guard with
+`require("calls:read")` for now — the SPA has no real auth yet, and the
+spec flags this. `publish` and `revoke-access` are owner-only actions
 gated on `require("calls:publish")`: the caller must hold the permission
 *and* be the call's `initiated_by_id`, enforced by an explicit 403 check
 in each handler.
 """
 
-import contextlib
 import logging
 from collections.abc import AsyncIterator
 from typing import Annotated
@@ -17,16 +16,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.api.v1.common import Audit, Kms, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import (
     current_identity,
-    get_audit,
     get_call_stream_service,
     get_sessionmaker,
 )
@@ -41,20 +38,11 @@ from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
-from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.models import Call, PatientForm
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
+from vera_core.models.enums import CallStatus
 from vera_core.observability.correlation import room_name_for_call
-from vera_core.schemas import (
-    CallSummary,
-    JoinTokenResponse,
-    PersonaTweak,
-    RevokeAccessRequest,
-    StartCallRequest,
-)
-from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
-from vera_core.services.ivr_selection import add_active_playbook_metadata
-from vera_core.services.queue_dispatcher import try_dispatch
+from vera_core.schemas import CallSummary, JoinTokenResponse, RevokeAccessRequest
 
 logger = logging.getLogger(__name__)
 
@@ -87,105 +75,6 @@ def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSumma
         published=call.published,
         is_owner=call.initiated_by_id == caller_id,
     )
-
-
-@router.post(
-    "/calls",
-    response_model=ResponseModel[CallSummary],
-    responses=CustomAPIResponse.custom(
-        DefaultExceptionCode.UNAUTHORIZED,
-        DefaultExceptionCode.FORBIDDEN,
-        DefaultExceptionCode.NOT_FOUND,
-        DefaultExceptionCode.VALIDATION_ERROR,
-    ),
-)
-async def start_call(
-    body: StartCallRequest,
-    tenant_id: TenantId,
-    session: TenantSession,
-    livekit: LiveKit,
-    caller: VerifiedIdentity = require("calls:read"),  # TODO: calls:write once catalog grows
-) -> ResponseModel[CallSummary]:
-    form = (
-        await session.execute(
-            select(PatientForm).where(PatientForm.id == body.form_id).with_for_update()
-        )
-    ).scalar_one_or_none()
-    if form is None:
-        raise NotFoundError(message="patient form not found")
-    if body.insurance_provider_id is not None:
-        # Require an ACTIVE provider here: an unknown id would otherwise FK-violate → 500 at
-        # flush, and an inactive provider must not start a call (nor let its playbook steer one).
-        provider_active = (
-            await session.execute(
-                select(InsuranceProvider.id).where(
-                    InsuranceProvider.id == body.insurance_provider_id,
-                    InsuranceProvider.status == ProviderStatus.ACTIVE,
-                )
-            )
-        ).scalar_one_or_none()
-        if provider_active is None:
-            raise NotFoundError(message="unknown or inactive insurance provider")
-
-    tenant = (
-        await session.execute(select(Tenant).where(Tenant.id == tenant_id))
-    ).scalar_one()  # RLS on `tenant` keys on id → only the caller's own row
-
-    # A manual call takes the form to IN_CALL through the state machine BEFORE
-    # the Call/room exist: the status callback then has a legal edge to a
-    # terminal status, the dispatcher won't treat the form as queue-eligible
-    # (no double dispatch), and the form counts against the tenant's concurrency
-    # slots. The IN_QUEUE hop is a synthetic pass-through (no enqueued_at, never
-    # dispatcher-visible — both transitions commit atomically) and a no-op when
-    # the form is already queued. Illegal states (e.g. already IN_CALL or
-    # COMPLETED) are rejected here instead of creating a stray call.
-    sm = FormStateMachine()
-    try:
-        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
-        sm.transition(form, FormStatus.IN_CALL, tenant_max_retries=tenant.max_retries)
-    except InvalidTransitionError as exc:
-        raise CustomAPIException(
-            DefaultExceptionCode.VALIDATION_ERROR,
-            message=f"cannot start a call for this form: {exc}",
-        ) from exc
-
-    call = Call(
-        tenant_id=tenant_id,
-        form_id=form.id,
-        current_status=CallStatus.INITIATED,
-        initiated_by_id=caller.user_id,
-        insurance_provider_id=body.insurance_provider_id,
-    )
-    session.add(call)
-    await session.flush()  # populates call.id (UUIDv7)
-
-    room_name = room_name_for_call(tenant_id, call.id)
-    # persona_tweak is admin-authored, non-PHI config; safe to serialize into metadata.
-    # Nested under its own key so sibling dispatch keys never trip the worker's
-    # extra="forbid" PersonaTweak validation (see agent_worker.prompt.parse_persona_tweak).
-    tweak = (
-        PersonaTweak.model_validate(tenant.persona_tweak)
-        if tenant.persona_tweak
-        else PersonaTweak()
-    )
-    metadata: dict[str, object] = {}
-    if tweak_fields := tweak.model_dump(exclude_none=True):
-        metadata["persona_tweak"] = tweak_fields
-    # When navigating the payer IVR, specialize the navigator with the provider's active playbook
-    # (non-PHI overlay) if one exists; otherwise it runs generic. Off preserves today's behavior.
-    if body.enable_ivr_navigation:
-        metadata["enable_ivr_navigation"] = True
-        await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
-    await livekit.create_call_room(room_name, metadata=metadata)
-    session.add(
-        CallEvent(
-            tenant_id=tenant_id,
-            call_id=call.id,
-            event_type=CallEventType.STATUS,
-            event_value=CallStatus.INITIATED,
-        )
-    )
-    return ok(_summary(call, form.patient_name, caller.user_id))
 
 
 @router.get(
@@ -475,139 +364,3 @@ async def revoke_access(
         )
     )
     return ok(None, message="Access revoked.")
-
-
-class UpdateCallStatusRequest(BaseModel):
-    status: CallStatus
-
-
-_TERMINAL_FAILURE_STATUSES = frozenset({CallStatus.FAILED, CallStatus.NO_ANSWER, CallStatus.BUSY})
-
-_ALLOWED_CALLBACK_STATUSES = frozenset(
-    {CallStatus.COMPLETED, CallStatus.FAILED, CallStatus.NO_ANSWER, CallStatus.BUSY}
-)
-_ALLOWED_CALLBACK_STATUS_VALUES = frozenset(s.value for s in _ALLOWED_CALLBACK_STATUSES)
-
-
-@router.post(
-    "/calls/{call_id}/status",
-    response_model=ResponseModel[CallSummary],
-    responses=CustomAPIResponse.custom(
-        DefaultExceptionCode.UNAUTHORIZED,
-        DefaultExceptionCode.FORBIDDEN,
-        DefaultExceptionCode.NOT_FOUND,
-        DefaultExceptionCode.VALIDATION_ERROR,
-    ),
-)
-async def update_call_status(
-    request: Request,
-    call_id: UUID,
-    body: UpdateCallStatusRequest,
-    tenant_id: TenantId,
-    session: TenantSession,
-    livekit: LiveKit,
-    kms: Kms,
-    caller: VerifiedIdentity = require("calls:read"),
-) -> ResponseModel[CallSummary]:
-    """Callback endpoint for the agent worker to report call terminal status.
-
-    On terminal failure with retries remaining, auto-retries the form.
-    Always fires the dispatcher afterward to fill freed concurrency slots.
-    """
-    call = (
-        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
-    ).scalar_one_or_none()
-    if call is None:
-        raise NotFoundError(message="call not found")
-
-    # Validate the reported status before the idempotency short-circuit, so a bogus
-    # or non-terminal status on an already-terminal call still gets a 422 (not a
-    # silent 200 no-op).
-    if body.status not in _ALLOWED_CALLBACK_STATUSES:
-        allowed = ", ".join(s.value for s in _ALLOWED_CALLBACK_STATUSES)
-        raise CustomAPIException(
-            DefaultExceptionCode.VALIDATION_ERROR,
-            message=f"only terminal statuses are accepted: {allowed}",
-        )
-
-    # Idempotent: if the call is already terminal, no-op.
-    if call.current_status in _ALLOWED_CALLBACK_STATUS_VALUES:
-        form = (
-            await session.execute(select(PatientForm).where(PatientForm.id == call.form_id))
-        ).scalar_one_or_none()
-        return ok(_summary(call, form.patient_name if form else None, caller.user_id))
-
-    form = (
-        await session.execute(
-            select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
-        )
-    ).scalar_one_or_none()
-    if form is None:
-        raise NotFoundError(message="patient form not found")
-
-    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
-
-    # Update the call's status.
-    call.current_status = body.status.value
-    session.add(
-        CallEvent(
-            tenant_id=tenant_id,
-            call_id=call.id,
-            event_type=CallEventType.STATUS,
-            event_value=body.status.value,
-        )
-    )
-
-    sm = FormStateMachine()
-    previous_form_status = form.status
-
-    # An illegal form edge must not 500 the callback: the call's terminal status
-    # is still recorded above even if the form can't take the transition (e.g. a
-    # second call on the same form already moved it). Log and continue.
-    try:
-        if body.status == CallStatus.COMPLETED:
-            sm.transition(form, FormStatus.COMPLETED, tenant_max_retries=tenant.max_retries)
-        elif body.status in _TERMINAL_FAILURE_STATUSES:
-            sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
-            # Auto-retry if retries remain; silently stay CALL_FAILED if exhausted.
-            # The dispatcher creates the retry call on its next pass.
-            with contextlib.suppress(InvalidTransitionError):
-                sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
-                # Caller owns enqueued_at — use the DB clock to avoid cross-node skew.
-                form.enqueued_at = func.now()
-    except InvalidTransitionError:
-        logger.warning(
-            "call callback: form %s cannot transition from '%s' on call %s status '%s'; "
-            "call status recorded, form left unchanged",
-            form.id,
-            previous_form_status,
-            call_id,
-            body.status.value,
-        )
-
-    await session.flush()
-
-    audit = get_audit(request)
-    # Audit the worker-driven form status change (HIPAA evidence trail).
-    await audit.emit(
-        AuditRecord(
-            tenant_id=tenant_id,
-            actor_type=ActorType.SERVICE,
-            actor_user_id=None,
-            actor_label="agent-worker",
-            event_type=AuditEvent.FORM_STATUS_CHANGE.value,
-            resource_type="patient_form",
-            resource_id=str(form.id),
-            detail={
-                "from": previous_form_status,
-                "to": form.status,
-                "call_id": str(call_id),
-                "trigger": "call_callback",
-            },
-        )
-    )
-
-    # Fire the dispatcher — a concurrency slot just freed up.
-    await try_dispatch(session, tenant_id, livekit, kms, audit=audit)
-
-    return ok(_summary(call, form.patient_name, caller.user_id))
