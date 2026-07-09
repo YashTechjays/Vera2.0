@@ -12,12 +12,149 @@ Pure and DB-free; consumed by the seeder (`scripts/seed.py`) and, later, the
 call-time prompt pipeline.
 """
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from vera_core.forms.conditions import leaf_gates
-from vera_core.forms.dsl import Condition, FormSchemaDoc, Leaf, Task
+from vera_core.forms.dsl import PLACEHOLDER_RE, Condition, FormSchemaDoc, Leaf, Task
+
+
+class _Doc(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SessionBlock(_Doc):
+    """Session-wide agent text applicable to every task. LITERAL content — consumed
+    as-is; nothing underneath is overridden (2026-07-08 spec §4)."""
+
+    persona: str = Field(
+        min_length=1,
+        description=(
+            "Who the agent is: name (VERA), voice/temperament ('calm, professional, "
+            "patient'), speech pacing habits, how it refers to itself, pronunciation "
+            "tendencies. Vera 1.0's AGENT_PERSONA maps here."
+        ),
+    )
+    goal: str = Field(
+        min_length=1,
+        description=(
+            "What the call is for — e.g. 'verify infertility benefits for a patient "
+            "with the payer's representative, completing every applicable question "
+            "accurately' — the north star the LLM falls back on when the "
+            "conversation drifts."
+        ),
+    )
+    base_instructions: str = Field(
+        min_length=1,
+        description=(
+            "Global behavior rules applied across every task: turn-taking "
+            "discipline, value-recording rules ('record exactly what the rep "
+            "says', 'never invent an answer'), background-noise/hold handling, "
+            "role enforcement ('you ask the questions, don't answer benefits "
+            "questions yourself'), anti-repetition, never re-introducing yourself. "
+            "Vera 1.0's conversation/value-recording rule blocks map here."
+        ),
+    )
+
+
+class TaskTextOverride(_Doc):
+    """Sparse patch over one task's schema-authored text; set fields win."""
+
+    intro: str | None = None
+    outro: str | None = None
+    prompt: str | None = None
+
+
+class PromptDocument(_Doc):
+    """prompt_version.composite_json — literal session block + task text patches."""
+
+    kind: Literal["prompt_document"]
+    session: SessionBlock
+    task_overrides: dict[str, TaskTextOverride] = Field(default_factory=dict)
+
+
+# Creation-time content for a schema's very first prompt_version (2026-07-08 spec
+# §6.1). Placeholder-free so it is valid for every schema. After bootstrap the DB
+# is authoritative — editing these constants never retrofits an existing schema.
+FACTORY_SESSION = SessionBlock(
+    persona=(
+        "You are VERA, an AI virtual assistant calling on behalf of a medical "
+        "practice's insurance verification team. You are calm, professional and "
+        "patient. You speak clearly at a measured pace, slow down for medical "
+        "terms and numbers, and never rush the representative. You refer to "
+        "yourself as VERA."
+    ),
+    goal=(
+        "Verify the patient's insurance benefits with the payer's representative, "
+        "completing every applicable question on the verification form accurately "
+        "and recording each answer exactly as stated."
+    ),
+    base_instructions=(
+        "Ask one question at a time and wait for the answer before moving on. "
+        "Record exactly what the representative says — never invent, assume or "
+        "round an answer. If an answer is partial or ambiguous, read it back and "
+        "ask for confirmation. If the representative asks you to hold, say 'take "
+        "your time' once and stay silent until they return. You are the caller "
+        "asking the questions: do not answer benefits questions yourself and do "
+        "not volunteer information you were not asked for. Do not repeat a "
+        "question that has already been answered. Never re-introduce yourself "
+        "mid-call. If the representative cannot provide an answer after checking, "
+        "note that and move on rather than pressing."
+    ),
+)
+
+
+class RenderedTaskPrompt(_Doc):
+    task_key: str
+    title: str
+    intro: str | None = None  # AgentTask entry speech — verbatim
+    outro: str | None = None  # AgentTask exit speech — verbatim
+    prompt: str  # compiled instruction text
+
+
+class RenderedPrompts(_Doc):
+    name: str
+    insurance_type: str
+    dsl_version: str
+    persona: str  # literal from the session block
+    goal: str
+    base_instructions: str
+    tasks: list[RenderedTaskPrompt]
+
+
+def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> list[str]:
+    """Content errors of a prompt document against its pinned schema (spec §4).
+
+    Shape errors are pydantic's job; this checks the parts that need the schema:
+    task keys exist, overrides are non-empty, placeholders resolve. The exact
+    token `value` is exempt (field-level confirm namespace)."""
+    errors: list[str] = []
+    valid_tokens = (
+        set(schema_doc.system_fields or {})
+        | {path for path, leaf in schema_doc.leaf_items() if leaf.role == "context"}
+        | {"value"}
+    )
+    task_keys = {t.task_key for t in schema_doc.tasks}
+    texts: list[tuple[str, str | None]] = [
+        ("session.persona", doc.session.persona),
+        ("session.goal", doc.session.goal),
+        ("session.base_instructions", doc.session.base_instructions),
+    ]
+    for key, override in doc.task_overrides.items():
+        if key not in task_keys:
+            errors.append(f"task_overrides.{key}: unknown task_key")
+        if override.intro is None and override.outro is None and override.prompt is None:
+            errors.append(f"task_overrides.{key}: empty override entry")
+        texts.extend(
+            (f"task_overrides.{key}.{attr}", getattr(override, attr))
+            for attr in ("intro", "outro", "prompt")
+        )
+    for where, text in texts:
+        for token in PLACEHOLDER_RE.findall(text or ""):
+            if token not in valid_tokens:
+                errors.append(f"{where}: unknown placeholder {{{{{token}}}}}")
+    return errors
 
 
 def _dump(model: BaseModel) -> dict[str, Any]:
