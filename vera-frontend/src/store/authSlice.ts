@@ -98,7 +98,6 @@ export const platformLoginThunk = createAsyncThunk(
   ): Promise<authApi.LoginResult["mfa"]> => {
     const res = await authApi.platformLogin(arg.email, arg.password)
     if (res.mfa === "enroll") {
-      // First-login enrollment wall — show the QR before a session exists.
       dispatch(
         setMfa({
           token: res.mfa_token ?? "",

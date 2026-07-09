@@ -125,9 +125,8 @@ async def platform_login(
     )
     # MFA is mandatory for platform operators: login NEVER mints a session directly.
     if not creds.mfa_enabled:
-        # First-login enrollment wall (browser). The operator was bootstrapped without
-        # MFA; mint the seed now via the definer path and hand back the QR. No session
-        # until a live code is confirmed at /mfa/enroll-activate.
+        # First-login enrollment wall: mint the seed via the definer path and hand back
+        # the QR. No session until /mfa/enroll-activate confirms a live code.
         async with platform_session(sessionmaker) as session:
             ident = await _password_identity_row(session, creds.user_id)
             if ident is None:

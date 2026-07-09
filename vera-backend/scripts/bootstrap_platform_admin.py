@@ -78,8 +78,6 @@ async def bootstrap(
             provider_subject=email,
             email=email,
             hashed_password=hash_password(password),
-            # MFA is NOT enrolled here — the operator sets it up in the browser on
-            # first /platform/login (the enrollment wall). No terminal QR.
             mfa_enabled=False,
         )
         session.add(identity)

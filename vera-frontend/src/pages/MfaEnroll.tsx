@@ -32,7 +32,6 @@ export function MfaEnroll() {
     setError(null)
     setBusy(true)
     try {
-      // Platform operators enroll via the slug-less platform endpoint.
       const codes = await dispatch(
         mfa!.platform
           ? platformEnrollActivateThunk({ mfaToken: mfa!.token, code })
