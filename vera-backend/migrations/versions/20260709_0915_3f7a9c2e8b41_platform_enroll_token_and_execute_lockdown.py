@@ -2,18 +2,13 @@
 
 Security hardening for browser-based platform MFA enrollment (PR #68 review):
 
-1. **One-time enroll token.** Bootstrap now leaves the super-admin unenrolled, so the
-   bootstrap password alone could bind an attacker's authenticator before the real
-   operator's first login. Add `user_identity.enroll_token_hash`: a bcrypt-hashed secret
-   set at bootstrap and required at `/platform/login` while unenrolled. `platform_activate_mfa`
-   clears it on success (one-time), so the old "you also need a bootstrap secret" guarantee
-   is restored — the terminal QR is replaced by this token.
+1. Add `user_identity.enroll_token_hash` — a one-time secret set at bootstrap, required
+   at `/platform/login` while unenrolled, and cleared by `platform_activate_mfa`. Stops
+   the bootstrap password alone from binding a second factor.
 
-2. **EXECUTE lockdown.** Postgres grants EXECUTE to PUBLIC on new functions by default, so the
-   two `f066c667ddc1` definer functions were callable by any DB principal (their only runtime
-   guard is the self-set `app.platform` GUC — not a barrier against a role that can run SQL).
-   Revoke PUBLIC and grant EXECUTE only to the deployed app role (`$VERA_APP_DB_ROLE`, unset →
-   `CURRENT_USER`). Advances devops-todo #12 for the platform-MFA pair.
+2. Lock down EXECUTE on the `f066c667ddc1` definer functions: revoke the PUBLIC default
+   and grant only the deployed app role (`$VERA_APP_DB_ROLE`, unset → `CURRENT_USER`).
+   Advances devops-todo #12.
 """
 
 import os

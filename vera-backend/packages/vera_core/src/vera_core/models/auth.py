@@ -114,10 +114,8 @@ class UserIdentity(Base, UUIDv7PKMixin, TimestampMixin, NullableTenantColumnMixi
     # password provider only:
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # One-time secret (bcrypt hash) gating a platform operator's first-login MFA
-    # enrollment: set at bootstrap, required at /platform/login while unenrolled, and
-    # cleared when enrollment activates. Password alone must not bind a second factor
-    # (ADR-0006 §D). NULL for tenant identities, which enroll behind an invite token.
+    # One-time bcrypt-hashed secret gating a platform operator's first-login MFA
+    # enrollment (set at bootstrap, cleared on activation). NULL for tenant identities.
     enroll_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     totp_seed_ct: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_dek_ct: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)

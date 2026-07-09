@@ -137,17 +137,13 @@ async def platform_login(
     )
     # MFA is mandatory for platform operators: login NEVER mints a session directly.
     if not creds.mfa_enabled:
-        # First-login enrollment wall. Require the one-time enroll token minted at
-        # bootstrap so the shared bootstrap password alone can't bind a second factor
-        # (ADR-0006 §D). Constant-work verify (dummy when unset) keeps the failure
-        # indistinguishable from a wrong password — no enrollment-state enumeration.
+        # First-login wall: require the one-time enroll token so the bootstrap password
+        # alone can't bind a second factor. Constant-work verify → uniform failure.
         if not verify_password_or_dummy(body.enroll_token or "", creds.enroll_token_hash):
             await emit_auth_event(
                 audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=creds.user_id
             )
             raise _unauthorized()
-        # Mint the seed via the definer path and hand back the QR. No session until
-        # /mfa/enroll-activate confirms a live code.
         async with platform_session(sessionmaker) as session:
             ident = await _password_identity_row(session, creds.user_id)
             if ident is None:
@@ -195,7 +191,13 @@ async def platform_mfa_verify(
 ) -> ResponseModel[SessionResponse]:
     ip = client_ip(request)
     challenge = await store.get(MFA_NS, body.mfa_token)
-    if challenge is None or challenge.account_type != AccountType.PLATFORM.value:
+    # Assert tenant_id nullability alongside account_type and fail closed (CLAUDE.md):
+    # the challenge round-trips through Redis and the two can drift.
+    if (
+        challenge is None
+        or challenge.account_type != AccountType.PLATFORM.value
+        or challenge.tenant_id is not None
+    ):
         raise _unauthorized()
 
     verified = False
@@ -245,7 +247,13 @@ async def platform_mfa_enroll_activate(
     enrollment `mfa_token`."""
     ip = client_ip(request)
     base = await store.get(MFA_ENROLL_NS, body.mfa_token)
-    if base is None or base.account_type != AccountType.PLATFORM.value:
+    # Fail closed if tenant_id isn't NULL, not on account_type alone (CLAUDE.md): the
+    # challenge round-trips through Redis and the two can drift.
+    if (
+        base is None
+        or base.account_type != AccountType.PLATFORM.value
+        or base.tenant_id is not None
+    ):
         raise _unauthorized()
 
     activated = False
@@ -255,9 +263,8 @@ async def platform_mfa_enroll_activate(
             activated = await mfa.activate_platform(kms, session, identity=ident, code=body.code)
 
     if not activated:
-        # No attempt cap on this route, so a live enroll token would otherwise be a
-        # full-TTL brute-force window against the operator's second factor. Burn the
-        # challenge on any failed code — a retry needs a fresh /platform/login.
+        # Burn the challenge on a failed code — no attempt cap, so a live token would be
+        # a full-TTL brute-force window against the second factor.
         await store.delete(MFA_ENROLL_NS, body.mfa_token)
         await emit_auth_event(
             audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=base.user_id

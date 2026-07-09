@@ -66,7 +66,14 @@ async def enroll_platform(
     """Enroll MFA for a NULL-tenant PLATFORM identity. The RLS-bound app role cannot
     UPDATE a NULL-tenant row, so the seed is written via the `platform_store_mfa_seed`
     SECURITY DEFINER function (migration f066c667ddc1) rather than through the ORM.
-    Returns the provisioning URI, or None if the identity is already enrolled."""
+    Returns the provisioning URI, or None if the identity is already enrolled.
+
+    Idempotent while unenrolled: if a seed already exists, its provisioning URI is
+    returned unchanged rather than re-minting, so a second login (reload, second tab)
+    can't overwrite the QR the operator already scanned."""
+    existing_secret = await _decrypt_seed(kms, identity)
+    if existing_secret is not None:
+        return pyotp.TOTP(existing_secret).provisioning_uri(name=account_email, issuer_name=_ISSUER)
     totp_secret = pyotp.random_base32()
     seed_ct, dek_ct, key_ref = await seal(kms, totp_secret.encode())
     stored = (

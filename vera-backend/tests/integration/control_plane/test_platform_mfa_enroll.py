@@ -128,6 +128,27 @@ async def test_first_login_returns_enroll_challenge_with_qr(
     assert pyotp.parse_uri(data["provisioning_uri"]).secret
 
 
+async def test_repeat_login_reissues_same_seed(
+    enroll_world: tuple[httpx.AsyncClient, EnrollWorld],
+) -> None:
+    """Enrollment is idempotent while unenrolled: a second login returns the SAME seed,
+    so a reload/second tab can't overwrite the QR the operator already scanned — and that
+    original QR still activates after the re-login."""
+    client, world = enroll_world
+    first = await _login(client, world.email)
+    secret = pyotp.parse_uri(first["provisioning_uri"]).secret
+
+    second = await _login(client, world.email)
+    assert pyotp.parse_uri(second["provisioning_uri"]).secret == secret
+
+    # The first QR still works: activate with the original secret after the re-login.
+    activated = await client.post(
+        "/api/v1/platform/auth/mfa/enroll-activate",
+        json={"mfa_token": first["mfa_token"], "code": pyotp.TOTP(secret).now()},
+    )
+    assert activated.status_code == 200, activated.text
+
+
 @pytest.mark.parametrize("payload_token", [None, "wrong-token"])
 async def test_first_login_without_valid_enroll_token_is_401(
     enroll_world: tuple[httpx.AsyncClient, EnrollWorld],
