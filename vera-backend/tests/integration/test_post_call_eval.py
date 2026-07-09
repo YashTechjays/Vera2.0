@@ -422,6 +422,9 @@ async def test_token_valued_field_routes_to_review(
     )
     assert rows == []  # token value must never be stored
 
+    form = await ctx.reload_form()
+    assert form.enqueued_at is None  # review path must not queue the form
+
 
 async def test_redelivery_is_a_noop(
     seeded_ai_processing_form: _SeedCtx,
@@ -642,3 +645,4 @@ async def test_incomplete_retries_exhausted_goes_to_review(
     assert outcome.status == FormStatus.EXCEPTION_REVIEW
     form = await ctx.reload_form()
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.enqueued_at is None  # review path must not queue the form
