@@ -32,11 +32,20 @@ def build_condition_renderer(doc: FormSchemaDoc) -> Callable[[Condition], str]:
             return f'"{leaf.title}" ({path})'
         return f'"{leaf.title}"'
 
-    def wrap(sub: Condition) -> str:
-        text = render(sub)
-        return f"({text})" if isinstance(sub, (AllCondition, AnyCondition)) else text
+    def resolve(cond: Condition, seen: frozenset[str]) -> Condition:
+        """Follow ref chains (cycle-guarded) so wrapping sees the real shape."""
+        while isinstance(cond, RefCondition) and cond.ref in shared and cond.ref not in seen:
+            seen = seen | {cond.ref}
+            cond = shared[cond.ref]
+        return cond
 
-    def render(cond: Condition) -> str:
+    def wrap(sub: Condition, seen: frozenset[str]) -> str:
+        text = render(sub, seen)
+        if isinstance(resolve(sub, seen), (AllCondition, AnyCondition)):
+            return f"({text})"
+        return text
+
+    def render(cond: Condition, seen: frozenset[str] = frozenset()) -> str:
         match cond:
             case Comparison(field=field, op="eq", value=value):
                 return f'{label(field)} is "{value}"'
@@ -49,13 +58,18 @@ def build_condition_renderer(doc: FormSchemaDoc) -> Callable[[Condition], str]:
                 options = ", ".join(f'"{v}"' for v in value)
                 return f"{label(field)} is none of {options}"
             case RefCondition(ref=ref):
-                return render(shared[ref]) if ref in shared else ref
+                if ref not in shared or ref in seen:
+                    return ref
+                return render(shared[ref], seen | {ref})
             case AllCondition(all=subs):
-                return " and ".join(wrap(sub) for sub in subs)
+                return " and ".join(wrap(sub, seen) for sub in subs)
             case AnyCondition(any=subs):
-                return " or ".join(wrap(sub) for sub in subs)
+                return " or ".join(wrap(sub, seen) for sub in subs)
             case NotCondition(not_=sub):
-                return f"not ({render(sub)})"
+                return f"not ({render(sub, seen)})"
         return ""  # unreachable: the match is exhaustive over Condition
 
-    return render
+    def entry(cond: Condition) -> str:
+        return render(cond)
+
+    return entry

@@ -90,6 +90,30 @@ def test_nesting_and_ref_expansion() -> None:
     )
 
 
+def test_ref_expanding_to_any_gets_parenthesized_inside_all() -> None:
+    shared = {
+        "opts": {
+            "any": [
+                {"field": "sections.a.x", "op": "eq", "value": "PPO"},
+                {"field": "sections.a.x", "op": "eq", "value": "HMO"},
+            ]
+        }
+    }
+    render = build_condition_renderer(doc_with(shared))
+    cond = _cond(
+        {"all": [{"ref": "opts"}, {"field": "sections.a.x", "op": "eq", "value": "Family"}]}
+    )
+    assert render(cond) == (
+        '("Plan Type" is "PPO" or "Plan Type" is "HMO") and "Plan Type" is "Family"'
+    )
+
+
+def test_cyclic_refs_do_not_recurse_forever() -> None:
+    shared = {"a": {"ref": "b"}, "b": {"ref": "a"}}
+    render = build_condition_renderer(doc_with(shared))
+    assert isinstance(render(_cond({"ref": "a"})), str)
+
+
 def _cond(data: dict[str, Any]) -> Any:
     from pydantic import TypeAdapter
 
