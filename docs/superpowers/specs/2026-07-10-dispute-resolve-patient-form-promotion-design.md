@@ -235,6 +235,16 @@ promoted_fields={
 Both are followed by `just compile-schemas` to regenerate the compiled JSON artifacts
 (the freshness test fails CI on drift).
 
+**Coherence cleanup, same section of both files:** both catalogs' `system_fields` also
+declare a `"policy_id"` handle aliasing the exact same path as `"member_id"`
+(`sections.insurance_information.policy_number` / `sections.policy_details.policy_number`)
+— a pure duplicate with no distinct consumer (nothing renders `{{policy_id}}`; only
+`{{member_id}}` is spoken, in `ibv_standard.py`'s introduction task prompt).
+`required_intake_fields` dedupes by path, so removing `"policy_id"` doesn't change any
+required-field behavior. Drop the `"policy_id"` handle from both catalogs, keeping
+`"member_id"` as the one canonical handle for this path — resolves the confusing
+same-path duplication without touching the still-needed `"member_id"` handle (§7).
+
 ## 9. Error handling
 
 - A malformed `promoted_fields` entry (unknown column, dangling path, path not backed by
