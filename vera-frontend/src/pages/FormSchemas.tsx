@@ -9,6 +9,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { ApiError } from "@/lib/api/client"
+import { copyText } from "@/lib/clipboard"
 import {
   listFormSchemas,
   listSchemaVersions,
@@ -46,7 +47,8 @@ function CopyableId({ value, label }: { value: string; label: string }) {
         aria-label={copied ? "Copied" : `Copy ${label}`}
         className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
         onClick={() => {
-          void navigator.clipboard.writeText(value).then(() => {
+          void copyText(value).then((ok) => {
+            if (!ok) return
             setCopied(true)
             setTimeout(() => setCopied(false), 2000)
           })
