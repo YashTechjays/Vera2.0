@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { Check, Copy } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -30,6 +31,31 @@ function formatDate(iso: string | null): string {
 function humanize(value: string): string {
   const spaced = value.replaceAll("_", " ")
   return spaced.charAt(0).toUpperCase() + spaced.slice(1)
+}
+
+/** A UUID the intake API needs (form_type_id / schema_version_id): shown in
+ *  full mono with a copy button that ticks briefly on success. */
+function CopyableId({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <span className="inline-flex items-center gap-1">
+      <code className="font-mono text-xs text-muted-foreground">{value}</code>
+      <button
+        type="button"
+        title={copied ? "Copied" : `Copy ${label}`}
+        aria-label={copied ? "Copied" : `Copy ${label}`}
+        className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+        onClick={() => {
+          void navigator.clipboard.writeText(value).then(() => {
+            setCopied(true)
+            setTimeout(() => setCopied(false), 2000)
+          })
+        }}
+      >
+        {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
+      </button>
+    </span>
+  )
 }
 
 /** Read-only Super Admin catalog of form schemas; View lists a schema's
@@ -88,23 +114,28 @@ export function FormSchemas() {
           return (
             <li
               key={v.id}
-              className={`flex items-center justify-between gap-3 rounded-md border p-3 ${
+              className={`space-y-1.5 rounded-md border p-3 ${
                 active ? "border-emerald-500 bg-emerald-50" : "border-border"
               }`}
             >
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-sm font-semibold">v{v.version}</span>
-                {active ? (
-                  <Badge className="bg-emerald-600 hover:bg-emerald-600">Active</Badge>
-                ) : (
-                  <Badge variant="secondary" className="capitalize">{v.status}</Badge>
-                )}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-sm font-semibold">v{v.version}</span>
+                  {active ? (
+                    <Badge className="bg-emerald-600 hover:bg-emerald-600">Active</Badge>
+                  ) : (
+                    <Badge variant="secondary" className="capitalize">{v.status}</Badge>
+                  )}
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {active && v.published_at
+                    ? `Published ${formatDate(v.published_at)}`
+                    : `Created ${formatDate(v.created_at)}`}
+                </span>
               </div>
-              <span className="text-xs text-muted-foreground">
-                {active && v.published_at
-                  ? `Published ${formatDate(v.published_at)}`
-                  : `Created ${formatDate(v.created_at)}`}
-              </span>
+              <div className="text-xs text-muted-foreground">
+                Schema version ID: <CopyableId value={v.id} label="schema version ID" />
+              </div>
             </li>
           )
         })}
@@ -140,6 +171,7 @@ export function FormSchemas() {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Insurance type</TableHead>
+              <TableHead>Form type ID</TableHead>
               <TableHead>Active version</TableHead>
               <TableHead>Versions</TableHead>
               <TableHead>Created</TableHead>
@@ -149,14 +181,14 @@ export function FormSchemas() {
           <TableBody>
             {schemas === null && (
               <TableRow>
-                <TableCell colSpan={6} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={7} className="py-6 text-center text-muted-foreground">
                   Loading…
                 </TableCell>
               </TableRow>
             )}
             {schemas?.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={7} className="py-6 text-center text-muted-foreground">
                   No form schemas yet.
                 </TableCell>
               </TableRow>
@@ -166,6 +198,9 @@ export function FormSchemas() {
                 <TableCell className="font-medium">{s.name}</TableCell>
                 <TableCell className="text-muted-foreground">
                   {humanize(s.insurance_type)}
+                </TableCell>
+                <TableCell>
+                  <CopyableId value={s.id} label="form type ID" />
                 </TableCell>
                 <TableCell>
                   {s.active_version !== null ? (
@@ -197,7 +232,8 @@ export function FormSchemas() {
               {viewing ? `${viewing.name} — versions` : "Versions"}
             </DialogTitle>
             <DialogDescription>
-              The published version is the active schema used for new intakes.
+              The published version is the active schema used for new intakes. Use the IDs
+              here as an intake payload's form_type_id (the schema) and schema_version_id.
             </DialogDescription>
           </DialogHeader>
           {dialogError && (
