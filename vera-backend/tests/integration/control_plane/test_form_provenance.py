@@ -240,3 +240,27 @@ async def test_detail_carries_provenance_for_ai_fields(
     assert ai["provenance"]["judge"]["supported"] is True
     human = fields["cov.a"]
     assert human["provenance"] is None
+
+
+@pytest.mark.asyncio
+async def test_calls_timeline(client, rbac_world, provenance_form_id) -> None:
+    resp = await client.get(
+        f"/api/v1/patient-forms/{provenance_form_id}/calls",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    calls = resp.json()["data"]
+    assert [c["attempt"] for c in calls] == [1, 2]
+    assert calls[1]["mode"] == "retry"
+    assert calls[1]["retry_of"] == calls[0]["id"]
+    assert calls[1]["changed_paths"] == ["cov.b"]
+    assert resp.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_calls_timeline_unknown_form_404(client, rbac_world) -> None:
+    resp = await client.get(
+        f"/api/v1/patient-forms/{uuid7()}/calls",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+    )
+    assert resp.status_code == 404

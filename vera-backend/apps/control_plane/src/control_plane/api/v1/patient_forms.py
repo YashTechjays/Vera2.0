@@ -305,6 +305,16 @@ class PatientFormDetail(BaseModel):
     fields: list[FieldView]
 
 
+class CallAttemptView(BaseModel):
+    id: UUID
+    attempt: int
+    mode: str
+    status: str
+    created_at: datetime
+    retry_of: UUID | None
+    changed_paths: list[str]
+
+
 class ResolveRequest(BaseModel):
     form_data: dict[str, Any] = {}  # current value per dotted path (post-edit)
     dispute_fields: list[str] = []  # paths the reviewer explicitly accepted
@@ -539,6 +549,44 @@ async def get_patient_form(
         )
     )
     return ok(detail)
+
+
+@router.get(
+    "/patient-forms/{form_id}/calls",
+    response_model=ResponseModel[list[CallAttemptView]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_form_calls(
+    form_id: UUID,
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[list[CallAttemptView]]:
+    """The form's call-attempt timeline: mode, status, lineage, and which field
+    paths each call changed. Paths and timings only — no field values."""
+    response.headers["Cache-Control"] = "no-store"
+    form = (
+        await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+    attempts = await load_call_attempts(session, form_id)
+    await get_audit(request).emit(
+        _audit_phi_read(
+            request,
+            tenant_id,
+            caller,
+            str(form_id),
+            sorted({p for a in attempts for p in a.changed_paths}),
+        )
+    )
+    return ok([CallAttemptView(**dataclasses.asdict(a)) for a in attempts])
 
 
 @router.post(
