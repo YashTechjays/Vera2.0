@@ -138,6 +138,10 @@ class _MemCallStreamStore:
 
     def __init__(self) -> None:
         self._entries: dict[str, list[tuple[str, CallStreamEvent]]] = {}
+        # (room_name, first_entry_deadline_s) per read() call — lets endpoint tests
+        # pin WHICH deadline each SSE branch passes down (a None on a tail branch
+        # would reopen the unbounded-hang hole if the stream vanishes post-EXISTS).
+        self.read_deadlines: list[tuple[str, float | None]] = []
 
     async def publish(self, room_name: str, event: CallStreamEvent) -> None:
         entries = self._entries.setdefault(room_name, [])
@@ -157,7 +161,9 @@ class _MemCallStreamStore:
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         # This fake replays a fixed snapshot and never blocks, so there is no idle
         # wait for a deadline to bound — a never-published room simply yields
-        # nothing and the generator ends immediately, same observable effect.
+        # nothing and the generator ends immediately, same observable effect. The
+        # deadline is still RECORDED so endpoint tests can assert what was passed.
+        self.read_deadlines.append((room_name, first_entry_deadline_s))
         for entry_id, event in list(self._entries.get(room_name, [])):
             yield entry_id, event
 
@@ -166,8 +172,13 @@ class _MemCallStreamStore:
 
 
 @pytest.fixture(scope="session")
-def call_stream_service() -> CallStreamService:
-    return CallStreamService(_MemCallStreamStore())
+def call_stream_store() -> _MemCallStreamStore:
+    return _MemCallStreamStore()
+
+
+@pytest.fixture(scope="session")
+def call_stream_service(call_stream_store: _MemCallStreamStore) -> CallStreamService:
+    return CallStreamService(call_stream_store)
 
 
 class RBACWorld:

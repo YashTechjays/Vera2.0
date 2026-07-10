@@ -65,10 +65,13 @@ _ACTIVE_STATUSES = (
     CallStatus.CRITICAL,
 )
 
-# Bound on tailing a stream that may never appear (no stream yet, call still live).
-# Pre-answer ring/IVR wait is bounded ~60s; 180s sits safely above any legitimate
-# pre-first-publish silence, so a genuinely stuck/never-dispatched room still lets
-# go instead of pinning the SSE connection open forever.
+# Bound on tailing a stream that may never appear (no stream yet, call still live;
+# or the stream vanished between the EXISTS check and the read). Pre-answer ring/IVR
+# wait is bounded ~60s; 180s sits safely above any legitimate pre-first-publish
+# silence, so a genuinely stuck/never-dispatched room still lets go instead of
+# pinning the SSE connection open forever. The deadline is checked after each idle
+# XREAD BLOCK window, so worst-case termination latency is deadline + block_ms
+# (~185s with the store's default 5s block).
 _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S: float = 180
 
 # Transcript.source ("rep"/"bot") -> envelope role, used only when the row's own
@@ -238,10 +241,11 @@ async def stream_call_events(
     # Task 16 persists transcripts to the DB and deletes the stream at closeout, so
     # a terminal call's stream is normally already gone — one EXISTS round-trip
     # decides which record to serve. Race: the stream is deleted between this check
-    # and the tail branch's read — that branch's own deadline still bounds it. Or a
-    # stream is (re)created between this EXISTS(false) and the terminal branch's DB
-    # read below — the finalizer will persist those rows too; the client just gets
-    # the DB snapshot as it stood at read time.
+    # and the tail branch's read (every live->terminal transition opens this
+    # window) — the tail terminates at its first-entry deadline instead of hanging.
+    # Or a stream is (re)created between this EXISTS(false) and the terminal
+    # branch's DB read below — the finalizer will persist those rows too; the
+    # client just gets the DB snapshot as it stood at read time.
     stream_exists = await service.exists(room_name)
 
     if not stream_exists and call.current_status in TERMINAL_VALUES:
@@ -285,15 +289,17 @@ async def stream_call_events(
 
         return _sse_response(_db_frames())
 
-    # No stream and the call is still live: the worker may not have published its
-    # first event yet (or never will, e.g. a crashed dispatch). Bound the wait so a
-    # stream that never appears can't pin the connection open forever; a stream
-    # that already exists tails with no deadline (today's behavior, unbounded).
-    first_entry_deadline_s = None if stream_exists else _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
+    # Tail branch (stream exists, OR no stream but the call is still live — the
+    # worker may not have published its first event yet, or never will after a
+    # crashed dispatch). BOTH cases carry the first-entry deadline: a stream that
+    # exists always has >= 1 entry, so the replay-from-0 first read marks it seen
+    # immediately and the deadline can never fire for a genuinely live stream — it
+    # only bounds the exists->deleted TOCTOU window above, where a None deadline on
+    # a now-vanished, never-seen stream would pin the SSE connection open forever.
 
     async def _live_frames() -> AsyncIterator[str]:
         async for entry_id, event in service.consume(
-            room_name, first_entry_deadline_s=first_entry_deadline_s
+            room_name, first_entry_deadline_s=_LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
         ):
             yield _sse_frame(entry_id, event)
 

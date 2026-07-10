@@ -13,7 +13,13 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld, seed_call
+from control_plane.api.v1.calls import _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
+from tests.integration.control_plane.conftest import (
+    FakeLiveKit,
+    RBACWorld,
+    _MemCallStreamStore,
+    seed_call,
+)
 from vera_core.call_stream import CallStreamService
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
@@ -781,3 +787,40 @@ async def test_call_events_live_call_no_stream_terminates_at_deadline(
     assert resp.headers["content-type"].startswith("text/event-stream")
     # The stream never appeared, so no frames are emitted and the connection closes.
     assert resp.text == ""
+
+
+@pytest.mark.asyncio
+async def test_call_events_stream_exists_branch_still_passes_the_deadline(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+    call_stream_store: _MemCallStreamStore,
+) -> None:
+    """Even when EXISTS said the stream is there, the tail must carry the
+    first-entry deadline: the finalizer can delete the stream between the EXISTS
+    check and the tail's first read (every live->terminal transition opens this
+    window), and a None deadline on a now-vanished, never-seen stream would hang
+    the SSE forever. Harmless for a genuinely live stream — it always has >= 1
+    entry, so the replay-from-0 first read marks it seen before the deadline can
+    ever fire."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    await call_stream_service.publish_turn(room, "agent", "hello", ts=1)
+    await call_stream_service.end(room)
+    assert await call_stream_service.exists(room) is True
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+
+    deadlines = [d for r, d in call_stream_store.read_deadlines if r == room]
+    assert deadlines == [_LIVE_TAIL_FIRST_ENTRY_DEADLINE_S]
