@@ -317,3 +317,31 @@ class TestDocumentValidation:
             },
         }
         FormSchemaDoc.model_validate(doc)  # anchor found via the group-gated leaf
+
+    def test_promoted_fields_accepts_a_valid_subset_of_system_fields(self) -> None:
+        doc = minimal_doc(
+            system_fields={"plan_type": "sections.basics.plan_type"},
+            promoted_fields={"patient_name": "sections.basics.plan_type"},
+        )
+        FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_rejects_unknown_column(self) -> None:
+        doc = minimal_doc(
+            system_fields={"plan_type": "sections.basics.plan_type"},
+            promoted_fields={"not_a_column": "sections.basics.plan_type"},
+        )
+        with pytest.raises(ValidationError, match="not a promotable patient_form column"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_rejects_path_not_a_leaf(self) -> None:
+        doc = minimal_doc(
+            system_fields={"plan_type": "sections.basics.plan_type"},
+            promoted_fields={"patient_name": "sections.basics.missing"},
+        )
+        with pytest.raises(ValidationError, match="does not resolve to a leaf"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_rejects_path_not_backed_by_system_fields(self) -> None:
+        doc = minimal_doc(promoted_fields={"patient_name": "sections.basics.plan_type"})
+        with pytest.raises(ValidationError, match="not a system_fields target"):
+            FormSchemaDoc.model_validate(doc)

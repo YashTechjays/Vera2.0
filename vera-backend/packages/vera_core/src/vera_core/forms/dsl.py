@@ -52,6 +52,18 @@ LeafType = Literal["text", "enum", "date", "currency", "percent", "integer", "ph
 ComparisonOp = Literal["eq", "ne", "in", "not_in"]
 RANGE_TYPES: frozenset[str] = frozenset({"currency", "percent", "integer"})
 COLLECTED_ROLES: frozenset[str] = frozenset({"ask", "confirm"})
+# patient_form columns a schema may declare in `promoted_fields` (dsl.py `_validate_document`
+# below, and vera_core.forms.intake.promote_columns).
+PROMOTABLE_COLUMNS: frozenset[str] = frozenset({
+    "patient_name",
+    "patient_dob",
+    "appointment_date",
+    "chart_number",
+    "appointment_type",
+    "member_id",
+    "insurance_provider",
+    "insurance_provider_phone_number",
+})
 
 
 class _Model(BaseModel):
@@ -361,6 +373,11 @@ class FormSchemaDoc(_Model):
     insurance_type: str
     description: str | None = None
     system_fields: dict[str, str] | None = None
+    # patient_form column name -> root-anchored leaf path. Always a subset of
+    # system_fields (validated below) — a promoted column can never be legitimately
+    # empty, since system_fields targets are exactly what required_intake_fields
+    # enforces at creation (intake.py).
+    promoted_fields: dict[str, str] | None = None
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.
     stt_key_terms: list[str] | None = None
@@ -592,6 +609,24 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
+
+        # promoted fields — patient_form columns re-derived from the current answer at
+        # dispute-resolve time too (not just intake). Must be a subset of system_fields:
+        # that's what guarantees a promoted column is never legitimately empty.
+        system_field_paths = set((self.system_fields or {}).values())
+        for column, path in (self.promoted_fields or {}).items():
+            if column not in PROMOTABLE_COLUMNS:
+                errors.append(
+                    f"promoted_fields.{column}: not a promotable patient_form column "
+                    f"(one of {sorted(PROMOTABLE_COLUMNS)})"
+                )
+            if path not in leaves:
+                errors.append(f"promoted_fields.{column}: {path!r} does not resolve to a leaf")
+            elif path not in system_field_paths:
+                errors.append(
+                    f"promoted_fields.{column}: {path!r} is not a system_fields target "
+                    "(promoted fields must be guaranteed present at intake)"
+                )
 
         # stt key terms: bounded, unique, static vocabulary
         terms = self.stt_key_terms or []
