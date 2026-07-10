@@ -17,8 +17,7 @@ import { useIbv } from "@/components/ibv/IbvProvider"
 import { usePermission } from "@/lib/auth/permissions"
 import { listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
 import { ApiError } from "@/lib/api/client"
-import { CallOverviewModal } from "@/components/monitoring/CallOverviewModal"
-import { InterveneModal } from "@/components/monitoring/InterveneModal"
+import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
@@ -107,7 +106,6 @@ export function LiveMonitoring() {
   const [publishing, setPublishing] = useState<string | null>(null)
   const [modalCall, setModalCall] = useState<LiveCall | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
-  const [interveneOpen, setInterveneOpen] = useState(false)
 
   // Load + poll (skip while the tab is hidden).
   useEffect(() => {
@@ -294,18 +292,12 @@ export function LiveMonitoring() {
         </Table>
       </Card>
 
-      <CallOverviewModal
+      <LiveCallModal
         call={modalCall}
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
         onExpand={() => openForm()}
-        onIntervene={() => {
-          setOverviewOpen(false)
-          setInterveneOpen(true)
-        }}
       />
-
-      <InterveneModal call={modalCall} open={interveneOpen} onOpenChange={setInterveneOpen} />
     </div>
   )
 }
