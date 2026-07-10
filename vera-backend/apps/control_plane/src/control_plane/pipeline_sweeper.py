@@ -33,7 +33,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.call_closeout import TERMINAL_VALUES, close_call
 from control_plane.dispatch import run_dispatch_pass
+from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditSink
+from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import platform_session, tenant_session
 from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.enums import CallStatus, FormStatus
@@ -71,6 +73,7 @@ class PipelineSweeper:
         livekit: Any,
         kms: Any,
         audit: AuditSink,
+        call_stream: CallStreamService,
         *,
         interval_s: float,
         stuck_grace_s: int,
@@ -80,6 +83,7 @@ class PipelineSweeper:
         self._livekit = livekit
         self._kms = kms
         self._audit = audit
+        self._call_stream = call_stream
         self._interval_s = interval_s
         self._stuck_grace_s = stuck_grace_s
         self._max_call_duration_s = max_call_duration_s
@@ -150,6 +154,7 @@ class PipelineSweeper:
                     actor_label="pipeline-sweeper",
                 )
                 if ref is not None:
+                    await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
                     closed += 1
                     logger.info("sweeper: reconciled stuck call room %s", room_name)
 

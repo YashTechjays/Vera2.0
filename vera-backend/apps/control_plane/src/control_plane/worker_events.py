@@ -22,7 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from control_plane.call_closeout import TERMINAL_VALUES, close_call
 from control_plane.dispatch import run_dispatch_pass
 from control_plane.livekit_gateway import LiveKitGateway
+from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditSink
+from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.events import (
     WORKER_EVENTS_GROUP,
@@ -87,6 +89,7 @@ class WorkerEventConsumer:
         sessionmaker: async_sessionmaker[AsyncSession],
         kms: Any,
         audit: AuditSink,
+        call_stream: CallStreamService,
         *,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
@@ -98,6 +101,7 @@ class WorkerEventConsumer:
         self._sessionmaker = sessionmaker
         self._kms = kms
         self._audit = audit
+        self._call_stream = call_stream
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
         self._teardown_grace_ms = teardown_grace_ms
@@ -289,6 +293,7 @@ class WorkerEventConsumer:
                 return  # voice-lab room
         ref = await close_call(self._sessionmaker, self._audit, room_name, status, trigger=trigger)
         if ref is not None:
+            await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
             await run_dispatch_pass(
                 self._sessionmaker, ref.tenant_id, self._livekit, self._kms, self._audit
             )

@@ -9,12 +9,15 @@ raw PHI.
 """
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from redis.exceptions import TimeoutError as RedisTimeoutError
+
+logger = logging.getLogger(__name__)
 
 _KEY_PREFIX = "vera:call-events:"
 _ENDED_FIELD = "event"
@@ -36,11 +39,20 @@ class CallStreamEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
+def _event_from_fields(fields: dict[str, str]) -> CallStreamEvent:
+    return CallStreamEvent(
+        type=fields["type"],
+        data=json.loads(fields["data"]),
+        ts=int(fields["ts"]),
+    )
+
+
 class CallStreamStore(Protocol):
     async def publish(self, room_name: str, event: CallStreamEvent) -> None: ...
     async def mark_ended(self, room_name: str) -> None: ...
     async def delete(self, room_name: str) -> None: ...
     def read(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]: ...
+    async def read_all(self, room_name: str) -> list[CallStreamEvent]: ...
 
 
 class RedisCallStreamStore:
@@ -99,14 +111,32 @@ class RedisCallStreamStore:
                 last_id = entry_id
                 if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
                     return
-                yield (
-                    entry_id,
-                    CallStreamEvent(
-                        type=fields["type"],
-                        data=json.loads(fields["data"]),
-                        ts=int(fields["ts"]),
-                    ),
-                )
+                yield entry_id, _event_from_fields(fields)
+
+    async def read_all(self, room_name: str) -> list[CallStreamEvent]:
+        """One-shot snapshot of every event currently on the stream, oldest first
+        (XRANGE `-` to `+` — no BLOCK, no tail). For the terminal-path finalizer:
+        the stream may or may not carry an ended sentinel (a crashed worker never
+        writes one), so this works with or without it. Skips the sentinel entry and
+        any malformed entry; content is never logged (PHI), only a skipped count."""
+        entries = await self._redis.xrange(call_stream_key(room_name), "-", "+") or []
+        events: list[CallStreamEvent] = []
+        malformed = 0
+        for _entry_id, fields in cast("list[tuple[str, dict[str, str]]]", entries):
+            if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
+                continue
+            try:
+                events.append(_event_from_fields(fields))
+            except Exception:  # malformed entry; content is PHI, never logged, count only
+                malformed += 1
+        if malformed:
+            logger.warning(
+                "call stream %s: skipped %d malformed entr%s",
+                room_name,
+                malformed,
+                "y" if malformed == 1 else "ies",
+            )
+        return events
 
 
 class CallStreamService:
@@ -132,6 +162,10 @@ class CallStreamService:
 
     def consume(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         return self._store.read(room_name)
+
+    async def read_all(self, room_name: str) -> list[CallStreamEvent]:
+        """One-shot snapshot for the terminal-path finalizer (see `read_all` above)."""
+        return await self._store.read_all(room_name)
 
     async def end(self, room_name: str) -> None:
         await self._store.mark_ended(room_name)

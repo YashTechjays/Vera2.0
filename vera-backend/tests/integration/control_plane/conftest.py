@@ -153,6 +153,9 @@ class _MemCallStreamStore:
         for entry_id, event in list(self._entries.get(room_name, [])):
             yield entry_id, event
 
+    async def read_all(self, room_name: str) -> list[CallStreamEvent]:
+        return [event for _entry_id, event in self._entries.get(room_name, [])]
+
 
 @pytest.fixture(scope="session")
 def call_stream_service() -> CallStreamService:

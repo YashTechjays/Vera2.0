@@ -15,12 +15,15 @@ from uuid import UUID, uuid4
 import pytest
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.dml import Insert
 
 import control_plane.call_closeout as call_closeout
+import control_plane.transcript_finalizer as transcript_finalizer
 import control_plane.worker_events as worker_events
 from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import AuditRecord
+from vera_core.call_stream import CallStreamEvent
 from vera_core.events import (
     CallAnsweredEvent,
     CallEndedEvent,
@@ -106,8 +109,9 @@ class _Result:
 
 class _FakeSession:
     """Routes `execute()` by the statement's target entity (Call / PatientForm /
-    Tenant). Defaults to "no Call row" — matches a voice-lab room whose
-    synthetic call id never made it into the table."""
+    Tenant) for SELECTs, or records it for the finalizer's transcript INSERT.
+    Defaults to "no Call row" — matches a voice-lab room whose synthetic call id
+    never made it into the table."""
 
     def __init__(self, *, call: Any = None, form: Any = None, tenant: Any = None) -> None:
         self.call = call
@@ -115,8 +119,12 @@ class _FakeSession:
         self.tenant = tenant
         self.added: list[Any] = []
         self.queried: list[type] = []
+        self.inserted: list[Any] = []
 
-    async def execute(self, stmt: Any) -> _Result:
+    async def execute(self, stmt: Any) -> _Result | None:
+        if isinstance(stmt, Insert):
+            self.inserted.append(stmt)
+            return None
         entity = stmt.column_descriptions[0]["entity"]
         self.queried.append(entity)
         if entity is Call:
@@ -129,6 +137,22 @@ class _FakeSession:
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
+
+
+class _FakeCallStream:
+    """In-memory call-stream double for the finalizer: read_all returns a fixed
+    snapshot until clear() runs (mirrors a real Redis DEL)."""
+
+    def __init__(self, events: list[CallStreamEvent] | None = None) -> None:
+        self._events = events or []
+        self.cleared: list[str] = []
+
+    async def read_all(self, room_name: str) -> list[CallStreamEvent]:
+        return self._events
+
+    async def clear(self, room_name: str) -> None:
+        self.cleared.append(room_name)
+        self._events = []
 
 
 class _FakeSessionCtx:
@@ -157,6 +181,7 @@ class _Wired:
     consumer: WorkerEventConsumer
     session: _FakeSession
     audit: _SpyAudit
+    call_stream: _FakeCallStream
     dispatch_calls: list[tuple[Any, ...]] = field(default_factory=list)
 
 
@@ -166,14 +191,17 @@ def _consumer(
     livekit: _FakeLiveKit,
     *,
     session: _FakeSession | None = None,
+    call_stream: _FakeCallStream | None = None,
 ) -> _Wired:
     """Wire a consumer to a fake DB seam and a fake dispatch pass. `tenant_session`
-    is monkeypatched in both `worker_events` (the answered handler) and
-    `call_closeout` (the shared terminal closeout) to the SAME fake session, so a
-    test can seed one Call/PatientForm/Tenant set and see it through both paths.
+    is monkeypatched in `worker_events` (the answered handler), `call_closeout` (the
+    shared terminal closeout), and `transcript_finalizer` (the post-closeout
+    finalizer) to the SAME fake session, so a test can seed one Call/PatientForm/
+    Tenant set and see it through every path.
     """
     fake_session = session if session is not None else _FakeSession()
     fake_audit = _SpyAudit()
+    fake_call_stream = call_stream if call_stream is not None else _FakeCallStream()
     dispatch_calls: list[tuple[Any, ...]] = []
 
     def _fake_tenant_session(sm: Any, tid: Any) -> _FakeSessionCtx:
@@ -181,6 +209,7 @@ def _consumer(
 
     monkeypatch.setattr(call_closeout, "tenant_session", _fake_tenant_session)
     monkeypatch.setattr(worker_events, "tenant_session", _fake_tenant_session)
+    monkeypatch.setattr(transcript_finalizer, "tenant_session", _fake_tenant_session)
 
     async def _fake_run_dispatch_pass(
         sessionmaker: Any, tenant_id: Any, lk: Any, kms: Any, aud: Any
@@ -195,10 +224,15 @@ def _consumer(
         cast("async_sessionmaker[AsyncSession]", object()),
         object(),
         fake_audit,
+        fake_call_stream,  # type: ignore[arg-type]
         teardown_grace_ms=0,
     )
     return _Wired(
-        consumer=consumer, session=fake_session, audit=fake_audit, dispatch_calls=dispatch_calls
+        consumer=consumer,
+        session=fake_session,
+        audit=fake_audit,
+        call_stream=fake_call_stream,
+        dispatch_calls=dispatch_calls,
     )
 
 
@@ -389,6 +423,7 @@ async def test_call_answered_activates_call_and_stamps_started_at(
     assert len(status_events) == 1
     assert status_events[0].event_value == CallStatus.ACTIVE.value
     assert wired.dispatch_calls == []  # not a terminal event — no refill
+    assert wired.call_stream.cleared == []  # not a closeout — finalizer never runs
     assert redis.acked == ["1-0"]
 
 
@@ -427,6 +462,36 @@ async def test_call_ended_completes_call_and_form_then_dispatches(
 
 
 @pytest.mark.asyncio
+async def test_call_ended_finalizes_transcript_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 16: on a `call.ended` closeout, the finalizer drains the room's event
+    stream into `transcript` rows and clears the stream, BEFORE the dispatch pass
+    that refills the freed slot."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value)
+    tenant = _tenant(id=tenant_id, max_retries=3)
+    session = _FakeSession(call=call, form=form, tenant=tenant)
+    call_stream = _FakeCallStream(
+        [
+            CallStreamEvent(type="transcript", data={"role": "user", "text": "hi"}, ts=1),
+            CallStreamEvent(type="transcript", data={"role": "agent", "text": "hello"}, ts=2),
+        ]
+    )
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session, call_stream=call_stream)
+
+    event = CallEndedEvent(room_name=room, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert len(session.inserted) == 1  # one multi-row transcript insert
+    assert call_stream.cleared == [room]
+    assert len(wired.dispatch_calls) == 1  # finalize ran before the refill, not instead of it
+
+
+@pytest.mark.asyncio
 async def test_call_failed_maps_reason_updates_rows_and_tears_room_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -436,8 +501,11 @@ async def test_call_failed_maps_reason_updates_rows_and_tears_room_down(
     form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, retry_count=0)
     tenant = _tenant(id=tenant_id, max_retries=3)
     session = _FakeSession(call=call, form=form, tenant=tenant)
+    call_stream = _FakeCallStream(
+        [CallStreamEvent(type="transcript", data={"role": "user", "text": "hi"}, ts=1)]
+    )
     redis, livekit = _FakeRedis(), _FakeLiveKit()
-    wired = _consumer(monkeypatch, redis, livekit, session=session)
+    wired = _consumer(monkeypatch, redis, livekit, session=session, call_stream=call_stream)
 
     event = CallFailedEvent(room_name=room, reason=CallFailureReason.NO_ANSWER, ts=1)
     await wired.consumer._process("1-0", {"event": event.model_dump_json()})
@@ -455,6 +523,8 @@ async def test_call_failed_maps_reason_updates_rows_and_tears_room_down(
     status_events = [e for e in session.added if e.event_type == CallEventType.STATUS.value]
     assert status_events[0].event_value == CallStatus.NO_ANSWER.value
 
+    assert len(session.inserted) == 1  # call.failed is a terminal closeout too — finalizes
+    assert call_stream.cleared == [room]
     assert len(wired.dispatch_calls) == 1
     assert wired.dispatch_calls[0][0] == tenant_id
     assert redis.acked == ["1-0"]
@@ -489,6 +559,9 @@ async def test_events_for_rooms_without_call_row_touch_no_db(
     assert wired.session.added == []
     assert wired.dispatch_calls == []
     assert redis.acked == ["1-0", "2-0", "3-0"]
+    # close_call returned None for every event (no Call row) — the finalizer never ran.
+    assert wired.session.inserted == []
+    assert wired.call_stream.cleared == []
 
 
 @pytest.mark.asyncio
@@ -511,6 +584,8 @@ async def test_terminal_events_are_idempotent(monkeypatch: pytest.MonkeyPatch) -
     # close_call's own row-locking query, which short-circuits before PatientForm/Tenant.
     assert session.queried == [Call, Call]
     assert wired.dispatch_calls == []  # no slot freed — no refill
+    assert session.inserted == []  # close_call returned None — the finalizer never ran
+    assert wired.call_stream.cleared == []
     assert redis.acked == ["1-0"]
 
 

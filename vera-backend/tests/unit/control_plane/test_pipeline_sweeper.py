@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import control_plane.pipeline_sweeper as sweeper_mod
 from control_plane.pipeline_sweeper import PipelineSweeper, rooms_to_close
 from vera_core.audit import AuditSink
+from vera_core.call_stream import CallStreamService
 from vera_core.observability.correlation import room_name_for_call
 
 
@@ -65,6 +66,7 @@ async def test_sweep_once_continues_past_a_failing_tenant(
         object(),
         object(),
         cast(AuditSink, object()),
+        cast(CallStreamService, object()),
         interval_s=60,
         stuck_grace_s=300,
         max_call_duration_s=10_800,
