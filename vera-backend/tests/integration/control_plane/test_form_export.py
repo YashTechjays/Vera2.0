@@ -10,10 +10,11 @@ from collections.abc import AsyncGenerator
 from io import BytesIO
 from uuid import UUID
 
+import httpx
 import pytest
 from openpyxl import load_workbook
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import uuid7
@@ -47,7 +48,7 @@ async def completed_form_id(
     schema_version_id = uuid7()
 
     engine = create_async_engine(database_url)
-    sm: async_sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    sm: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
 
     schema_id: UUID
     schema_id_to_delete: UUID | None = None
@@ -184,7 +185,7 @@ async def non_completed_form_id(
     schema_version_id = uuid7()
 
     engine = create_async_engine(database_url)
-    sm: async_sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    sm: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
 
     schema_id: UUID
     schema_id_to_delete: UUID | None = None
@@ -253,7 +254,10 @@ async def non_completed_form_id(
 
 @pytest.mark.asyncio
 async def test_export_streams_xlsx_and_writes_ledger(
-    client, rbac_world, completed_form_id, admin_sessionmaker
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    completed_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """completed_form_id: a COMPLETED form under rbac_world.tenant_id with at
     least one current answer and one call with snapshot."""
@@ -282,7 +286,9 @@ async def test_export_streams_xlsx_and_writes_ledger(
 
 
 @pytest.mark.asyncio
-async def test_export_rejects_non_completed(client, rbac_world, non_completed_form_id) -> None:
+async def test_export_rejects_non_completed(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, non_completed_form_id: UUID
+) -> None:
     """Form that is not COMPLETED must be rejected with 422."""
     resp = await client.post(
         f"/api/v1/patient-forms/{non_completed_form_id}/export",
@@ -293,7 +299,9 @@ async def test_export_rejects_non_completed(client, rbac_world, non_completed_fo
 
 
 @pytest.mark.asyncio
-async def test_export_requires_permission(client, rbac_world, completed_form_id) -> None:
+async def test_export_requires_permission(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, completed_form_id: UUID
+) -> None:
     """A user without forms:export permission must receive 403."""
     resp = await client.post(
         f"/api/v1/patient-forms/{completed_form_id}/export",

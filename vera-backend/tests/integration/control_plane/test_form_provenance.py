@@ -7,9 +7,10 @@ answers and null for human answers.
 from collections.abc import AsyncGenerator
 from uuid import UUID
 
+import httpx
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import uuid7
@@ -47,7 +48,7 @@ async def provenance_form_id(
     schema_version_id = uuid7()
 
     engine = create_async_engine(database_url)
-    sm: async_sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    sm: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
 
     schema_id: UUID
     schema_id_to_delete: UUID | None = None
@@ -223,7 +224,7 @@ async def provenance_form_id(
 
 @pytest.mark.asyncio
 async def test_detail_carries_provenance_for_ai_fields(
-    client, rbac_world, provenance_form_id
+    client: httpx.AsyncClient, rbac_world: RBACWorld, provenance_form_id: UUID
 ) -> None:
     """provenance_form_id: form with one ai_call answer (from a retry call, judged
     supported/88) and one human answer. AI field gets provenance; human gets null."""
@@ -243,7 +244,9 @@ async def test_detail_carries_provenance_for_ai_fields(
 
 
 @pytest.mark.asyncio
-async def test_calls_timeline(client, rbac_world, provenance_form_id) -> None:
+async def test_calls_timeline(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, provenance_form_id: UUID
+) -> None:
     resp = await client.get(
         f"/api/v1/patient-forms/{provenance_form_id}/calls",
         headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
@@ -258,7 +261,9 @@ async def test_calls_timeline(client, rbac_world, provenance_form_id) -> None:
 
 
 @pytest.mark.asyncio
-async def test_calls_timeline_unknown_form_404(client, rbac_world) -> None:
+async def test_calls_timeline_unknown_form_404(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
     resp = await client.get(
         f"/api/v1/patient-forms/{uuid7()}/calls",
         headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
