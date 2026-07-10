@@ -30,6 +30,7 @@ describe("visibleNavFor", () => {
     expect(titles).not.toContain("Agent Prompt")
     expect(titles).not.toContain("Insurance Providers")
     expect(titles).not.toContain("IVR Playbooks")
+    expect(titles).not.toContain("Form Schemas")
   })
 
   it("virtual_assistant-shaped permission set sees only Voice Lab and Settings", () => {
@@ -48,7 +49,13 @@ describe("visibleNavFor", () => {
       isSuperAdmin: true,
       isElevated: false,
     }).map((i) => i.title)
-    expect(titles).toEqual(["Tenant Access", "Agent Prompt", "Insurance Providers", "IVR Playbooks"])
+    expect(titles).toEqual([
+      "Tenant Access",
+      "Agent Prompt",
+      "Insurance Providers",
+      "IVR Playbooks",
+      "Form Schemas",
+    ])
   })
 
   it("super admin, elevated: platform items first, then tenant items", () => {
@@ -57,11 +64,12 @@ describe("visibleNavFor", () => {
       isSuperAdmin: true,
       isElevated: true,
     }).map((i) => i.title)
-    expect(titles.slice(0, 4)).toEqual([
+    expect(titles.slice(0, 5)).toEqual([
       "Tenant Access",
       "Agent Prompt",
       "Insurance Providers",
       "IVR Playbooks",
+      "Form Schemas",
     ])
     expect(titles).toContain("Live Monitoring")
     expect(titles).toContain("Users")
