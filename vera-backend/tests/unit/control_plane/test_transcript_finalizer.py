@@ -106,13 +106,13 @@ class _FakeCallStream:
 
 
 class _FakeSession:
-    def __init__(self, *, raise_on_execute: bool = False) -> None:
+    def __init__(self, *, error: Exception | None = None) -> None:
         self.executed: list[Any] = []
-        self._raise_on_execute = raise_on_execute
+        self._error = error
 
     async def execute(self, stmt: Any) -> None:
-        if self._raise_on_execute:
-            raise RuntimeError("db boom")
+        if self._error is not None:
+            raise self._error
         self.executed.append(stmt)
 
 
@@ -203,10 +203,40 @@ async def test_finalize_swallows_a_raising_session_and_leaves_stream_intact(
     stream = _FakeCallStream(
         [CallStreamEvent(type="transcript", data={"role": "user", "text": "hi"}, ts=1)]
     )
-    session = _FakeSession(raise_on_execute=True)
+    session = _FakeSession(error=RuntimeError("db boom"))
     _patch_tenant_session(monkeypatch, session)
 
     count = await _finalize(stream, _ref())
 
     assert count == 0
     assert stream.cleared == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_failure_log_never_contains_exception_content(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SQLAlchemy statement errors embed the compiled SQL and bound parameters —
+    i.e. the transcript text (PHI) — in their str(). The failure log must carry
+    only the exception TYPE name, never its content or a traceback (same rule as
+    agent_worker/transcript_publisher.py)."""
+    sentinel = "SECRET_PHI_TOKEN"
+    stream = _FakeCallStream(
+        [CallStreamEvent(type="transcript", data={"role": "user", "text": sentinel}, ts=1)]
+    )
+    session = _FakeSession(
+        error=RuntimeError(f"INSERT INTO transcript (message) VALUES ('{sentinel}')")
+    )
+    _patch_tenant_session(monkeypatch, session)
+
+    with caplog.at_level("WARNING", logger=finalizer_mod.logger.name):
+        count = await _finalize(stream, _ref())
+
+    assert count == 0
+    assert stream.cleared == []  # failure path — stream left for the TTL backstop
+    rendered = "\n".join(
+        f"{record.getMessage()}{record.exc_text or ''}" for record in caplog.records
+    )
+    assert sentinel not in rendered  # exception content (PHI) never logged
+    assert "RuntimeError" in rendered  # the type name IS logged
+    assert all(record.exc_info is None for record in caplog.records)  # no traceback attached

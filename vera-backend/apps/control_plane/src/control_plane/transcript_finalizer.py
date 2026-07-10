@@ -111,8 +111,12 @@ async def finalize_transcript(
         # next redelivery / the TTL backstop still has it.
         await call_stream_service.clear(room_name)
         return len(rows)
-    except Exception:
-        logger.exception(
-            "transcript finalize failed for call %s; stream TTL is the backstop", ref.call_id
+    except Exception as exc:
+        # Exception content is unsafe here — SQLAlchemy statement errors embed the
+        # bound parameters (the transcript text, PHI); log only the exception type.
+        logger.warning(
+            "transcript finalize failed for call %s (%s); stream TTL is the backstop",
+            ref.call_id,
+            type(exc).__name__,
         )
         return 0
