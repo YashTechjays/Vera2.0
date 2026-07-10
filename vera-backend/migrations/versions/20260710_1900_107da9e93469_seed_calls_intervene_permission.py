@@ -1,8 +1,8 @@
 """seed calls:intervene permission and grant it to TENANT_ADMIN and SUPERVISOR
 
 Revision ID: 107da9e93469
-Revises: 089b3e98f0b0
-Create Date: 2026-07-10 15:00:00.000000
+Revises: f503e82734cc
+Create Date: 2026-07-10 19:00:00.000000
 
 Intervening (publishing audio into a live call) moves off the implicit
 calls:read gate onto a dedicated calls:intervene permission, enforced by
@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "107da9e93469"
-down_revision: str | None = "089b3e98f0b0"
+down_revision: str | None = "f503e82734cc"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
