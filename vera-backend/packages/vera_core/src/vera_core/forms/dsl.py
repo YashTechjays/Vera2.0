@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
+from datetime import date
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -165,6 +166,42 @@ class Range(_Model):
 # Tokens legal in `date_format` (closed set — extend deliberately): month/day
 # with or without a leading zero, 4- or 2-digit year, `/` `-` `.` separators.
 DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY|YY)(?:[-/.](?:MM?|DD?|YYYY|YY))*$")
+
+_DATE_TOKEN_RE = re.compile(r"YYYY|YY|MM?|DD?")
+_DATE_TOKEN_PATTERNS: dict[str, str] = {
+    "YYYY": r"(?P<year>\d{4})",
+    "YY": r"(?P<year2>\d{2})",
+    "MM": r"(?P<month>\d{2})",
+    "M": r"(?P<month>\d{1,2})",
+    "DD": r"(?P<day>\d{2})",
+    "D": r"(?P<day>\d{1,2})",
+}
+
+
+def parse_date_format(text: str, date_format: str) -> date | None:
+    """Parse `text` against a leaf's display/entry `date_format` (e.g. "M/D/YYYY" —
+    see `Validation.date_format`), for values a human typed in that format rather
+    than ISO (the review UI prompts and validates against this same format; see
+    `vera-frontend/src/lib/ibv/validation.ts`). Returns `None` on a shape or
+    calendar mismatch — never raises; the caller decides whether that's an error."""
+    pattern = ""
+    pos = 0
+    for m in _DATE_TOKEN_RE.finditer(date_format):
+        pattern += re.escape(date_format[pos : m.start()]) + _DATE_TOKEN_PATTERNS[m.group()]
+        pos = m.end()
+    pattern += re.escape(date_format[pos:])
+    match = re.fullmatch(pattern, text)
+    if match is None:
+        return None
+    groups = match.groupdict()
+    month, day = groups.get("month"), groups.get("day")
+    year = groups.get("year") or (str(2000 + int(groups["year2"])) if groups.get("year2") else None)
+    if month is None or day is None or year is None:
+        return None
+    try:
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
 
 
 class Validation(_Model):

@@ -1,5 +1,6 @@
 """Form-schema DSL: compiler freshness, round-trip, and document validation."""
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
-from vera_core.forms.dsl import FormSchemaDoc, compile_document, load_document
+from vera_core.forms.dsl import FormSchemaDoc, compile_document, load_document, parse_date_format
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 
@@ -371,3 +372,32 @@ class TestDocumentValidation:
         doc = minimal_doc(promoted_fields={"patient_name": "sections.basics.plan_type"})
         with pytest.raises(ValidationError, match="not a system_fields target"):
             FormSchemaDoc.model_validate(doc)
+
+
+class TestParseDateFormat:
+    """`parse_date_format` — the display/entry `date_format` fallback parser used
+    when a human-typed value (e.g. from the review UI) doesn't parse as ISO."""
+
+    def test_parses_m_d_yyyy(self) -> None:
+        assert parse_date_format("12/4/1999", "M/D/YYYY") == date(1999, 12, 4)
+
+    def test_parses_with_leading_zeros(self) -> None:
+        assert parse_date_format("04/12/1990", "M/D/YYYY") == date(1990, 4, 12)
+
+    def test_parses_dd_mm_yyyy_with_dash_separator(self) -> None:
+        assert parse_date_format("04-12-1990", "DD-MM-YYYY") == date(1990, 12, 4)
+
+    def test_parses_two_digit_year(self) -> None:
+        assert parse_date_format("12/4/99", "M/D/YY") == date(2099, 12, 4)
+
+    def test_rejects_shape_mismatch(self) -> None:
+        assert parse_date_format("1990-04-12", "M/D/YYYY") is None
+
+    def test_rejects_wrong_separator(self) -> None:
+        assert parse_date_format("12-4-1999", "M/D/YYYY") is None
+
+    def test_rejects_out_of_range_calendar_date(self) -> None:
+        assert parse_date_format("13/45/1999", "M/D/YYYY") is None
+
+    def test_rejects_empty_string(self) -> None:
+        assert parse_date_format("", "M/D/YYYY") is None

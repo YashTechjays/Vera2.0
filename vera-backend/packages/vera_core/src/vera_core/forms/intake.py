@@ -15,7 +15,7 @@ from datetime import date
 from typing import Any
 
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc
+from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, parse_date_format
 
 # Legacy v1 section the required-fields fallback reads structurally.
 _PATIENT_INFO = "patient_information"
@@ -143,14 +143,23 @@ def _clean_str(value: Any) -> str | None:
     return text or None
 
 
-def _parse_date(value: Any, field_path: str) -> date | None:
+def _parse_date(value: Any, field_path: str, date_format: str | None = None) -> date | None:
+    """ISO first — intake's caller is a separate machine system that always sends
+    ISO, regardless of the leaf's own `date_format`. Falls back to `date_format`
+    (the leaf's display/entry format, e.g. "M/D/YYYY") for a human-typed value —
+    the review UI prompts for and submits values in exactly that format, never ISO."""
     text = _clean_str(value)
     if text is None:
         return None
     try:
         return date.fromisoformat(text)
-    except ValueError as exc:
-        raise InvalidIntakeValue(field_path, "expected ISO date YYYY-MM-DD") from exc
+    except ValueError:
+        pass
+    if date_format is not None:
+        parsed = parse_date_format(text, date_format)
+        if parsed is not None:
+            return parsed
+    raise InvalidIntakeValue(field_path, "expected an ISO date or the field's configured format")
 
 
 def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
@@ -160,11 +169,14 @@ def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> Prom
     lookup at intake (`resolve_path`) or a flat `{field_path: value}` lookup at
     dispute-resolve (`dict.get`); both share the same schema-path namespace. Raises
     `InvalidIntakeValue` on a bad date."""
+    leaves = dict(doc.leaf_items())
     values: dict[str, Any] = {}
     for column, path in (doc.promoted_fields or {}).items():
         raw = get_value(path)
         if column in ("patient_dob", "appointment_date"):
-            values[column] = _parse_date(raw, path)
+            leaf = leaves.get(path)
+            date_format = leaf.validation.date_format if leaf and leaf.validation else None
+            values[column] = _parse_date(raw, path, date_format)
         elif column == "patient_name":
             cleaned = _clean_str(raw)
             values[column] = cleaned.lower() if cleaned is not None else None

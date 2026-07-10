@@ -370,3 +370,58 @@ class TestPromoteColumns:
         with pytest.raises(InvalidIntakeValue) as exc:
             promote_columns(lambda p: resolve_path(payload, p), doc)
         assert exc.value.field_path == "sections.patient_information.patient_dob"
+
+
+def _doc_with_date_format(date_format: str) -> FormSchemaDoc:
+    """A doc whose patient_dob leaf declares `validation.date_format`, mirroring
+    ibv_standard.py's real `DATE_VALIDATION = Validation(date_format="M/D/YYYY")`
+    — the review UI prompts for and submits values in exactly this format."""
+    return FormSchemaDoc.model_validate(
+        {
+            "dsl_version": "2.1",
+            "name": "Test",
+            "insurance_type": "test_type",
+            "system_fields": {"patient_dob": "sections.patient_information.patient_dob"},
+            "promoted_fields": {"patient_dob": "sections.patient_information.patient_dob"},
+            "sections": {
+                "patient_information": {
+                    "title": "Patient Information",
+                    "role": "context",
+                    "fields": {
+                        "patient_dob": {
+                            "type": "date",
+                            "title": "Patient DOB",
+                            "role": "context",
+                            "validation": {"date_format": date_format},
+                        },
+                    },
+                },
+            },
+            "tasks": [],
+        }
+    )
+
+
+class TestPromoteColumnsDateFormatFallback:
+    """A human editing a date field through the review UI types it in the leaf's
+    declared `validation.date_format`, not ISO (intake.py's `_parse_date` only ever
+    accepted ISO — this is the fallback that makes dispute-resolve date edits work)."""
+
+    def test_falls_back_to_the_leaf_declared_date_format(self) -> None:
+        doc = _doc_with_date_format("M/D/YYYY")
+        payload = {"patient_information": {"patient_dob": "12/4/1999"}}
+        promoted = promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert promoted.patient_dob == date(1999, 12, 4)
+
+    def test_iso_still_works_when_a_date_format_is_declared(self) -> None:
+        doc = _doc_with_date_format("M/D/YYYY")
+        payload = {"patient_information": {"patient_dob": "1999-12-04"}}
+        promoted = promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert promoted.patient_dob == date(1999, 12, 4)
+
+    def test_raises_when_neither_iso_nor_the_declared_format_matches(self) -> None:
+        doc = _doc_with_date_format("M/D/YYYY")
+        payload = {"patient_information": {"patient_dob": "not-a-date"}}
+        with pytest.raises(InvalidIntakeValue) as exc:
+            promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert exc.value.field_path == "sections.patient_information.patient_dob"

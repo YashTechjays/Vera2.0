@@ -3,6 +3,7 @@
 `POST /api/v1/patient-forms/{id}/disputes:resolve`. Skips without Postgres."""
 
 from collections.abc import AsyncGenerator
+from datetime import date
 from uuid import UUID, uuid4
 
 import httpx
@@ -571,17 +572,41 @@ async def test_resolve_with_invalid_promoted_date_returns_422(
     rbac_world: RBACWorld,
     promoted_field_form: UUID,
 ) -> None:
-    """A non-ISO date written to a promoted date column (patient_dob/appointment_date)
-    must surface as a clean 422 from promote_columns's InvalidIntakeValue — not an
-    unhandled 500 — mirroring upload_patient_form's existing handling."""
+    """A date matching neither ISO nor the leaf's declared date_format
+    (ibv_standard's patient_dob is "M/D/YYYY") must surface as a clean 422 from
+    promote_columns's InvalidIntakeValue — not an unhandled 500 — mirroring
+    upload_patient_form's existing handling."""
     resp = await client.post(
         f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
-        json={"form_data": {"sections.patient_information.patient_dob": "12/04/1990"}},
+        json={"form_data": {"sections.patient_information.patient_dob": "not-a-date"}},
         headers=_auth(rbac_world.admin_token),
     )
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["data"]["fields"] == ["sections.patient_information.patient_dob"]
+
+
+async def test_resolve_accepts_a_date_in_the_leafs_declared_format(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """Regression test for a live bug: the review UI prompts for and submits
+    patient_dob in the schema's declared display format ("M/D/YYYY" for
+    ibv_standard), not ISO — resolve must accept that, not 422."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.patient_dob": "12/4/1999"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.patient_dob == date(1999, 12, 4)
 
 
 # ---- baseline-derived dispute behavior --------------------------------------
