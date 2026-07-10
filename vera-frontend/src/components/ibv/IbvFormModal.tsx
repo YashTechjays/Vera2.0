@@ -9,8 +9,9 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { cn } from "@/lib/utils"
+import { cn, triggerBlobDownload } from "@/lib/utils"
 import { usePermission } from "@/lib/auth/permissions"
+import { ApiError } from "@/lib/api/errors"
 import {
   allowedStatusTransitions,
   humanizeSegment,
@@ -18,6 +19,7 @@ import {
   statusBadgeClass,
   statusLabel,
 } from "@/lib/patient-forms/display"
+import { exportPatientForm } from "@/lib/patient-forms/api"
 import { useIbv } from "./IbvProvider"
 import { SchemaForm } from "./SchemaForm"
 import { CallHistoryTab } from "./CallHistoryTab"
@@ -50,8 +52,26 @@ export function IbvFormModal() {
     insuranceType,
   } = useIbv()
   const canWrite = usePermission("forms:write")
+  const canExport = usePermission("forms:export")
   const transitions = status ? allowedStatusTransitions(status) : []
+  const canExportForm = canExport && status === "completed" && !!formId
   const [tab, setTab] = useState<TabId>("form")
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  async function handleExport() {
+    if (!formId) return
+    setExporting(true)
+    setExportError(null)
+    try {
+      const blob = await exportPatientForm(formId)
+      triggerBlobDownload(blob, `ibv-${formId}.xlsx`)
+    } catch (err) {
+      setExportError(err instanceof ApiError ? err.message : "Export failed.")
+    } finally {
+      setExporting(false)
+    }
+  }
 
   return (
     <Dialog open={modalOpen} onOpenChange={(o) => (o ? null : closeForm())}>
@@ -91,19 +111,30 @@ export function IbvFormModal() {
                 {statusLabel(status)}
               </span>
             </div>
-            {canWrite && transitions.length > 0 && (
+            {((canWrite && transitions.length > 0) || canExportForm) && (
               <div className="flex items-center gap-2">
-                {transitions.map((target) => (
+                {canExportForm && (
                   <Button
-                    key={target}
                     size="sm"
-                    variant={target === "completed" ? "default" : "outline"}
-                    disabled={statusChanging}
-                    onClick={() => changeStatus(target)}
+                    variant="outline"
+                    disabled={exporting}
+                    onClick={() => void handleExport()}
                   >
-                    {statusActionLabel(target)}
+                    {exporting ? "Exporting…" : "Export XLSX"}
                   </Button>
-                ))}
+                )}
+                {canWrite &&
+                  transitions.map((target) => (
+                    <Button
+                      key={target}
+                      size="sm"
+                      variant={target === "completed" ? "default" : "outline"}
+                      disabled={statusChanging}
+                      onClick={() => changeStatus(target)}
+                    >
+                      {statusActionLabel(target)}
+                    </Button>
+                  ))}
               </div>
             )}
           </div>
@@ -114,6 +145,14 @@ export function IbvFormModal() {
             role="alert"
           >
             {statusError}
+          </p>
+        )}
+        {exportError && (
+          <p
+            className="border-b border-border bg-destructive/5 px-4 py-2 text-sm text-destructive"
+            role="alert"
+          >
+            {exportError}
           </p>
         )}
 
