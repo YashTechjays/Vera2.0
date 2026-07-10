@@ -32,6 +32,7 @@ type TabId = (typeof TABS)[number]["id"]
 export function IbvFormModal() {
   const {
     schema,
+    formId,
     modalOpen,
     closeForm,
     dirty,
@@ -141,7 +142,10 @@ export function IbvFormModal() {
               {error}
             </p>
           )}
-          {!loading && !error && (tab === "form" ? <SchemaForm /> : <CallHistoryTab />)}
+          {/* Keyed by form so the tab's fetch/expansion state never leaks across forms. */}
+          {!loading &&
+            !error &&
+            (tab === "form" ? <SchemaForm /> : <CallHistoryTab key={formId ?? "demo"} />)}
         </div>
 
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">

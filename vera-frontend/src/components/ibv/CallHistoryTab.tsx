@@ -20,8 +20,6 @@ export function CallHistoryTab() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
-    // A new form means a new timeline — drop the previous form's expansion state.
-    setExpanded({})
     if (!formId) return
     let cancelled = false
     getPatientFormCalls(formId)
