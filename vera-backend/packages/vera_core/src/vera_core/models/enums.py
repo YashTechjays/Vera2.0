@@ -96,11 +96,6 @@ class ProviderStage(enum.StrEnum):
     TTS = "tts"
 
 
-class ExportFormat(enum.StrEnum):
-    XLSX = "xlsx"
-    PDF = "pdf"
-
-
 class VersionStatus(enum.StrEnum):
     DRAFT = "draft"
     PUBLISHED = "published"

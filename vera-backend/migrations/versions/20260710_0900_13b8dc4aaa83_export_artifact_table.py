@@ -57,7 +57,8 @@ def upgrade() -> None:
     # Add the new format check — guarded against duplicate_object.
     op.execute(
         "DO $$ BEGIN "
-        "ALTER TABLE export_artifact ADD CONSTRAINT format_valid CHECK (format IN ('xlsx')); "
+        "ALTER TABLE export_artifact ADD CONSTRAINT ck_export_artifact_format_valid "
+        "CHECK (format IN ('xlsx')); "
         "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
     )
     # RLS: already enabled on provisioned DBs; natively idempotent ALTER + guarded CREATE.
@@ -69,4 +70,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # WARNING: on already-provisioned DBs this destroys the pre-existing disclosure-ledger
+    # table and all its rows — there is no undo; the data is permanently gone.
     op.execute("DROP TABLE IF EXISTS export_artifact")
