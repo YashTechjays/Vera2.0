@@ -14,6 +14,7 @@ Two caller classes share this router:
 Every PHI response audits field **names** only (never values).
 """
 
+import dataclasses
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -64,6 +65,11 @@ from vera_core.models.enums import (
     AnswerSource,
     DisputeActionType,
     FormStatus,
+)
+from vera_core.services.call_provenance import (
+    FieldProvenance,
+    load_call_attempts,
+    load_field_provenance,
 )
 from vera_core.services.field_status import load_current_values
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
@@ -256,12 +262,32 @@ class DisputeView(BaseModel):
     reasoning: str | None
 
 
+class JudgeView(BaseModel):
+    confidence: int | None
+    supported: bool
+    evidence: str | None
+
+
+class ProvenanceView(BaseModel):
+    attempt: int
+    mode: str
+    judge: JudgeView | None
+
+
 class FieldView(BaseModel):
     field_path: str
     value: Any
     source: str
     confidence: int | None
     dispute: DisputeView | None
+    provenance: ProvenanceView | None = None
+
+
+def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
+    if p is None:
+        return None
+    judge = JudgeView(**dataclasses.asdict(p.judge)) if p.judge is not None else None
+    return ProvenanceView(attempt=p.attempt, mode=p.mode, judge=judge)
 
 
 class PatientFormDetail(BaseModel):
@@ -380,6 +406,11 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         )
     ).scalar_one()
 
+    attempts = await load_call_attempts(session, form.id)
+    prov = await load_field_provenance(
+        session, form.id, {a.id: (a.attempt, a.mode) for a in attempts}
+    )
+
     return PatientFormDetail(
         id=form.id,
         status=form.status,
@@ -392,7 +423,10 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         chart_number=form.chart_number,
         appointment_date=form.appointment_date,
         member_id=form.member_id,
-        fields=[FieldView(**view) for view in views],
+        fields=[
+            FieldView(**view, provenance=_provenance_view(prov.get(view["field_path"])))
+            for view in views
+        ],
     )
 
 
