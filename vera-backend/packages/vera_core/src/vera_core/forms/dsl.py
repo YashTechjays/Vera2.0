@@ -376,9 +376,11 @@ class FormSchemaDoc(_Model):
     description: str | None = None
     system_fields: dict[str, str] | None = None
     # patient_form column name -> root-anchored leaf path. Always a subset of
-    # system_fields (validated below) — a promoted column can never be legitimately
-    # empty, since system_fields targets are exactly what required_intake_fields
-    # enforces at creation (intake.py).
+    # system_fields (validated below) — that guarantees a promoted column can never be
+    # *unexpectedly* empty at intake (system_fields targets are exactly what
+    # required_intake_fields enforces at creation, intake.py), though a leaf with its
+    # own `default` is still allowed to be absent from the payload (it counts as
+    # filled either way).
     promoted_fields: dict[str, str] | None = None
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.

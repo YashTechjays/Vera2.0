@@ -14,6 +14,7 @@ Two caller classes share this router:
 Every PHI response audits field **names** only (never values).
 """
 
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -100,6 +101,19 @@ def _v2_doc(schema_json: dict[str, Any]) -> FormSchemaDoc | None:
     return FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
 
 
+def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
+    """`promote_columns`, translated to the API's validation-error contract — the
+    error-wrapping shared by intake and dispute-resolve column promotion."""
+    try:
+        return promote_columns(get_value, doc)
+    except InvalidIntakeValue as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="invalid field value",
+            data={"fields": [exc.field_path]},
+        ) from exc
+
+
 @router.post(
     "/patient-forms",
     response_model=ResponseModel[PatientFormResponse],
@@ -146,14 +160,7 @@ async def upload_patient_form(
         doc = _v2_doc(version.schema_json)
         promoted = PromotedIdentifiers()
         if doc is not None:
-            try:
-                promoted = promote_columns(lambda p: resolve_path(body.intake_payload, p), doc)
-            except InvalidIntakeValue as exc:
-                raise CustomAPIException(
-                    DefaultExceptionCode.VALIDATION_ERROR,
-                    message="invalid field value",
-                    data={"fields": [exc.field_path]},
-                ) from exc
+            promoted = _promote_or_422(lambda p: resolve_path(body.intake_payload, p), doc)
 
         form = PatientForm(
             tenant_id=principal.tenant_id,
@@ -523,6 +530,7 @@ async def get_patient_form(
     response_model=ResponseModel[PatientFormDetail],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.VALIDATION_ERROR,
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
     ),
@@ -664,7 +672,7 @@ async def resolve_disputes(
     # any resolve call that changes a promoted field's value (dispute or plain edit)
     # keeps the worklist columns in sync, not just intake (2026-07-10 design doc).
     if doc is not None:
-        promoted = promote_columns(current_values.get, doc)
+        promoted = _promote_or_422(current_values.get, doc)
         for column in doc.promoted_fields or {}:
             new_value = getattr(promoted, column)
             if getattr(form, column) != new_value:

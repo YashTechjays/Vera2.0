@@ -215,6 +215,19 @@ async def _make_form_with_promoted_field(
                 is_current=True,
             )
         )
+        # A current answer for the other promoted field (patient_name) — resolve's
+        # promotion re-derives EVERY promoted column from current_values, so without
+        # this a resolve call would silently wipe form.patient_name to None.
+        s.add(
+            FieldAnswer(
+                tenant_id=tenant_id,
+                form_id=form.id,
+                field_path="sections.patient_information.patient_name",
+                value={"value": "Jane Doe"},
+                source=AnswerSource.INTAKE.value,
+                is_current=True,
+            )
+        )
         return form.id
 
 
@@ -527,6 +540,9 @@ async def test_resolve_promotes_the_patient_form_column(
             await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
         ).scalar_one()
         assert form.insurance_provider == "Corrected Provider"
+        # Re-derivation covers every promoted column, not just the one being edited —
+        # the untouched patient_name promoted column must survive intact.
+        assert form.patient_name == "jane doe"
 
 
 async def test_resolve_leaves_promoted_columns_untouched_for_a_non_promoted_field(
@@ -547,6 +563,25 @@ async def test_resolve_leaves_promoted_columns_untouched_for_a_non_promoted_fiel
             await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
         ).scalar_one()
         assert form.insurance_provider == "Stale Provider"  # unchanged
+        assert form.patient_name == "jane doe"  # unchanged, not wiped
+
+
+async def test_resolve_with_invalid_promoted_date_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    """A non-ISO date written to a promoted date column (patient_dob/appointment_date)
+    must surface as a clean 422 from promote_columns's InvalidIntakeValue — not an
+    unhandled 500 — mirroring upload_patient_form's existing handling."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.patient_dob": "12/04/1990"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["data"]["fields"] == ["sections.patient_information.patient_dob"]
 
 
 # ---- baseline-derived dispute behavior --------------------------------------
