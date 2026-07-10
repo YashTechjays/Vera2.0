@@ -6,18 +6,25 @@
 
 **Architecture:** A new `promoted_fields: dict[str, str]` block on the schema DSL (`FormSchemaDoc`) declares column → schema-path mappings, validated as a subset of the existing `system_fields` block (so a promoted column can never be legitimately empty at intake). `promote_columns` becomes schema-driven and takes a value-getter closure, so the same function serves both the nested intake payload and the flat `{field_path: value}` map `resolve_disputes` already builds. The dead `PatientForm.member_id` column is dropped, and the *live* identifier column (currently `member_policy_id`) is renamed to `member_id` — matching the schema's own `system_fields["member_id"]` handle, which already refers to this same concept (it drives the `{{member_id}}` prompt spoken during the call). The redundant `system_fields["policy_id"]` handle (a pure duplicate of `member_id`, no distinct consumer) is dropped from both catalogs.
 
-**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy async, Pydantic v2, Alembic, pytest, uv workspace (`vera-backend`); TypeScript/React (`vera-frontend`).
+**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy async, Pydantic v2, Alembic, pytest, uv workspace (`vera-backend`); TypeScript/React (`vera-frontend`, one type + one page edit).
+
+## Task order rationale
+
+The column rename (drop dead `member_id`, rename `member_policy_id` → `member_id`) is
+Task 4, done *before* any code writes to a `member_id`-shaped `PatientForm` field —
+so every task from here on leaves the repo fully green (tests pass, `mypy`/`ruff` clean)
+at its own boundary. Don't reorder Tasks 4–6.
 
 ## Global Constraints
 
-- Full spec: `docs/superpowers/specs/2026-07-10-dispute-resolve-patient-form-promotion-design.md` — read it before starting; every task below implements one of its sections. (The spec predates the `member_policy_id` → `member_id` rename decided in conversation after the spec was written — this plan is the source of truth for that part; see Task 6.)
+- Full spec: `docs/superpowers/specs/2026-07-10-dispute-resolve-patient-form-promotion-design.md` — read it before starting; every task below implements one of its sections.
 - Backend gate before any task is "done": `cd vera-backend && just check` (ruff format --check, ruff check, mypy --strict, pytest). Run it at minimum at the end of every task that touches `vera-backend/`.
 - Frontend gate for the frontend-touching task: `cd vera-frontend && npm run build && npm run lint`.
 - Migration revision IDs are alembic's auto-generated random hex — never hand-number them. Use `just makemigration "<message>"` and edit the generated file's body, never its `revision`/`down_revision` fields (except the one explicit relink in Task 1).
 - Every `ALTER TABLE` in a new migration must be idempotent and dual-path-safe: it must be a no-op both on an existing dev DB (pre-change shape) and on a fresh DB built by `0001`'s `create_all` off the already-changed model (post-change shape) — see the migrations bullet in `vera-backend/CLAUDE.md`.
 - Per the repo-root `CLAUDE.md`: after the last code task, run the `code-simplifier` agent ("simplify code") over the changes in this same session, then re-run `just check`, before treating the plan as complete (Task 7).
 - PHI discipline (`vera-backend/CLAUDE.md`, `apps/control_plane/.../CLAUDE.md`): none of these changes log or trace field values; don't introduce any `logger.*`/print of a promoted column's value.
-- `vera-frontend/src/lib/mock-data.ts` is a separate, unrelated demo dataset (different shape, camelCase, feeds the live-call monitoring pages) — it happens to also have a `memberPolicyId` field, but it is NOT wired to the real `patient_form` API and is out of scope for the rename in Task 6. Do not touch it.
+- `vera-frontend/src/lib/mock-data.ts` is a separate, unrelated demo dataset (different shape, camelCase, feeds the live-call monitoring pages) — it happens to also have a `memberPolicyId` field, but it is NOT wired to the real `patient_form` API and is out of scope for the rename in Task 4. Do not touch it.
 
 ---
 
@@ -26,7 +33,7 @@
 **Files:**
 - Modify: `vera-backend/migrations/versions/20260709_1834_8115d1763daf_add_ivr_navigation_enabled_to_patient_.py`
 
-**Interfaces:** None — this is a pure migration-graph fix, no code interface changes. Every later task that runs an integration test depends on this: right now `uv run alembic upgrade head` fails with "Multiple head revisions are present."
+**Interfaces:** None — this is a pure migration-graph fix, no code interface changes. Every later task that runs an integration test or generates a migration depends on this: right now `uv run alembic upgrade head` fails with "Multiple head revisions are present."
 
 - [ ] **Step 1: Confirm the current broken state**
 
@@ -94,7 +101,7 @@ merge-revision file; local DB reset separately, not via migration."
 - Test: `vera-backend/tests/unit/forms/test_schema_dsl.py`
 
 **Interfaces:**
-- Produces: `vera_core.forms.dsl.PROMOTABLE_COLUMNS: frozenset[str]` — the 8 valid `patient_form` column names (using the final, post-rename name `member_id` — Task 6 renames the DB column to match; nothing here depends on Task 6 having run yet). `FormSchemaDoc.promoted_fields: dict[str, str] | None` — column name → root-anchored leaf path.
+- Produces: `vera_core.forms.dsl.PROMOTABLE_COLUMNS: frozenset[str]` — the 8 valid `patient_form` column names (using the final, post-rename name `member_id` — Task 4 renames the DB column to match; nothing here depends on Task 4 having run yet). `FormSchemaDoc.promoted_fields: dict[str, str] | None` — column name → root-anchored leaf path.
 - Consumes: nothing new (uses the existing `leaves` dict and `system_fields` already computed inside `_validate_document`).
 
 - [ ] **Step 1: Write the failing tests**
@@ -247,7 +254,7 @@ be legitimately empty at intake. No consumer wired yet."
 
 **Interfaces:**
 - Consumes: `FormSchemaDoc.promoted_fields`, `PROMOTABLE_COLUMNS` (Task 2).
-- Produces: `SCHEMAS["infertility_treatment"][1]().promoted_fields` and `SCHEMAS["disease_only"][1]().promoted_fields` — both non-empty from here on; Task 4/5 read these. Both use the key `"member_id"` (not `"member_policy_id"`) — Task 6 renames the underlying DB column to match; the catalog is written in its final, post-rename shape from the start so Task 6 doesn't need to touch these files again.
+- Produces: `SCHEMAS["infertility_treatment"][1]().promoted_fields` and `SCHEMAS["disease_only"][1]().promoted_fields` — both non-empty from here on; Task 5/6 read these. Both use the key `"member_id"` (not `"member_policy_id"`) — Task 4 renames the underlying DB column to match; the catalog is written in its final, post-rename shape from the start.
 
 - [ ] **Step 1: Add `promoted_fields` to `build_ibv_standard`, and drop the redundant `policy_id` handle**
 
@@ -460,25 +467,309 @@ catalogs (pure duplicate of member_id, same path, no distinct consumer)
 for coherence — member_id stays, since it drives the {{member_id}}
 prompt spoken during the call. promoted_fields is keyed \"member_id\"
 throughout, anticipating the member_policy_id -> member_id column
-rename in Task 6."
+rename in Task 4."
 ```
 
 ---
 
-### Task 4: Make `promote_columns` schema-driven and wire the intake call site
+### Task 4: Drop the dead `member_id` column and rename the live `member_policy_id` column to `member_id`
+
+**Files:**
+- Modify: `vera-backend/packages/vera_core/src/vera_core/models/patient_form.py`
+- Create: a new alembic migration (path assigned by `just makemigration`)
+- Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/patient_forms.py` (`PatientFormDetail`, `_build_detail`, `PatientFormSummary`, `list_patient_forms`)
+- Modify: `vera-frontend/src/lib/patient-forms/types.ts`
+- Modify: `vera-frontend/src/pages/DataManagement.tsx`
+
+**Interfaces:** Two DB columns collapse into one: `patient_form.member_id` (dead, always `None`) and `patient_form.member_policy_id` (live) become a single `patient_form.member_id` column carrying the live data. `PatientFormDetail.member_id` (dead) is removed with no replacement. `PatientFormSummary.member_policy_id` is renamed to `PatientFormSummary.member_id`. This is the interface Task 5's `PatientForm(member_id=...)` construction and Task 6's dynamic `getattr(form, "member_id")` depend on — do this task before those.
+
+- [ ] **Step 1: Rename the model field**
+
+In `vera-backend/packages/vera_core/src/vera_core/models/patient_form.py`, delete the dead column's line:
+
+```python
+    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
+```
+
+and rename the live one, from:
+
+```python
+    member_policy_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
+```
+
+to:
+
+```python
+    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
+```
+
+(Net effect: the model ends up with exactly one `member_id` field, in the position `member_policy_id` used to occupy, with the same type/column definition. The docstring at the top of this file already says "Searchable identifiers are promoted... canonical member-id" — no docstring change needed, it already describes this correctly.)
+
+- [ ] **Step 2: Update the API response models and endpoints**
+
+In `vera-backend/apps/control_plane/src/control_plane/api/v1/patient_forms.py`:
+
+Remove `member_id: str | None` from `PatientFormDetail` (the dead column — no replacement):
+
+```python
+class PatientFormDetail(BaseModel):
+    id: UUID
+    status: str
+    insurance_type: str
+    schema_version_id: UUID
+    completion_pct: float
+    created_at: datetime
+    updated_at: datetime
+    patient_name: str | None
+    chart_number: str | None
+    appointment_date: date | None
+    # Voice-lab-style toggle stored on the form (default True) — the UI's re-queue
+    # toggle pre-loads from here so an operator's earlier choice round-trips.
+    ivr_navigation_enabled: bool
+    fields: list[FieldView]
+```
+
+and remove it from `_build_detail`'s construction (`member_id=form.member_id,` is deleted):
+
+```python
+    return PatientFormDetail(
+        id=form.id,
+        status=form.status,
+        insurance_type=form_schema.insurance_type,
+        schema_version_id=form.schema_version_id,
+        completion_pct=float(form.completion_pct),
+        created_at=form.created_at,
+        updated_at=form.updated_at,
+        patient_name=form.patient_name,
+        chart_number=form.chart_number,
+        appointment_date=form.appointment_date,
+        ivr_navigation_enabled=form.ivr_navigation_enabled,
+        fields=[FieldView(**view) for view in views],
+    )
+```
+
+Rename `member_policy_id` to `member_id` in `PatientFormSummary` (the live/worklist column):
+
+```python
+class PatientFormSummary(BaseModel):
+    """Worklist row — promoted identifiers + display columns."""
+
+    id: UUID
+    status: str
+    patient_name: str | None
+    chart_number: str | None
+    appointment_date: date | None
+    # Promoted out of intake_payload into typed columns (see PatientForm).
+    appointment_type: str | None
+    member_id: str | None
+    insurance_provider: str | None
+    insurance_provider_phone_number: str | None
+    completion_pct: float
+    created_at: datetime
+    updated_at: datetime
+```
+
+Rename it in `list_patient_forms`'s construction (`member_policy_id=r.member_policy_id,` → `member_id=r.member_id,`):
+
+```python
+    items = [
+        PatientFormSummary(
+            id=r.id,
+            status=r.status,
+            patient_name=r.patient_name,
+            chart_number=r.chart_number,
+            appointment_date=r.appointment_date,
+            appointment_type=r.appointment_type,
+            member_id=r.member_id,
+            insurance_provider=r.insurance_provider,
+            insurance_provider_phone_number=r.insurance_provider_phone_number,
+            completion_pct=float(r.completion_pct),
+            created_at=r.created_at,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
+```
+
+And rename it in the PHI-access audit field-name list right below (`"member_policy_id",` → `"member_id",`):
+
+```python
+    await get_audit(request).emit(
+        _audit_phi_read(
+            request,
+            tenant_id,
+            caller,
+            "list",
+            [
+                "patient_name",
+                "chart_number",
+                "appointment_date",
+                "appointment_type",
+                "member_id",
+                "insurance_provider",
+                "insurance_provider_phone_number",
+            ],
+        )
+    )
+```
+
+- [ ] **Step 3: Generate the migration**
+
+Run: `just makemigration "drop_dead_member_id_and_rename_member_policy_id"`
+Expected: a new file appears under `vera-backend/migrations/versions/`, printed by the command, with `down_revision` auto-set to the current single head (`8115d1763daf`, from Task 1). The autogenerated body will likely be wrong/incomplete for a rename (alembic's autogenerate typically emits a `drop_column` + `add_column` pair instead of detecting a rename, and may include unrelated drift ops per the CLAUDE.md note) — Step 4 replaces the body entirely regardless of what's generated.
+
+- [ ] **Step 4: Write the dual-path-safe migration body**
+
+Edit the generated file's `upgrade`/`downgrade` (leave `revision`/`down_revision`/docstring/`Revision ID`/`Create Date` exactly as generated):
+
+```python
+def upgrade() -> None:
+    # Only act if the OLD shape is present (member_policy_id still exists) — a fresh
+    # DB built from 0001's create_all off the already-renamed model never has it, so
+    # this is a no-op there. Drop the dead old member_id first: it would collide with
+    # the rename target.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'patient_form' AND column_name = 'member_policy_id'
+            ) THEN
+                ALTER TABLE patient_form DROP COLUMN IF EXISTS member_id;
+                ALTER TABLE patient_form RENAME COLUMN member_policy_id TO member_id;
+            END IF;
+        END $$;
+        """
+    )
+
+
+def downgrade() -> None:
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'patient_form' AND column_name = 'member_id'
+            ) THEN
+                ALTER TABLE patient_form RENAME COLUMN member_id TO member_policy_id;
+                ALTER TABLE patient_form ADD COLUMN IF NOT EXISTS member_id varchar(128);
+            END IF;
+        END $$;
+        """
+    )
+```
+
+- [ ] **Step 5: Apply the migration**
+
+Run: `just migrate`
+Expected: completes with no errors; last line references the new revision.
+
+- [ ] **Step 6: Update the frontend types and the page that renders this column**
+
+In `vera-frontend/src/lib/patient-forms/types.ts`, in `PatientFormSummary`, rename `member_policy_id: string | null` to `member_id: string | null`. In `PatientFormDetail`, delete the `member_id: string | null` line entirely (the dead column — no replacement, mirroring Step 2's backend removal).
+
+In `vera-frontend/src/pages/DataManagement.tsx`, rename every `member_policy_id` occurrence to `member_id`:
+
+```typescript
+type SortKey =
+  | "appointment_date"
+  | "appointment_type"
+  | "patient_name"
+  | "member_id"
+  | "insurance_provider"
+  | "status"
+const COLUMNS: { key: SortKey; label: string }[] = [
+  { key: "appointment_date", label: "Appointment Date" },
+  { key: "appointment_type", label: "Appointment Type" },
+  { key: "patient_name", label: "Patient Name" },
+  { key: "member_id", label: "Member/Policy ID" },
+  { key: "insurance_provider", label: "Insurance Provider" },
+  { key: "status", label: "Status" },
+]
+```
+
+and, further down in the table body:
+
+```tsx
+                <TableCell className="text-muted-foreground">
+                  {f.member_id || "—"}
+                </TableCell>
+```
+
+(`vera-frontend/src/lib/mock-data.ts`'s `memberPolicyId` is a separate, unrelated demo dataset — see the Global Constraints note — do not touch it.)
+
+- [ ] **Step 7: Type-check and lint the backend**
+
+Run (from `vera-backend/`):
+```bash
+uv run mypy
+uv run ruff check .
+```
+Expected: no errors.
+
+- [ ] **Step 8: Run the full backend test suite**
+
+Run: `uv run pytest -q`
+Expected: all tests pass. (`test_patient_forms_intake.py`'s `test_upload_promotes_worklist_columns` still references the OLD `promote_columns(payload)` signature and `form.member_policy_id` at this point — Task 5 rewrites both; a failure there referencing `promote_columns`'s argument count or `member_policy_id` not existing is expected until Task 5, not a sign this task is wrong. Every other test should be green, including anything exercising the renamed model/API fields directly.)
+
+- [ ] **Step 9: Type-check and lint the frontend**
+
+Run (from `vera-frontend/`):
+```bash
+npm run build
+npm run lint
+```
+Expected: no errors.
+
+- [ ] **Step 10: Commit (backend)**
+
+```bash
+cd vera-backend
+git add packages/vera_core/src/vera_core/models/patient_form.py \
+        apps/control_plane/src/control_plane/api/v1/patient_forms.py \
+        migrations/versions/
+git commit -m "fix(patient-forms): collapse member_id/member_policy_id into one column
+
+member_id was dead (every code path set it to None); member_policy_id
+was the live identifier column (sourced from
+insurance_information.policy_number). Renaming the live column to
+member_id — instead of just dropping the dead one — matches the
+schema's own system_fields[\"member_id\"] handle, which already refers
+to this same concept (it drives the {{member_id}} prompt spoken during
+the call). One name, one meaning, end to end: schema handle ->
+promoted_fields key -> DB column -> API field.
+
+Migration is dual-path-safe: a no-op on a fresh DB (0001's create_all
+already has the renamed shape), drop-then-rename on an existing one."
+```
+
+- [ ] **Step 11: Commit (frontend)**
+
+```bash
+cd ../vera-frontend
+git add src/lib/patient-forms/types.ts src/pages/DataManagement.tsx
+git commit -m "chore(patient-forms): rename member_policy_id to member_id
+
+Matches the backend API field rename. The dead member_id field on
+PatientFormDetail is dropped with no replacement (nothing read it)."
+```
+
+---
+
+### Task 5: Make `promote_columns` schema-driven and wire the intake call site
 
 **Files:**
 - Modify: `vera-backend/packages/vera_core/src/vera_core/forms/intake.py`
-- Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/patient_forms.py` (`upload_patient_form` only — `resolve_disputes` is Task 5)
+- Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/patient_forms.py` (`upload_patient_form` only — `resolve_disputes` is Task 6)
 - Modify: `vera-backend/scripts/seed_patient_data.py`
 - Test: `vera-backend/tests/unit/forms/test_intake.py`
 - Test: `vera-backend/tests/integration/control_plane/test_patient_forms_intake.py`
 
 **Interfaces:**
-- Consumes: `FormSchemaDoc.promoted_fields`, `PROMOTABLE_COLUMNS` (Task 2), catalog data (Task 3).
-- Produces: `promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers` (replaces the old `promote_columns(payload: dict) -> PromotedIdentifiers`). `resolve_path(payload: dict[str, Any], path: str) -> Any` (renamed from `_resolve_path`, now public). `PromotedIdentifiers.member_id: str | None = None` (replaces the old `member_id` field, which was always `None` and the old `member_policy_id` field — merged into one, matching the DB column Task 6 renames). Every `PromotedIdentifiers` field now defaults to `None`.
-
-Note: this task writes `PromotedIdentifiers.member_id` and `PatientForm(member_id=...)` in `upload_patient_form` — but `PatientForm.member_id` on the model is still the OLD dead column until Task 6 runs. That's fine: Task 6 renames the model's `member_policy_id` field to `member_id` and drops the truly-dead old one in the same task, so by the time this task's code runs against a migrated DB (Task 6, done before this is considered complete end-to-end — see the task order note in Task 6), `member_id` already means the live column. Running the test suite for *this* task in isolation (before Task 6) would fail at the DB layer since the model doesn't have a `member_id`-shaped live column yet — do Tasks 4, 5, 6 in order without skipping.
+- Consumes: `FormSchemaDoc.promoted_fields`, `PROMOTABLE_COLUMNS` (Task 2), catalog data (Task 3), `PatientForm.member_id` (Task 4 — already renamed, so this task's code compiles clean from the start).
+- Produces: `promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers` (replaces the old `promote_columns(payload: dict) -> PromotedIdentifiers`). `resolve_path(payload: dict[str, Any], path: str) -> Any` (renamed from `_resolve_path`, now public). `PromotedIdentifiers.member_id: str | None = None` (replaces the old always-`None` `member_id` field and the old `member_policy_id` field — merged into one, matching Task 4's renamed DB column). Every `PromotedIdentifiers` field now defaults to `None`.
 
 - [ ] **Step 1: Write the failing unit tests**
 
@@ -822,7 +1113,7 @@ with:
         )
 ```
 
-(A v1 `schema_json` has no `promoted_fields`/`system_fields` DSL concept — `FormSchemaDoc.model_validate` would reject its shape outright, so promotion is skipped entirely for v1 and every promoted column stays `None`, matching how `completion_pct`/`completion_pct_v2` already branch on `is_v2` elsewhere in this file. Note `PatientForm(member_id=...)` here refers to the column Task 6 renames from `member_policy_id` — until Task 6 runs, the model doesn't have this shape; see the task-order note above.)
+(A v1 `schema_json` has no `promoted_fields`/`system_fields` DSL concept — `FormSchemaDoc.model_validate` would reject its shape outright, so promotion is skipped entirely for v1 and every promoted column stays `None`, matching how `completion_pct`/`completion_pct_v2` already branch on `is_v2` elsewhere in this file. `member_id=promoted.member_id` refers to the column Task 4 already renamed, so this compiles/type-checks clean.)
 
 - [ ] **Step 7: Wire the seed script call site**
 
@@ -901,17 +1192,19 @@ And rename the column assertion right below it — `assert form.member_policy_id
 - [ ] **Step 9: Run the intake integration tests**
 
 Run: `uv run pytest tests/integration/control_plane/test_patient_forms_intake.py -v`
-Expected: this will fail at this point in the task sequence with an error about the `patient_form.member_id` column shape — `PatientForm(member_id=...)` in Step 6/7 refers to the column Task 6 renames, and Task 6 hasn't run yet. **This is expected here — proceed to Task 5, then Task 6; re-run this test at the end of Task 6 (its Step 8) to confirm green.** If you want green tests at every task boundary, do Task 6's model/migration steps (Steps 1–5) before running this test, then return here.
+Expected: all pass, including `test_upload_promotes_worklist_columns` (now genuinely exercising the fixed insurance-field mapping and the renamed `member_id` column) and `test_missing_required_returns_422_with_paths_no_phi` / `test_missing_required_field_outside_patient_information_returns_422` (unaffected by this task — still exercise `missing_required`, untouched).
 
 - [ ] **Step 10: Type-check and lint the touched files**
 
 Run:
 ```bash
+uv run mypy packages/vera_core/src/vera_core/forms/intake.py \
+             apps/control_plane/src/control_plane/api/v1/patient_forms.py \
+             scripts/seed_patient_data.py
 uv run ruff check packages/vera_core/src/vera_core/forms/intake.py \
                    apps/control_plane/src/control_plane/api/v1/patient_forms.py \
                    scripts/seed_patient_data.py
 ```
-(Skip `mypy` on `patient_forms.py`/`scripts/seed_patient_data.py` until Task 6 renames the model field — mypy will correctly flag `member_id` as an unexpected kwarg on `PatientForm(...)` until then. Do run `uv run mypy packages/vera_core/src/vera_core/forms/intake.py` now — that file has no such dependency.)
 Expected: no errors.
 
 - [ ] **Step 11: Commit**
@@ -930,24 +1223,20 @@ serves a nested intake payload and a flat field_path map. Fixes the
 intake-time bug where insurance_provider/insurance_provider_phone_number
 used stale keys that never matched the real schema fields.
 PromotedIdentifiers.member_id replaces both the old always-None
-member_id and member_policy_id fields (Task 6 renames the DB column to
-match — this commit's PatientForm(member_id=...) call sites depend on
-that follow-up)."
+member_id and member_policy_id fields, matching Task 4's DB rename."
 ```
 
 ---
 
-### Task 5: Wire promotion into dispute resolution
+### Task 6: Wire promotion into dispute resolution
 
 **Files:**
 - Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/patient_forms.py` (`resolve_disputes`)
 - Test: `vera-backend/tests/integration/control_plane/test_patient_forms_review.py`
 
 **Interfaces:**
-- Consumes: `promote_columns`, `FormSchemaDoc` (Task 4), `doc.promoted_fields` (Task 2/3).
+- Consumes: `promote_columns`, `FormSchemaDoc` (Task 5), `doc.promoted_fields` (Task 2/3), `PatientForm.member_id` (Task 4).
 - Produces: nothing new for other tasks — this is the feature's actual bug fix.
-
-Note: like Task 4, the new test added here exercises `PatientForm.member_id`-shaped columns only indirectly (it targets `insurance_provider`, not `member_id`), so it does NOT depend on Task 6 having run — it's safe to implement and pass before Task 6.
 
 - [ ] **Step 1: Write the failing integration test**
 
@@ -1117,7 +1406,7 @@ Insert the promotion step right after `version` is loaded and before the `comple
     )
 ```
 
-`FormSchemaDoc` and `promote_columns` are already imported from Task 4's Step 6.
+`FormSchemaDoc` and `promote_columns` are already imported from Task 5's Step 6.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1127,7 +1416,7 @@ Expected: all tests in the file pass, including the two new ones and every pre-e
 - [ ] **Step 5: Type-check and lint**
 
 Run: `uv run mypy apps/control_plane/src/control_plane/api/v1/patient_forms.py && uv run ruff check apps/control_plane/src/control_plane/api/v1/patient_forms.py`
-Expected: `ruff check` passes. `mypy` will still flag the `member_id=`/`member_policy_id` mismatch left over from Task 4 until Task 6 runs (see Task 4's Step 10 note) — that's expected at this point in the sequence.
+Expected: no errors.
 
 - [ ] **Step 6: Commit**
 
@@ -1142,292 +1431,6 @@ worklist search/display stale after a dispute correction. Now recomputes
 promoted columns from the post-write current answers on every resolve
 call that touches a promoted field, using the same schema-driven mapping
 intake uses."
-```
-
----
-
-### Task 6: Drop the dead `member_id` column and rename the live `member_policy_id` column to `member_id`
-
-**Files:**
-- Modify: `vera-backend/packages/vera_core/src/vera_core/models/patient_form.py`
-- Create: a new alembic migration (path assigned by `just makemigration`)
-- Modify: `vera-backend/apps/control_plane/src/control_plane/api/v1/patient_forms.py` (`PatientFormDetail`, `_build_detail`, `PatientFormSummary`, `list_patient_forms`)
-- Modify: `vera-frontend/src/lib/patient-forms/types.ts`
-- Modify: `vera-frontend/src/pages/DataManagement.tsx`
-
-**Interfaces:** Two DB columns collapse into one: `patient_form.member_id` (dead, always `None`) and `patient_form.member_policy_id` (live) become a single `patient_form.member_id` column carrying the live data. `PatientFormDetail.member_id` (dead) is removed with no replacement. `PatientFormSummary.member_policy_id` is renamed to `PatientFormSummary.member_id`.
-
-- [ ] **Step 1: Rename the model field**
-
-In `vera-backend/packages/vera_core/src/vera_core/models/patient_form.py`, delete the dead column's line:
-
-```python
-    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
-```
-
-and rename the live one, from:
-
-```python
-    member_policy_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
-```
-
-to:
-
-```python
-    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
-```
-
-(Net effect: the model ends up with exactly one `member_id` field, in the position `member_policy_id` used to occupy, with the same type/column definition. The docstring at the top of this file already says "Searchable identifiers are promoted... canonical member-id" — no docstring change needed, it already describes this correctly.)
-
-- [ ] **Step 2: Update the API response models and endpoints**
-
-In `vera-backend/apps/control_plane/src/control_plane/api/v1/patient_forms.py`:
-
-Remove `member_id: str | None` from `PatientFormDetail` (the dead column — no replacement):
-
-```python
-class PatientFormDetail(BaseModel):
-    id: UUID
-    status: str
-    insurance_type: str
-    schema_version_id: UUID
-    completion_pct: float
-    created_at: datetime
-    updated_at: datetime
-    patient_name: str | None
-    chart_number: str | None
-    appointment_date: date | None
-    # Voice-lab-style toggle stored on the form (default True) — the UI's re-queue
-    # toggle pre-loads from here so an operator's earlier choice round-trips.
-    ivr_navigation_enabled: bool
-    fields: list[FieldView]
-```
-
-and remove it from `_build_detail`'s construction (`member_id=form.member_id,` is deleted):
-
-```python
-    return PatientFormDetail(
-        id=form.id,
-        status=form.status,
-        insurance_type=form_schema.insurance_type,
-        schema_version_id=form.schema_version_id,
-        completion_pct=float(form.completion_pct),
-        created_at=form.created_at,
-        updated_at=form.updated_at,
-        patient_name=form.patient_name,
-        chart_number=form.chart_number,
-        appointment_date=form.appointment_date,
-        ivr_navigation_enabled=form.ivr_navigation_enabled,
-        fields=[FieldView(**view) for view in views],
-    )
-```
-
-Rename `member_policy_id` to `member_id` in `PatientFormSummary` (the live/worklist column):
-
-```python
-class PatientFormSummary(BaseModel):
-    """Worklist row — promoted identifiers + display columns."""
-
-    id: UUID
-    status: str
-    patient_name: str | None
-    chart_number: str | None
-    appointment_date: date | None
-    # Promoted out of intake_payload into typed columns (see PatientForm).
-    appointment_type: str | None
-    member_id: str | None
-    insurance_provider: str | None
-    insurance_provider_phone_number: str | None
-    completion_pct: float
-    created_at: datetime
-    updated_at: datetime
-```
-
-Rename it in `list_patient_forms`'s construction (`member_policy_id=r.member_policy_id,` → `member_id=r.member_id,`):
-
-```python
-    items = [
-        PatientFormSummary(
-            id=r.id,
-            status=r.status,
-            patient_name=r.patient_name,
-            chart_number=r.chart_number,
-            appointment_date=r.appointment_date,
-            appointment_type=r.appointment_type,
-            member_id=r.member_id,
-            insurance_provider=r.insurance_provider,
-            insurance_provider_phone_number=r.insurance_provider_phone_number,
-            completion_pct=float(r.completion_pct),
-            created_at=r.created_at,
-            updated_at=r.updated_at,
-        )
-        for r in rows
-    ]
-```
-
-And rename it in the PHI-access audit field-name list right below (`"member_policy_id",` → `"member_id",`):
-
-```python
-    await get_audit(request).emit(
-        _audit_phi_read(
-            request,
-            tenant_id,
-            caller,
-            "list",
-            [
-                "patient_name",
-                "chart_number",
-                "appointment_date",
-                "appointment_type",
-                "member_id",
-                "insurance_provider",
-                "insurance_provider_phone_number",
-            ],
-        )
-    )
-```
-
-- [ ] **Step 3: Generate the migration**
-
-Run: `just makemigration "drop_dead_member_id_and_rename_member_policy_id"`
-Expected: a new file appears under `vera-backend/migrations/versions/`, printed by the command, with `down_revision` auto-set to the current single head (`8115d1763daf`, from Task 1). The autogenerated body will likely be wrong/incomplete for a rename (alembic's autogenerate typically emits a `drop_column` + `add_column` pair instead of detecting a rename, and may include unrelated drift ops per the CLAUDE.md note) — Step 4 replaces the body entirely regardless of what's generated.
-
-- [ ] **Step 4: Write the dual-path-safe migration body**
-
-Edit the generated file's `upgrade`/`downgrade` (leave `revision`/`down_revision`/docstring/`Revision ID`/`Create Date` exactly as generated):
-
-```python
-def upgrade() -> None:
-    # Only act if the OLD shape is present (member_policy_id still exists) — a fresh
-    # DB built from 0001's create_all off the already-renamed model never has it, so
-    # this is a no-op there. Drop the dead old member_id first: it would collide with
-    # the rename target.
-    op.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'patient_form' AND column_name = 'member_policy_id'
-            ) THEN
-                ALTER TABLE patient_form DROP COLUMN IF EXISTS member_id;
-                ALTER TABLE patient_form RENAME COLUMN member_policy_id TO member_id;
-            END IF;
-        END $$;
-        """
-    )
-
-
-def downgrade() -> None:
-    op.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'patient_form' AND column_name = 'member_id'
-            ) THEN
-                ALTER TABLE patient_form RENAME COLUMN member_id TO member_policy_id;
-                ALTER TABLE patient_form ADD COLUMN IF NOT EXISTS member_id varchar(128);
-            END IF;
-        END $$;
-        """
-    )
-```
-
-- [ ] **Step 5: Apply the migration**
-
-Run: `just migrate`
-Expected: completes with no errors; last line references the new revision.
-
-- [ ] **Step 6: Update the frontend types and the page that renders this column**
-
-In `vera-frontend/src/lib/patient-forms/types.ts`, in `PatientFormSummary`, rename `member_policy_id: string | null` to `member_id: string | null`. In `PatientFormDetail`, delete the `member_id: string | null` line entirely (the dead column — no replacement, mirroring Step 2's backend removal).
-
-In `vera-frontend/src/pages/DataManagement.tsx`, rename every `member_policy_id` occurrence to `member_id`:
-
-```typescript
-type SortKey =
-  | "appointment_date"
-  | "appointment_type"
-  | "patient_name"
-  | "member_id"
-  | "insurance_provider"
-  | "status"
-const COLUMNS: { key: SortKey; label: string }[] = [
-  { key: "appointment_date", label: "Appointment Date" },
-  { key: "appointment_type", label: "Appointment Type" },
-  { key: "patient_name", label: "Patient Name" },
-  { key: "member_id", label: "Member/Policy ID" },
-  { key: "insurance_provider", label: "Insurance Provider" },
-  { key: "status", label: "Status" },
-]
-```
-
-and, further down in the table body:
-
-```tsx
-                <TableCell className="text-muted-foreground">
-                  {f.member_id || "—"}
-                </TableCell>
-```
-
-(`vera-frontend/src/lib/mock-data.ts`'s `memberPolicyId` is a separate, unrelated demo dataset — see the Global Constraints note — do not touch it.)
-
-- [ ] **Step 7: Type-check and lint the backend**
-
-Run (from `vera-backend/`):
-```bash
-uv run mypy
-uv run ruff check .
-```
-Expected: no errors — this is the point where the `member_id=`/`member_policy_id` mismatches flagged as "expected" in Tasks 4/5 finally resolve, since the model now has the matching field.
-
-- [ ] **Step 8: Run the full backend test suite**
-
-Run: `uv run pytest -q`
-Expected: all tests pass, including `test_patient_forms_intake.py` (left pending since Task 4's Step 9) and `test_patient_forms_review.py`.
-
-- [ ] **Step 9: Type-check and lint the frontend**
-
-Run (from `vera-frontend/`):
-```bash
-npm run build
-npm run lint
-```
-Expected: no errors.
-
-- [ ] **Step 10: Commit (backend)**
-
-```bash
-cd vera-backend
-git add packages/vera_core/src/vera_core/models/patient_form.py \
-        apps/control_plane/src/control_plane/api/v1/patient_forms.py \
-        migrations/versions/
-git commit -m "fix(patient-forms): collapse member_id/member_policy_id into one column
-
-member_id was dead (every code path set it to None); member_policy_id
-was the live identifier column (sourced from
-insurance_information.policy_number). Renaming the live column to
-member_id — instead of just dropping the dead one — matches the
-schema's own system_fields[\"member_id\"] handle, which already refers
-to this same concept (it drives the {{member_id}} prompt spoken during
-the call). One name, one meaning, end to end: schema handle ->
-promoted_fields key -> DB column -> API field.
-
-Migration is dual-path-safe: a no-op on a fresh DB (0001's create_all
-already has the renamed shape), drop-then-rename on an existing one."
-```
-
-- [ ] **Step 11: Commit (frontend)**
-
-```bash
-cd ../vera-frontend
-git add src/lib/patient-forms/types.ts src/pages/DataManagement.tsx
-git commit -m "chore(patient-forms): rename member_policy_id to member_id
-
-Matches the backend API field rename. The dead member_id field on
-PatientFormDetail is dropped with no replacement (nothing read it)."
 ```
 
 ---
