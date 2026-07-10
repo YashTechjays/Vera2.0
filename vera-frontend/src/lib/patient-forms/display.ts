@@ -31,6 +31,13 @@ export function statusBadgeClass(status: PatientFormStatus | string): string {
   }
 }
 
+/** Tailwind chip classes for a call attempt's mode ("full" | "retry"). */
+export function modeBadgeClass(mode: "full" | "retry"): string {
+  return mode === "retry"
+    ? "bg-purple-100 text-purple-700"
+    : "bg-slate-100 text-slate-600"
+}
+
 // Manual status transitions a reviewer/operator may trigger from the form UI —
 // mirrors the backend state machine in patient_forms.py. The call pipeline owns
 // every other edge, so only these targets are offered.

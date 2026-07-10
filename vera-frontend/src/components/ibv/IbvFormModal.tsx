@@ -1,3 +1,5 @@
+import { useState } from "react"
+
 import {
   Dialog,
   DialogContent,
@@ -18,6 +20,14 @@ import {
 } from "@/lib/patient-forms/display"
 import { useIbv } from "./IbvProvider"
 import { SchemaForm } from "./SchemaForm"
+import { CallHistoryTab } from "./CallHistoryTab"
+
+const TABS = [
+  { id: "form", label: "Form" },
+  { id: "calls", label: "Call history" },
+] as const
+
+type TabId = (typeof TABS)[number]["id"]
 
 export function IbvFormModal() {
   const {
@@ -40,12 +50,15 @@ export function IbvFormModal() {
   } = useIbv()
   const canWrite = usePermission("forms:write")
   const transitions = status ? allowedStatusTransitions(status) : []
+  const [tab, setTab] = useState<TabId>("form")
 
   return (
     <Dialog open={modalOpen} onOpenChange={(o) => (o ? null : closeForm())}>
       <DialogContent
         showCloseButton
         className="flex max-h-[92vh] w-[96vw] max-w-[1200px] flex-col gap-0 p-0"
+        // Fires on every open (Radix), so each session starts on the Form tab.
+        onOpenAutoFocus={() => setTab("form")}
       >
         <DialogHeader className="border-b border-border p-4">
           {/* Form-type eyebrow, from the loaded form's insurance type. */}
@@ -103,6 +116,24 @@ export function IbvFormModal() {
           </p>
         )}
 
+        <div className="flex gap-1 border-b border-border px-4 pt-2">
+          {TABS.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setTab(id)}
+              className={cn(
+                "rounded-t-md px-3 py-1.5 text-sm font-medium",
+                tab === id
+                  ? "border border-b-0 border-border bg-background"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="flex-1 overflow-auto bg-[#f8f9fa] p-4 font-ibv">
           {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
           {error && (
@@ -110,7 +141,7 @@ export function IbvFormModal() {
               {error}
             </p>
           )}
-          {!loading && !error && <SchemaForm />}
+          {!loading && !error && (tab === "form" ? <SchemaForm /> : <CallHistoryTab />)}
         </div>
 
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
