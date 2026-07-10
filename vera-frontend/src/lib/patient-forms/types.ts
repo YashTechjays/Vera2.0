@@ -55,7 +55,7 @@ export type PatientFormSummary = {
   appointment_date: string | null
   /** Promoted columns lifted from the intake snapshot. */
   appointment_type: string | null
-  member_policy_id: string | null
+  member_id: string | null
   insurance_provider: string | null
   insurance_provider_phone_number: string | null
   completion_pct: number
@@ -75,7 +75,6 @@ export type PatientFormDetail = {
   patient_name: string | null
   chart_number: string | null
   appointment_date: string | null
-  member_id: string | null
   fields: PatientFormField[]
   /** Stored queue-time choice: run the IVR navigator on this form's calls. */
   ivr_navigation_enabled: boolean
