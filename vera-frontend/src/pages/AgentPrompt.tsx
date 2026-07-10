@@ -674,7 +674,7 @@ export function AgentPrompt(): JSX.Element {
             <DialogTitle>{dialogCopy?.title}</DialogTitle>
             <DialogDescription>{dialogCopy?.description}</DialogDescription>
           </DialogHeader>
-          <DialogFooter className="p-4">
+          <DialogFooter className="border-t border-border p-4">
             <Button type="button" variant="outline" onClick={() => setPendingAction(null)}>
               {dialogCopy?.cancelLabel}
             </Button>
