@@ -5,7 +5,20 @@ import logging
 
 import pytest
 
-from agent_worker.transcript_publisher import FanOutTurnPublisher
+from agent_worker.transcript_publisher import FanOutTurnPublisher, ReorderingEmitter
+
+# Sentinel PHI that a failing sink embeds in its exception args, the way redis-py's
+# Pipeline.annotate_exception embeds the failed command (incl. the turn text) into
+# exception.args. It must NEVER reach a log line.
+_PHI = "SECRET_PHI_TOKEN"
+
+
+class _AnnotatedBoomSink:
+    """Raises the way a redis pipeline failure does: exception args contain the failed
+    command, including the turn text."""
+
+    async def publish_turn(self, room_name: str, role: str, text: str, *, ts: int) -> None:
+        raise RuntimeError(f"Command # 1 (XADD stream '*' text {text!r}) of pipeline: OOM")
 
 
 class _RecordingSink:
@@ -64,3 +77,38 @@ async def test_raising_sink_is_logged_without_the_turn_text(
     await fan.publish_turn("room", "user", "super-secret-phi-text", ts=1)  # must not raise
     assert "super-secret-phi-text" not in caplog.text
     assert "room" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fan_out_never_logs_exception_content_even_when_it_embeds_the_turn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Redis pipeline errors annotate exception.args with the failed command — including the
+    # turn text. The failure log must carry only the exception TYPE, never its content.
+    caplog.set_level(logging.WARNING, logger="agent_worker")
+    fan = FanOutTurnPublisher([_AnnotatedBoomSink()])
+    await fan.publish_turn("room", "user", _PHI, ts=1)  # must not raise
+    rendered = "".join(record.getMessage() for record in caplog.records)
+    assert _PHI not in rendered
+    assert "RuntimeError" in rendered
+
+
+@pytest.mark.asyncio
+async def test_emitter_drain_never_logs_exception_content_even_when_it_embeds_the_turn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Same PHI channel one layer up: the ReorderingEmitter's queue drain logs a publish
+    # failure — that log must also carry only the exception type, never its content.
+    caplog.set_level(logging.WARNING, logger="agent_worker")
+
+    class _UserEvent:
+        transcript = _PHI
+        is_final = True
+        created_at = 1.0
+
+    emitter = ReorderingEmitter(_AnnotatedBoomSink(), "room")
+    emitter.on_user(_UserEvent())
+    await emitter.aclose()  # drains the queued turn through the raising sink
+    rendered = "".join(record.getMessage() for record in caplog.records)
+    assert _PHI not in rendered
+    assert "RuntimeError" in rendered

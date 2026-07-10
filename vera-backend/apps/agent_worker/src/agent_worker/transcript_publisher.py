@@ -73,11 +73,13 @@ class FanOutTurnPublisher:
             try:
                 await sink.publish_turn(room_name, role, text, ts=ts)
             except Exception as exc:  # best-effort; one sink's failure must not break the rest
+                # Exception content is unsafe here — redis pipeline errors embed the failed
+                # command incl. the turn text (PHI), so log only the exception type.
                 logger.warning(
-                    "turn publish failed for sink=%s room=%s: %r",
+                    "turn publish failed for sink=%s room=%s (%s)",
                     type(sink).__name__,
                     room_name,
-                    exc,
+                    type(exc).__name__,
                 )
 
 
@@ -214,7 +216,9 @@ class ReorderingEmitter:
             try:
                 await self._service.publish_turn(self._room, role, text, ts=int(ts * 1000))
             except Exception as exc:  # best-effort; a Redis failure must not break the call
-                logger.warning("transcript publish failed: %r", exc)
+                # Exception content is unsafe here — redis pipeline errors embed the failed
+                # command incl. the turn text (PHI), so log only the exception type.
+                logger.warning("transcript publish failed (%s)", type(exc).__name__)
 
     async def aclose(self) -> None:
         """Flush held turns and drain the queue. Call before TranscriptService.end() so no
