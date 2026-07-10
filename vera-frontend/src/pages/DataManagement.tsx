@@ -290,7 +290,7 @@ export function DataManagement() {
                         <span
                           className={cn(
                             "inline-block rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide",
-                            statusBadgeClass(f.review_reason),
+                            "bg-amber-100 text-amber-700", // review reasons are warning-level by definition
                           )}
                         >
                           {statusLabel(f.review_reason)}
