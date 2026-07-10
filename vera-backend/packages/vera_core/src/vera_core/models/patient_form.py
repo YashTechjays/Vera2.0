@@ -63,7 +63,6 @@ class PatientForm(Base, TenantScopedMixin):
     # (lowercase/trim name, canonical member-id) so a future blind index has a
     # stable input — ADR §5 rule 3.
     patient_name: Mapped[str | None] = mapped_column(String(255), nullable=True, info=PHI_INFO)
-    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
     patient_dob: Mapped[date | None] = mapped_column(Date, nullable=True, info=PHI_INFO)
     appointment_date: Mapped[date | None] = mapped_column(Date, nullable=True, info=PHI_INFO)
     chart_number: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
@@ -73,7 +72,7 @@ class PatientForm(Base, TenantScopedMixin):
     # over them yet, so no index — they're projection-only). Treated as PHI and
     # carried under CMEK like the identifiers above.
     appointment_type: Mapped[str | None] = mapped_column(String(64), nullable=True, info=PHI_INFO)
-    member_policy_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
+    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
     insurance_provider: Mapped[str | None] = mapped_column(
         String(255), nullable=True, info=PHI_INFO
     )

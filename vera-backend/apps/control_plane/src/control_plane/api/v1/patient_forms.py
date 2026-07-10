@@ -151,9 +151,11 @@ async def upload_patient_form(
             patient_dob=promoted.patient_dob,
             appointment_date=promoted.appointment_date,
             chart_number=promoted.chart_number,
-            member_id=promoted.member_id,
+            # promoted.member_id is dead (always None at intake); the live identifier is
+            # promoted.member_policy_id, which now lands in the renamed member_id column.
+            # Task 5 rewrites promote_columns/PromotedIdentifiers so this indirection goes away.
+            member_id=promoted.member_policy_id,
             appointment_type=promoted.appointment_type,
-            member_policy_id=promoted.member_policy_id,
             insurance_provider=promoted.insurance_provider,
             insurance_provider_phone_number=promoted.insurance_provider_phone_number,
             completion_pct=0,
@@ -233,7 +235,7 @@ class PatientFormSummary(BaseModel):
     appointment_date: date | None
     # Promoted out of intake_payload into typed columns (see PatientForm).
     appointment_type: str | None
-    member_policy_id: str | None
+    member_id: str | None
     insurance_provider: str | None
     insurance_provider_phone_number: str | None
     completion_pct: float
@@ -275,7 +277,6 @@ class PatientFormDetail(BaseModel):
     patient_name: str | None
     chart_number: str | None
     appointment_date: date | None
-    member_id: str | None
     # Voice-lab-style toggle stored on the form (default True) — the UI's re-queue
     # toggle pre-loads from here so an operator's earlier choice round-trips.
     ivr_navigation_enabled: bool
@@ -394,7 +395,6 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         patient_name=form.patient_name,
         chart_number=form.chart_number,
         appointment_date=form.appointment_date,
-        member_id=form.member_id,
         ivr_navigation_enabled=form.ivr_navigation_enabled,
         fields=[FieldView(**view) for view in views],
     )
@@ -449,7 +449,7 @@ async def list_patient_forms(
             chart_number=r.chart_number,
             appointment_date=r.appointment_date,
             appointment_type=r.appointment_type,
-            member_policy_id=r.member_policy_id,
+            member_id=r.member_id,
             insurance_provider=r.insurance_provider,
             insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
@@ -469,7 +469,7 @@ async def list_patient_forms(
                 "chart_number",
                 "appointment_date",
                 "appointment_type",
-                "member_policy_id",
+                "member_id",
                 "insurance_provider",
                 "insurance_provider_phone_number",
             ],
