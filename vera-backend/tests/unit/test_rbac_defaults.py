@@ -13,6 +13,14 @@ def test_calls_publish_permission_is_catalogued_and_granted() -> None:
     assert "calls:publish" in SYSTEM_ROLES["TENANT_ADMIN"]
 
 
+def test_calls_intervene_permission_is_catalogued_and_granted() -> None:
+    assert "calls:intervene" in DEFAULT_PERMISSIONS
+    assert "calls:intervene" in SYSTEM_ROLES["SUPERVISOR"]
+    assert "calls:intervene" in SYSTEM_ROLES["TENANT_ADMIN"]
+    # A VA can watch nothing and speak into nothing — sandbox only.
+    assert "calls:intervene" not in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
+
+
 def test_insurance_provider_permissions_are_catalogued_and_super_admin_only() -> None:
     for code in ("platform:insurance_providers:read", "platform:insurance_providers:write"):
         assert code in PLATFORM_PERMISSIONS

@@ -24,7 +24,15 @@ from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
-from vera_core.models import AppUser, Integration, IntegrationType, Tenant, UserRole
+from vera_core.models import (
+    AppUser,
+    Integration,
+    IntegrationType,
+    Role,
+    RolePermission,
+    Tenant,
+    UserRole,
+)
 from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
@@ -129,6 +137,8 @@ class RBACWorld:
         self.ghost_token = ""
         self.supervisor_token = ""
         self.virtual_assistant_token = ""
+        # Holds ONLY calls:read (custom tenant role) — can watch, never intervene.
+        self.listener_token = ""
 
 
 async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
@@ -253,6 +263,30 @@ async def rbac_world(
         )
         supervisor_id = supervisor.id
 
+        # Every system role with calls:read now also holds calls:intervene, so a
+        # custom LISTENER role is the only way to test read-without-intervene.
+        listener_role = Role(tenant_id=tenant_id, name="LISTENER", description="")
+        listener = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="listener@test.example",
+            name="Listener",
+            status="active",
+        )
+        session.add_all([listener_role, listener])
+        await session.flush()
+        session.add(
+            RolePermission(
+                tenant_id=tenant_id,
+                role_id=listener_role.id,
+                permission_id=permission_ids["calls:read"],
+            )
+        )
+        session.add(
+            UserRole(tenant_id=tenant_id, app_user_id=listener.id, role_id=listener_role.id)
+        )
+        listener_id = listener.id
+
     world.admin_token = await _mint(
         session_store, user_id=admin_id, tenant_id=tenant_id, email="admin@test.example"
     )
@@ -267,6 +301,9 @@ async def rbac_world(
         user_id=virtual_assistant_id,
         tenant_id=tenant_id,
         email="virtual_assistant@test.example",
+    )
+    world.listener_token = await _mint(
+        session_store, user_id=listener_id, tenant_id=tenant_id, email="listener@test.example"
     )
     # A valid session whose user_id has no app_user row -> "unknown user" deny.
     world.ghost_token = await _mint(

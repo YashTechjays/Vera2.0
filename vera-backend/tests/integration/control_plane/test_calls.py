@@ -571,6 +571,129 @@ async def test_join_token_gated_and_audited_for_non_owner(
 
 
 @pytest.mark.asyncio
+async def test_intervene_token_requires_calls_intervene(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = created.json()["data"]["id"]
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert published.status_code == 200, published.text
+
+    # calls:read alone still allows watching — server-side muted token.
+    watch = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.listener_token)
+    )
+    assert watch.status_code == 200, watch.text
+    assert fake_livekit.minted[-1][2] is False
+
+    # ...but never publishing.
+    denied = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.listener_token),
+    )
+    assert denied.status_code == 403, denied.text
+    assert "calls:intervene" in denied.json()["message"]
+
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.event_type == "authz.deny",
+            AuditLog.resource_id == call_id,
+            AuditLog.permission_key == "calls:intervene",
+        )
+    )
+    assert len(result.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_intervene_requires_permission_too(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+) -> None:
+    # The listener owns the call (start only needs calls:read) — ownership does
+    # not substitute for calls:intervene.
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.listener_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = created.json()["data"]["id"]
+
+    watch = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.listener_token)
+    )
+    assert watch.status_code == 200, watch.text
+
+    denied = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.listener_token),
+    )
+    assert denied.status_code == 403, denied.text
+
+
+@pytest.mark.asyncio
+async def test_intervene_on_private_call_stays_404_for_non_owner(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+) -> None:
+    # Visibility beats capability: holding calls:intervene must not turn a
+    # private call's 404 into a 403 (no enumeration).
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = created.json()["data"]["id"]
+
+    denied = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert denied.status_code == 404, denied.text
+
+
+@pytest.mark.asyncio
+async def test_supervisor_can_intervene_on_published_call(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(seeded_form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id = created.json()["data"]["id"]
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert published.status_code == 200, published.text
+
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert joined.status_code == 200, joined.text
+    assert fake_livekit.minted[-1][2] is True
+
+
+@pytest.mark.asyncio
 async def test_owner_revokes_intervener_access(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

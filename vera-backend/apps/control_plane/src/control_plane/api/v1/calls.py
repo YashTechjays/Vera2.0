@@ -6,20 +6,23 @@ with `require("calls:read")` for now — the SPA has no real auth yet, and
 the spec flags this. `publish` and `revoke-access` are owner-only actions
 gated on `require("calls:publish")`: the caller must hold the permission
 *and* be the call's `initiated_by_id`, enforced by an explicit 403 check
-in each handler.
+in each handler. A publish-capable join token (`?intervene=true`)
+additionally requires `calls:intervene`, checked in-handler after the
+visibility 404s (owners included).
 """
 
 import contextlib
 import logging
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import require
+from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import get_audit
 from control_plane.exceptions import (
     CustomAPIException,
@@ -193,6 +196,7 @@ async def join_token(
     session: TenantSession,
     livekit: LiveKit,
     audit: Audit,
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
     intervene: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
@@ -201,12 +205,41 @@ async def join_token(
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
-    if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
+    is_owner = call.initiated_by_id == caller.user_id
+    if not is_owner:  # non-owner joining another's call
         # Ownerless calls are joinable tenant-wide; revoked users get the same
         # 404 as a private call (no enumeration).
         revoked = str(caller.user_id) in call.revoked_user_ids
         if revoked or (call.initiated_by_id is not None and not call.published):
             raise NotFoundError(message="call not found")  # don't reveal a private call
+    if intervene:
+        # Publishing audio into a live call needs calls:intervene — owners included.
+        # Checked AFTER the visibility 404s so a private call never turns into a 403.
+        user_id, permissions = await resolver.effective_permissions(
+            session, tenant_id, caller.user_id
+        )
+        allowed = "calls:intervene" in permissions
+        await audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.USER,
+                actor_user_id=user_id,
+                actor_label=caller.email or caller.subject,
+                event_type=(
+                    AuditEvent.AUTHZ_ALLOW.value if allowed else AuditEvent.AUTHZ_DENY.value
+                ),
+                resource_type="call",
+                resource_id=str(call.id),
+                permission_key="calls:intervene",
+                decision="allow" if allowed else "deny",
+                request_id=current_request_id(request),
+            )
+        )
+        if not allowed:
+            raise CustomAPIException(
+                DefaultExceptionCode.FORBIDDEN, message="missing permission calls:intervene"
+            )
+    if not is_owner:
         await audit.emit(
             AuditRecord(
                 tenant_id=tenant_id,
