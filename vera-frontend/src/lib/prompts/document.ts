@@ -153,12 +153,13 @@ export function hasErrorsFor(fieldErrors: Record<string, string[]>, prefix: stri
 const FIELD_LOCATION_RE =
   /^(session\.(?:persona|goal|base_instructions)|task_overrides\.[^\s.:]+\.(?:intro|outro|prompt)): (.*)$/
 
-/** Split the server's "; "-joined, location-prefixed content errors (draft-save
- *  400 message and POST-preview `errors[]` use identical strings). */
-export function parsePromptErrors(joined: string): ParsedErrors {
+/** Map location-prefixed content errors onto fields, one list element per
+ *  error. The POST-preview endpoint already returns the list, so no join/split
+ *  round-trip — an error whose text itself contains "; " stays intact. */
+export function parsePromptErrorList(messages: string[]): ParsedErrors {
   const fields: Record<string, string[]> = {}
   const general: string[] = []
-  for (const part of joined.split("; ")) {
+  for (const part of messages) {
     const message = part.trim()
     if (message === "") continue
     const match = FIELD_LOCATION_RE.exec(message)
@@ -170,6 +171,13 @@ export function parsePromptErrors(joined: string): ParsedErrors {
     }
   }
   return { fields, general }
+}
+
+/** Split the server's "; "-joined form (the draft-save 400 message — see the
+ *  contract comments in api/v1/prompts.py). Prefer parsePromptErrorList when
+ *  the errors are already a list. */
+export function parsePromptErrors(joined: string): ParsedErrors {
+  return parsePromptErrorList(joined.split("; "))
 }
 
 // ---------------------------------------------------------------------------

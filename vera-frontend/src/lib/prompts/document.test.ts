@@ -9,6 +9,7 @@ import {
   insertToken,
   normalizeDocument,
   overrideStateOf,
+  parsePromptErrorList,
   parsePromptErrors,
   placeholderGroupsOf,
   removeOverrideEntry,
@@ -135,6 +136,16 @@ describe("validation", () => {
       "unknown placeholder {{b}}",
     ])
     expect(parsed.general).toEqual(["task_overrides.ghost: unknown task_key"])
+  })
+
+  it("parsePromptErrorList keeps a message containing '; ' intact (no re-split)", () => {
+    const parsed = parsePromptErrorList([
+      'session.goal: unknown placeholder {{oops; typo}}',
+      "task_overrides.wrap_up.outro: unknown placeholder {{a}}",
+    ])
+    expect(parsed.fields["session.goal"]).toEqual(["unknown placeholder {{oops; typo}}"])
+    expect(parsed.fields["task_overrides.wrap_up.outro"]).toEqual(["unknown placeholder {{a}}"])
+    expect(parsed.general).toEqual([])
   })
 })
 

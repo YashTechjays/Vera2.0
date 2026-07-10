@@ -41,6 +41,7 @@ import {
   documentsEqual,
   hasErrorsFor,
   normalizeDocument,
+  parsePromptErrorList,
   parsePromptErrors,
   placeholderGroupsOf,
   removeOverrideEntry,
@@ -165,8 +166,10 @@ export function AgentPrompt(): JSX.Element {
     }
     return merged
   }, [clientErrors, previewErrors.fields, saveErrors.fields])
+  // Deduped (Set, insertion order): preview and save can report the identical
+  // string, and these render keyed by message.
   const generalErrors = useMemo(
-    () => [...previewErrors.general, ...saveErrors.general],
+    () => [...new Set([...previewErrors.general, ...saveErrors.general])],
     [previewErrors.general, saveErrors.general],
   )
   const orphanedKeys = useMemo(() => {
@@ -317,7 +320,7 @@ export function AgentPrompt(): JSX.Element {
       const result = await previewPromptDocument(pid, normalizeDocument(buffer))
       if (cancelled) return
       setPreview(result.rendered)
-      setPreviewErrors(parsePromptErrors(result.errors.join("; ")))
+      setPreviewErrors(parsePromptErrorList(result.errors))
     }
 
     function run(task: Promise<void>): void {
@@ -369,8 +372,11 @@ export function AgentPrompt(): JSX.Element {
     const pid = promptId
     setBusy(true)
     setError(null)
+    // The textareas stay editable during the save round trips; snapshot what was
+    // actually sent so mid-save keystrokes are never clobbered below.
+    const snapshot = doc
     try {
-      const created = await createPromptDraft(pid, normalizeDocument(doc))
+      const created = await createPromptDraft(pid, normalizeDocument(snapshot))
       if (activePromptIdRef.current !== pid) return
       // Refresh the version list before pointing loadedVersionId at the new draft, so
       // `loadedVersion` (looked up by id in `versions`) resolves on the same render
@@ -378,7 +384,12 @@ export function AgentPrompt(): JSX.Element {
       await refreshVersions(pid)
       if (activePromptIdRef.current !== pid) return
       const normalized = normalizeDocument(created.composite_json)
-      setDoc(normalized)
+      // Only replace the buffer if it still equals what was saved; edits typed while
+      // the save was in flight are kept and simply read as dirty against the new
+      // draft (setBaseline lands either way — that IS the new baseline).
+      setDoc((current) =>
+        current !== null && documentsEqual(current, snapshot) ? normalized : current,
+      )
       setBaseline(normalized)
       setLoadedVersionId(created.id)
       setSaveErrors(NO_ERRORS)
@@ -423,12 +434,19 @@ export function AgentPrompt(): JSX.Element {
 
   async function onLoadConfirmed(versionId: string): Promise<void> {
     if (promptId === null) return
+    const pid = promptId
     setPendingAction(null)
     setError(null)
+    // busy disables the Load buttons for the duration — two rapid Loads on the
+    // same prompt would otherwise race and the slower response would win.
+    setBusy(true)
     try {
-      await loadVersionIntoBuffer(promptId, versionId)
+      await loadVersionIntoBuffer(pid, versionId)
     } catch (err) {
+      if (activePromptIdRef.current !== pid) return
       setError(errorMessage(err, "Could not load the version."))
+    } finally {
+      setBusy(false)
     }
   }
 

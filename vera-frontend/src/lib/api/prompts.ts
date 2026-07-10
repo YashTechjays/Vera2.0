@@ -1,7 +1,7 @@
 // Platform (super admin) prompt-catalog endpoints. Mirrors backend api/v1/prompts.py:
 // composite_json is a PromptDocument (session block + sparse task overrides), never
 // compiled text; rendering happens server-side (GET/POST /preview).
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, randomId } from "@/lib/api/client"
 
 export type SessionBlock = {
   persona: string
@@ -93,11 +93,14 @@ export function getPromptVersion(promptId: string, versionId: string): Promise<P
   )
 }
 
-/** Every save creates a new immutable draft; the body IS the document. */
+/** Every save creates a new immutable draft; the body IS the document.
+ *  Idempotency-Key follows the write convention (ivrPlaybooks, insuranceProviders);
+ *  the backend prompt routes don't enforce it yet (known, deferred). */
 export function createPromptDraft(promptId: string, doc: PromptDocument): Promise<PromptVersionDetail> {
   return apiRequest<PromptVersionDetail>(`/prompts/${encodeURIComponent(promptId)}/versions`, {
     method: "POST",
     body: doc,
+    headers: { "Idempotency-Key": randomId() },
   })
 }
 

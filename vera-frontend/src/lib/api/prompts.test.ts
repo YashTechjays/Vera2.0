@@ -11,7 +11,7 @@ vi.mock("@/lib/api/client", () => {
       this.errorCode = errorCode
     }
   }
-  return { apiRequest: vi.fn(), ApiError }
+  return { apiRequest: vi.fn(), ApiError, randomId: () => "test-idempotency-key" }
 })
 
 import { apiRequest } from "@/lib/api/client"
@@ -32,10 +32,14 @@ const doc: PromptDocument = {
 describe("prompts api client", () => {
   beforeEach(() => vi.resetAllMocks())
 
-  it("posts the document itself as the draft body (not {composite_json})", async () => {
+  it("posts the document itself as the draft body, with the conventional Idempotency-Key", async () => {
     vi.mocked(apiRequest).mockResolvedValue({})
     await createPromptDraft("p1", doc)
-    expect(apiRequest).toHaveBeenCalledWith("/prompts/p1/versions", { method: "POST", body: doc })
+    expect(apiRequest).toHaveBeenCalledWith("/prompts/p1/versions", {
+      method: "POST",
+      body: doc,
+      headers: { "Idempotency-Key": "test-idempotency-key" },
+    })
   })
 
   it("fetches the published schema for a prompt", async () => {
