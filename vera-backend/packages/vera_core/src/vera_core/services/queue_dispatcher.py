@@ -240,9 +240,7 @@ async def try_dispatch(
                 if call_mode == CallMode.RETRY:
                     version = (
                         await session.execute(
-                            select(SchemaVersion).where(
-                                SchemaVersion.id == form.schema_version_id
-                            )
+                            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
                         )
                     ).scalar_one()
                     status_by_path = await load_field_status(session, form.id)

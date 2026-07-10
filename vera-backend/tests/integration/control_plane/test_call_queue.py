@@ -628,9 +628,7 @@ async def retry_form_ctx(database_url: str) -> AsyncGenerator[_RetryFormCtx]:
     finally:
         async with sm() as session, session.begin():
             await session.execute(
-                text(
-                    "DELETE FROM call_lineage WHERE tenant_id = :tid"
-                ).bindparams(tid=tenant_id)
+                text("DELETE FROM call_lineage WHERE tenant_id = :tid").bindparams(tid=tenant_id)
             )
             await session.execute(
                 text(
@@ -645,9 +643,7 @@ async def retry_form_ctx(database_url: str) -> AsyncGenerator[_RetryFormCtx]:
                 text("DELETE FROM patient_form WHERE tenant_id = :tid").bindparams(tid=tenant_id)
             )
             await session.execute(
-                text("DELETE FROM schema_version WHERE id = :sid").bindparams(
-                    sid=schema_version_id
-                )
+                text("DELETE FROM schema_version WHERE id = :sid").bindparams(sid=schema_version_id)
             )
             if created_schema:
                 await session.execute(
