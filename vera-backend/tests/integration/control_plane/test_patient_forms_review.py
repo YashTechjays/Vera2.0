@@ -1193,6 +1193,57 @@ async def test_status_unknown_form_returns_404(
     assert resp.status_code == 404, resp.text
 
 
+# ---- review_reason ----------------------------------------------------------
+
+
+@pytest.fixture
+async def review_form_id(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> UUID:
+    """A plain EXCEPTION_REVIEW form with no disputes — used for review_reason tests."""
+    return await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_requeue_clears_review_reason(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    review_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Leaving EXCEPTION_REVIEW by hand nulls review_reason."""
+    # Seed the reason directly (the pipeline normally stamps it).
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(
+            text("UPDATE patient_form SET review_reason = 'llm_error' WHERE id = :fid").bindparams(
+                fid=review_form_id
+            )
+        )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{review_form_id}/status",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+    async with admin_sessionmaker() as session:
+        reason = (
+            await session.execute(
+                text("SELECT review_reason FROM patient_form WHERE id = :fid").bindparams(
+                    fid=review_form_id
+                )
+            )
+        ).scalar_one()
+    assert reason is None
+
+
 async def test_status_same_status_is_idempotent_noop(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

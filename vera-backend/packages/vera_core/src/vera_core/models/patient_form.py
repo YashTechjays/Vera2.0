@@ -83,6 +83,10 @@ class PatientForm(Base, TenantScopedMixin):
 
     completion_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Why the pipeline sent this form to EXCEPTION_REVIEW (token_value,
+    # retries_exhausted, llm_error, no_transcript). NULL outside review and for
+    # manual transitions — a pipeline artifact, not a user field. Not PHI.
+    review_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The user who queued this form — persisted so the dispatcher can attribute

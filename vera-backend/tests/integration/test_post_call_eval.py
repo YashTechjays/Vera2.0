@@ -646,3 +646,29 @@ async def test_incomplete_retries_exhausted_goes_to_review(
     form = await ctx.reload_form()
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.enqueued_at is None  # review path must not queue the form
+    assert form.review_reason == "retries_exhausted"
+
+
+async def test_incomplete_with_retries_left_requeues_clears_review_reason(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Non-review outcome (IN_QUEUE) always clears review_reason."""
+    ctx = seeded_ai_processing_form
+    turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.IN_QUEUE
+    form = await ctx.reload_form()
+    assert form.review_reason is None  # non-review outcome always clears it

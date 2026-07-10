@@ -236,6 +236,7 @@ class PatientFormSummary(BaseModel):
     insurance_provider: str | None
     insurance_provider_phone_number: str | None
     completion_pct: float
+    review_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -448,6 +449,7 @@ async def list_patient_forms(
             insurance_provider=r.insurance_provider,
             insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
+            review_reason=r.review_reason,
             created_at=r.created_at,
             updated_at=r.updated_at,
         )
@@ -838,6 +840,9 @@ async def update_patient_form_status(
             message=str(exc),
             data={"from": current.value, "to": target.value},
         ) from exc
+
+    if current == FormStatus.EXCEPTION_REVIEW:
+        form.review_reason = None
 
     # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
     if target == FormStatus.IN_QUEUE:

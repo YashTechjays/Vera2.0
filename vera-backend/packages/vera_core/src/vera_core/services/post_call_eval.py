@@ -158,6 +158,7 @@ async def evaluate_call(
         reason: str | None = None,
     ) -> EvalOutcome:
         sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+        form.review_reason = reason if target == FormStatus.EXCEPTION_REVIEW else None
         if target == FormStatus.IN_QUEUE:
             form.enqueued_at = func.now()
         await session.flush()
