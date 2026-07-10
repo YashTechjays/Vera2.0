@@ -63,6 +63,23 @@ def _supervisor_identity(user_id: UUID) -> str:
     return f"supervisor-{user_id}"
 
 
+def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
+    """Whether *user_id* must NOT see this call (→ the same 404 as a missing row,
+    so a private call is never revealed by enumeration).
+
+    The owner always sees their own call. A non-owner sees it only when it is
+    published or ownerless (dispatcher-created, joinable tenant-wide) AND they
+    have not been revoked; a revoked user gets the same 404 as a private call.
+    Shared by join-token and the event stream so the two visibility gates can
+    never diverge.
+    """
+    if call.initiated_by_id == user_id:
+        return False
+    if str(user_id) in call.revoked_user_ids:
+        return True
+    return call.initiated_by_id is not None and not call.published
+
+
 def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
     return CallSummary(
         id=call.id,
@@ -101,12 +118,9 @@ async def join_token(
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
+    if _call_hidden_from(call, caller.user_id):
+        raise NotFoundError(message="call not found")  # don't reveal a private call
     if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
-        # Ownerless calls are joinable tenant-wide; revoked users get the same
-        # 404 as a private call (no enumeration).
-        revoked = str(caller.user_id) in call.revoked_user_ids
-        if revoked or (call.initiated_by_id is not None and not call.published):
-            raise NotFoundError(message="call not found")  # don't reveal a private call
         await audit.emit(
             AuditRecord(
                 tenant_id=tenant_id,
@@ -156,10 +170,8 @@ async def stream_call_events(
         ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
-    if call.initiated_by_id != user_id:
-        revoked = str(user_id) in call.revoked_user_ids
-        if revoked or (call.initiated_by_id is not None and not call.published):
-            raise NotFoundError(message="call not found")  # don't reveal a private call
+    if _call_hidden_from(call, user_id):
+        raise NotFoundError(message="call not found")  # don't reveal a private call
     allowed = "calls:read" in permissions
     # Transcript text is tokenized/de-identified, but the disclosure is still audited
     # (mirrors the voice-lab transcript endpoint).
