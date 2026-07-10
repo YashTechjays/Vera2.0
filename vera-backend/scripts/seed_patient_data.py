@@ -26,7 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vera_core.config import get_settings
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.intake import iter_leaf_answers, missing_required, promote_columns
+from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.intake import (
+    iter_leaf_answers,
+    missing_required,
+    promote_columns,
+    resolve_path,
+)
 from vera_core.models import FieldAnswer, FormSchema, PatientForm, SchemaVersion, Tenant
 from vera_core.models.enums import AnswerSource, FormStatus, InsuranceType, VersionStatus
 
@@ -225,7 +231,8 @@ async def seed_patient(status: FormStatus) -> None:
         missing = missing_required(payload, schema_json)
         if missing:
             raise SystemExit(f"missing required patient_information fields: {missing}")
-        promoted = promote_columns(payload)
+        doc = FormSchemaDoc.model_validate(schema_json)
+        promoted = promote_columns(lambda p: resolve_path(payload, p), doc)
 
         marker = _MARKER_CHART_NUMBER[status]
         await session.execute(delete(PatientForm).where(PatientForm.chart_number == marker))
@@ -239,9 +246,8 @@ async def seed_patient(status: FormStatus) -> None:
             patient_dob=promoted.patient_dob,
             appointment_date=promoted.appointment_date,
             chart_number=promoted.chart_number,
-            member_id=promoted.member_id,
             appointment_type=promoted.appointment_type,
-            member_policy_id=promoted.member_policy_id,
+            member_id=promoted.member_id,
             insurance_provider=promoted.insurance_provider,
             insurance_provider_phone_number=promoted.insurance_provider_phone_number,
             completion_pct=0,

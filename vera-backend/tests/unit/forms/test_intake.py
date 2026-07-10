@@ -1,15 +1,18 @@
 """Pure-logic tests for the IBV intake helpers (no DB)."""
 
 from datetime import date
+from typing import Any
 
 import pytest
 
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     iter_leaf_answers,
     missing_required,
     promote_columns,
     required_intake_fields,
+    resolve_path,
 )
 
 # A minimal stand-in for schema_version.schema_json — only the bits the helpers read.
@@ -246,8 +249,51 @@ class TestIterLeafAnswers:
         ]
 
 
+def _doc_with_promoted_fields(promoted_fields: dict[str, str]) -> FormSchemaDoc:
+    """A minimal v2 document whose system_fields (required for dsl.py validation)
+    exactly mirror the given promoted_fields."""
+    sections: dict[str, Any] = {}
+    for path in promoted_fields.values():
+        _, section_key, field_key = path.split(".")
+        sections.setdefault(
+            section_key,
+            {"title": section_key, "role": "context", "fields": {}},
+        )["fields"][field_key] = {"type": "text", "title": field_key, "role": "context"}
+    return FormSchemaDoc.model_validate(
+        {
+            "dsl_version": "2.1",
+            "name": "Test",
+            "insurance_type": "test_type",
+            "system_fields": dict(promoted_fields),
+            "promoted_fields": promoted_fields,
+            "sections": sections,
+            # All fixture sections are role="context" (no voice collection needed for
+            # these tests), so none may be assigned to a task (dsl.py: "only collect
+            # sections belong to tasks") — an empty task list is the valid v2 shape
+            # for a document with zero collect sections.
+            "tasks": [],
+        }
+    )
+
+
+_FULL_DOC = _doc_with_promoted_fields(
+    {
+        "patient_name": "sections.patient_information.patient_name",
+        "patient_dob": "sections.patient_information.patient_dob",
+        "chart_number": "sections.patient_information.chart_number",
+        "appointment_date": "sections.appointment_information.appointment_date",
+        "appointment_type": "sections.appointment_information.appointment_type",
+        "member_id": "sections.insurance_information.policy_number",
+        "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
+        "insurance_provider_phone_number": (
+            "sections.insurance_reference_information.insurance_phone_number"
+        ),
+    }
+)
+
+
 class TestPromoteColumns:
-    def test_maps_and_normalizes(self) -> None:
+    def test_maps_and_normalizes_from_a_nested_payload(self) -> None:
         payload = {
             "patient_information": {
                 "patient_name": "  Jane Doe  ",
@@ -260,40 +306,67 @@ class TestPromoteColumns:
             },
             "insurance_information": {"policy_number": "  POL-42 "},
             "insurance_reference_information": {
-                "insurance": "  Blue Cross ",
-                "phone_number": " +1 555 0100 ",
+                "insurance_provider_name": "  Blue Cross ",
+                "insurance_phone_number": " +1 555 0100 ",
             },
         }
-        promoted = promote_columns(payload)
+        promoted = promote_columns(lambda p: resolve_path(payload, p), _FULL_DOC)
         assert promoted.patient_name == "jane doe"
         assert promoted.chart_number == "C-100"
         assert promoted.patient_dob == date(1990, 4, 12)
         assert promoted.appointment_date == date(2026, 7, 1)
-        assert promoted.member_id is None
-        # Display fields: trimmed, kept verbatim (no case folding).
         assert promoted.appointment_type == "New Patient"
-        assert promoted.member_policy_id == "POL-42"
+        assert promoted.member_id == "POL-42"
         assert promoted.insurance_provider == "Blue Cross"
         assert promoted.insurance_provider_phone_number == "+1 555 0100"
 
-    def test_chart_number_na_becomes_none(self) -> None:
-        payload = {"patient_information": {"chart_number": "N/A"}}
-        assert promote_columns(payload).chart_number is None
+    def test_maps_and_normalizes_from_a_flat_map(self) -> None:
+        # The dispute-resolve shape: current_values keyed by root-anchored field_path.
+        current_values = {
+            "sections.patient_information.patient_name": "  Jane Doe  ",
+            "sections.patient_information.patient_dob": "1990-04-12",
+            "sections.insurance_reference_information.insurance_provider_name": "Blue Cross",
+        }
+        doc = _doc_with_promoted_fields(
+            {
+                "patient_name": "sections.patient_information.patient_name",
+                "patient_dob": "sections.patient_information.patient_dob",
+                "insurance_provider": (
+                    "sections.insurance_reference_information.insurance_provider_name"
+                ),
+            }
+        )
+        promoted = promote_columns(current_values.get, doc)
+        assert promoted.patient_name == "jane doe"
+        assert promoted.patient_dob == date(1990, 4, 12)
+        assert promoted.insurance_provider == "Blue Cross"
 
-    def test_absent_fields_are_none(self) -> None:
-        promoted = promote_columns({})
-        assert promoted.patient_name is None
+    def test_chart_number_na_becomes_none(self) -> None:
+        doc = _doc_with_promoted_fields(
+            {"chart_number": "sections.patient_information.chart_number"}
+        )
+        payload = {"patient_information": {"chart_number": "N/A"}}
+        promoted = promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert promoted.chart_number is None
+
+    def test_columns_the_schema_does_not_promote_stay_none(self) -> None:
+        # disease_only-shaped: only a subset of the 8 promotable columns is declared.
+        doc = _doc_with_promoted_fields(
+            {"patient_name": "sections.patient_information.patient_name"}
+        )
+        promoted = promote_columns(lambda p: None, doc)
+        assert promoted.patient_name is None  # get_value returned None too
         assert promoted.patient_dob is None
         assert promoted.appointment_date is None
         assert promoted.chart_number is None
-        assert promoted.member_id is None
         assert promoted.appointment_type is None
-        assert promoted.member_policy_id is None
+        assert promoted.member_id is None
         assert promoted.insurance_provider is None
         assert promoted.insurance_provider_phone_number is None
 
-    def test_bad_date_raises_with_field_path(self) -> None:
+    def test_bad_date_raises_with_the_schema_path(self) -> None:
+        doc = _doc_with_promoted_fields({"patient_dob": "sections.patient_information.patient_dob"})
         payload = {"patient_information": {"patient_dob": "12/04/1990"}}
         with pytest.raises(InvalidIntakeValue) as exc:
-            promote_columns(payload)
-        assert exc.value.field_path == "patient_information.patient_dob"
+            promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert exc.value.field_path == "sections.patient_information.patient_dob"

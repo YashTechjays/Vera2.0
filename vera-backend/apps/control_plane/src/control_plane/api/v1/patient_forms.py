@@ -39,11 +39,14 @@ from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
 from vera_core.forms.conditions import is_v2
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import (
     InvalidIntakeValue,
+    PromotedIdentifiers,
     iter_leaf_answers,
     missing_required,
     promote_columns,
+    resolve_path,
 )
 from vera_core.forms.review import (
     AnswerRow,
@@ -133,14 +136,18 @@ async def upload_patient_form(
                 message="missing required fields",
                 data={"fields": missing},
             )
-        try:
-            promoted = promote_columns(body.intake_payload)
-        except InvalidIntakeValue as exc:
-            raise CustomAPIException(
-                DefaultExceptionCode.VALIDATION_ERROR,
-                message="invalid field value",
-                data={"fields": [exc.field_path]},
-            ) from exc
+        v2 = is_v2(version.schema_json)
+        promoted = PromotedIdentifiers()
+        if v2:
+            doc = FormSchemaDoc.model_validate(version.schema_json)
+            try:
+                promoted = promote_columns(lambda p: resolve_path(body.intake_payload, p), doc)
+            except InvalidIntakeValue as exc:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="invalid field value",
+                    data={"fields": [exc.field_path]},
+                ) from exc
 
         form = PatientForm(
             tenant_id=principal.tenant_id,
@@ -151,11 +158,8 @@ async def upload_patient_form(
             patient_dob=promoted.patient_dob,
             appointment_date=promoted.appointment_date,
             chart_number=promoted.chart_number,
-            # promoted.member_id is dead (always None at intake); the live identifier is
-            # promoted.member_policy_id, which now lands in the renamed member_id column.
-            # Task 5 rewrites promote_columns/PromotedIdentifiers so this indirection goes away.
-            member_id=promoted.member_policy_id,
             appointment_type=promoted.appointment_type,
+            member_id=promoted.member_id,
             insurance_provider=promoted.insurance_provider,
             insurance_provider_phone_number=promoted.insurance_provider_phone_number,
             completion_pct=0,
@@ -167,9 +171,7 @@ async def upload_patient_form(
         # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
         # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
         # payload (nested by section_key) is flattened under a `sections` root.
-        payload_root = (
-            {"sections": body.intake_payload} if is_v2(version.schema_json) else body.intake_payload
-        )
+        payload_root = {"sections": body.intake_payload} if v2 else body.intake_payload
         answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(

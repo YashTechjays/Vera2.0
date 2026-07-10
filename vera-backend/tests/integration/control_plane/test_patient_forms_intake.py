@@ -192,9 +192,8 @@ async def test_upload_promotes_worklist_columns(
             "appointment_type": "New Patient",
         },
         "insurance_reference_information": {
-            **INTAKE_PAYLOAD["insurance_reference_information"],
-            "insurance": "Blue Cross",
-            "phone_number": "+1 555 0100",
+            "insurance_provider_name": "Blue Cross",
+            "insurance_phone_number": "+1 555 0100",
         },
     }
     resp = await client.post(
@@ -214,7 +213,7 @@ async def test_upload_promotes_worklist_columns(
             await session.execute(select(PatientForm).where(PatientForm.id == form_id))
         ).scalar_one()
         assert form.appointment_type == "New Patient"
-        assert form.member_policy_id == "POL-550411"
+        assert form.member_id == "POL-550411"
         assert form.insurance_provider == "Blue Cross"
         assert form.insurance_provider_phone_number == "+1 555 0100"
 
