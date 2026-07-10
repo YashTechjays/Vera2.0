@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
 import control_plane.call_closeout as call_closeout
+import control_plane.post_call as post_call
 import control_plane.transcript_finalizer as transcript_finalizer
 import control_plane.worker_events as worker_events
 from control_plane.livekit_gateway import LiveKitGateway
@@ -192,6 +193,7 @@ def _consumer(
     *,
     session: _FakeSession | None = None,
     call_stream: _FakeCallStream | None = None,
+    form_auto_retry_enabled: bool = False,
 ) -> _Wired:
     """Wire a consumer to a fake DB seam and a fake dispatch pass. `tenant_session`
     is monkeypatched in `worker_events` (the answered handler), `call_closeout` (the
@@ -210,6 +212,7 @@ def _consumer(
     monkeypatch.setattr(call_closeout, "tenant_session", _fake_tenant_session)
     monkeypatch.setattr(worker_events, "tenant_session", _fake_tenant_session)
     monkeypatch.setattr(transcript_finalizer, "tenant_session", _fake_tenant_session)
+    monkeypatch.setattr(post_call, "tenant_session", _fake_tenant_session)
 
     async def _fake_run_dispatch_pass(
         sessionmaker: Any, tenant_id: Any, lk: Any, kms: Any, aud: Any
@@ -226,6 +229,7 @@ def _consumer(
         fake_audit,
         fake_call_stream,  # type: ignore[arg-type]
         teardown_grace_ms=0,
+        form_auto_retry_enabled=form_auto_retry_enabled,
     )
     return _Wired(
         consumer=consumer,
@@ -249,6 +253,7 @@ def _tenant(**overrides: Any) -> Tenant:
         "status": "active",
         "max_agents_per_va": 3,
         "max_retries": 3,
+        "retry_fill_threshold": 0.95,
         "queue_expiry_hours": 48,
         "persona_tweak": {},
     }
@@ -278,6 +283,7 @@ def _form_row(tenant_id: UUID, form_id: UUID, **overrides: Any) -> PatientForm:
         "patient_name": "Jane Doe",
         "insurance_provider_phone_number": "+15551234567",
         "retry_count": 0,
+        "completion_pct": 100.0,
         "enqueued_at": None,
     }
     defaults.update(overrides)
@@ -428,13 +434,16 @@ async def test_call_answered_activates_call_and_stamps_started_at(
 
 
 @pytest.mark.asyncio
-async def test_call_ended_completes_call_and_form_then_dispatches(
+async def test_call_ended_routes_form_through_ai_processing_to_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The lifecycle's happy path: call complete → AI_PROCESSING → (high
+    completion) EXCEPTION_REVIEW. The form must never land on COMPLETED —
+    that edge is reserved for a reviewer's manual approve."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
     call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
-    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=100.0)
     tenant = _tenant(id=tenant_id, max_retries=3)
     session = _FakeSession(call=call, form=form, tenant=tenant)
     redis, livekit = _FakeRedis(), _FakeLiveKit()
@@ -445,19 +454,75 @@ async def test_call_ended_completes_call_and_form_then_dispatches(
 
     assert call.current_status == CallStatus.COMPLETED.value
     assert call.ended_at is not None
-    assert form.status == FormStatus.COMPLETED.value
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
     status_events = [e for e in session.added if e.event_type == CallEventType.STATUS.value]
     assert len(status_events) == 1
     assert status_events[0].event_value == CallStatus.COMPLETED.value
 
-    assert len(wired.audit.records) == 1
-    record = wired.audit.records[0]
-    assert record.event_type == AuditEvent.FORM_STATUS_CHANGE.value
-    assert record.detail["from"] == FormStatus.IN_CALL.value
-    assert record.detail["to"] == FormStatus.COMPLETED.value
+    # Two audited form transitions: IN_CALL → AI_PROCESSING (closeout), then
+    # AI_PROCESSING → EXCEPTION_REVIEW (post-call resolution).
+    assert [
+        (r.detail["from"], r.detail["to"])
+        for r in wired.audit.records
+        if r.event_type == AuditEvent.FORM_STATUS_CHANGE.value
+    ] == [
+        (FormStatus.IN_CALL.value, FormStatus.AI_PROCESSING.value),
+        (FormStatus.AI_PROCESSING.value, FormStatus.EXCEPTION_REVIEW.value),
+    ]
 
     assert len(wired.dispatch_calls) == 1
     assert wired.dispatch_calls[0][0] == tenant_id  # refill ran for the freed tenant
+    assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_call_ended_low_completion_auto_requeues_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The diagram's "system auto-retry: low completion" edge (feature-gated,
+    enabled here): a completed call whose form fill is below the tenant
+    threshold goes back to IN_QUEUE."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=40.0)
+    tenant = _tenant(id=tenant_id, max_retries=3, retry_fill_threshold=0.95)
+    session = _FakeSession(call=call, form=form, tenant=tenant)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session, form_auto_retry_enabled=True)
+
+    event = CallEndedEvent(room_name=room, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert call.current_status == CallStatus.COMPLETED.value
+    assert form.status == FormStatus.IN_QUEUE.value
+    assert form.retry_count == 1
+    assert form.enqueued_at is not None
+    assert len(wired.dispatch_calls) == 1  # the requeued form gets a dispatch pass
+    assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_call_ended_low_completion_defaults_to_review_when_flag_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default wiring (auto-retry flag OFF): low completion goes to
+    EXCEPTION_REVIEW without consuming the retry budget — no form-filling
+    mechanism exists yet, so a redial could never improve completion."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=40.0)
+    tenant = _tenant(id=tenant_id, max_retries=3, retry_fill_threshold=0.95)
+    session = _FakeSession(call=call, form=form, tenant=tenant)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session)
+
+    event = CallEndedEvent(room_name=room, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.retry_count == 0
     assert redis.acked == ["1-0"]
 
 

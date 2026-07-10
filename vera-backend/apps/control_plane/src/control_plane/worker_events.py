@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from control_plane.call_closeout import TERMINAL_VALUES, close_call
 from control_plane.dispatch import run_dispatch_pass
 from control_plane.livekit_gateway import LiveKitGateway
+from control_plane.post_call import resolve_ai_processing
 from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
@@ -95,6 +96,7 @@ class WorkerEventConsumer:
         reclaim_idle_ms: int = 60_000,
         teardown_grace_ms: int = 1_500,
         consumer_name: str | None = None,
+        form_auto_retry_enabled: bool = False,
     ) -> None:
         self._redis = redis
         self._livekit = livekit
@@ -106,6 +108,7 @@ class WorkerEventConsumer:
         self._reclaim_idle_ms = reclaim_idle_ms
         self._teardown_grace_ms = teardown_grace_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
+        self._form_auto_retry_enabled = form_auto_retry_enabled
         self._bus = WorkerEventBus(redis)
         self._handlers: dict[str, EventHandler] = {
             "call.failed": self._handle_call_failed,
@@ -294,6 +297,17 @@ class WorkerEventConsumer:
         ref = await close_call(self._sessionmaker, self._audit, room_name, status, trigger=trigger)
         if ref is not None:
             await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
+            if status is CallStatus.COMPLETED:
+                # The closeout parked the form in AI_PROCESSING; resolve the
+                # lifecycle's next system edge (EXCEPTION_REVIEW or low-completion
+                # auto-requeue) before refilling — either way a slot is freed.
+                await resolve_ai_processing(
+                    self._sessionmaker,
+                    self._audit,
+                    ref,
+                    trigger=trigger,
+                    auto_retry_enabled=self._form_auto_retry_enabled,
+                )
             await run_dispatch_pass(
                 self._sessionmaker, ref.tenant_id, self._livekit, self._kms, self._audit
             )

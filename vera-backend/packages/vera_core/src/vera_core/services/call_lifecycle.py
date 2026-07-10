@@ -16,8 +16,11 @@ from vera_core.services.form_state_machine import FormStateMachine, InvalidTrans
 
 logger = logging.getLogger(__name__)
 
+# A completed call parks the form in AI_PROCESSING — post-call resolution
+# (control_plane.post_call) then drives the EXCEPTION_REVIEW / auto-retry edge.
+# The form never goes straight to COMPLETED: that is the reviewer's manual edge.
 _FORM_EDGE: dict[CallStatus, FormStatus] = {
-    CallStatus.COMPLETED: FormStatus.COMPLETED,
+    CallStatus.COMPLETED: FormStatus.AI_PROCESSING,
     CallStatus.FAILED: FormStatus.CALL_FAILED,
     CallStatus.NO_ANSWER: FormStatus.CALL_FAILED,
     CallStatus.BUSY: FormStatus.CALL_FAILED,

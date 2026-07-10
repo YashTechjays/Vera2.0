@@ -14,19 +14,24 @@ from typing import Any
 from vera_core.models.enums import FormStatus
 
 # The full transition map. Keys are source statuses; values are the set of
-# legal target statuses from that source.
+# legal target statuses from that source. COMPLETED is reachable only from
+# EXCEPTION_REVIEW (manual approve, no disputes) — a call ending never completes
+# the form directly; it parks it in AI_PROCESSING for post-call resolution.
 ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE, FormStatus.EXCEPTION_REVIEW}),
     FormStatus.IN_QUEUE: frozenset({FormStatus.IN_CALL, FormStatus.EXPIRED}),
-    # The worker reports a terminal COMPLETED directly from IN_CALL; AI_PROCESSING
-    # is a reserved intermediate for post-call processing that no code path sets yet.
-    FormStatus.IN_CALL: frozenset(
-        {FormStatus.AI_PROCESSING, FormStatus.COMPLETED, FormStatus.CALL_FAILED}
-    ),
-    FormStatus.AI_PROCESSING: frozenset({FormStatus.COMPLETED, FormStatus.CALL_FAILED}),
+    FormStatus.IN_CALL: frozenset({FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED}),
+    # → EXCEPTION_REVIEW when post-call processing finishes; → IN_QUEUE is the
+    # system auto-retry on low completion (guarded by the retry cap below).
+    FormStatus.AI_PROCESSING: frozenset({FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE}),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
 }
+
+# Sources whose → IN_QUEUE edge is a *retry* (consumes the tenant's retry budget).
+# EXCEPTION_REVIEW → IN_QUEUE is deliberately absent: a manual requeue is an
+# operator decision, not a retry.
+_RETRY_SOURCES = frozenset({FormStatus.CALL_FAILED, FormStatus.AI_PROCESSING})
 
 
 class InvalidTransitionError(Exception):
@@ -59,7 +64,8 @@ class FormStateMachine:
         target:
             The desired new ``FormStatus``.
         tenant_max_retries:
-            The tenant's ``max_retries`` cap — guards ``CALL_FAILED → IN_QUEUE``.
+            The tenant's ``max_retries`` cap — guards the retry edges
+            (``CALL_FAILED → IN_QUEUE`` and ``AI_PROCESSING → IN_QUEUE``).
 
         Raises
         ------
@@ -76,8 +82,8 @@ class FormStateMachine:
         if target not in allowed:
             raise InvalidTransitionError(current.value, target.value)
 
-        # Guard: retry cap on CALL_FAILED → IN_QUEUE.
-        if current == FormStatus.CALL_FAILED and target == FormStatus.IN_QUEUE:
+        # Guard: retry cap on the retry edges into IN_QUEUE.
+        if current in _RETRY_SOURCES and target == FormStatus.IN_QUEUE:
             if form.retry_count >= tenant_max_retries:
                 raise InvalidTransitionError(
                     current.value, target.value, reason="retries exhausted"

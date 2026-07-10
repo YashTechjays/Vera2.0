@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.call_closeout import TERMINAL_VALUES, close_call
 from control_plane.dispatch import run_dispatch_pass
+from control_plane.post_call import sweep_stuck_ai_processing
 from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
@@ -78,6 +79,7 @@ class PipelineSweeper:
         interval_s: float,
         stuck_grace_s: int,
         max_call_duration_s: int,
+        form_auto_retry_enabled: bool = False,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._livekit = livekit
@@ -87,6 +89,7 @@ class PipelineSweeper:
         self._interval_s = interval_s
         self._stuck_grace_s = stuck_grace_s
         self._max_call_duration_s = max_call_duration_s
+        self._form_auto_retry_enabled = form_auto_retry_enabled
 
     async def run(self) -> None:
         """Sweep immediately on boot, then every interval. Mirrors the worker-event
@@ -158,8 +161,19 @@ class PipelineSweeper:
                     closed += 1
                     logger.info("sweeper: reconciled stuck call room %s", room_name)
 
-        # Phase 3: time-based dispatch wake-up — freed slots and/or queued forms.
-        if closed or has_queued:
+        # Phase 3: resolve forms stranded in AI_PROCESSING (a crash between
+        # closeout and post-call resolution leaks a concurrency slot forever —
+        # the dispatcher counts AI_PROCESSING as active).
+        resolved = await sweep_stuck_ai_processing(
+            self._sessionmaker,
+            self._audit,
+            tenant_id,
+            grace_s=self._stuck_grace_s,
+            auto_retry_enabled=self._form_auto_retry_enabled,
+        )
+
+        # Phase 4: time-based dispatch wake-up — freed slots and/or queued forms.
+        if closed or resolved or has_queued:
             await run_dispatch_pass(
                 self._sessionmaker, tenant_id, self._livekit, self._kms, self._audit
             )

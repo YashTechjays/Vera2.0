@@ -14,11 +14,13 @@ def _form(status: FormStatus = FormStatus.IN_CALL, retry_count: int = 0) -> Simp
     return SimpleNamespace(status=status.value, retry_count=retry_count, enqueued_at=None)
 
 
-def test_completed_call_completes_form() -> None:
+def test_completed_call_moves_form_to_ai_processing() -> None:
+    """A completed call hands the form to post-call processing — never straight
+    to COMPLETED (that requires manual approval from EXCEPTION_REVIEW)."""
     call, form = _call(), _form()
     requeued = apply_terminal_call_status(call, form, CallStatus.COMPLETED, tenant_max_retries=3)
     assert call.current_status == CallStatus.COMPLETED.value
-    assert form.status == FormStatus.COMPLETED.value
+    assert form.status == FormStatus.AI_PROCESSING.value
     assert requeued is False
 
 

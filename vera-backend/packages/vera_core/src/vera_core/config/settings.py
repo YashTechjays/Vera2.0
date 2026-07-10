@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # failed even if the room is still alive (wedged worker session). Payer calls
     # with long holds run long — keep this generous.
     call_max_duration_seconds: int = 3 * 3600  # VERA_CALL_MAX_DURATION_SECONDS
+    # Feature gate for the lifecycle's "system auto-retry: low completion" edge
+    # (AI_PROCESSING → IN_QUEUE). OFF until post-call answer extraction exists:
+    # nothing raises completion_pct between calls today, so a retry would redial
+    # up to max_retries times to no benefit. When off, every completed call goes
+    # to EXCEPTION_REVIEW.
+    form_auto_retry_enabled: bool = False  # VERA_FORM_AUTO_RETRY_ENABLED
 
     gcp_project: str | None = None
 

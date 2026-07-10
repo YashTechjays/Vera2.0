@@ -31,12 +31,12 @@ class TestTransitionMap:
             (FormStatus.IN_QUEUE, FormStatus.IN_CALL),
             (FormStatus.IN_QUEUE, FormStatus.EXPIRED),
             (FormStatus.IN_CALL, FormStatus.AI_PROCESSING),
-            (FormStatus.IN_CALL, FormStatus.COMPLETED),
             (FormStatus.IN_CALL, FormStatus.CALL_FAILED),
-            (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
-            (FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED),
+            (FormStatus.AI_PROCESSING, FormStatus.EXCEPTION_REVIEW),
+            (FormStatus.AI_PROCESSING, FormStatus.IN_QUEUE),
             (FormStatus.CALL_FAILED, FormStatus.IN_QUEUE),
             (FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE),
+            (FormStatus.EXCEPTION_REVIEW, FormStatus.COMPLETED),
         ],
     )
     def test_allowed_transitions(self, from_status: FormStatus, to_status: FormStatus) -> None:
@@ -49,6 +49,11 @@ class TestTransitionMap:
             (FormStatus.EXPIRED, FormStatus.IN_QUEUE),
             (FormStatus.IN_QUEUE, FormStatus.COMPLETED),
             (FormStatus.IN_CALL, FormStatus.IN_QUEUE),
+            # COMPLETED is reachable only from EXCEPTION_REVIEW (manual approve) —
+            # a call ending must never complete the form directly.
+            (FormStatus.IN_CALL, FormStatus.COMPLETED),
+            (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
+            (FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED),
             (FormStatus.READY_FOR_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.READY_FOR_PROCESSING, FormStatus.CALL_FAILED),
         ],
@@ -89,6 +94,29 @@ class TestFormStateMachine:
         form = self._make_form(FormStatus.CALL_FAILED, retry_count=5)
         with pytest.raises(InvalidTransitionError, match="retries exhausted"):
             sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+
+    def test_transition_ai_processing_to_in_queue_increments_retry(self) -> None:
+        """The low-completion auto-retry edge is a retry call — it counts against
+        the tenant's retry budget exactly like a CALL_FAILED requeue."""
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.AI_PROCESSING, retry_count=1)
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+        assert form.retry_count == 2
+        assert form.enqueued_at is None
+
+    def test_transition_ai_processing_to_in_queue_blocked_at_max_retries(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.AI_PROCESSING, retry_count=5)
+        with pytest.raises(InvalidTransitionError, match="retries exhausted"):
+            sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+
+    def test_transition_exception_review_to_in_queue_does_not_touch_retry(self) -> None:
+        """Manual requeue from review is an operator decision, not a retry —
+        it must not consume the auto-retry budget."""
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.EXCEPTION_REVIEW, retry_count=5)
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+        assert form.retry_count == 5
 
     def test_invalid_transition_raises(self) -> None:
         sm = FormStateMachine()

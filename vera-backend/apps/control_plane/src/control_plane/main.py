@@ -167,6 +167,7 @@ def create_app(
                 block_ms=settings.worker_events_block_ms,
                 reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
+                form_auto_retry_enabled=settings.form_auto_retry_enabled,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
@@ -184,6 +185,7 @@ def create_app(
                 interval_s=settings.pipeline_sweep_interval_seconds,
                 stuck_grace_s=settings.call_stuck_grace_seconds,
                 max_call_duration_s=settings.call_max_duration_seconds,
+                form_auto_retry_enabled=settings.form_auto_retry_enabled,
             )
             sweeper_task = asyncio.create_task(sweeper.run())
             sweeper_task.add_done_callback(_log_task_exit("pipeline sweeper"))
