@@ -164,13 +164,15 @@ class Range(_Model):
 
 
 # Tokens legal in `date_format` (closed set — extend deliberately): month/day
-# with or without a leading zero, 4- or 2-digit year, `/` `-` `.` separators.
-DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY|YY)(?:[-/.](?:MM?|DD?|YYYY|YY))*$")
+# with or without a leading zero, 4-digit year, `/` `-` `.` separators. No 2-digit
+# year (`YY`): unsafe on a DOB field — "55" is ambiguous between 1955 and 2055 —
+# and never gets any better resolved by adding a pivot-year heuristic, so it's
+# rejected outright rather than silently guessing a century.
+DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY)(?:[-/.](?:MM?|DD?|YYYY))*$")
 
-_DATE_TOKEN_RE = re.compile(r"YYYY|YY|MM?|DD?")
+_DATE_TOKEN_RE = re.compile(r"YYYY|MM?|DD?")
 _DATE_TOKEN_PATTERNS: dict[str, str] = {
     "YYYY": r"(?P<year>\d{4})",
-    "YY": r"(?P<year2>\d{2})",
     "MM": r"(?P<month>\d{2})",
     "M": r"(?P<month>\d{1,2})",
     "DD": r"(?P<day>\d{2})",
@@ -190,12 +192,18 @@ def parse_date_format(text: str, date_format: str) -> date | None:
         pattern += re.escape(date_format[pos : m.start()]) + _DATE_TOKEN_PATTERNS[m.group()]
         pos = m.end()
     pattern += re.escape(date_format[pos:])
-    match = re.fullmatch(pattern, text)
+    try:
+        match = re.fullmatch(pattern, text)
+    except re.error:
+        # A grammar-legal but degenerate date_format (e.g. "M/M/YYYY" — DATE_FORMAT_RE
+        # doesn't forbid a repeated token) builds a pattern with a duplicate named
+        # group, which re.compile rejects. Not this function's contract to raise on
+        # a malformed schema — treat it as "doesn't parse," same as any other mismatch.
+        return None
     if match is None:
         return None
     groups = match.groupdict()
-    month, day = groups.get("month"), groups.get("day")
-    year = groups.get("year") or (str(2000 + int(groups["year2"])) if groups.get("year2") else None)
+    month, day, year = groups.get("month"), groups.get("day"), groups.get("year")
     if month is None or day is None or year is None:
         return None
     try:
@@ -219,7 +227,8 @@ class Validation(_Model):
                 raise ValueError(f"invalid pattern regex: {exc}") from exc
         if self.date_format is not None and not DATE_FORMAT_RE.match(self.date_format):
             raise ValueError(
-                "date_format must combine M/MM, D/DD, YYYY/YY tokens with -/. separators"
+                "date_format must combine M/MM, D/DD, YYYY tokens with -/. separators "
+                "(no YY — a 2-digit year is ambiguous on a date field)"
             )
         return self
 

@@ -8,7 +8,13 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
-from vera_core.forms.dsl import FormSchemaDoc, compile_document, load_document, parse_date_format
+from vera_core.forms.dsl import (
+    FormSchemaDoc,
+    Validation,
+    compile_document,
+    load_document,
+    parse_date_format,
+)
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 
@@ -387,9 +393,6 @@ class TestParseDateFormat:
     def test_parses_dd_mm_yyyy_with_dash_separator(self) -> None:
         assert parse_date_format("04-12-1990", "DD-MM-YYYY") == date(1990, 12, 4)
 
-    def test_parses_two_digit_year(self) -> None:
-        assert parse_date_format("12/4/99", "M/D/YY") == date(2099, 12, 4)
-
     def test_rejects_shape_mismatch(self) -> None:
         assert parse_date_format("1990-04-12", "M/D/YYYY") is None
 
@@ -401,3 +404,20 @@ class TestParseDateFormat:
 
     def test_rejects_empty_string(self) -> None:
         assert parse_date_format("", "M/D/YYYY") is None
+
+    def test_never_raises_on_a_grammar_valid_repeated_token_format(self) -> None:
+        # "M/M/YYYY" passes DATE_FORMAT_RE (repeated tokens aren't shape-illegal)
+        # but would build a regex with two `month` groups — must not crash.
+        assert parse_date_format("12/4/1999", "M/M/YYYY") is None
+
+
+class TestDateFormatRejectsTwoDigitYear:
+    """A 2-digit year is unsafe on a DOB field (e.g. "55" is ambiguous between
+    1955 and 2055) — rejected at schema-authoring time, not just at parse time."""
+
+    def test_yyyy_is_accepted(self) -> None:
+        Validation(date_format="M/D/YYYY")
+
+    def test_yy_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="M/D/YY")
