@@ -88,10 +88,16 @@ class FormStateMachine:
 
         # Guard: retry cap on any source in _RETRY_SOURCES → IN_QUEUE.
         if target == FormStatus.IN_QUEUE and current in _RETRY_SOURCES:
-            if form.retry_count >= tenant_max_retries:
+            if not self.can_retry(form, tenant_max_retries=tenant_max_retries):
                 raise InvalidTransitionError(
                     current.value, target.value, reason="retries exhausted"
                 )
             form.retry_count += 1
 
         form.status = target.value
+
+    def can_retry(self, form: Any, *, tenant_max_retries: int) -> bool:
+        """True when the retry-cap guard would allow another retry (IN_QUEUE hop).
+        The one encoding of the cap comparison — callers deciding retry-vs-review
+        use this instead of re-implementing it."""
+        return bool(form.retry_count < tenant_max_retries)

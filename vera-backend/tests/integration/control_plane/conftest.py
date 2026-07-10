@@ -40,9 +40,6 @@ class FakePostCallBus:
     async def emit(self, job: PostCallJob) -> None:
         self.emitted.append(job)
 
-    async def ensure_group(self) -> None:
-        pass
-
 
 class FakeLiveKit(LiveKitGateway):
     """Minimal LiveKitGateway stand-in for integration tests.

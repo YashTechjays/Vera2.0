@@ -19,7 +19,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
-from vera_core.forms.review import field_labels, retryable_required_paths
+from vera_core.forms.review import (
+    REVIEW_CONFIDENCE_FLOOR,
+    field_labels,
+    retryable_required_paths,
+)
 from vera_core.models import (
     Call,
     CallEvent,
@@ -82,7 +86,7 @@ async def try_dispatch(
     livekit: Any,
     *,
     audit: AuditSink | None = None,
-    retry_floor: int = 70,
+    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -101,11 +105,9 @@ async def try_dispatch(
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
     retry_floor:
-        Confidence floor used to determine which field labels to embed in the
-        RETRY room metadata.  Best-effort prompt guidance only — the
-        authoritative retry-vs-review decision happened earlier in
-        ``evaluate_call``; this floor only shapes which labels are listed.
-        Defaults to 70, matching ``settings.post_call_review_floor``.
+        Confidence floor for which field labels to embed in RETRY room
+        metadata. Best-effort prompt guidance only — the authoritative
+        retry-vs-review decision happened earlier in ``evaluate_call``.
     """
     # 1. Load tenant config.
     tenant = (
@@ -206,6 +208,9 @@ async def try_dispatch(
     )
     metadata = tweak.model_dump(exclude_none=True)
 
+    # Forms in one pass typically share a schema version — fetch each once.
+    schema_versions: dict[UUID, SchemaVersion] = {}
+
     for form in candidates:
         # 4b. Working-hours check.
         if not await _provider_in_hours(session, form):
@@ -238,11 +243,16 @@ async def try_dispatch(
                 call_metadata = metadata
                 parent_call_id = None
                 if call_mode == CallMode.RETRY:
-                    version = (
-                        await session.execute(
-                            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
-                        )
-                    ).scalar_one()
+                    version = schema_versions.get(form.schema_version_id)
+                    if version is None:
+                        version = (
+                            await session.execute(
+                                select(SchemaVersion).where(
+                                    SchemaVersion.id == form.schema_version_id
+                                )
+                            )
+                        ).scalar_one()
+                        schema_versions[form.schema_version_id] = version
                     status_by_path = await load_field_status(session, form.id)
                     paths = retryable_required_paths(
                         status_by_path, version.schema_json, floor=retry_floor

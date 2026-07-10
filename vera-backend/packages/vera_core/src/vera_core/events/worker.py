@@ -11,8 +11,8 @@ from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, TypeAdapter
-from redis.asyncio import Redis
-from redis.exceptions import ResponseError
+
+from vera_core.events.stream_bus import StreamBus
 
 WORKER_EVENTS_STREAM = "vera:worker-events"
 WORKER_EVENTS_GROUP = "control-plane"
@@ -46,29 +46,12 @@ def parse_worker_event(raw: str) -> WorkerEvent:
     return _ADAPTER.validate_json(raw)
 
 
-class WorkerEventBus:
+class WorkerEventBus(StreamBus):
     """XADD publish side (worker) + consumer-group bootstrap. One stream, one group."""
 
-    def __init__(self, redis: Redis, *, maxlen: int = 10_000) -> None:
-        self._redis = redis
-        self._maxlen = maxlen
+    stream = WORKER_EVENTS_STREAM
+    group = WORKER_EVENTS_GROUP
+    payload_field = _EVENT_FIELD
 
     async def emit(self, event: WorkerEvent) -> None:
-        await self._redis.xadd(
-            WORKER_EVENTS_STREAM,
-            {_EVENT_FIELD: event.model_dump_json()},
-            maxlen=self._maxlen,
-            approximate=True,
-        )
-
-    async def ensure_group(self) -> None:
-        try:
-            # id="0" (not "$"): the group starts at the beginning of the stream, so
-            # events published before the group first exists are still delivered
-            # (at-least-once across bootstrap) instead of being silently dropped.
-            await self._redis.xgroup_create(
-                WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, id="0", mkstream=True
-            )
-        except ResponseError as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
+        await self._emit_raw(event.model_dump_json())

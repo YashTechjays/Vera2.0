@@ -47,8 +47,7 @@ from vera_core.forms.review import (
     AnswerRow,
     adjudication_action,
     build_field_views,
-    completion_pct,
-    completion_pct_v2,
+    form_completion_pct,
     normalize_value,
     unwrap_value,
 )
@@ -66,6 +65,7 @@ from vera_core.models.enums import (
     DisputeActionType,
     FormStatus,
 )
+from vera_core.services.field_status import load_current_values
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
 
@@ -631,28 +631,13 @@ async def resolve_disputes(
     # disputes only records the human answers/actions; re-asked fields are surfaced
     # in the audit for the worker, and re-queueing is a manual status change.
     await session.flush()
-    current_values: dict[str, Any] = {
-        path: unwrap_value(value)
-        for path, value in (
-            await session.execute(
-                select(FieldAnswer.field_path, FieldAnswer.value).where(
-                    FieldAnswer.form_id == form_id, FieldAnswer.is_current.is_(True)
-                )
-            )
-        ).all()
-    }
+    current_values = await load_current_values(session, form_id)
     version = (
         await session.execute(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
-    # v2 completion needs the values (applicable_when/required.when evaluate against
-    # them); v1 only needs which paths are filled.
-    form.completion_pct = (
-        completion_pct_v2(current_values, version.schema_json)
-        if is_v2(version.schema_json)
-        else completion_pct(set(current_values), version.schema_json)
-    )
+    form.completion_pct = form_completion_pct(current_values, version.schema_json)
     # Flush BEFORE refresh: refresh() reloads from the DB and DISCARDS pending
     # attribute changes — without this flush the completion update was silently
     # lost. The refresh then reloads server-updated columns (updated_at onupdate)

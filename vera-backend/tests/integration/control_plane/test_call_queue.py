@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from tests.integration.control_plane.conftest import FakePostCallBus, RBACWorld
+from tests.integration.control_plane.conftest import FakeLiveKit, FakePostCallBus, RBACWorld
 from vera_core.db import tenant_session, uuid7
 from vera_core.models import Call, CallLineage, PatientForm, Tenant
 from vera_core.models.authoring import FormSchema, SchemaVersion
@@ -493,22 +493,6 @@ _RETRY_SCHEMA: dict[str, object] = {
 }
 
 
-class _CaptureLiveKit:
-    """Fake LiveKit that records the last metadata passed to create_call_room."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, object] | None]] = []
-
-    async def create_call_room(
-        self, room_name: str, metadata: dict[str, object] | None = None
-    ) -> None:
-        self.calls.append((room_name, metadata))
-
-    @property
-    def last_metadata(self) -> dict[str, object] | None:
-        return self.calls[-1][1] if self.calls else None
-
-
 @dataclass
 class _RetryFormCtx:
     tenant_id: UUID
@@ -664,14 +648,14 @@ async def test_retry_dispatch_attaches_retry_fields_and_lineage(
     CallLineage row linking the new call to the prior completed call."""
     from vera_core.services.queue_dispatcher import try_dispatch
 
-    capture = _CaptureLiveKit()
+    capture = FakeLiveKit()
 
     async with tenant_session(retry_form_ctx.sessionmaker, retry_form_ctx.tenant_id) as session:
         dispatched = await try_dispatch(session, retry_form_ctx.tenant_id, capture)
 
     assert dispatched == 1, "expected exactly one call dispatched"
 
-    md = capture.last_metadata
+    md = capture.dispatch_metadata[-1]
     assert md is not None, "create_call_room must receive metadata"
     assert "retry_fields" in md, f"retry_fields missing from metadata: {md}"
     assert md["retry_fields"], "retry_fields must be non-empty"
@@ -692,8 +676,6 @@ async def test_full_dispatch_does_not_carry_retry_fields(
     Uses the session-scoped FakeLiveKit that is wired into the app; records the
     dispatch_metadata index before/after enqueueing to isolate the metadata for
     this particular call."""
-    from tests.integration.control_plane.conftest import FakeLiveKit
-
     lk: FakeLiveKit = fake_livekit  # type: ignore[assignment]
     calls_before = len(lk.dispatch_metadata)
 
@@ -738,14 +720,14 @@ async def test_retry_dispatch_with_no_unsatisfied_fields_omits_retry_fields(
             )
         )
 
-    capture = _CaptureLiveKit()
+    capture = FakeLiveKit()
 
     async with tenant_session(retry_form_ctx.sessionmaker, retry_form_ctx.tenant_id) as session:
         dispatched = await try_dispatch(session, retry_form_ctx.tenant_id, capture)
 
     assert dispatched == 1, "expected exactly one call dispatched"
 
-    md = capture.last_metadata
+    md = capture.dispatch_metadata[-1]
     assert md is not None, "create_call_room must receive metadata"
     # Empty labels ⇒ retry_fields key omitted ⇒ worker uses the full script.
     assert "retry_fields" not in md, (

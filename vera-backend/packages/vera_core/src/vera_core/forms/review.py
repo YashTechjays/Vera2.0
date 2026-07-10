@@ -23,6 +23,12 @@ from vera_core.forms.conditions import is_applicable, is_required, is_v2, leaf_g
 from vera_core.forms.dsl import COLLECTED_ROLES, FormSchemaDoc
 from vera_core.models.enums import AnswerSource, DisputeActionType
 
+# A judge verdict below this confidence (or unsupported) routes the field to review,
+# and an AI answer below it is not "satisfied" for the retry decision. The single
+# default for the whole post-call pipeline; `settings.post_call_review_floor` overrides
+# it at consumer wiring time.
+REVIEW_CONFIDENCE_FLOOR = 70
+
 
 @dataclass(frozen=True)
 class AnswerRow:
@@ -118,6 +124,14 @@ def completion_pct_v2(values: Mapping[str, Any], schema_json: Mapping[str, Any])
     return round(filled / len(relevant) * 100, 2)
 
 
+def form_completion_pct(values: Mapping[str, Any], schema_json: Mapping[str, Any]) -> float:
+    """Version-gated completion %: v2 evaluates conditions against the values;
+    v1 only needs which paths are filled."""
+    if is_v2(schema_json):
+        return completion_pct_v2(values, schema_json)
+    return completion_pct(set(values), schema_json)
+
+
 def adjudication_action(new_value: Any, current_value: Any, prior_values: Collection[Any]) -> str:
     """Which `DisputeActionType` a human edit represents: ACCEPT (unchanged),
     OVERRIDE (reverted to a known prior value), else CORRECT (a fresh value)."""
@@ -164,18 +178,19 @@ def build_field_views(
 
 @dataclass(frozen=True)
 class FieldStatus:
-    """Immutable snapshot of a field's satisfaction state: filled, source, and AI confidence."""
+    """Immutable snapshot of a filled field's satisfaction state: source and AI
+    confidence. An unfilled field has no status at all (absent from the map)."""
 
-    filled: bool
     source: str | None
     ai_supported: bool | None
     ai_confidence: int | None
 
 
-def is_field_satisfied(status: FieldStatus, *, floor: int) -> bool:
+def is_field_satisfied(status: FieldStatus | None, *, floor: int) -> bool:
     """True when a field's status meets retry-gate requirements: human/intake-sourced
-    (trusted), or AI-sourced with supported language and confidence >= floor."""
-    if not status.filled:
+    (trusted), or AI-sourced with supported language and confidence >= floor.
+    ``None`` means the field is unfilled — never satisfied."""
+    if status is None:
         return False
     if status.source in (AnswerSource.INTAKE.value, AnswerSource.HUMAN.value):
         return True
@@ -205,15 +220,18 @@ def retryable_required_paths(
     status_by_path: Mapping[str, FieldStatus], schema_json: Mapping[str, Any], *, floor: int
 ) -> list[str]:
     """Paths of required, applicable, askable fields that are not yet satisfied.
-    These are the fields a retry call should attempt to fill."""
-    # applicability needs filled-ness only
-    values = {p: "x" for p, s in status_by_path.items() if s.filled}
+    These are the fields a retry call should attempt to fill.
+
+    Conditions are evaluated against presence only (a sentinel stands in for each
+    filled field's value, keeping this path PHI-free): presence-based gates evaluate
+    exactly; a value-comparing gate (``eq``/``in`` …) sees the sentinel and reads as
+    "not matching", so its dependents are treated as inapplicable — a deliberate
+    conservative approximation for the retry nudge, not a general evaluation mode."""
+    values = dict.fromkeys(status_by_path, "x")
     return [
         path
         for path in _required_askable_paths(schema_json, values)
-        if not is_field_satisfied(
-            status_by_path.get(path) or FieldStatus(False, None, None, None), floor=floor
-        )
+        if not is_field_satisfied(status_by_path.get(path), floor=floor)
     ]
 
 

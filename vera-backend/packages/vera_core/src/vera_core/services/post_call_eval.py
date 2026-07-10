@@ -5,7 +5,6 @@ the DB orchestration lives in `evaluate_call` below.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -17,41 +16,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from phi_codec.tokens.token import TOKEN_RE
 from vera_core.audit import AuditRecord, AuditSink
-from vera_core.forms import dsl
-from vera_core.forms.conditions import is_v2
-from vera_core.forms.review import completion_pct, completion_pct_v2, retryable_required_paths
-from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
+from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.review import (
+    REVIEW_CONFIDENCE_FLOOR,
+    form_completion_pct,
+    retryable_required_paths,
+)
+from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import SchemaVersion
 from vera_core.models.enums import AnswerSource, FormStatus
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
-from vera_core.services.field_status import load_field_status
+from vera_core.services.field_status import load_current_values, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
 
 logger = logging.getLogger("vera.post_call_eval")
-
-# A judge verdict below this confidence (or unsupported) routes the field to review.
-REVIEW_CONFIDENCE_FLOOR = 70
-
-PHI_TOKEN_RE = TOKEN_RE
 
 
 def has_phi_token(value: str) -> bool:
     """True if the extracted value still contains a `[[TYPE_N]]` PHI token — meaning the
     LLM surfaced an identifier we cannot safely materialize (no live vault). Such fields
     are routed to review rather than stored as a token."""
-    return PHI_TOKEN_RE.search(value) is not None
-
-
-def needs_review(extracted: ExtractedField, verdict: JudgeVerdict | None, *, floor: int) -> bool:
-    if has_phi_token(extracted.value):
-        return True
-    if verdict is None or not verdict.supported:
-        return True
-    return verdict.confidence < floor
+    return TOKEN_RE.search(value) is not None
 
 
 def evidence_text(turns: list[TranscriptTurn], evidence_seq: int) -> str | None:
@@ -85,18 +74,19 @@ class EvalOutcome:
 # ---------------------------------------------------------------------------
 
 
-async def _demote_current(session: AsyncSession, form_id: UUID, field_path: str) -> None:
-    """Demote any existing current answer for (form, path) — the merge invariant."""
+async def _demote_current(session: AsyncSession, form_id: UUID, field_paths: list[str]) -> None:
+    """Demote any existing current answers for (form, paths) — the merge invariant."""
+    if not field_paths:
+        return
     await session.execute(
         update(FieldAnswer)
         .where(
             FieldAnswer.form_id == form_id,
-            FieldAnswer.field_path == field_path,
+            FieldAnswer.field_path.in_(field_paths),
             FieldAnswer.is_current.is_(True),
         )
         .values(is_current=False)
     )
-    await session.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +181,9 @@ async def evaluate_call(
                 detail=detail,
             )
         )
-        await try_dispatch(session, tenant_id, deps.livekit, audit=deps.audit)
+        await try_dispatch(
+            session, tenant_id, deps.livekit, audit=deps.audit, retry_floor=deps.floor
+        )
         return EvalOutcome(status=target, answers_written=written, reviewed_fields=reviewed)
 
     # (3) No transcript → route to EXCEPTION_REVIEW.
@@ -201,7 +193,7 @@ async def evaluate_call(
         )
 
     # (2) Parse schema — collection paths for extraction.
-    doc = dsl.load_document(json.dumps(version.schema_json))
+    doc = FormSchemaDoc.model_validate(version.schema_json)
     paths = doc.collection_paths()
 
     # (4-5) Extract + persist (skip token-valued fields). Keep each written row so
@@ -219,14 +211,13 @@ async def evaluate_call(
         return await _finish(
             FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="llm_error"
         )
-    token_fields: list[str] = []
-    reviewed: list[str] = []
+    token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
+    clean = [ef for ef in extracted if not has_phi_token(ef.value)]
+    # Demote the outgoing current rows in one statement BEFORE adding their
+    # replacements, so the merge invariant (one current row per path) holds at flush.
+    await _demote_current(session, form_id, [ef.field_path for ef in clean])
     kept: list[tuple[ExtractedField, FieldAnswer]] = []
-    for ef in extracted:
-        if has_phi_token(ef.value):
-            token_fields.append(ef.field_path)
-            continue
-        await _demote_current(session, form_id, ef.field_path)
+    for ef in clean:
         answer = FieldAnswer(
             tenant_id=tenant_id,
             form_id=form_id,
@@ -243,7 +234,8 @@ async def evaluate_call(
         kept.append((ef, answer))
     await session.flush()
 
-    # (6) Judge + write FieldEvaluation; collect further review candidates.
+    # (6) Judge + write FieldEvaluation. The verdicts feed the satisfaction check
+    # below via load_field_status — nothing is decided per-field here.
     try:
         raw_verdicts = await deps.llm.judge(extracted=[ef for ef, _ in kept], turns=turns)
     except Exception as exc:
@@ -272,25 +264,11 @@ async def evaluate_call(
                     supported=v.supported,
                 )
             )
-        if needs_review(ef, v, floor=deps.floor):
-            reviewed.append(ef.field_path)
     await session.flush()
 
     # (7) Recompute completion % from the form's current answers.
-    current_rows = (
-        await session.execute(
-            select(FieldAnswer.field_path, FieldAnswer.value).where(
-                FieldAnswer.form_id == form_id,
-                FieldAnswer.is_current.is_(True),
-            )
-        )
-    ).all()
-    current_values = {row.field_path: row.value["value"] for row in current_rows}
-    form.completion_pct = (
-        completion_pct_v2(current_values, version.schema_json)
-        if is_v2(version.schema_json)
-        else completion_pct(set(current_values), version.schema_json)
-    )
+    current_values = await load_current_values(session, form_id)
+    form.completion_pct = form_completion_pct(current_values, version.schema_json)
 
     # (8) Update call_form_snapshot.after_state (the before_state row was written
     #     by the callback; here we fill in after_state).
@@ -309,8 +287,6 @@ async def evaluate_call(
         )
 
     # (9-12) Decide status, transition, audit, dispatch.
-    status_by_path = await load_field_status(session, form_id)
-    retryable = retryable_required_paths(status_by_path, version.schema_json, floor=deps.floor)
     if token_fields:
         return await _finish(
             FormStatus.EXCEPTION_REVIEW,
@@ -318,9 +294,11 @@ async def evaluate_call(
             reviewed=token_fields,
             reason="token_value",
         )
+    status_by_path = await load_field_status(session, form_id)
+    retryable = retryable_required_paths(status_by_path, version.schema_json, floor=deps.floor)
     if not retryable:
         return await _finish(FormStatus.COMPLETED, written=len(kept), reviewed=[])
-    if form.retry_count < tenant.max_retries:
+    if sm.can_retry(form, tenant_max_retries=tenant.max_retries):
         return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
     return await _finish(
         FormStatus.EXCEPTION_REVIEW,

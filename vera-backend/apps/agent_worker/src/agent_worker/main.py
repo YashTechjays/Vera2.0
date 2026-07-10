@@ -261,10 +261,14 @@ async def entrypoint(ctx: JobContext) -> None:
     await boundary.open_session(session_id)
 
     # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
-    # plane). Fail-safe: bad/missing metadata falls back to the base persona.
+    # plane). Fail-safe: bad/missing metadata falls back to the base persona, and a
+    # malformed retry_fields falls back to the full script.
     tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
-    retry_fields = meta.get("retry_fields") if isinstance(meta, dict) else None
-    instructions = build_instructions(tweak, retry_fields=retry_fields)
+    raw_retry = meta.get("retry_fields") if isinstance(meta, dict) else None
+    retry_fields = raw_retry if isinstance(raw_retry, list) else None
+    instructions = build_instructions(
+        tweak, retry_fields=[str(f) for f in retry_fields] if retry_fields else None
+    )
     greeting = resolve_greeting(tweak)
 
     session = build_session(vad=ctx.proc.userdata.get("vad"))

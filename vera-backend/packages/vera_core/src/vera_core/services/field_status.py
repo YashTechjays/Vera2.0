@@ -1,11 +1,17 @@
-"""Load per-field satisfaction inputs for the retry decision — PHI-free (no values)."""
+"""Readers over a form's current field answers.
 
+`load_field_status` feeds the retry decision and is PHI-free (no value columns).
+`load_current_values` returns the values themselves (PHI — callers never log them);
+it is the single "current values of a form" query for snapshots and completion %.
+"""
+
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vera_core.forms.review import FieldStatus
+from vera_core.forms.review import FieldStatus, unwrap_value
 from vera_core.models.field_answer import FieldAnswer, FieldEvaluation
 
 
@@ -51,8 +57,19 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
         )
     ).all()
     return {
-        path: FieldStatus(
-            filled=True, source=source, ai_supported=supported, ai_confidence=confidence
-        )
+        path: FieldStatus(source=source, ai_supported=supported, ai_confidence=confidence)
         for path, source, confidence, supported in rows
     }
+
+
+async def load_current_values(session: AsyncSession, form_id: UUID) -> dict[str, Any]:
+    """Return {field_path: raw value} for the form's current FieldAnswer rows."""
+    rows = (
+        await session.execute(
+            select(FieldAnswer.field_path, FieldAnswer.value).where(
+                FieldAnswer.form_id == form_id,
+                FieldAnswer.is_current.is_(True),
+            )
+        )
+    ).all()
+    return {path: unwrap_value(value) for path, value in rows}

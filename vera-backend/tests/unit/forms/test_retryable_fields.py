@@ -43,16 +43,12 @@ V2 = {
 }
 
 
-def _unfilled() -> FieldStatus:
-    return FieldStatus(filled=False, source=None, ai_supported=None, ai_confidence=None)
-
-
 def _ai(conf: int, sup: bool = True) -> FieldStatus:
-    return FieldStatus(filled=True, source="ai_call", ai_supported=sup, ai_confidence=conf)
+    return FieldStatus(source="ai_call", ai_supported=sup, ai_confidence=conf)
 
 
 def _human() -> FieldStatus:
-    return FieldStatus(filled=True, source="human", ai_supported=None, ai_confidence=None)
+    return FieldStatus(source="human", ai_supported=None, ai_confidence=None)
 
 
 def test_is_field_satisfied_rules() -> None:
@@ -60,13 +56,13 @@ def test_is_field_satisfied_rules() -> None:
     assert is_field_satisfied(_ai(90), floor=FLOOR) is True  # ai supported, >=70
     assert is_field_satisfied(_ai(60), floor=FLOOR) is False  # ai <70
     assert is_field_satisfied(_ai(90, sup=False), floor=FLOOR) is False  # unsupported
-    assert is_field_satisfied(_unfilled(), floor=FLOOR) is False
+    assert is_field_satisfied(None, floor=FLOOR) is False  # unfilled (no status)
 
 
 def test_retryable_only_unsatisfied_askable_required() -> None:
     p = "sections.cov.network_status"
-    # unfilled required askable -> retryable
-    assert retryable_required_paths({p: _unfilled()}, V2, floor=FLOOR) == [p]
+    # unfilled (absent from the status map) required askable -> retryable
+    assert retryable_required_paths({}, V2, floor=FLOOR) == [p]
     # low-conf ai_call required askable -> retryable
     assert retryable_required_paths({p: _ai(50)}, V2, floor=FLOOR) == [p]
     # satisfied -> not retryable

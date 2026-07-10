@@ -17,7 +17,6 @@ async def test_load_field_status_maps_source_conf_supported(
     assert status["cov.a"].source == "ai_call"
     assert status["cov.a"].ai_confidence == 55
     assert status["cov.a"].ai_supported is False
-    assert status["cov.a"].filled is True
     # cov.b: human answer with no evaluation
     assert status["cov.b"].source == "human"
     assert status["cov.b"].ai_supported is None

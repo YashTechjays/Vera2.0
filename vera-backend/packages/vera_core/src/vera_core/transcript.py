@@ -37,6 +37,14 @@ class TranscriptEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
+def _event_from_fields(fields: dict[str, str]) -> TranscriptEvent | None:
+    """Decode one stream entry's fields; None for the ended sentinel.
+    The single wire-format decode rule shared by both stores."""
+    if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
+        return None
+    return TranscriptEvent(role=fields["role"], text=fields["text"], ts=int(fields["ts"]))
+
+
 class TranscriptStore(Protocol):
     """Low-level transport. Callers use TranscriptService, not this directly."""
 
@@ -44,7 +52,7 @@ class TranscriptStore(Protocol):
     async def mark_ended(self, room_name: str) -> None: ...
     async def delete(self, room_name: str) -> None: ...
     def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]: ...
-    async def snapshot(self, room_name: str) -> list[tuple[str, TranscriptEvent]]: ...
+    async def snapshot(self, room_name: str) -> list[TranscriptEvent]: ...
 
 
 class InMemoryTranscriptStore:
@@ -86,33 +94,16 @@ class InMemoryTranscriptStore:
                     await self._cond.wait()
                 entry_id, fields = self._entries[key][idx]
                 idx += 1
-            if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
+            event = _event_from_fields(fields)
+            if event is None:
                 return
-            yield (
-                entry_id,
-                TranscriptEvent(
-                    role=fields["role"],
-                    text=fields["text"],
-                    ts=int(fields["ts"]),
-                ),
-            )
+            yield (entry_id, event)
 
-    async def snapshot(self, room_name: str) -> list[tuple[str, TranscriptEvent]]:
+    async def snapshot(self, room_name: str) -> list[TranscriptEvent]:
         key = transcript_stream_key(room_name)
-        out: list[tuple[str, TranscriptEvent]] = []
         async with self._cond:
-            for entry_id, fields in self._entries.get(key, []):
-                if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
-                    continue
-                out.append(
-                    (
-                        entry_id,
-                        TranscriptEvent(
-                            role=fields["role"], text=fields["text"], ts=int(fields["ts"])
-                        ),
-                    )
-                )
-        return out
+            entries = list(self._entries.get(key, []))
+        return [event for _id, fields in entries if (event := _event_from_fields(fields))]
 
 
 class RedisTranscriptStore:
@@ -182,34 +173,18 @@ class RedisTranscriptStore:
             _stream, entries = xread_result[0]
             for entry_id, fields in entries:
                 last_id = entry_id
-                if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
+                event = _event_from_fields(fields)
+                if event is None:
                     return
-                yield (
-                    entry_id,
-                    TranscriptEvent(
-                        role=fields["role"],
-                        text=fields["text"],
-                        ts=int(fields["ts"]),
-                    ),
-                )
+                yield (entry_id, event)
 
-    async def snapshot(self, room_name: str) -> list[tuple[str, TranscriptEvent]]:
+    async def snapshot(self, room_name: str) -> list[TranscriptEvent]:
         key = transcript_stream_key(room_name)
         entries = cast(
             list[tuple[str, dict[str, str]]],
             await self._redis.xrange(key),
         )
-        out: list[tuple[str, TranscriptEvent]] = []
-        for entry_id, fields in entries:
-            if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
-                continue
-            out.append(
-                (
-                    entry_id,
-                    TranscriptEvent(role=fields["role"], text=fields["text"], ts=int(fields["ts"])),
-                )
-            )
-        return out
+        return [event for _id, fields in entries if (event := _event_from_fields(fields))]
 
 
 class TranscriptService:
@@ -258,4 +233,4 @@ class TranscriptService:
     async def snapshot(self, room_name: str) -> list[TranscriptEvent]:
         """One-shot, non-blocking drain of the current stream (post-call re-read).
         Unlike consume()/collect(), returns even if the ended sentinel is absent."""
-        return [event for _id, event in await self._store.snapshot(room_name)]
+        return await self._store.snapshot(room_name)

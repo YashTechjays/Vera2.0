@@ -11,13 +11,11 @@ in each handler.
 
 import contextlib
 import logging
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.common import Audit, LiveKit, PostCallBus, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
@@ -37,7 +35,7 @@ from vera_core.events import PostCallJob
 from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
-from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer
+from vera_core.models.field_answer import CallFormSnapshot
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import (
     CallSummary,
@@ -46,6 +44,7 @@ from vera_core.schemas import (
     RevokeAccessRequest,
     StartCallRequest,
 )
+from vera_core.services.field_status import load_current_values
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
 
@@ -66,19 +65,6 @@ _ACTIVE_STATUSES = (
 def _supervisor_identity(user_id: UUID) -> str:
     """LiveKit participant identity for a VA joining/intervening on a call."""
     return f"supervisor-{user_id}"
-
-
-async def _current_values(session: AsyncSession, form_id: UUID) -> dict[str, Any]:
-    """Return {field_path: value} for the form's current FieldAnswer rows."""
-    rows = (
-        await session.execute(
-            select(FieldAnswer.field_path, FieldAnswer.value).where(
-                FieldAnswer.form_id == form_id,
-                FieldAnswer.is_current.is_(True),
-            )
-        )
-    ).all()
-    return {fp: v["value"] for fp, v in rows}
 
 
 def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
@@ -507,7 +493,7 @@ async def update_call_status(
     # second call on the same form already moved it). Log and continue.
     try:
         if body.status == CallStatus.COMPLETED:
-            before_state = await _current_values(session, form.id)
+            before_state = await load_current_values(session, form.id)
             sm.transition(form, FormStatus.AI_PROCESSING, tenant_max_retries=tenant.max_retries)
             session.add(
                 CallFormSnapshot(
@@ -561,7 +547,10 @@ async def update_call_status(
     if form.status == FormStatus.AI_PROCESSING.value:
         await post_call_bus.emit(PostCallJob(tenant_id=tenant_id, form_id=form.id, call_id=call.id))
 
-    # Fire the dispatcher — a concurrency slot just freed up.
-    await try_dispatch(session, tenant_id, livekit, audit=audit)
+    # Fire the dispatcher — but not when the form moved to AI_PROCESSING: it still
+    # holds its concurrency slot there, so no capacity freed; evaluate_call runs the
+    # dispatcher itself once it releases the form.
+    if form.status != FormStatus.AI_PROCESSING.value:
+        await try_dispatch(session, tenant_id, livekit, audit=audit)
 
     return ok(_summary(call, form.patient_name, caller.user_id))
