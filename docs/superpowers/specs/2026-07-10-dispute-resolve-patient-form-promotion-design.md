@@ -179,28 +179,43 @@ spurious `updated_at` churn on every resolve call.
 `doc` (the `FormSchemaDoc`) is parsed once from `version.schema_json`, reusing the same
 parse the endpoint already needs for `completion_pct_v2`/`is_v2`.
 
-## 7. Drop `PatientForm.member_id`
+## 7. Collapse `member_id`/`member_policy_id` into one column, named `member_id`
 
-- Migration (new alembic revision, `DROP COLUMN IF EXISTS member_id` — idempotent per
-  the repo's dual-path migration rule, since a fresh DB built from `0001`'s `create_all`
-  after this change never has the column at all).
-- Remove `member_id` from the `PatientForm` model
-  (`vera_core/models/patient_form.py:66`).
-- Remove `member_id` from `PromotedIdentifiers` and its two call sites
-  (`patient_forms.py:154`, `scripts/seed_patient_data.py:242`).
-- Remove `member_id` from the `PatientFormDetail`/list response schemas and their
-  construction (`patient_forms.py:278`, `:397`), and the matching frontend type
-  (`vera-frontend/src/lib/patient-forms/types.ts:78`) — unused there (no `.member_id`
-  reader), so a type-only deletion.
+**Superseded from a plain drop, per a follow-up decision in conversation (2026-07-10):**
+rather than only dropping the dead `member_id` and leaving the live column named
+`member_policy_id`, rename the live column to `member_id` too — so the schema handle
+(`system_fields["member_id"]`), the `promoted_fields` key, the DB column, and the API
+field all say the same thing end to end. That mismatch (schema calls the concept
+"member_id"; the promoted column was called "member_policy_id") was part of what made
+this area confusing in the first place.
 
-**Do not touch `system_fields["member_id"]`** in either catalog. It's a same-named but
-unrelated concept: a schema handle that hydrates the `{{member_id}}` placeholder actually
-spoken during the call (`ibv_standard.py`'s introduction task prompt references
-`{{member_id}}` twice, e.g. "provide the member ID {{member_id}}"). Removing it would
-break placeholder validation (`dsl.py`'s "unknown placeholder" check) and the live call
-prompt. It coincidentally shares a name with the DB column being dropped here but serves
-a completely different purpose — leave every `system_fields` entry in both catalogs
-exactly as-is.
+- One migration: drop the dead old `member_id` column, then rename `member_policy_id` to
+  `member_id`. Dual-path-safe: guarded on `member_policy_id` still existing, so it's a
+  no-op on a fresh DB (`0001`'s `create_all` off the already-renamed model creates the
+  final `member_id` shape directly) and a drop-then-rename on an existing dev DB.
+- `PatientForm` model: one `member_id` field (`vera_core/models/patient_form.py`),
+  replacing both the old dead field and `member_policy_id`.
+- `PromotedIdentifiers.member_id` replaces both the old always-`None` `member_id` field
+  and `member_policy_id`.
+- `PatientFormDetail` (the dispute-resolve/detail response): its `member_id` field is
+  removed with **no replacement** — it only ever exposed the dead column, and the detail
+  view doesn't otherwise surface this identifier (only the worklist summary does).
+- `PatientFormSummary` (the worklist list response) and the frontend
+  (`vera-frontend/src/lib/patient-forms/types.ts`,
+  `vera-frontend/src/pages/DataManagement.tsx`): `member_policy_id` renamed to
+  `member_id`.
+- Both catalogs' `promoted_fields` (§8) are written directly in this final shape — keyed
+  `"member_id"`, not `"member_policy_id"` — so they don't need a second edit.
+
+**Still do not touch `system_fields["member_id"]`** in either catalog — unchanged from
+the original reasoning: it's the handle that hydrates the `{{member_id}}` placeholder
+actually spoken during the call (`ibv_standard.py`'s introduction task prompt references
+it twice, e.g. "provide the member ID {{member_id}}"). The rename above makes the DB
+column finally *agree* with this handle's name instead of colliding with it.
+
+`system_fields["policy_id"]` (both catalogs) — a pure duplicate of `system_fields["member_id"]`,
+same target path, no distinct consumer (nothing renders `{{policy_id}}`) — is dropped for
+the same coherence reason (§8).
 
 ## 8. Catalog updates
 
@@ -215,20 +230,23 @@ promoted_fields={
     "chart_number": "sections.patient_information.chart_number",
     "appointment_date": "sections.appointment_information.appointment_date",
     "appointment_type": "sections.appointment_information.appointment_type",
-    "member_policy_id": "sections.insurance_information.policy_number",
+    "member_id": "sections.insurance_information.policy_number",
     "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
     "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
 },
 ```
 
-`disease_only.py` adds `promoted_fields` for only what it has data for — it has no
-appointment/insurance sections:
+`disease_only.py` adds `promoted_fields` for what it has data for — it has a
+`policy_details.policy_number` field (same shape as `ibv_standard`'s
+`insurance_information.policy_number`) but no appointment/insurance-*reference*
+sections:
 
 ```python
 promoted_fields={
     "patient_name": "sections.patient_information.patient_name",
     "patient_dob": "sections.patient_information.patient_dob",
     "chart_number": "sections.patient_information.chart_number",
+    "member_id": "sections.policy_details.policy_number",
 },
 ```
 
