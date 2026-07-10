@@ -93,6 +93,13 @@ class PatientFormResponse(BaseModel):
     created_at: datetime
 
 
+def _v2_doc(schema_json: dict[str, Any]) -> FormSchemaDoc | None:
+    """The parsed v2 document, or `None` for a legacy v1 schema — the single "is this
+    v2, and if so hand me the doc" check shared by intake and dispute-resolve column
+    promotion (both call `promote_columns` against it)."""
+    return FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
+
+
 @router.post(
     "/patient-forms",
     response_model=ResponseModel[PatientFormResponse],
@@ -136,10 +143,9 @@ async def upload_patient_form(
                 message="missing required fields",
                 data={"fields": missing},
             )
-        v2 = is_v2(version.schema_json)
+        doc = _v2_doc(version.schema_json)
         promoted = PromotedIdentifiers()
-        if v2:
-            doc = FormSchemaDoc.model_validate(version.schema_json)
+        if doc is not None:
             try:
                 promoted = promote_columns(lambda p: resolve_path(body.intake_payload, p), doc)
             except InvalidIntakeValue as exc:
@@ -171,7 +177,7 @@ async def upload_patient_form(
         # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
         # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
         # payload (nested by section_key) is flattened under a `sections` root.
-        payload_root = {"sections": body.intake_payload} if v2 else body.intake_payload
+        payload_root = {"sections": body.intake_payload} if doc is not None else body.intake_payload
         answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(
@@ -653,12 +659,11 @@ async def resolve_disputes(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
-    v2 = is_v2(version.schema_json)
+    doc = _v2_doc(version.schema_json)
     # Re-derive promoted patient_form columns from the post-write current answers —
     # any resolve call that changes a promoted field's value (dispute or plain edit)
     # keeps the worklist columns in sync, not just intake (2026-07-10 design doc).
-    if v2:
-        doc = FormSchemaDoc.model_validate(version.schema_json)
+    if doc is not None:
         promoted = promote_columns(current_values.get, doc)
         for column in doc.promoted_fields or {}:
             new_value = getattr(promoted, column)
@@ -668,7 +673,7 @@ async def resolve_disputes(
     # them); v1 only needs which paths are filled.
     form.completion_pct = (
         completion_pct_v2(current_values, version.schema_json)
-        if v2
+        if doc is not None
         else completion_pct(set(current_values), version.schema_json)
     )
     # Flush BEFORE refresh: refresh() reloads from the DB and DISCARDS pending
