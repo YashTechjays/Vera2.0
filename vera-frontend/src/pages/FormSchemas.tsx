@@ -173,7 +173,7 @@ export function FormSchemas() {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Insurance type</TableHead>
-              <TableHead>Form type ID</TableHead>
+              <TableHead>Form schema ID</TableHead>
               <TableHead>Active version</TableHead>
               <TableHead>Versions</TableHead>
               <TableHead>Created</TableHead>
@@ -202,7 +202,7 @@ export function FormSchemas() {
                   {humanize(s.insurance_type)}
                 </TableCell>
                 <TableCell>
-                  <CopyableId value={s.id} label="form type ID" />
+                  <CopyableId value={s.id} label="form schema ID" />
                 </TableCell>
                 <TableCell>
                   {s.active_version !== null ? (
@@ -234,8 +234,9 @@ export function FormSchemas() {
               {viewing ? `${viewing.name} — versions` : "Versions"}
             </DialogTitle>
             <DialogDescription>
-              The published version is the active schema used for new intakes. Use the IDs
-              here as an intake payload's form_type_id (the schema) and schema_version_id.
+              The published version is the active schema used for new intakes. In an intake
+              payload, the form schema ID goes in form_type_id and the version ID in
+              schema_version_id.
             </DialogDescription>
           </DialogHeader>
           {dialogError && (
