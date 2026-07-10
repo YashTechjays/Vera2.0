@@ -653,11 +653,22 @@ async def resolve_disputes(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
+    v2 = is_v2(version.schema_json)
+    # Re-derive promoted patient_form columns from the post-write current answers —
+    # any resolve call that changes a promoted field's value (dispute or plain edit)
+    # keeps the worklist columns in sync, not just intake (2026-07-10 design doc).
+    if v2:
+        doc = FormSchemaDoc.model_validate(version.schema_json)
+        promoted = promote_columns(current_values.get, doc)
+        for column in doc.promoted_fields or {}:
+            new_value = getattr(promoted, column)
+            if getattr(form, column) != new_value:
+                setattr(form, column, new_value)
     # v2 completion needs the values (applicable_when/required.when evaluate against
     # them); v1 only needs which paths are filled.
     form.completion_pct = (
         completion_pct_v2(current_values, version.schema_json)
-        if is_v2(version.schema_json)
+        if v2
         else completion_pct(set(current_values), version.schema_json)
     )
     # Flush BEFORE refresh: refresh() reloads from the DB and DISCARDS pending

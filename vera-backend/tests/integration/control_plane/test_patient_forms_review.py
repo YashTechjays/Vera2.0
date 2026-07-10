@@ -181,6 +181,55 @@ async def dispute_form(
     )
 
 
+INSURANCE_PROVIDER_NAME = "sections.insurance_reference_information.insurance_provider_name"
+
+
+async def _make_form_with_promoted_field(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    schema_version_id: UUID,
+) -> UUID:
+    """A form whose current insurance_provider_name answer disagrees with the
+    already-promoted patient_form.insurance_provider column — the bug this task fixes."""
+    async with sm() as s, s.begin():
+        form = PatientForm(
+            tenant_id=tenant_id,
+            schema_version_id=schema_version_id,
+            status=FormStatus.EXCEPTION_REVIEW.value,
+            intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
+            patient_name="jane doe",
+            insurance_provider="Stale Provider",
+            completion_pct=0,
+            retry_count=0,
+        )
+        s.add(form)
+        await s.flush()
+        s.add(
+            FieldAnswer(
+                tenant_id=tenant_id,
+                form_id=form.id,
+                field_path=INSURANCE_PROVIDER_NAME,
+                value={"value": "Stale Provider"},
+                source=AnswerSource.INTAKE.value,
+                is_current=True,
+            )
+        )
+        return form.id
+
+
+@pytest.fixture
+async def promoted_field_form(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> UUID:
+    return await _make_form_with_promoted_field(
+        admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+    )
+
+
 # ---- list -------------------------------------------------------------------
 
 
@@ -458,6 +507,46 @@ async def test_resolve_requires_forms_write(
         json={"form_data": {}},
     )
     assert resp.status_code == 403, resp.text
+
+
+async def test_resolve_promotes_the_patient_form_column(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PROVIDER_NAME: "Corrected Provider"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider == "Corrected Provider"
+
+
+async def test_resolve_leaves_promoted_columns_untouched_for_a_non_promoted_field(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_verification.patient_on_plan": "Yes"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider == "Stale Provider"  # unchanged
 
 
 # ---- baseline-derived dispute behavior --------------------------------------
