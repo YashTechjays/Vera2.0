@@ -24,6 +24,62 @@
     "doctor_name": "sections.provider_reference_information.provider_name",
     "doctor_npi": "sections.provider_reference_information.npi"
   },
+  "stt_key_terms": [
+    "intrauterine insemination",
+    "IUI",
+    "in vitro fertilization",
+    "IVF",
+    "ovulation induction",
+    "egg cryopreservation",
+    "embryo cryopreservation",
+    "frozen embryo transfer",
+    "embryo biopsy",
+    "semen analysis",
+    "sperm cryopreservation",
+    "infertility",
+    "coinsurance",
+    "copay",
+    "deductible",
+    "out-of-pocket maximum",
+    "lifetime maximum",
+    "prior authorization",
+    "coordination of benefits",
+    "policy situs",
+    "PPO",
+    "HMO",
+    "EPO",
+    "POS",
+    "self insured",
+    "fully funded",
+    "benefit year",
+    "plan year",
+    "telehealth",
+    "PCP referral",
+    "infertility plan mandate",
+    "cycle limit",
+    "pharmacy benefit manager",
+    "third party administrator",
+    "specialty pharmacy",
+    "member ID",
+    "group number",
+    "NPI",
+    "tax ID",
+    "covered",
+    "not covered",
+    "in network",
+    "out of network",
+    "individual",
+    "family",
+    "spouse",
+    "dependent",
+    "primary",
+    "secondary",
+    "tertiary",
+    "small group",
+    "large group",
+    "no limit",
+    "unlimited"
+  ],
   "shared_conditions": {
     "family_coverage": {
       "field": "sections.benefit_coverage.coverage_type",
@@ -245,7 +301,10 @@
           "applicable_when": {
             "ref": "family_coverage"
           },
-          "confirm_in_task": "insurance_basics",
+          "confirm_in_task": {
+            "task_key": "insurance_basics",
+            "confirm_immediate": true
+          },
           "prompt": {
             "confirm": "Can we also check the spouse on the plan? I have the spouse listed as {{value}} — can you confirm that is correct?"
           }
@@ -266,7 +325,10 @@
           "applicable_when": {
             "ref": "family_coverage"
           },
-          "confirm_in_task": "insurance_basics",
+          "confirm_in_task": {
+            "task_key": "insurance_basics",
+            "confirm_immediate": true
+          },
           "prompt": {
             "confirm": "And the spouse's date of birth I have is {{value}} — is that right?"
           }
@@ -405,6 +467,25 @@
           "type": "text",
           "title": "Office Location",
           "role": "context"
+        }
+      }
+    },
+    "patient_verification": {
+      "title": "Patient Verification",
+      "description": "Outcome of the call-opening membership check. Recorded during the introduction task; a denial terminates the call via the patient_not_on_plan flow rule.",
+      "fields": {
+        "patient_on_plan": {
+          "type": "enum",
+          "title": "Patient On Plan",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Yes",
+            "No"
+          ],
+          "prompt": {
+            "ask": "Can you confirm the patient is on this plan?"
+          }
         }
       }
     },
@@ -5030,6 +5111,16 @@
   },
   "tasks": [
     {
+      "task_key": "introduction",
+      "title": "Introduction & Patient Verification",
+      "intro": "Hello, I'm VERA, an AI Virtual Assistant... calling from {{hospital_name}}, on behalf of Dr. {{doctor_name}}. Before we begin... I'd like to let you know that this call is being recorded for quality and training purposes. Also, please note that... this call is supervised by my human manager, {{verified_by}}, who may intervene if necessary. I'm looking at the details for... {{patient_name}}, date of birth {{patient_dob}}. Could you let me know if this matches the name on the plan?",
+      "outro": "Great, let me pull up my questions...",
+      "prompt": "Deliver the introduction exactly once, calmly; if interrupted, continue from where you left off — never restart it. Wait for the representative to confirm they can see the patient AND introduce themselves. 'Let me check', 'hold on', 'one moment', 'give me a second' and similar are NOT confirmations — say 'Take your time' once, then stay silent until they return. A bare 'yes' without the representative introducing themselves is NOT a confirmation — keep waiting. If the representative cannot find the patient, provide the member ID {{member_id}} and the insurance provider {{insurance_provider_name}}. If the representative asks questions to verify the call is legitimate, answer from these details: patient {{patient_name}}, date of birth {{patient_dob}}, member ID {{member_id}}, facility {{hospital_name}} at {{hospital_address}}, facility NPI {{hospital_npi}}, tax ID {{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} with NPI {{doctor_npi}}, callback number {{callback_number}}. Record Patient On Plan as 'No' ONLY after those details have been provided and the representative still denies the patient is on the plan — then wrap up politely. After this task, never re-introduce yourself for the rest of the call.",
+      "sections": [
+        "patient_verification"
+      ]
+    },
+    {
       "task_key": "insurance_basics",
       "title": "Insurance Basics",
       "outro": "Perfect, that covers the plan basics. Give me just a moment to note all of that down.",
@@ -5078,7 +5169,7 @@
       "task_key": "closing_admin",
       "title": "Administrative Details",
       "intro": "Just a few more questions about administrative details.",
-      "outro": "Perfect, I have all the administrative details I need. One second please.",
+      "outro": "Perfect, I have all the administrative details I need. Let me take a quick moment to review my notes and make sure I haven't missed anything. One moment please.",
       "prompt": "Close out enrollment, authorization and third-party administration details. Ask the existence gate first and skip the contact questions when the entity does not exist.",
       "sections": [
         "enrollment",
@@ -5092,13 +5183,26 @@
     {
       "task_key": "wrap_up",
       "title": "Wrap Up",
-      "prompt": "Always run last, even on early termination: capture the representative's name and a call reference number before ending the call politely.",
+      "intro": "Thanks so much for your patience — that covers everything on my list.",
+      "outro": "That's everything I need today. Thank you so much for all your help — have a wonderful day!",
+      "prompt": "Always run last, even on early termination: capture the representative's name and a call reference number before ending the call politely. Both are critical fields and must be actual values — never accept 'None', 'Unknown', 'Not provided' or any placeholder; politely re-ask until the representative provides them. Ask for them only once every remaining question has been resolved.",
       "sections": [
         "insurance_representative"
       ]
     }
   ],
   "flow_rules": [
+    {
+      "rule_key": "patient_not_on_plan",
+      "when": {
+        "field": "sections.patient_verification.patient_on_plan",
+        "op": "eq",
+        "value": "No"
+      },
+      "action": "terminate_call",
+      "skip_to_task": "wrap_up",
+      "note": "The representative denied the patient is on the plan even after the member ID, insurance provider and verification details were provided. Skip all remaining tasks, collect the representative name and call reference number, then end the call."
+    },
     {
       "rule_key": "no_out_of_network_coverage",
       "when": {

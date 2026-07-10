@@ -25,8 +25,26 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+# {{token}} placeholders in task-level text; token = a system_fields key or the
+# root-anchored path of a context-role leaf (2026-07-08 spec §4).
+PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
+# A complete {{…}} pair whose innards did NOT parse as a token above — e.g.
+# "{{ member_id }}" (inner whitespace) or "{{patient-name}}" (bad chars). These
+# are operator typos that would otherwise reach the spoken prompt as literal
+# braces, so validation flags them. A lone unclosed "{{" stays legal literal
+# text (2026-07-06 spec §8).
+_MALFORMED_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]*\}\}")
+
+
+def malformed_placeholders(text: str) -> list[str]:
+    """Brace pairs that look like placeholders but fail PLACEHOLDER_RE, in
+    document order. Valid tokens are stripped first so only leftovers report."""
+    return _MALFORMED_PLACEHOLDER_RE.findall(PLACEHOLDER_RE.sub("", text))
+
+
 PATH_PREFIX = "sections."
 MAX_PATH_LENGTH = 255
+MAX_STT_KEY_TERMS = 100  # Deepgram keyterm-prompting limit
 
 SectionRole = Literal["collect", "context", "ui_only"]
 LeafRole = Literal["ask", "confirm", "context", "readonly", "input"]
@@ -76,6 +94,40 @@ class RefCondition(_Model):
 
 
 Condition = Comparison | AllCondition | AnyCondition | NotCondition | RefCondition
+
+
+def condition_field_paths(
+    cond: Condition, shared: dict[str, Condition] | None, depth: int = 0
+) -> Iterator[str]:
+    """Every leaf path a condition references, shared refs expanded."""
+    if depth > 10:
+        return
+    match cond:
+        case Comparison(field=field):
+            yield field
+        case RefCondition(ref=ref):
+            if shared and ref in shared:
+                yield from condition_field_paths(shared[ref], shared, depth + 1)
+        case AllCondition(all=subs) | AnyCondition(any=subs):
+            for sub in subs:
+                yield from condition_field_paths(sub, shared, depth + 1)
+        case NotCondition(not_=sub):
+            yield from condition_field_paths(sub, shared, depth + 1)
+
+
+class ConfirmInTask(_Model):
+    """Where and when a context-section confirm field is spoken (2026-07-08 spec §3.4)."""
+
+    task_key: str = Field(description="The task during which this confirmation is spoken.")
+    confirm_immediate: bool = Field(
+        default=False,
+        description=(
+            "True: speak the confirmation immediately after the anchor question — "
+            "the last collectable leaf in the named task referenced by this "
+            "field's applicable_when gate chain — is answered and the gate holds. "
+            "False: speak it at the end of the named task."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +214,7 @@ class Leaf(_Model):
     inapplicable_value: str | None = None
     applicable_when: Condition | None = None
     derive: Derive | None = None
-    confirm_in_task: str | None = None
+    confirm_in_task: ConfirmInTask | None = None
     codes: Codes | None = None
     prompt: FieldPrompt | None = None
     ui: Ui | None = None
@@ -262,12 +314,19 @@ class Section(_Model):
 
 
 class Task(_Model):
+    """One LiveKit AgentTask.
+
+    ``intro``/``outro`` are spoken verbatim on task entry/exit (TTS-safe text);
+    ``prompt`` is supplied directly as the agent's task instructions. All three
+    may embed ``{{system_field_key}}`` placeholders, hydrated per patient form
+    at task creation and validated against ``system_fields`` below. ``sections``
+    may be empty for ritual tasks that collect nothing.
+    """
+
     task_key: str
     title: str
     intro: str | None = None
     outro: str | None = None
-    # Task-level agent instructions; the prompt compiler folds this into the
-    # task's composite prompt ahead of the schema-derived question list.
     prompt: str | None = None
     sections: list[str]
     applicable_when: Condition | None = None
@@ -302,6 +361,9 @@ class FormSchemaDoc(_Model):
     insurance_type: str
     description: str | None = None
     system_fields: dict[str, str] | None = None
+    # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
+    # at voice-session build; applies to every task. Static domain terms only.
+    stt_key_terms: list[str] | None = None
     shared_conditions: dict[str, Condition] | None = None
     sections: dict[str, Section]
     tasks: list[Task]
@@ -374,19 +436,26 @@ class FormSchemaDoc(_Model):
                 errors.append(f"{where}: bad key {key!r}")
 
         # fields, roles, gating
+        immediate_confirms: list[tuple[str, ConfirmInTask, tuple[Condition, ...]]] = []
+
         def walk_fields(
-            prefix: str, fields: dict[str, FormField], section: Section, gated: bool
+            prefix: str,
+            fields: dict[str, FormField],
+            section: Section,
+            chain: tuple[Condition, ...],
         ) -> None:
             for key, field in fields.items():
                 path = f"{prefix}.{key}"
                 check_key(path, key)
                 if len(path) > MAX_PATH_LENGTH:
                     errors.append(f"{path}: exceeds {MAX_PATH_LENGTH} chars")
-                field_gated = gated or field.applicable_when is not None
+                field_chain = (
+                    (*chain, field.applicable_when) if field.applicable_when is not None else chain
+                )
                 if field.applicable_when is not None:
                     check_condition(f"{path}.applicable_when", field.applicable_when)
                 if isinstance(field, Group):
-                    walk_fields(path, field.fields, section, field_gated)
+                    walk_fields(path, field.fields, section, field_chain)
                     continue
                 if (
                     field.role in COLLECTED_ROLES
@@ -397,16 +466,21 @@ class FormSchemaDoc(_Model):
                         f"{path}: role {field.role} outside a collect section "
                         "requires confirm_in_task"
                     )
-                if field.confirm_in_task is not None and field.confirm_in_task not in task_keys:
+                if (
+                    field.confirm_in_task is not None
+                    and field.confirm_in_task.task_key not in task_keys
+                ):
                     errors.append(f"{path}: confirm_in_task references unknown task")
                 if isinstance(field.required, RequiredWhen):
                     check_condition(f"{path}.required.when", field.required.when)
                 if field.derive is not None:
                     check_condition(f"{path}.derive.when", field.derive.when)
-                if field.inapplicable_value is not None and not field_gated:
+                if field.inapplicable_value is not None and not field_chain:
                     errors.append(
                         f"{path}: inapplicable_value without applicable_when on self or ancestor"
                     )
+                if field.confirm_in_task is not None and field.confirm_in_task.confirm_immediate:
+                    immediate_confirms.append((path, field.confirm_in_task, field_chain))
 
         for section_key, section in self.sections.items():
             check_key(f"section {section_key}", section_key)
@@ -416,7 +490,7 @@ class FormSchemaDoc(_Model):
                 f"{PATH_PREFIX}{section_key}",
                 section.fields,
                 section,
-                section.applicable_when is not None,
+                (section.applicable_when,) if section.applicable_when is not None else (),
             )
 
         # shared conditions
@@ -426,6 +500,7 @@ class FormSchemaDoc(_Model):
 
         # tasks: every collect section in exactly one task
         assigned: list[str] = []
+        context_paths = {p for p, leaf in leaves.items() if leaf.role == "context"}
         for task in self.tasks:
             check_key(f"task {task.task_key}", task.task_key)
             if task.applicable_when is not None:
@@ -443,11 +518,40 @@ class FormSchemaDoc(_Model):
                         f"task {task.task_key}: section {skey!r} has role "
                         f"{task_section.role!r}, only collect sections belong to tasks"
                     )
+            for attr in ("intro", "outro", "prompt"):
+                text: str | None = getattr(task, attr)
+                for token in PLACEHOLDER_RE.findall(text or ""):
+                    if token not in (self.system_fields or {}) and token not in context_paths:
+                        errors.append(
+                            f"task {task.task_key}.{attr}: unknown placeholder "
+                            f"{{{{{token}}}}} (not a system_fields key or context-leaf path)"
+                        )
+                for snippet in malformed_placeholders(text or ""):
+                    errors.append(
+                        f"task {task.task_key}.{attr}: malformed placeholder {snippet!r} "
+                        "(use {{token}} — word characters and dots only, no spaces)"
+                    )
         if len(set(task_keys)) != len(task_keys):
             errors.append("duplicate task_key")
         for skey, section in self.sections.items():
             if section.role == "collect" and skey not in assigned:
                 errors.append(f"collect section {skey!r} not assigned to any task")
+
+        # confirm_immediate needs a determinable anchor inside its task
+        task_sections = {t.task_key: set(t.sections) for t in self.tasks}
+        for path, cit, chain in immediate_confirms:
+            in_task = task_sections.get(cit.task_key, set())
+            refs = {ref for cond in chain for ref in condition_field_paths(cond, shared)}
+            if not any(
+                ref in leaves
+                and leaves[ref].role in COLLECTED_ROLES
+                and ref.split(".")[1] in in_task
+                for ref in refs
+            ):
+                errors.append(
+                    f"{path}: confirm_immediate=true needs an anchor — the gate chain "
+                    f"must reference a collectable leaf inside task {cit.task_key!r}"
+                )
 
         # ask_groups / alternatives
         for skey, section in self.sections.items():
@@ -488,6 +592,23 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
+
+        # stt key terms: bounded, unique, static vocabulary
+        terms = self.stt_key_terms or []
+        if len(terms) > MAX_STT_KEY_TERMS:
+            errors.append(f"stt_key_terms: {len(terms)} terms exceeds limit of {MAX_STT_KEY_TERMS}")
+        seen_terms: set[str] = set()
+        for i, term in enumerate(terms):
+            where = f"stt_key_terms[{i}]"
+            if not term or term != term.strip():
+                errors.append(f"{where}: empty or untrimmed term {term!r}")
+                continue
+            if "{{" in term:
+                errors.append(f"{where}: placeholders are not allowed in key terms")
+            lowered = term.lower()
+            if lowered in seen_terms:
+                errors.append(f"{where}: duplicate term {term!r}")
+            seen_terms.add(lowered)
 
         # flow rules
         for rule in self.flow_rules or []:

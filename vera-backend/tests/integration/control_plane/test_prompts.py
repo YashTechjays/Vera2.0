@@ -6,6 +6,7 @@ published SchemaVersion + Prompt + published PromptVersion for read assertions."
 
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -48,6 +49,40 @@ class PromptIds:
     schema_version_id: UUID
     prompt_id: UUID
     version_id: UUID
+
+
+VALID_SCHEMA_JSON: dict[str, Any] = {
+    "dsl_version": "2.1",
+    "name": "IBV",
+    "insurance_type": "infertility_treatment",
+    "system_fields": {"member_id": "sections.basics.plan_type"},
+    "sections": {
+        "basics": {
+            "title": "Basics",
+            "fields": {
+                "plan_type": {
+                    "type": "text",
+                    "title": "Plan Type",
+                    "role": "ask",
+                    "required": True,
+                    "prompt": {"ask": "What type of plan is this?"},
+                },
+                "bg": {"type": "text", "title": "Background", "role": "context"},
+            },
+        }
+    },
+    "tasks": [{"task_key": "main", "title": "Main", "sections": ["basics"]}],
+}
+
+VALID_PROMPT_DOC: dict[str, Any] = {
+    "kind": "prompt_document",
+    "session": {
+        "persona": "You are VERA.",
+        "goal": "Verify benefits.",
+        "base_instructions": "Ask one question at a time.",
+    },
+    "task_overrides": {},
+}
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -159,7 +194,10 @@ async def prompts_world(
         s.add(fs)
         await s.flush()
         sv = SchemaVersion(
-            schema_id=fs.id, version=1, schema_json={}, status=VersionStatus.PUBLISHED
+            schema_id=fs.id,
+            version=1,
+            schema_json=VALID_SCHEMA_JSON,
+            status=VersionStatus.PUBLISHED,
         )
         s.add(sv)
         await s.flush()
@@ -170,12 +208,7 @@ async def prompts_world(
             prompt_id=prompt.id,
             schema_version_id=sv.id,
             version=1,
-            composite_json={
-                "name": "IBV Standard Prompt",
-                "format": "text",
-                "source": "x",
-                "prompt": "hello",
-            },
+            composite_json=VALID_PROMPT_DOC,
             status=VersionStatus.PUBLISHED,
         )
         s.add(pv)
@@ -272,7 +305,7 @@ async def test_list_prompts_and_versions(
         f"/api/v1/prompts/{ids.prompt_id}/versions/{ids.version_id}",
         headers=_auth(w.super_token),
     )
-    assert detail.json()["data"]["composite_json"]["prompt"] == "hello"
+    assert detail.json()["data"]["composite_json"]["session"]["persona"] == "You are VERA."
 
 
 async def test_tenant_user_forbidden(
@@ -287,22 +320,16 @@ async def test_create_draft_increments_version(
     prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
 ) -> None:
     client, w, ids = prompts_world
+    edited = {**VALID_PROMPT_DOC, "session": {**VALID_PROMPT_DOC["session"], "goal": "edited"}}
     resp = await client.post(
         f"/api/v1/prompts/{ids.prompt_id}/versions",
         headers=_auth(w.super_token),
-        json={
-            "composite_json": {
-                "name": "IBV Standard Prompt",
-                "format": "text",
-                "source": "x",
-                "prompt": "edited",
-            }
-        },
+        json=edited,
     )
     assert resp.status_code == 201, resp.text
     d = resp.json()["data"]
     assert d["version"] == 2 and d["status"] == "draft"
-    assert d["composite_json"]["prompt"] == "edited"
+    assert d["composite_json"]["session"]["goal"] == "edited"
 
 
 async def test_publish_promotes_and_demotes(
@@ -313,7 +340,7 @@ async def test_publish_promotes_and_demotes(
         await client.post(
             f"/api/v1/prompts/{ids.prompt_id}/versions",
             headers=_auth(w.super_token),
-            json={"composite_json": {"prompt": "v2"}},
+            json=VALID_PROMPT_DOC,
         )
     ).json()["data"]
     pub = await client.post(
@@ -344,7 +371,7 @@ async def test_create_draft_without_published_schema_conflicts(
     resp = await client.post(
         f"/api/v1/prompts/{ids.prompt_id}/versions",
         headers=_auth(w.super_token),
-        json={"composite_json": {"prompt": "x"}},
+        json=VALID_PROMPT_DOC,
     )
     assert resp.status_code == 409
 
@@ -356,7 +383,7 @@ async def test_write_endpoints_forbidden_for_tenant(
     create_resp = await client.post(
         f"/api/v1/prompts/{ids.prompt_id}/versions",
         headers=_auth(w.tenant_admin_token),
-        json={"composite_json": {"prompt": "x"}},
+        json=VALID_PROMPT_DOC,
     )
     assert create_resp.status_code == 403
 
@@ -405,3 +432,213 @@ async def test_publish_already_published_is_noop(
     ).json()["data"]
     published = [v for v in versions if v["status"] == "published"]
     assert len(published) == 1
+
+
+async def test_create_draft_validates_document(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, world, ids = prompts_world
+    url = f"/api/v1/prompts/{ids.prompt_id}/versions"
+    headers = _auth(world.super_token)
+
+    # not a prompt document at all → 422 (pydantic body validation)
+    resp = await client.post(url, headers=headers, json={"composite_json": {}})
+    assert resp.status_code == 422
+
+    # unknown task key → 400
+    bad_key = {**VALID_PROMPT_DOC, "task_overrides": {"ghost": {"prompt": "x"}}}
+    resp = await client.post(url, headers=headers, json=bad_key)
+    assert resp.status_code == 400
+    assert "unknown task_key" in resp.text
+
+    # unknown placeholder → 400
+    bad_ph = {
+        **VALID_PROMPT_DOC,
+        "session": {**VALID_PROMPT_DOC["session"], "persona": "Hi {{patietn}}."},
+    }
+    resp = await client.post(url, headers=headers, json=bad_ph)
+    assert resp.status_code == 400
+    assert "unknown placeholder" in resp.text
+
+    # valid document → 201 draft
+    resp = await client.post(url, headers=headers, json=VALID_PROMPT_DOC)
+    assert resp.status_code == 201
+
+
+async def test_preview_renders_published_and_named_draft(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, world, ids = prompts_world
+    headers = _auth(world.super_token)
+
+    resp = await client.get(f"/api/v1/prompts/{ids.prompt_id}/preview", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["persona"] == "You are VERA."
+    assert data["tasks"] and all(t["prompt"] for t in data["tasks"])
+
+    # a draft with an override previews differently when named explicitly
+    draft_doc = {
+        **VALID_PROMPT_DOC,
+        "task_overrides": {"main": {"prompt": "OVERRIDDEN INSTRUCTIONS."}},
+    }
+    created = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/versions", headers=headers, json=draft_doc
+    )
+    draft_id = created.json()["data"]["id"]
+    resp = await client.get(
+        f"/api/v1/prompts/{ids.prompt_id}/preview",
+        headers=headers,
+        params={"version_id": draft_id},
+    )
+    assert resp.status_code == 200
+    main = next(t for t in resp.json()["data"]["tasks"] if t["task_key"] == "main")
+    assert main["prompt"].startswith("OVERRIDDEN INSTRUCTIONS.")
+
+
+async def test_preview_forbidden_for_tenant(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, world, ids = prompts_world
+    resp = await client.get(
+        f"/api/v1/prompts/{ids.prompt_id}/preview", headers=_auth(world.tenant_admin_token)
+    )
+    assert resp.status_code == 403
+
+
+async def test_versions_expose_pinned_schema_version(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    versions = (
+        await client.get(f"/api/v1/prompts/{ids.prompt_id}/versions", headers=_auth(w.super_token))
+    ).json()["data"]
+    assert versions[0]["schema_version_id"] == str(ids.schema_version_id)
+    assert versions[0]["schema_version"] == 1
+
+    detail = (
+        await client.get(
+            f"/api/v1/prompts/{ids.prompt_id}/versions/{ids.version_id}",
+            headers=_auth(w.super_token),
+        )
+    ).json()["data"]
+    assert detail["schema_version_id"] == str(ids.schema_version_id)
+    assert detail["schema_version"] == 1
+
+
+async def test_get_prompt_schema_returns_published_document(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.get(f"/api/v1/prompts/{ids.prompt_id}/schema", headers=_auth(w.super_token))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["id"] == str(ids.schema_version_id)
+    assert data["version"] == 1
+    assert data["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
+    assert data["document"]["system_fields"] == {"member_id": "sections.basics.plan_type"}
+    assert data["document"]["tasks"][0]["task_key"] == "main"
+
+
+async def test_get_prompt_schema_conflict_when_none_published(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, w, ids = prompts_world
+    async with admin_sessionmaker() as s, s.begin():
+        await s.execute(
+            text("UPDATE schema_version SET status='draft' WHERE id=:i").bindparams(
+                i=ids.schema_version_id
+            )
+        )
+    resp = await client.get(f"/api/v1/prompts/{ids.prompt_id}/schema", headers=_auth(w.super_token))
+    assert resp.status_code == 409
+
+
+async def test_get_prompt_schema_forbidden_for_tenant(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.get(
+        f"/api/v1/prompts/{ids.prompt_id}/schema", headers=_auth(w.tenant_admin_token)
+    )
+    assert resp.status_code == 403
+
+
+async def test_stateless_preview_renders_without_saving(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    headers = _auth(w.super_token)
+    body = {**VALID_PROMPT_DOC, "task_overrides": {"main": {"prompt": "DRY RUN."}}}
+    resp = await client.post(f"/api/v1/prompts/{ids.prompt_id}/preview", headers=headers, json=body)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["errors"] == []
+    main = next(t for t in data["rendered"]["tasks"] if t["task_key"] == "main")
+    assert main["prompt"].startswith("DRY RUN.")
+
+    versions = (
+        await client.get(f"/api/v1/prompts/{ids.prompt_id}/versions", headers=headers)
+    ).json()["data"]
+    assert len(versions) == 1  # no draft row was created
+
+
+async def test_stateless_preview_reports_content_errors_but_still_renders(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    body = {
+        **VALID_PROMPT_DOC,
+        "session": {**VALID_PROMPT_DOC["session"], "persona": "Hi {{ghost}}."},
+        "task_overrides": {"phantom": {"prompt": "x"}},
+    }
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview", headers=_auth(w.super_token), json=body
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert "session.persona: unknown placeholder {{ghost}}" in data["errors"]
+    assert "task_overrides.phantom: unknown task_key" in data["errors"]
+    assert data["rendered"]["persona"] == "Hi {{ghost}}."  # rendered anyway
+
+
+async def test_stateless_preview_shape_error_is_422(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview", headers=_auth(w.super_token), json={"nope": 1}
+    )
+    assert resp.status_code == 422
+
+
+async def test_stateless_preview_forbidden_for_tenant(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    client, w, ids = prompts_world
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview",
+        headers=_auth(w.tenant_admin_token),
+        json=VALID_PROMPT_DOC,
+    )
+    assert resp.status_code == 403
+
+
+async def test_stateless_preview_conflict_when_none_published(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, w, ids = prompts_world
+    async with admin_sessionmaker() as s, s.begin():
+        await s.execute(
+            text("UPDATE schema_version SET status='draft' WHERE id=:i").bindparams(
+                i=ids.schema_version_id
+            )
+        )
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview",
+        headers=_auth(w.super_token),
+        json=VALID_PROMPT_DOC,
+    )
+    assert resp.status_code == 409

@@ -74,6 +74,7 @@ resolves these in favor of the stated business rules.
   "insurance_type": "infertility_treatment",
   "description": "…",                     // optional, top-level human description of the form
   "system_fields": { "<handle>": "field_path", ... },  // optional, see below
+  "stt_key_terms": ["intrauterine insemination", ...],  // optional; session-wide STT vocabulary
   "shared_conditions": { "<name>": Condition, ... },   // optional
   "sections": { "<section_key>": Section, ... },       // object; key order = UI order
   "tasks": [ Task, ... ],                 // document order = call order
@@ -214,6 +215,15 @@ its sections complete — by then any answers their `applicable_when` depends on
 `coverage_type`, asked mid-task) exist. It is the only field-level task reference;
 everything else maps via sections.
 
+> **Amended 2026-07-08** (by the prompt-compiler design §3.4): `confirm_in_task`
+> changes from a plain task key to the **object form only**:
+> `{"task_key": "…", "confirm_immediate": true|false}` — the string form is
+> rejected so behavior is always explicit. `confirm_immediate: true` speaks the
+> confirmation **immediately after the gating question is answered** (spouse
+> name/DOB right after `coverage_type` = Family), not at the task's end; `false`
+> keeps the end-of-task behavior described above. Published documents carrying the
+> string form must be republished (pre-production stance).
+
 **Types** drive both the UI widget default and the extraction/normalization target:
 `enum`→select, `date`→date input, `phone`→tel, `currency`/`percent`/`integer`→validated
 text, `text`→input (or `ui.widget: "textarea"`). `special_values` lists the
@@ -291,8 +301,9 @@ The validator ensures every path resolves to a defined leaf field.
 
 ```jsonc
 { "task_key": "financial", "title": "Financial Details",
-  "intro": "Now let me ask about some financial details.",   // optional one-line opener
-  "outro": "…",   // optional closer; also masks next-task spin-up latency while it plays
+  "intro": "Now let me ask about some financial details.",   // spoken verbatim on task entry
+  "outro": "…",   // spoken verbatim on exit; also masks next-task spin-up latency
+  "prompt": "…",  // supplied directly as the agent's task instructions
   "sections": ["deductibles", "out_of_pocket", "lifetime_maximum", "embryo_cryo_storage"],
   "applicable_when": Condition }                              // optional
 ```
@@ -305,10 +316,18 @@ is skipped when its `applicable_when` is false or all of its sections are inappl
 — so the male-partner task needs no condition of its own; its single section carries
 `male_partner_in_scope`.
 
-The schema deliberately defines **only the form-collection tasks**. IVR navigation
-(provider-specific playbooks + the generalized IVR-navigator prompt), the gap-analysis
-phase, and the closing ritual are runtime stages composed around these tasks by the
-prompt pipeline (annotation C23).
+`intro`/`outro`/`prompt` map one-to-one onto a LiveKit AgentTask and may embed
+`{{system_field_key}}` placeholders (validated; hydrated per patient form at task
+creation). `sections` may be `[]` for ritual tasks that collect nothing. The schema
+defines the form-collection tasks **and** the call-opening ritual (the
+`introduction` task: verbatim introduction script + patient-membership
+verification, with its outcome recorded in a `patient_verification` collect
+section and a `patient_not_on_plan` flow rule). IVR navigation (provider-specific
+playbooks + the generalized IVR-navigator prompt) and the gap-analysis phase remain
+runtime stages; gap analysis is pinned between the last data task and `wrap_up`, so
+the representative's name and reference number are collected after every gap is
+cleared, and `wrap_up`'s outro is the goodbye (see the 2026-07-06 task-prompts
+design for the full closing flow).
 
 ### 4.7 Codes
 
@@ -401,6 +420,11 @@ their own section, at least two per group, with no field in more than one group;
 `contradictions` have unique rule_keys, a valid `when`, a non-empty `reason`, and
 `fields` resolving to `ask`/`confirm` leaves (only re-askable fields can be
 clarified).
+- Every `{{token}}` in a task's `intro`/`outro`/`prompt` must be a defined
+  `system_fields` key.
+- `stt_key_terms`: ≤ 100 terms, each non-empty and trimmed, no case-insensitive
+  duplicates, no `{{placeholders}}` (static vocabulary — never hydrated).
+
 A scratch implementation lives at the session scratchpad (`validate_dsl_v2.py`); it
 should be productized as a pydantic model + CI check in the migration (§9).
 
@@ -415,6 +439,9 @@ group-per-row matrix (replaces the frontend's structural guessing heuristic).
 
 **Task builder (call initiation).** Tasks in document order → LiveKit agentTasks;
 lazy applicability evaluation (§4.6); IVR/gap/closing stages composed around them.
+The builder hydrates task-text placeholders from `system_fields` → intake answers
+(field `default` when unanswered) and passes `stt_key_terms` to the STT component
+(`deepgram.STTv2(keyterms=...)`) once per session.
 
 **Prompt compiler (per task).** Persona + global behavior from prompt-pipeline
 templates (not the schema); a context block from every `context`-role field's current

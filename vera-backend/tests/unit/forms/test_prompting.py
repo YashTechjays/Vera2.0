@@ -1,104 +1,158 @@
-"""Prompt compilation: schema document → per-task composite_json."""
+"""render_task_prompts: schema document (+ prompt document) → per-task prompt text."""
 
+import logging
+import os
 from pathlib import Path
-from typing import Any
+
+import pytest
 
 from vera_core.forms.dsl import FormSchemaDoc, load_document
-from vera_core.forms.prompting import compile_prompt_document
+from vera_core.forms.prompting import (
+    FACTORY_SESSION,
+    PromptDocument,
+    RenderedPrompts,
+    RenderedTaskPrompt,
+    SessionBlock,
+    TaskTextOverride,
+    render_task_prompts,
+)
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
+SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
 
 IBV: FormSchemaDoc = load_document(
     (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
 )
-COMPOSITE: dict[str, Any] = compile_prompt_document(IBV)
+RENDERED: RenderedPrompts = render_task_prompts(IBV)
 
 
-def task(key: str) -> dict[str, Any]:
-    return next(t for t in COMPOSITE["tasks"] if t["task_key"] == key)
+def task(key: str) -> RenderedTaskPrompt:
+    return next(t for t in RENDERED.tasks if t.task_key == key)
 
 
-class TestCompositeShape:
-    def test_one_nested_entry_per_task_in_document_order(self) -> None:
-        assert [t["task_key"] for t in COMPOSITE["tasks"]] == [t.task_key for t in IBV.tasks]
-        assert COMPOSITE["generated_from"] == "form_schema"
-        assert COMPOSITE["name"] == "Infertility"
+class TestSession:
+    def test_factory_fallback_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            out = render_task_prompts(IBV, None)
+        assert out.persona == FACTORY_SESSION.persona
+        assert any("factory session" in r.message for r in caplog.records)
 
-    def test_task_level_prompt_is_carried(self) -> None:
-        for entry in COMPOSITE["tasks"]:
-            assert entry["prompt"], f"task {entry['task_key']} lost its prompt"
-        assert "spouse" in task("insurance_basics")["prompt"]
-
-    def test_sections_nest_their_question_lists(self) -> None:
-        basics = task("insurance_basics")
-        insurance = next(
-            s for s in basics["sections"] if s["section_key"] == "insurance_information"
+    def test_session_text_is_literal(self) -> None:
+        doc = PromptDocument(
+            kind="prompt_document",
+            session=SessionBlock(persona="P.", goal="G.", base_instructions="B."),
         )
-        by_path = {q["field_path"]: q for q in insurance["questions"]}
-        plan_type = by_path["sections.insurance_information.plan_type"]
-        assert plan_type["question"].startswith("What type of plan")
-        assert plan_type["special_values"] == ["PPO", "HMO", "EPO", "POS"]
-        assert plan_type["required"] is True
-        # ask_groups ride along as the combined-question overlay
-        assert any(
-            "plan_type" in member for group in insurance["ask_groups"] for member in group["fields"]
+        out = render_task_prompts(IBV, doc)
+        assert (out.persona, out.goal, out.base_instructions) == ("P.", "G.", "B.")
+        # session text is never folded into task prompts
+        assert all("P." not in t.prompt for t in out.tasks)
+
+
+class TestTaskText:
+    def test_task_order_and_meta(self) -> None:
+        assert [t.task_key for t in RENDERED.tasks] == [t.task_key for t in IBV.tasks]
+        assert RENDERED.name == "Infertility"
+        assert RENDERED.dsl_version == "2.1"
+
+    def test_intro_outro_pass_through(self) -> None:
+        intro_task = task("introduction")
+        assert intro_task.intro is not None and "{{patient_name}}" in intro_task.intro
+        assert intro_task.outro == "Great, let me pull up my questions..."
+
+    def test_override_merge_field_level(self) -> None:
+        doc = PromptDocument(
+            kind="prompt_document",
+            session=FACTORY_SESSION,
+            task_overrides={"introduction": TaskTextOverride(intro="Hi. {{member_id}}.")},
+        )
+        out = render_task_prompts(IBV, doc)
+        intro_task = next(t for t in out.tasks if t.task_key == "introduction")
+        assert intro_task.intro == "Hi. {{member_id}}."
+        # outro not overridden → schema default survives
+        assert intro_task.outro == "Great, let me pull up my questions..."
+
+    def test_unknown_override_key_ignored(self) -> None:
+        doc = PromptDocument(
+            kind="prompt_document",
+            session=FACTORY_SESSION,
+            task_overrides={"ghost": TaskTextOverride(prompt="x")},
+        )
+        assert render_task_prompts(IBV, doc).tasks  # no raise
+
+    def test_questions_render_with_vocab_and_gates(self) -> None:
+        basics = task("insurance_basics").prompt
+        assert "Is the doctor inside the insurance network?" in basics
+        assert "Answers: Yes | No" in basics
+        assert "Ask only if" in basics
+        assert '"Doctor Inside Network" is "No"' in basics
+
+    def test_immediate_confirm_attaches_to_anchor(self) -> None:
+        basics = task("insurance_basics").prompt
+        assert "Immediately after this answer" in basics
+        assert "spouse listed" in basics  # spouse name confirm text
+        assert (
+            "Before finishing this task" not in basics
+            or "spouse" not in basics.split("Before finishing this task")[-1]
         )
 
-    def test_questions_carry_gates_as_skip_conditions(self) -> None:
-        financial = task("financial")
-        deductibles = next(s for s in financial["sections"] if s["section_key"] == "deductibles")
-        met = next(
-            q
-            for q in deductibles["questions"]
-            if q["field_path"] == "sections.deductibles.individual.met_amount"
+    def test_flow_rules_attach_to_firing_task(self) -> None:
+        assert "TERMINATION RULE — patient_not_on_plan" in task("introduction").prompt
+        assert "TERMINATION RULE — no_out_of_network_coverage" in task("insurance_basics").prompt
+        assert "TERMINATION RULE" not in task("coverage").prompt
+
+    def test_contradictions_attach_to_last_field_task(self) -> None:
+        assert (
+            "CONSISTENCY CHECK — small_group_self_insured_conflict"
+            in task("insurance_basics").prompt
         )
-        assert any("not_in" in str(gate.values()) for gate in met["skip_unless"])
-
-    def test_confirm_in_task_fields_attach_to_their_task_end(self) -> None:
-        basics = task("insurance_basics")
-        paths = [q["field_path"] for q in basics["confirm_at_end"]]
-        assert "sections.patient_information.spouse_partner_name" in paths
-        assert "sections.patient_information.spouse_partner_dob" in paths
-        # and they are NOT duplicated into any section question list
-        all_section_questions = [
-            q["field_path"]
-            for t in COMPOSITE["tasks"]
-            for s in t["sections"]
-            for q in s["questions"]
-        ]
-        assert "sections.patient_information.spouse_partner_name" not in all_section_questions
-
-    def test_context_fields_form_the_known_background_block(self) -> None:
-        paths = {c["field_path"] for c in COMPOSITE["context_fields"]}
-        assert "sections.patient_information.patient_name" in paths
-        assert "sections.hospital_information.npi" in paths
-        # input/readonly leaves are no-ops — never in the prompt
-        assert "sections.form_information.practice" not in paths
-
-    def test_date_format_nuance_reaches_the_questions(self) -> None:
-        coverage = task("insurance_basics")
-        benefit = next(s for s in coverage["sections"] if s["section_key"] == "benefit_coverage")
-        effective_date = next(
-            q
-            for q in benefit["questions"]
-            if q["field_path"] == "sections.benefit_coverage.plan_effective_date"
+        assert (
+            "CONSISTENCY CHECK — mandate_requires_infertility_coverage" in task("coverage").prompt
         )
-        assert effective_date["validation"]["date_format"] == "M/D/YYYY"
 
-    def test_rules_ride_along(self) -> None:
-        assert COMPOSITE["flow_rules"][0]["action"] == "terminate_call"
-        assert {c["rule_key"] for c in COMPOSITE["contradictions"]} == {
-            "small_group_self_insured_conflict",
-            "mandate_requires_infertility_coverage",
-        }
-        assert "family_coverage" in COMPOSITE["shared_conditions"]
+    def test_derive_note_renders(self) -> None:
+        basics = task("insurance_basics").prompt
+        assert 'record "01/01/{{current_year}}" without asking' in basics
 
-
-class TestDiseaseOnlyComposite:
-    def test_compiles_for_every_catalog_schema(self) -> None:
-        doc = load_document(
+    def test_every_catalog_schema_renders(self) -> None:
+        disease = load_document(
             (FORM_SCHEMA_DIR / "disease_only_verification.json").read_text(encoding="utf-8")
         )
-        composite = compile_prompt_document(doc)
-        assert len(composite["tasks"]) == len(doc.tasks)
-        assert all(t["prompt"] for t in composite["tasks"])
+        out = render_task_prompts(disease)
+        assert out.tasks and all(t.prompt for t in out.tasks)
+
+    def test_no_raw_paths_leak_into_any_prompt(self) -> None:
+        for t in RENDERED.tasks:
+            assert "sections." not in t.prompt, t.task_key
+
+    def test_multi_gate_or_condition_parenthesized(self) -> None:
+        coverage = task("coverage").prompt
+        assert " and (" in coverage
+        assert " or " in coverage.split(" and (", 1)[1]
+
+    def test_numeric_range_note_renders(self) -> None:
+        coverage = task("coverage").prompt
+        assert "Expected numeric range: 0 to 100." in coverage
+        assert "Expected numeric range: at least 0." in coverage
+
+    def test_icd10_codes_render_for_speak_sections(self) -> None:
+        coverage = task("coverage").prompt
+        assert "ICD-10 Z31.41" in coverage
+
+
+class TestSnapshots:
+    """Golden files lock wording. To update intentionally:
+    UPDATE_SNAPSHOTS=1 uv run pytest tests/unit/forms/test_prompting.py -k Snapshots
+    then review the diff and commit."""
+
+    def _check(self, name: str, text: str) -> None:
+        path = SNAPSHOT_DIR / name
+        if os.environ.get("UPDATE_SNAPSHOTS") == "1":
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        assert text == path.read_text(encoding="utf-8"), f"{name} stale — see docstring"
+
+    def test_introduction_snapshot(self) -> None:
+        self._check("ibv_introduction.prompt.txt", task("introduction").prompt)
+
+    def test_insurance_basics_snapshot(self) -> None:
+        self._check("ibv_insurance_basics.prompt.txt", task("insurance_basics").prompt)

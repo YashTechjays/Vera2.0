@@ -76,6 +76,26 @@ class TestCompiledArtifacts:
             if path in set(collected)
         )
 
+    def test_ibv_call_opening_and_key_terms(self) -> None:
+        doc = SCHEMAS["infertility_treatment"][1]()
+        intro_task = doc.tasks[0]
+        assert intro_task.task_key == "introduction"
+        assert intro_task.sections == ["patient_verification"]
+        assert "{{patient_name}}" in (intro_task.intro or "")
+        assert "{{member_id}}" in (intro_task.prompt or "")
+        assert intro_task.outro == "Great, let me pull up my questions..."
+        rule_keys = [r.rule_key for r in doc.flow_rules or []]
+        assert rule_keys[0] == "patient_not_on_plan"
+        rule = (doc.flow_rules or [])[0]
+        assert rule.action == "terminate_call"
+        assert rule.skip_to_task == "wrap_up"
+        wrap_up = doc.tasks[-1]
+        assert wrap_up.task_key == "wrap_up"
+        assert wrap_up.intro is not None and wrap_up.outro is not None
+        assert doc.stt_key_terms is not None
+        assert "intrauterine insemination" in doc.stt_key_terms
+        assert len(doc.stt_key_terms) <= 100
+
 
 class TestDocumentValidation:
     def test_minimal_doc_is_valid(self) -> None:
@@ -139,3 +159,161 @@ class TestDocumentValidation:
         ]
         with pytest.raises(ValidationError, match="re-clarified"):
             FormSchemaDoc.model_validate(doc)
+
+    def test_unknown_task_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["intro"] = "Calling about {{patient_name}}."
+        with pytest.raises(ValidationError, match="unknown placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_known_task_placeholder_accepted(self) -> None:
+        doc = minimal_doc(system_fields={"plan_type": "sections.basics.plan_type"})
+        doc["tasks"][0]["prompt"] = "Mention {{plan_type}} when asked."
+        FormSchemaDoc.model_validate(doc)
+
+    def test_unclosed_braces_are_not_placeholders(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["intro"] = "This {{ is not a placeholder."
+        FormSchemaDoc.model_validate(doc)
+
+    def test_malformed_placeholder_with_spaces_rejected(self) -> None:
+        doc = minimal_doc(system_fields={"member_id": "sections.basics.plan_type"})
+        doc["tasks"][0]["intro"] = "Your id is {{ member_id }}."
+        with pytest.raises(ValidationError, match="malformed placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_malformed_placeholder_bad_chars_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["prompt"] = "Mention {{patient-name}} politely."
+        with pytest.raises(ValidationError, match="malformed placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_stt_key_terms_valid_list_accepted(self) -> None:
+        FormSchemaDoc.model_validate(minimal_doc(stt_key_terms=["coinsurance", "IVF"]))
+
+    def test_stt_key_terms_duplicate_rejected(self) -> None:
+        doc = minimal_doc(stt_key_terms=["IVF", "ivf"])
+        with pytest.raises(ValidationError, match="duplicate term"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_stt_key_terms_empty_or_untrimmed_rejected(self) -> None:
+        for bad in ["", " coinsurance", "coinsurance "]:
+            with pytest.raises(ValidationError, match="empty or untrimmed"):
+                FormSchemaDoc.model_validate(minimal_doc(stt_key_terms=[bad]))
+
+    def test_stt_key_terms_placeholder_rejected(self) -> None:
+        doc = minimal_doc(stt_key_terms=["{{patient_name}}"])
+        with pytest.raises(ValidationError, match="placeholders are not allowed"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_stt_key_terms_cap_enforced(self) -> None:
+        doc = minimal_doc(stt_key_terms=[f"term {i}" for i in range(101)])
+        with pytest.raises(ValidationError, match="exceeds limit"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_empty_sections_ritual_task_is_valid(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"].insert(0, {"task_key": "ritual", "title": "Ritual", "sections": []})
+        FormSchemaDoc.model_validate(doc)
+
+    @staticmethod
+    def _context_confirm(cit: object) -> dict[str, Any]:
+        """minimal_doc + a context section holding one confirm_in_task field."""
+        doc = minimal_doc()
+        doc["sections"]["ctx"] = {
+            "title": "Ctx",
+            "role": "context",
+            "fields": {
+                "spouse": {
+                    "type": "text",
+                    "title": "Spouse",
+                    "role": "confirm",
+                    "applicable_when": {
+                        "field": "sections.basics.plan_type",
+                        "op": "eq",
+                        "value": "PPO",
+                    },
+                    "confirm_in_task": cit,
+                    "prompt": {"confirm": "Spouse is {{value}} — correct?"},
+                }
+            },
+        }
+        return doc
+
+    def test_confirm_in_task_object_form_required(self) -> None:
+        with pytest.raises(ValidationError):
+            FormSchemaDoc.model_validate(self._context_confirm("main"))
+        FormSchemaDoc.model_validate(
+            self._context_confirm({"task_key": "main", "confirm_immediate": True})
+        )
+
+    def test_confirm_immediate_requires_in_task_anchor(self) -> None:
+        doc = self._context_confirm({"task_key": "main", "confirm_immediate": True})
+        del doc["sections"]["ctx"]["fields"]["spouse"]["applicable_when"]
+        with pytest.raises(ValidationError, match="needs an anchor"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_confirm_at_task_end_needs_no_anchor(self) -> None:
+        doc = self._context_confirm({"task_key": "main", "confirm_immediate": False})
+        del doc["sections"]["ctx"]["fields"]["spouse"]["applicable_when"]
+        FormSchemaDoc.model_validate(doc)
+
+    def test_confirm_in_task_unknown_task_rejected(self) -> None:
+        doc = self._context_confirm({"task_key": "ghost", "confirm_immediate": False})
+        with pytest.raises(ValidationError, match="unknown task"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_context_leaf_path_placeholder_accepted(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["bg"] = {
+            "type": "text",
+            "title": "Background",
+            "role": "context",
+        }
+        doc["tasks"][0]["intro"] = "About {{sections.basics.bg}}."
+        FormSchemaDoc.model_validate(doc)
+
+    def test_non_context_leaf_path_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["intro"] = "About {{sections.basics.plan_type}}."
+        with pytest.raises(ValidationError, match="unknown placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_confirm_immediate_anchor_through_nested_group_gate(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["panel"] = {
+            "type": "group",
+            "title": "Panel",
+            "applicable_when": {
+                "field": "sections.basics.plan_type",
+                "op": "eq",
+                "value": "PPO",
+            },
+            "fields": {
+                "inner": {
+                    "type": "text",
+                    "title": "Inner",
+                    "role": "ask",
+                    "prompt": {"ask": "Inner?"},
+                }
+            },
+        }
+        doc["sections"]["ctx"] = {
+            "title": "Ctx",
+            "role": "context",
+            "fields": {
+                "spouse": {
+                    "type": "text",
+                    "title": "Spouse",
+                    "role": "confirm",
+                    "applicable_when": {
+                        "field": "sections.basics.panel.inner",
+                        "op": "eq",
+                        "value": "x",
+                    },
+                    "confirm_in_task": {"task_key": "main", "confirm_immediate": True},
+                    "prompt": {"confirm": "Spouse is {{value}}?"},
+                }
+            },
+        }
+        FormSchemaDoc.model_validate(doc)  # anchor found via the group-gated leaf
