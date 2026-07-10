@@ -40,6 +40,7 @@ monotonically non-decreasing so the published order and the `ts` field never dis
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 
 from vera_core.transcript import ROLE_AGENT, ROLE_USER
@@ -54,6 +55,30 @@ class TurnPublisher(Protocol):
     async def publish_turn(
         self, room_name: str, role: Literal["user", "agent"], text: str, *, ts: int
     ) -> None: ...
+
+
+class FanOutTurnPublisher:
+    """A TurnPublisher that fans one ordered turn out to many sinks, so a single
+    ReorderingEmitter can drive every stream instead of one per sink. Sinks are called
+    sequentially, in registration order; a sink that raises is logged and skipped —
+    it never starves the sinks after it, and never bubbles out of publish_turn."""
+
+    def __init__(self, sinks: Sequence[TurnPublisher]) -> None:
+        self._sinks = sinks
+
+    async def publish_turn(
+        self, room_name: str, role: Literal["user", "agent"], text: str, *, ts: int
+    ) -> None:
+        for sink in self._sinks:
+            try:
+                await sink.publish_turn(room_name, role, text, ts=ts)
+            except Exception as exc:  # best-effort; one sink's failure must not break the rest
+                logger.warning(
+                    "turn publish failed for sink=%s room=%s: %r",
+                    type(sink).__name__,
+                    room_name,
+                    exc,
+                )
 
 
 # Safety net: if a held caller turn is never released (the interrupted agent turn never

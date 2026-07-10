@@ -28,7 +28,12 @@ from redis.asyncio import Redis
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
-from agent_worker.transcript_publisher import ReorderingEmitter, attach_transcript_publisher
+from agent_worker.transcript_publisher import (
+    FanOutTurnPublisher,
+    ReorderingEmitter,
+    TurnPublisher,
+    attach_transcript_publisher,
+)
 from vera_core.call_stream import CallStreamService, RedisCallStreamStore
 from vera_core.config.settings import get_settings
 from vera_core.events import (
@@ -243,6 +248,17 @@ def resolve_session(room_name: str, *, is_local: bool) -> str | None:
     return None
 
 
+def _fan_out_sink(sinks: list[TurnPublisher]) -> TurnPublisher | None:
+    """Collapse the enabled stream sinks (transcript service, call stream) behind one
+    TurnPublisher, so at most one ReorderingEmitter is ever attached per job: None with
+    nothing enabled, the sink itself with exactly one, a FanOutTurnPublisher otherwise."""
+    if not sinks:
+        return None
+    if len(sinks) == 1:
+        return sinks[0]
+    return FanOutTurnPublisher(sinks)
+
+
 def prewarm(proc: JobProcess) -> None:
     # Initialize OTel once per worker process so span attributes set in entrypoint
     # are exported to Langfuse.  No-op when settings.langfuse_host is None (local/CI).
@@ -323,7 +339,6 @@ async def entrypoint(ctx: JobContext) -> None:
         # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
         transcript_redis: Redis | None = None
         transcript_service: TranscriptService | None = None
-        transcript_emitter: ReorderingEmitter | None = None
         if meta.get("publish_transcript"):
             transcript_redis = create_redis(settings.redis_url)
             transcript_service = TranscriptService(
@@ -333,13 +348,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     end_grace_seconds=settings.transcript_end_grace_seconds,
                 )
             )
-            transcript_emitter = attach_transcript_publisher(session, transcript_service, room_name)
 
         # Real-call envelope stream (dispatcher opt-in via publish_events): transcript
         # turns + call_status frames for the /calls/{id}/events SSE. Reuses the
         # transcript TTL settings — same lifecycle, different stream.
         call_stream: CallStreamService | None = None
-        call_stream_emitter: ReorderingEmitter | None = None
         if meta.get("publish_events"):
             call_stream_redis = create_redis(settings.redis_url)
             call_stream = CallStreamService(
@@ -349,18 +362,32 @@ async def entrypoint(ctx: JobContext) -> None:
                     end_grace_seconds=settings.transcript_end_grace_seconds,
                 )
             )
-            call_stream_emitter = attach_transcript_publisher(session, call_stream, room_name)
-            if speaker is not None:  # the callee already answered during wait_for_speaker
-                await call_stream.publish_status(room_name, "active", ts=int(time.time() * 1000))
 
-        async def _flush_transcript_stream() -> None:
-            # Order is load-bearing: flush held turns BEFORE end(). end() appends the sentinel
-            # that stops readers, so a turn flushed after it would be stranded behind the sentinel.
-            if transcript_emitter is not None:
+        # One reordering emitter fanned out to every enabled sink — the barge-in reorder
+        # state machine lives once per job, not once per stream (see transcript_publisher).
+        sinks: list[TurnPublisher] = [
+            svc for svc in (transcript_service, call_stream) if svc is not None
+        ]
+        turn_sink = _fan_out_sink(sinks)
+        turn_emitter: ReorderingEmitter | None = None
+        if turn_sink is not None:
+            turn_emitter = attach_transcript_publisher(session, turn_sink, room_name)
+
+        if call_stream is not None and speaker is not None:
+            # the callee already answered during wait_for_speaker
+            await call_stream.publish_status(room_name, "active", ts=int(time.time() * 1000))
+
+        async def _flush_turn_emitter() -> None:
+            # Order is load-bearing: flush held turns BEFORE any service's end(). end()
+            # appends the sentinel that stops readers, so a turn flushed after it would be
+            # stranded behind the sentinel. One flush covers every fanned-out sink.
+            if turn_emitter is not None:
                 try:
-                    await transcript_emitter.aclose()
+                    await turn_emitter.aclose()
                 except Exception:  # best-effort; never block shutdown
-                    logger.exception("failed to flush transcript for %s", room_name)
+                    logger.exception("failed to flush turn emitter for %s", room_name)
+
+        async def _end_transcript_stream() -> None:
             if transcript_service is not None:
                 try:
                     await transcript_service.end(room_name)
@@ -372,13 +399,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 except Exception:
                     logger.exception("failed to close transcript redis for %s", room_name)
 
-        async def _flush_call_stream() -> None:
-            # Same flush-before-end ordering as the transcript stream, above.
-            if call_stream_emitter is not None:
-                try:
-                    await call_stream_emitter.aclose()
-                except Exception:
-                    logger.exception("failed to flush call stream for %s", room_name)
+        async def _end_call_stream() -> None:
             if call_stream is not None:
                 try:
                     await call_stream.publish_status(room_name, "ended", ts=int(time.time() * 1000))
@@ -392,11 +413,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     logger.exception("failed to close call stream redis for %s", room_name)
 
         async def _on_shutdown() -> None:
-            # Sequential, spec-pinned order: transcript-stream teardown, then
-            # call-stream teardown, then the PHI boundary. Each step inside the helpers
-            # is best-effort (own try/except), so a failure never skips the rest.
-            await _flush_transcript_stream()
-            await _flush_call_stream()
+            # Sequential, spec-pinned order: flush the shared emitter once, then
+            # transcript-stream teardown, then call-stream teardown, then the PHI boundary.
+            # Each step inside the helpers is best-effort (own try/except), so a failure
+            # never skips the rest.
+            await _flush_turn_emitter()
+            await _end_transcript_stream()
+            await _end_call_stream()
             await boundary.close_session(session_id)
 
             # Last: signal call end (the consumer completes the form and refills the
