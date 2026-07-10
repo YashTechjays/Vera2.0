@@ -18,6 +18,7 @@ dependencies = [
     # IANA tz data for zoneinfo on platforms without a system database (Windows);
     # queue_dispatcher pins its business-hours window to America/New_York.
     "tzdata>=2025.1",
+    "openpyxl>=3.1",
 ]
 
 [tool.uv.sources]
