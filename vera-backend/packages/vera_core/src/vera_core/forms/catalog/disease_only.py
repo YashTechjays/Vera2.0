@@ -352,10 +352,18 @@ def build_disease_only() -> FormSchemaDoc:
             "patient_dob": "sections.patient_information.patient_dob",
             "patient_gender": "sections.patient_information.patient_gender",
             "member_id": "sections.policy_details.policy_number",
-            "policy_id": "sections.policy_details.policy_number",
             "verified_by": "sections.verification_information.verified_by",
             "callback_number": "sections.verification_information.callback_number",
             "form_completed_at": "sections.verification_information.verified_at",
+        },
+        # Only the columns this schema actually collects — no appointment/insurance-
+        # reference sections exist here, so appointment_date/appointment_type/
+        # insurance_provider* stay unmapped (their patient_form columns stay None).
+        promoted_fields={
+            "patient_name": "sections.patient_information.patient_name",
+            "patient_dob": "sections.patient_information.patient_dob",
+            "chart_number": "sections.patient_information.chart_number",
+            "member_id": "sections.policy_details.policy_number",
         },
         shared_conditions={
             "disease_covered": eq("sections.coverage_summary.disease_coverage_active", "Yes"),

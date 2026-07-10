@@ -1018,7 +1018,6 @@ def build_ibv_standard() -> FormSchemaDoc:
             "appointment_date": "sections.appointment_information.appointment_date",
             "appointment_type": "sections.appointment_information.appointment_type",
             "member_id": "sections.insurance_information.policy_number",
-            "policy_id": "sections.insurance_information.policy_number",
             "insurance_provider_name": "sections.insurance_reference_information.insurance_provider_name",
             "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
             "verified_by": "sections.verification_information.verified_by",
@@ -1030,6 +1029,21 @@ def build_ibv_standard() -> FormSchemaDoc:
             "hospital_npi": "sections.hospital_information.npi",
             "doctor_name": "sections.provider_reference_information.provider_name",
             "doctor_npi": "sections.provider_reference_information.npi",
+        },
+        # patient_form columns re-derived from the current answer at intake AND
+        # dispute-resolve (2026-07-10 design doc). Every path here must also be a
+        # system_fields target (dsl.py validates this).
+        promoted_fields={
+            "patient_name": "sections.patient_information.patient_name",
+            "patient_dob": "sections.patient_information.patient_dob",
+            "chart_number": "sections.patient_information.chart_number",
+            "appointment_date": "sections.appointment_information.appointment_date",
+            "appointment_type": "sections.appointment_information.appointment_type",
+            "member_id": "sections.insurance_information.policy_number",
+            "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
+            "insurance_provider_phone_number": (
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
         },
         stt_key_terms=[
             # treatments

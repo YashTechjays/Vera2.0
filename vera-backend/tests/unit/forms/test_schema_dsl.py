@@ -96,6 +96,30 @@ class TestCompiledArtifacts:
         assert "intrauterine insemination" in doc.stt_key_terms
         assert len(doc.stt_key_terms) <= 100
 
+    def test_ibv_promotes_the_full_column_set(self) -> None:
+        doc = SCHEMAS["infertility_treatment"][1]()
+        assert doc.promoted_fields == {
+            "patient_name": "sections.patient_information.patient_name",
+            "patient_dob": "sections.patient_information.patient_dob",
+            "chart_number": "sections.patient_information.chart_number",
+            "appointment_date": "sections.appointment_information.appointment_date",
+            "appointment_type": "sections.appointment_information.appointment_type",
+            "member_id": "sections.insurance_information.policy_number",
+            "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
+            "insurance_provider_phone_number": (
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
+        }
+
+    def test_disease_only_promotes_identity_and_member_id(self) -> None:
+        doc = SCHEMAS["disease_only"][1]()
+        assert doc.promoted_fields == {
+            "patient_name": "sections.patient_information.patient_name",
+            "patient_dob": "sections.patient_information.patient_dob",
+            "chart_number": "sections.patient_information.chart_number",
+            "member_id": "sections.policy_details.policy_number",
+        }
+
 
 class TestDocumentValidation:
     def test_minimal_doc_is_valid(self) -> None:

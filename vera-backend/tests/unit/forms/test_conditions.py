@@ -184,7 +184,7 @@ class TestIntakeV2:
         assert "sections.patient_information.spouse_partner_name" not in fields
         # dynamic over the WHOLE document, not just `patient_information`
         assert "sections.hospital_information.npi" in fields
-        # role=confirm, but it IS a system_fields target (member_id/policy_id)
+        # role=confirm, but it IS a system_fields target (member_id)
         # and carries no default → still required at creation.
         assert "sections.insurance_information.policy_number" in fields
 
