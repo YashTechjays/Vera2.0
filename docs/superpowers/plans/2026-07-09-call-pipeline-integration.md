@@ -2710,6 +2710,24 @@ git commit -m "chore: post-simplification cleanups for call pipeline integration
 
 ---
 
+---
+
+# Extension round (2026-07-10, user-directed): transcript persistence + emitter fan-out
+
+User decisions: (a) the dual-emitter duplication gets a proper fan-out (one `ReorderingEmitter`, many sinks); (b) at call termination — any exit path — the call-event stream must be drained into the existing `transcript` DB table and the Redis key deleted (durability first: today the rolling TTL silently discards transcripts; Redis hygiene second); (c) reads follow a check-Redis-else-DB abstraction so the SSE serves live calls from the stream and historical calls from the DB, closing the SSE-waits-forever hole.
+
+### Task 15: FanOutTurnPublisher — one emitter, many sinks
+
+**Files:** Modify `apps/agent_worker/src/agent_worker/transcript_publisher.py` (add `FanOutTurnPublisher(sinks: Sequence[TurnPublisher])` satisfying `TurnPublisher`; each `publish_turn` iterates sinks, per-sink try/except logging — a failing sink never starves the others); modify `apps/agent_worker/src/agent_worker/main.py` (collect enabled sinks: `transcript_service` under `publish_transcript`, `call_stream` under `publish_events`; when any, ONE `attach_transcript_publisher(session, FanOutTurnPublisher(sinks) if len(sinks) > 1 else sinks[0], room_name)`; shutdown flushes the single emitter once, then each service's end/close exactly as today — sequential order preserved). Tests: fan-out publishes to all sinks in order; one sink raising doesn't block the next; single-sink path unchanged.
+
+### Task 16: transcript finalizer at the terminal path
+
+**Files:** `packages/vera_core/src/vera_core/call_stream.py` — add a snapshot read to the store + service: `read_all(room_name) -> list[CallStreamEvent]` via `XRANGE - +` (NO tailing; skip the ended-sentinel entry; works with or without a sentinel — crashed workers never write one). Create `apps/control_plane/src/control_plane/transcript_finalizer.py`: `async def finalize_transcript(sessionmaker, call_stream_service, ref: RoomRef, room_name: str) -> int` — snapshot `transcript`-type envelopes, map to `Transcript` rows (`source`: role `user`→`TranscriptSource.REP`, `agent`→`TranscriptSource.BOT`; `role`=raw role; `seq`=0-based stream order; `message`=text; `spoke_at`=ts→UTC datetime; `tenant_id`/`call_id` from ref), insert via `insert(...).on_conflict_do_nothing(index_elements=["call_id", "seq"])` (idempotent under event redelivery), commit, then `await call_stream_service.clear(room_name)` (delete the key), return rows written. Exception-safe: log + swallow (a finalizer failure must not block closeout; the stream TTL remains the backstop). Wire: the consumer (`worker_events.py::_close_and_refill`, after `close_call` returns a RoomRef, before the dispatch pass) and the sweeper (`pipeline_sweeper.py`, after its `close_call` returns non-None) both call it — both therefore need the app-level `CallStreamService` injected (consumer + sweeper constructors gain a `call_stream` dep; `main.py` passes `app.state.call_stream_service`). Tests: unit — mapping/idempotency/sentinel-skip with an in-memory store per existing conventions; consumer test asserting finalize runs on `call.ended` closeout and the stream is cleared.
+
+### Task 17: check-Redis-else-DB read abstraction for the events SSE
+
+**Files:** `packages/vera_core/src/vera_core/call_stream.py` — `RedisCallStreamStore.read()` gains `first_entry_deadline_s: float | None = None` (never-seen streams terminate at the deadline; `None` keeps today's behavior; service `consume()` forwards it; service also gains `exists(room_name) -> bool` backed by Redis `EXISTS`). Modify `apps/control_plane/src/control_plane/api/v1/calls.py::stream_call_events`: after authz, branch — (1) stream key exists: replay/tail as today; (2) no stream AND `call.current_status` terminal: emit the DB `Transcript` rows for the call (ordered by seq, read UP FRONT in the short-lived authz session — small result set; never hold a DB session while streaming) as `transcript` frames with synthetic ids (`db-<seq>`), then one `call_status: {status}` frame, then close; (3) no stream AND call live: tail with `first_entry_deadline_s=180` (pre-answer ring/IVR wait is bounded ~60 s — 180 s is safely above any legitimate silence). Same frame contract — no frontend change. Tests: integration — terminal call + persisted rows → SSE returns DB frames and terminates; live call with stream → unchanged; live call, no stream → terminates at the deadline (inject a tiny deadline via the fake/service).
+
 ## Known limitations (accepted, documented, not built)
 
 1. **Worker still has no form context / writes no AI_CALL answers** — separate developer's workstream; this plan only guarantees the lifecycle loop they will plug into.
