@@ -5,12 +5,13 @@ Revises: 8115d1763daf
 Create Date: 2026-07-10 18:12:32.830166
 
 """
+
 from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = '39f81ad53651'
-down_revision: str | None = '8115d1763daf'
+revision: str = "39f81ad53651"
+down_revision: str | None = "8115d1763daf"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -54,16 +54,18 @@ RANGE_TYPES: frozenset[str] = frozenset({"currency", "percent", "integer"})
 COLLECTED_ROLES: frozenset[str] = frozenset({"ask", "confirm"})
 # patient_form columns a schema may declare in `promoted_fields` (dsl.py `_validate_document`
 # below, and vera_core.forms.intake.promote_columns).
-PROMOTABLE_COLUMNS: frozenset[str] = frozenset({
-    "patient_name",
-    "patient_dob",
-    "appointment_date",
-    "chart_number",
-    "appointment_type",
-    "member_id",
-    "insurance_provider",
-    "insurance_provider_phone_number",
-})
+PROMOTABLE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "patient_name",
+        "patient_dob",
+        "appointment_date",
+        "chart_number",
+        "appointment_type",
+        "member_id",
+        "insurance_provider",
+        "insurance_provider_phone_number",
+    }
+)
 
 
 class _Model(BaseModel):
