@@ -89,3 +89,14 @@ export function formatDate(iso: string | null): string {
     ? "—"
     : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
 }
+
+/** Rough relative age for worklist columns: "3d" / "5h" / "12m", or "—". */
+export function ageLabel(iso: string | null): string {
+  if (!iso) return "—"
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return "—"
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60_000))
+  if (mins >= 1440) return `${Math.floor(mins / 1440)}d`
+  if (mins >= 60) return `${Math.floor(mins / 60)}h`
+  return `${mins}m`
+}
