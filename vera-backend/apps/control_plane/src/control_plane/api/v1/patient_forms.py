@@ -15,6 +15,7 @@ Every PHI response audits field **names** only (never values).
 """
 
 import dataclasses
+import hashlib
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -38,6 +39,7 @@ from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
 from vera_core.forms.conditions import is_v2
+from vera_core.forms.export import build_workbook
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     iter_leaf_answers,
@@ -54,6 +56,7 @@ from vera_core.forms.review import (
 )
 from vera_core.models import (
     DisputeAction,
+    ExportArtifact,
     FieldAnswer,
     FormSchema,
     PatientForm,
@@ -71,7 +74,7 @@ from vera_core.services.call_provenance import (
     load_call_attempts,
     load_field_provenance,
 )
-from vera_core.services.field_status import load_current_values
+from vera_core.services.field_status import load_current_values, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.queue_dispatcher import try_dispatch
 
@@ -754,6 +757,88 @@ async def resolve_disputes(
         )
     )
     return ok(detail, message="Disputes resolved.")
+
+
+# ---------------------------------------------------------------------------
+# XLSX export (binary — errors still ride the standard envelope)
+# ---------------------------------------------------------------------------
+
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.post(
+    "/patient-forms/{form_id}/export",
+    response_class=Response,
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def export_patient_form(
+    form_id: UUID,
+    request: Request,
+    session: TenantSession,
+    tenant_id: TenantId,
+    caller: VerifiedIdentity = require("forms:export"),
+) -> Response:
+    """Stream the COMPLETED form as XLSX — a PHI disclosure. Writes one
+    export_artifact ledger row + a FORM_EXPORTED audit (field names only).
+    The one binary endpoint: errors still ride the standard envelope."""
+    form = (
+        await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+    if form.status != FormStatus.COMPLETED:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="only completed forms can be exported",
+            data={"status": form.status},
+        )
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    values = await load_current_values(session, form_id)
+    sources = {p: s.source or "" for p, s in (await load_field_status(session, form_id)).items()}
+    attempts = await load_call_attempts(session, form_id)
+    prov = await load_field_provenance(
+        session, form_id, {a.id: (a.attempt, a.mode) for a in attempts}
+    )
+    data = build_workbook(version.schema_json, values, sources, prov, attempts)
+
+    artifact = ExportArtifact(
+        tenant_id=tenant_id,
+        form_id=form_id,
+        format="xlsx",
+        sha256=hashlib.sha256(data).hexdigest(),
+        exported_by=caller.user_id,
+    )
+    session.add(artifact)
+    await session.flush()
+    await get_audit(request).emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.FORM_EXPORTED.value,
+            resource_type="patient_form",
+            resource_id=str(form_id),
+            detail={"artifact_id": str(artifact.id), "format": "xlsx", "fields": sorted(values)},
+        )
+    )
+    return Response(
+        content=data,
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="ibv-{form_id}.xlsx"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
