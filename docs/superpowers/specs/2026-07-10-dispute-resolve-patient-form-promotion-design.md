@@ -189,12 +189,18 @@ parse the endpoint already needs for `completion_pct_v2`/`is_v2`.
 - Remove `member_id` from `PromotedIdentifiers` and its two call sites
   (`patient_forms.py:154`, `scripts/seed_patient_data.py:242`).
 - Remove `member_id` from the `PatientFormDetail`/list response schemas and their
-  construction (`patient_forms.py:278`, `:397`).
-- Remove the now-redundant `"member_id"` handle from `system_fields` in both catalogs
-  (`ibv_standard.py:999`, `disease_only.py:354`) — safe because `ibv_standard.py` already
-  requires the same `policy_number` path via the `"policy_id"` handle, so
-  `required_intake_fields` behavior is unchanged; `disease_only.py`'s `"member_id"`
-  handle has no other consumer.
+  construction (`patient_forms.py:278`, `:397`), and the matching frontend type
+  (`vera-frontend/src/lib/patient-forms/types.ts:78`) — unused there (no `.member_id`
+  reader), so a type-only deletion.
+
+**Do not touch `system_fields["member_id"]`** in either catalog. It's a same-named but
+unrelated concept: a schema handle that hydrates the `{{member_id}}` placeholder actually
+spoken during the call (`ibv_standard.py`'s introduction task prompt references
+`{{member_id}}` twice, e.g. "provide the member ID {{member_id}}"). Removing it would
+break placeholder validation (`dsl.py`'s "unknown placeholder" check) and the live call
+prompt. It coincidentally shares a name with the DB column being dropped here but serves
+a completely different purpose — leave every `system_fields` entry in both catalogs
+exactly as-is.
 
 ## 8. Catalog updates
 
