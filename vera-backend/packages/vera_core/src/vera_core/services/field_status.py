@@ -15,20 +15,12 @@ from vera_core.forms.review import FieldStatus, unwrap_value
 from vera_core.models.field_answer import FieldAnswer, FieldEvaluation
 
 
-async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, FieldStatus]:
-    """Return one FieldStatus per current field answer for *form_id*.
-
-    Selects only field_path, source, confidence, and the latest eval's supported
-    flag — no value or evidence columns, so this query is PHI-free. An answer with
-    no evaluation yields ai_supported=None.
-
-    The latest evaluation per answer is resolved in-DB via a subquery on
-    MAX(created_at) so that multiple evaluations (e.g. LLM retries) never produce
-    duplicate rows for the same field path. Concurrent evals within the same
-    database clock tick choose non-deterministically.
-    """
-    # Subquery: latest created_at per answer_id across all evaluations.
-    latest_eval = (
+def latest_eval_subquery() -> Any:
+    """Subquery: latest created_at per answer_id across all evaluations — the one
+    encoding of "the latest FieldEvaluation for an answer" (multiple evals from LLM
+    retries must never fan out into duplicate rows). Concurrent evals within the
+    same database clock tick choose non-deterministically."""
+    return (
         select(
             FieldEvaluation.answer_id,
             func.max(FieldEvaluation.created_at).label("max_created_at"),
@@ -36,6 +28,18 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
         .group_by(FieldEvaluation.answer_id)
         .subquery()
     )
+
+
+async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, FieldStatus]:
+    """Return one FieldStatus per current field answer for *form_id*.
+
+    Selects only field_path, source, confidence, and the latest eval's supported
+    flag — no value or evidence columns, so this query is PHI-free. An answer with
+    no evaluation yields ai_supported=None.
+
+    The latest evaluation per answer is resolved in-DB via latest_eval_subquery().
+    """
+    latest_eval = latest_eval_subquery()
     rows = (
         await session.execute(
             select(

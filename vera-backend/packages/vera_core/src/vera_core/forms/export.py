@@ -48,11 +48,12 @@ def build_workbook(
     if is_v2(schema_json):
         doc = FormSchemaDoc.model_validate(schema_json)
         shared = doc.shared_conditions or {}
-        # Build label map from the already-parsed doc — avoids a second model_validate
-        # inside field_labels (review.py re-parses if passed raw schema_json).
-        titles = {path: leaf.title for path, leaf, _ in leaf_gates(doc)}
+        # One leaf_gates walk feeds both the Form rows and the label map (avoids a
+        # second traversal — and a second model_validate inside field_labels).
+        titles: dict[str, str] = {}
         current_section: str | None = None
         for path, leaf, gates in leaf_gates(doc):
+            titles[path] = leaf.title
             if not is_applicable(gates, values, shared):
                 continue
             # v2 paths are root-anchored: sections.<key>.<...>

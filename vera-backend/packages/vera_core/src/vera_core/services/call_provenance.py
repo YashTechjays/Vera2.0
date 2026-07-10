@@ -14,12 +14,13 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.models.call import Call, CallLineage
 from vera_core.models.enums import AnswerSource
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
+from vera_core.services.field_status import latest_eval_subquery
 
 _MISSING = object()
 
@@ -116,15 +117,8 @@ async def load_field_provenance(
 ) -> dict[str, FieldProvenance]:
     """Per-path provenance for the form's current ai_call answers: which attempt
     wrote it (via *attempt_by_call*, from load_call_attempts) + the latest judge
-    verdict. Same latest-eval MAX(created_at) join as load_field_status."""
-    latest_eval = (
-        select(
-            FieldEvaluation.answer_id,
-            func.max(FieldEvaluation.created_at).label("max_created_at"),
-        )
-        .group_by(FieldEvaluation.answer_id)
-        .subquery()
-    )
+    verdict (latest_eval_subquery, shared with load_field_status)."""
+    latest_eval = latest_eval_subquery()
     rows = (
         await session.execute(
             select(

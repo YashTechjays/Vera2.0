@@ -14,7 +14,6 @@ Two caller classes share this router:
 Every PHI response audits field **names** only (never values).
 """
 
-import dataclasses
 import hashlib
 from datetime import date, datetime
 from typing import Any
@@ -70,6 +69,7 @@ from vera_core.models.enums import (
     FormStatus,
 )
 from vera_core.services.call_provenance import (
+    CallAttempt,
     FieldProvenance,
     load_call_attempts,
     load_field_provenance,
@@ -287,9 +287,18 @@ class FieldView(BaseModel):
 
 
 def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
+    # Explicit field mapping: the view models ARE the API contract, so a service-
+    # dataclass rename or new field must be an explicit decision here — not a
+    # silent splat-through (or runtime TypeError) via dataclasses.asdict.
     if p is None:
         return None
-    judge = JudgeView(**dataclasses.asdict(p.judge)) if p.judge is not None else None
+    judge = (
+        JudgeView(
+            confidence=p.judge.confidence, supported=p.judge.supported, evidence=p.judge.evidence
+        )
+        if p.judge is not None
+        else None
+    )
     return ProvenanceView(attempt=p.attempt, mode=p.mode, judge=judge)
 
 
@@ -316,6 +325,18 @@ class CallAttemptView(BaseModel):
     created_at: datetime
     retry_of: UUID | None
     changed_paths: list[str]
+
+
+def _call_attempt_view(a: CallAttempt) -> CallAttemptView:
+    return CallAttemptView(
+        id=a.id,
+        attempt=a.attempt,
+        mode=a.mode,
+        status=a.status,
+        created_at=a.created_at,
+        retry_of=a.retry_of,
+        changed_paths=a.changed_paths,
+    )
 
 
 class ResolveRequest(BaseModel):
@@ -420,8 +441,12 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
     ).scalar_one()
 
     attempts = await load_call_attempts(session, form.id)
-    prov = await load_field_provenance(
-        session, form.id, {a.id: (a.attempt, a.mode) for a in attempts}
+    # No calls → no ai_call answers → nothing to join; skip the provenance query
+    # (this runs on every form-detail GET, incl. intake-only forms).
+    prov = (
+        await load_field_provenance(session, form.id, {a.id: (a.attempt, a.mode) for a in attempts})
+        if attempts
+        else {}
     )
 
     return PatientFormDetail(
@@ -589,7 +614,7 @@ async def list_form_calls(
             sorted({p for a in attempts for p in a.changed_paths}),
         )
     )
-    return ok([CallAttemptView(**dataclasses.asdict(a)) for a in attempts])
+    return ok([_call_attempt_view(a) for a in attempts])
 
 
 @router.post(
@@ -1008,8 +1033,7 @@ async def update_patient_form_status(
             data={"from": current.value, "to": target.value},
         ) from exc
 
-    if current == FormStatus.EXCEPTION_REVIEW:
-        form.review_reason = None
+    # review_reason is stamped/cleared inside FormStateMachine.transition.
 
     # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
     if target == FormStatus.IN_QUEUE:

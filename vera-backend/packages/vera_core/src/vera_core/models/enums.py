@@ -96,6 +96,16 @@ class ProviderStage(enum.StrEnum):
     TTS = "tts"
 
 
+class ReviewReason(enum.StrEnum):
+    """Why the post-call pipeline routed a form to EXCEPTION_REVIEW. NULL on the
+    form outside review and for manual transitions (a pipeline artifact)."""
+
+    TOKEN_VALUE = "token_value"
+    RETRIES_EXHAUSTED = "retries_exhausted"
+    LLM_ERROR = "llm_error"
+    NO_TRANSCRIPT = "no_transcript"
+
+
 class VersionStatus(enum.StrEnum):
     DRAFT = "draft"
     PUBLISHED = "published"
