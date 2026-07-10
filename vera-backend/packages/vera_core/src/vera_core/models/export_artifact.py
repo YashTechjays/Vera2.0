@@ -26,6 +26,9 @@ class ExportArtifact(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
     format: Mapped[str] = mapped_column(String(8))
     sha256: Mapped[str] = mapped_column(String(64))
     gcs_uri: Mapped[str | None] = mapped_column(String(512))
+    # SET NULL is deliberate: the WORM audit_log's FORM_EXPORTED record is the
+    # authoritative, immutable "who" for the disclosure (actor_user_id + label);
+    # this column is a convenience join that must not block app_user deletion.
     exported_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL")
     )
