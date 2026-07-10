@@ -1,10 +1,10 @@
 """Worker→control-plane event bus over Redis Streams + a consumer group.
 
 The agent worker is DB-less; this is its first-class channel to signal domain
-events (call failures today; call-status transitions for the real /calls flow
-later) to the control plane. Events are PHI-free by construction: only a
-room_name (tenant+call UUIDs), an enum, and a timestamp — never a phone number
-or transcript text.
+events (call failures, and the answered/ended call-status transitions that
+drive the consumer's closeout) to the control plane. Events are PHI-free by
+construction: only a room_name (tenant+call UUIDs), an enum, and a timestamp —
+never a phone number or transcript text.
 """
 
 from enum import StrEnum

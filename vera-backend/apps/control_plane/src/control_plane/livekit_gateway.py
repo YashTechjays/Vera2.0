@@ -163,11 +163,20 @@ class LiveKitGateway:
         """Set room-level metadata (JSON-encoded). LiveKit pushes it to every
         participant as a RoomMetadataChanged event, so the browser can read
         session status (e.g. a failed outbound call) before the room is torn down.
+        Idempotent like `delete_room`: setting metadata on an already-deleted room
+        is a no-op — teardown paths may race (a crash after delete_room but before
+        ack, or a sweeper that already deleted the room, both redeliver call.failed
+        and re-enter this call after the room is gone).
         """
         async with self._client() as lk:
-            await lk.room.update_room_metadata(
-                api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
-            )
+            try:
+                await lk.room.update_room_metadata(
+                    api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
+                )
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return  # room already gone — nothing to update
+                raise
 
     def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
         # Short TTL: the token is used immediately; the SDK default (~6h) would

@@ -12,6 +12,8 @@ import {
  * Live transcript feed for a call, from the /calls/{id}/events SSE.
  * PHI hygiene: turns are tokenized server-side and held in component state only —
  * discarded on unmount (closing the modal). Never persisted or logged.
+ * Callers MUST key this component by callId (state resets rely on keyed remount —
+ * see both modal call sites).
  */
 export function CallTranscript({ callId }: { callId: string }) {
   const [turns, setTurns] = useState<TranscriptTurn[]>([])

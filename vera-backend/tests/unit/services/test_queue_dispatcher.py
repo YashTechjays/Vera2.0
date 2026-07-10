@@ -140,7 +140,10 @@ class FakeSession:
         self.added: list[Any] = []
 
     async def execute(self, stmt: Any) -> _Result:
-        entity = stmt.column_descriptions[0]["entity"]
+        # .get(...): the advisory-lock select (no select_from) omits the "entity"
+        # key entirely, unlike select(func.count()).select_from(...) which carries
+        # entity=None — both fall through to the same "no mapped entity" branch.
+        entity = stmt.column_descriptions[0].get("entity")
         if entity is Tenant:
             return _Result(scalar=self.tenant)
         if entity is InsuranceProvider:
@@ -149,7 +152,7 @@ class FakeSession:
         if entity is PatientForm:
             rows = self.candidates if stmt._limit_clause is not None else self.expired
             return _Result(rows=rows)
-        # select(func.count()) — no mapped entity.
+        # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
 
     def add(self, obj: Any) -> None:

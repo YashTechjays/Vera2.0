@@ -53,6 +53,8 @@ _ACTIVE_FORM_STATUSES = (
     FormStatus.AI_PROCESSING.value,
 )
 
+_DISPATCH_LOCK_CLASS = 0x76455241  # "vERA" — namespace for dispatch advisory locks
+
 
 def _now_eastern_time() -> time:
     """Current wall-clock time in US Eastern. Extracted for test patching."""
@@ -105,6 +107,15 @@ async def try_dispatch(
         the carrier's calls-per-second limit (Twilio ~1 CPS). Applied between
         dials only — never before the first.
     """
+    # Serialize dispatch passes per tenant (consumer refill / sweeper / enqueue
+    # tasks race otherwise and can over-allocate concurrency slots): the two-int
+    # advisory lock is transaction-scoped, so it releases on commit/rollback.
+    # close_call takes row locks without this lock — no ordering inversion, since
+    # the advisory lock is always acquired first, at the very start of a pass.
+    await session.execute(
+        select(func.pg_advisory_xact_lock(_DISPATCH_LOCK_CLASS, func.hashtext(str(tenant_id))))
+    )
+
     # 1. Load tenant config.
     tenant = (
         await session.execute(select(Tenant).where(Tenant.id == tenant_id))

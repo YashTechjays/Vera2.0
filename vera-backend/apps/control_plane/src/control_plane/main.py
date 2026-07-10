@@ -15,6 +15,7 @@ from control_plane.auth.invitations import InvitationStore, RedisInvitationStore
 from control_plane.auth.permission_cache import PermissionCache, RedisPermissionCache
 from control_plane.auth.rbac import PermissionResolver
 from control_plane.auth.session import RedisSessionStore, SessionStore, SessionVerifier
+from control_plane.dispatch import drain_pending
 from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
@@ -195,6 +196,9 @@ def create_app(
             sweeper_task.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper_task
+        # Detached dispatch tasks (post-commit enqueue / consumer refill) must finish
+        # before the engine goes away — they hold their own sessions off this engine.
+        await drain_pending()
         if worker_events_redis is not None:
             await worker_events_redis.aclose()
         if redis is not None:

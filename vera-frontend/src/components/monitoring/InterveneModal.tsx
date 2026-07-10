@@ -142,7 +142,7 @@ export function InterveneModal({
                 </Button>
               </div>
               {call?.id ? (
-                <div className="flex min-h-[240px] flex-1 flex-col rounded-lg border border-border">
+                <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border">
                   <div className="shrink-0 border-b border-border">
                     <LiveCallRoom key={call.id} callId={call.id} microphone />
                   </div>

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -52,6 +53,30 @@ _FAILURE_STATUS: dict[CallFailureReason, CallStatus] = {
     CallFailureReason.BUSY_OR_DECLINED: CallStatus.BUSY,
     CallFailureReason.FAILED: CallStatus.FAILED,
 }
+
+
+class _RetryEventLater(Exception):
+    """Control flow: a canonical-room event arrived before its Call row committed
+    (the dispatcher dials inside the dispatch transaction). Leave the entry
+    UNACKED so XAUTOCLAIM redelivers it after reclaim_idle_ms — by then the row
+    is committed. Events older than _NO_ROW_RETRY_WINDOW_S with still no row are
+    genuine voice-lab rooms and are dropped normally."""
+
+
+_NO_ROW_RETRY_WINDOW_S = 120.0
+
+
+def _event_is_young(ts_ms: int) -> bool:
+    return (time.time() * 1000 - ts_ms) < _NO_ROW_RETRY_WINDOW_S * 1000
+
+
+def _retry_young_or_drop(room_name: str, ts_ms: int) -> None:
+    """A canonical-room event whose Call row isn't there yet: retry if the event is
+    young (the dispatcher dials inside the dispatch transaction, so a fast answer/
+    failure/end can race the row's commit), else let the caller drop it as a genuine
+    voice-lab room. Raises `_RetryEventLater` in the retry case; returns otherwise."""
+    if _event_is_young(ts_ms):
+        raise _RetryEventLater(room_name)
 
 
 class WorkerEventConsumer:
@@ -170,6 +195,13 @@ class WorkerEventConsumer:
             return
         try:
             await handler(event)
+        except _RetryEventLater:
+            logger.info(
+                "event %s for %s arrived before its call row; leaving unacked for redelivery",
+                entry_id,
+                getattr(event, "room_name", "?"),
+            )
+            return  # do NOT ack → XAUTOCLAIM retries once the Call row has committed
         except Exception:
             logger.exception("handler failed for event %s; leaving unacked for reclaim", entry_id)
             return  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
@@ -199,7 +231,7 @@ class WorkerEventConsumer:
             await asyncio.sleep(self._teardown_grace_ms / 1000)
         await self._livekit.delete_room(event.room_name)
         await self._close_and_refill(
-            event.room_name, _FAILURE_STATUS[event.reason], trigger="call.failed"
+            event.room_name, _FAILURE_STATUS[event.reason], trigger="call.failed", ts=event.ts
         )
 
     async def _handle_call_answered(self, event: WorkerEvent) -> None:
@@ -212,8 +244,11 @@ class WorkerEventConsumer:
             call = (
                 await session.execute(select(Call).where(Call.id == ref.call_id).with_for_update())
             ).scalar_one_or_none()
-            if call is None or call.current_status in TERMINAL_VALUES:
-                return  # voice-lab room, or a stale redelivery after terminal
+            if call is None:
+                _retry_young_or_drop(event.room_name, event.ts)
+                return  # voice-lab room
+            if call.current_status in TERMINAL_VALUES:
+                return  # stale redelivery after terminal
             if call.current_status == CallStatus.ACTIVE.value:
                 return  # idempotent redelivery
             call.current_status = CallStatus.ACTIVE.value
@@ -230,11 +265,28 @@ class WorkerEventConsumer:
     async def _handle_call_ended(self, event: WorkerEvent) -> None:
         if not isinstance(event, CallEndedEvent):
             return
-        await self._close_and_refill(event.room_name, CallStatus.COMPLETED, trigger="call.ended")
+        await self._close_and_refill(
+            event.room_name, CallStatus.COMPLETED, trigger="call.ended", ts=event.ts
+        )
 
-    async def _close_and_refill(self, room_name: str, status: CallStatus, *, trigger: str) -> None:
+    async def _close_and_refill(
+        self, room_name: str, status: CallStatus, *, trigger: str, ts: int
+    ) -> None:
         """Terminal closeout via the shared path, then refill the freed slot
         (dispatch runs AFTER close_call's transaction committed)."""
+        room_ref = parse_room_name(room_name)
+        if room_ref is not None:
+            # Lightweight existence check (no lock) ahead of close_call: a fast
+            # call.failed/call.ended can race the dispatch transaction's commit
+            # exactly like call.answered does — distinguish "not committed yet"
+            # from "genuine voice-lab room" the same way.
+            async with tenant_session(self._sessionmaker, room_ref.tenant_id) as session:
+                row = (
+                    await session.execute(select(Call.id).where(Call.id == room_ref.call_id))
+                ).scalar_one_or_none()
+            if row is None:
+                _retry_young_or_drop(room_name, ts)
+                return  # voice-lab room
         ref = await close_call(self._sessionmaker, self._audit, room_name, status, trigger=trigger)
         if ref is not None:
             await run_dispatch_pass(

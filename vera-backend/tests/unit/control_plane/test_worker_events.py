@@ -7,6 +7,7 @@ monkeypatched per-test via `_consumer()`, which routes queries through a
 `tests/unit/services/test_queue_dispatcher.py`.
 """
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -506,6 +507,92 @@ async def test_terminal_events_are_idempotent(monkeypatch: pytest.MonkeyPatch) -
 
     assert call.current_status == CallStatus.COMPLETED.value  # untouched
     assert session.added == []  # no CallEvent row
-    assert session.queried == [Call]  # short-circuited before PatientForm/Tenant
+    # Two Call queries: _close_and_refill's pre-close existence check, then
+    # close_call's own row-locking query, which short-circuits before PatientForm/Tenant.
+    assert session.queried == [Call, Call]
     assert wired.dispatch_calls == []  # no slot freed — no refill
     assert redis.acked == ["1-0"]
+
+
+# ---------------------------------------------------------------------------
+# Fix: worker events racing the dispatch transaction's commit. A fast
+# call.answered/call.failed/call.ended can arrive before the Call row commits
+# (the dispatcher dials inside the dispatch transaction) — a "young" event with
+# no Call row must be retried (left unacked) rather than treated as voice-lab.
+# ---------------------------------------------------------------------------
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_young_call_answered_with_no_row_is_retried_not_acked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call.answered for a room with no Call row yet, timestamped "now", must be
+    left unacked (redelivered later) instead of being treated as a voice-lab room."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)  # default session: call=None
+
+    event = CallAnsweredEvent(room_name=_VALID_ROOM, ts=_now_ms())
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert redis.acked == []  # left pending for XAUTOCLAIM to redeliver
+    assert wired.session.added == []  # no DB mutation
+    assert wired.dispatch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_old_call_answered_with_no_row_is_acked_as_voice_lab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call.answered for a room with no Call row, timestamped long ago (past the
+    retry window), is a genuine voice-lab room — acked normally, no DB mutation."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)  # default session: call=None
+
+    event = CallAnsweredEvent(room_name=_VALID_ROOM, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert redis.acked == ["1-0"]
+    assert wired.session.added == []
+    assert wired.dispatch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_young_call_ended_with_no_row_is_retried_not_acked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same race for call.ended, which goes through _close_and_refill."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)  # default session: call=None
+
+    event = CallEndedEvent(room_name=_VALID_ROOM, ts=_now_ms())
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert redis.acked == []
+    assert wired.session.added == []
+    assert wired.dispatch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_young_call_failed_with_no_row_tears_room_down_but_is_not_acked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """call.failed always tears the room down regardless of the Call row's state,
+    but the closeout retry logic still applies to the DB side via _close_and_refill:
+    a young event with no row leaves the entry unacked for redelivery."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)  # default session: call=None
+
+    event = CallFailedEvent(room_name=_VALID_ROOM, reason=CallFailureReason.NO_ANSWER, ts=_now_ms())
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert livekit.calls == [
+        ("meta", (_VALID_ROOM, {"status": "call_failed", "reason": "no_answer"})),
+        ("delete", _VALID_ROOM),
+    ]
+    assert redis.acked == []  # DB-side closeout retried; room teardown already ran
+    assert wired.session.added == []
+    assert wired.dispatch_calls == []
