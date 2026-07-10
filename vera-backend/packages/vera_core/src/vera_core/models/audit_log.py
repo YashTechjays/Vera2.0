@@ -53,6 +53,9 @@ class AuditEvent(enum.StrEnum):
     # Queue expiry: the dispatcher marked a form expired because it exceeded the
     # tenant's queue_expiry_hours window. Records form id + tenant only.
     QUEUE_EXPIRED = "queue.expired"
+    # A user exported a completed form as a file — PHI left the perimeter.
+    # Detail carries artifact id, format, and field NAMES only, never values.
+    FORM_EXPORTED = "form.exported"
 
 
 class AuditLog(Base, TenantScopedMixin):
