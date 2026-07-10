@@ -43,6 +43,7 @@ PLATFORM_PERMISSIONS: Final[dict[str, str]] = {
     "platform:insurance_providers:write": "Create and manage insurance providers",
     "platform:ivr_playbooks:read": "View IVR playbooks",
     "platform:ivr_playbooks:write": "Create and manage IVR playbooks",
+    "platform:form_schemas:read": "View form schemas and their versions",
 }
 
 # The full catalog seeded into `permission` (tenant + platform).

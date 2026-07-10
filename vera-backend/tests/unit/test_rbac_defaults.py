@@ -21,6 +21,12 @@ def test_insurance_provider_permissions_are_catalogued_and_super_admin_only() ->
         assert code not in SYSTEM_ROLES["TENANT_ADMIN"]
 
 
+def test_form_schemas_read_permission_is_catalogued_and_super_admin_only() -> None:
+    assert "platform:form_schemas:read" in PLATFORM_PERMISSIONS
+    assert "platform:form_schemas:read" in SYSTEM_ROLES["SUPER_ADMIN"]
+    assert "platform:form_schemas:read" not in SYSTEM_ROLES["TENANT_ADMIN"]
+
+
 def test_call_audit_events_exist() -> None:
     assert AuditEvent.CALL_PUBLISH.value == "call.publish"
     assert AuditEvent.CALL_INTERVENE_JOIN.value == "call.intervene.join"
