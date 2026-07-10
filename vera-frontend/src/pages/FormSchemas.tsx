@@ -17,8 +17,6 @@ import {
   type SchemaVersionSummary,
 } from "@/lib/api/formSchemas"
 import { usePermission } from "@/lib/auth/permissions"
-import { useAppSelector } from "@/store/hooks"
-import { selectIsSuperAdmin } from "@/store/authSlice"
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—"
@@ -63,7 +61,6 @@ function CopyableId({ value, label }: { value: string; label: string }) {
 /** Read-only Super Admin catalog of form schemas; View lists a schema's
  *  versions with the active (published) one highlighted. */
 export function FormSchemas() {
-  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
   const canRead = usePermission("platform:form_schemas:read")
   const [schemas, setSchemas] = useState<FormSchemaSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -74,7 +71,7 @@ export function FormSchemas() {
   const [dialogError, setDialogError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!isSuperAdmin) return
+    if (!canRead) return
     let cancelled = false
     listFormSchemas()
       .then((s) => {
@@ -88,7 +85,7 @@ export function FormSchemas() {
     return () => {
       cancelled = true
     }
-  }, [isSuperAdmin])
+  }, [canRead])
 
   function openView(schema: FormSchemaSummary) {
     setViewing(schema)
@@ -145,12 +142,12 @@ export function FormSchemas() {
     )
   }
 
-  if (!isSuperAdmin) {
+  if (!canRead) {
     return (
       <div className="p-6">
         <h1 className="text-xl font-semibold">Form Schemas</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          This catalog is managed by platform operators only.
+          You don't have permission to view form schemas.
         </p>
       </div>
     )
@@ -214,11 +211,9 @@ export function FormSchemas() {
                 <TableCell className="text-muted-foreground">{s.version_count}</TableCell>
                 <TableCell className="text-muted-foreground">{formatDate(s.created_at)}</TableCell>
                 <TableCell>
-                  {canRead && (
-                    <Button variant="ghost" size="sm" className="-ml-2.5" onClick={() => openView(s)}>
-                      View
-                    </Button>
-                  )}
+                  <Button variant="ghost" size="sm" className="-ml-2.5" onClick={() => openView(s)}>
+                    View
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}
