@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
@@ -19,6 +19,7 @@ from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
+from control_plane.pipeline_sweeper import PipelineSweeper
 from control_plane.request_context import RequestIdMiddleware
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import (
@@ -38,14 +39,19 @@ from vera_core.transcript import RedisTranscriptStore, TranscriptService
 logger = logging.getLogger("control_plane.main")
 
 
-def _log_consumer_exit(task: asyncio.Task[None]) -> None:
-    """Surface an unexpected exit of the worker-event consumer background task.
+def _log_task_exit(label: str) -> Callable[[asyncio.Task[None]], None]:
+    """Build a done-callback that surfaces an unexpected exit of a lifespan
+    background task (the worker-event consumer, the pipeline sweeper).
 
     `run()` only returns via cancellation (shutdown) or an uncaught exception; without
     this callback the latter would die silently ("Task exception was never retrieved").
     """
-    if not task.cancelled() and task.exception() is not None:
-        logger.error("worker-event consumer exited unexpectedly", exc_info=task.exception())
+
+    def _on_done(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("%s exited unexpectedly", label, exc_info=task.exception())
+
+    return _on_done
 
 
 def create_app(
@@ -147,6 +153,7 @@ def create_app(
         # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
         worker_events_redis: Redis | None = None
         worker_event_task: asyncio.Task[None] | None = None
+        sweeper_task: asyncio.Task[None] | None = None
         if settings.livekit_url is not None and app.state.livekit is not None:
             worker_events_redis = create_redis(settings.redis_url)
             consumer = WorkerEventConsumer(
@@ -160,7 +167,23 @@ def create_app(
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
             )
             worker_event_task = asyncio.create_task(consumer.run())
-            worker_event_task.add_done_callback(_log_consumer_exit)
+            worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
+
+            # Time-based safety net: reconciles stuck calls (crashed worker, no
+            # call.ended) and wakes the dispatcher on a timer (working-hours
+            # reopen, queue expiry). Same gate as the consumer — needs a real
+            # LiveKit gateway to probe/tear down rooms.
+            sweeper = PipelineSweeper(
+                sessionmaker,
+                app.state.livekit,
+                app.state.kms,
+                app.state.audit,
+                interval_s=settings.pipeline_sweep_interval_seconds,
+                stuck_grace_s=settings.call_stuck_grace_seconds,
+                max_call_duration_s=settings.call_max_duration_seconds,
+            )
+            sweeper_task = asyncio.create_task(sweeper.run())
+            sweeper_task.add_done_callback(_log_task_exit("pipeline sweeper"))
 
         configure_observability(settings)
         yield
@@ -168,6 +191,10 @@ def create_app(
             worker_event_task.cancel()
             with suppress(asyncio.CancelledError):
                 await worker_event_task
+        if sweeper_task is not None:
+            sweeper_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper_task
         if worker_events_redis is not None:
             await worker_events_redis.aclose()
         if redis is not None:

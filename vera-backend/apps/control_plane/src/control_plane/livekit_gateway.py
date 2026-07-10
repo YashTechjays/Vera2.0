@@ -120,6 +120,16 @@ class LiveKitGateway:
         except _LIVEKIT_TRANSPORT_ERRORS as e:
             raise OutboundDialError(str(e)) from e
 
+    async def existing_rooms(self, room_names: list[str]) -> set[str]:
+        """The subset of *room_names* that currently exist on the LiveKit server.
+        One RPC; the pipeline sweeper uses "room gone but call non-terminal" as the
+        worker-died signal (the healthy end path always deletes the room)."""
+        if not room_names:
+            return set()
+        async with self._client() as lk:
+            resp = await lk.room.list_rooms(api.ListRoomsRequest(names=room_names))
+        return {room.name for room in resp.rooms}
+
     async def delete_room(self, room_name: str) -> None:
         """Tear the room down server-side: removes every participant — the agent
         worker (→ its session shuts down) and any SIP callee (→ the outbound call is
