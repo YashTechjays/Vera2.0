@@ -16,9 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld, seed_call
 from vera_core.call_stream import CallStreamService
 from vera_core.db import uuid7
-from vera_core.models import AppUser, AuditLog, Call, PatientForm
+from vera_core.db.rls import tenant_session
+from vera_core.models import AppUser, AuditLog, Call, PatientForm, Transcript
 from vera_core.models.authoring import FormSchema, SchemaVersion
-from vera_core.models.enums import InsuranceType
+from vera_core.models.enums import CallStatus, InsuranceType
 from vera_core.observability.correlation import parse_room_name, room_name_for_call
 
 
@@ -669,3 +670,114 @@ async def test_call_events_unknown_call_returns_404(
         f"/api/v1/calls/{uuid4()}/events", headers=_auth(rbac_world.admin_token)
     )
     assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_call_events_terminal_call_no_stream_serves_db_transcript_then_closes(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+) -> None:
+    """Task 16 deletes the stream at closeout — for a terminal call with no live
+    stream, the DB Transcript rows are the record. The endpoint must replay them
+    as the same envelope frame shape, then close (no hang)."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert await call_stream_service.exists(room) is False  # no stream for this room
+
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        session.add_all(
+            [
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=call_id,
+                    seq=0,
+                    source="bot",
+                    role="",  # blank role -> falls back to source-derived (bot -> agent)
+                    message="Hello, how can I help?",
+                    spoke_at=None,
+                ),
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=call_id,
+                    seq=1,
+                    source="rep",
+                    role="user",  # explicit role wins over source-derived
+                    message="I need a claim status.",
+                    spoke_at=None,
+                ),
+            ]
+        )
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    frames = [f for f in resp.text.split("\n\n") if f]
+    assert len(frames) == 3, resp.text
+
+    id0, data0 = frames[0].split("\n")
+    assert id0 == "id: db-0"
+    envelope0 = json.loads(data0.removeprefix("data: "))
+    assert envelope0 == {
+        "type": "transcript",
+        "data": {"role": "agent", "text": "Hello, how can I help?"},
+        "ts": 0,
+    }
+
+    id1, data1 = frames[1].split("\n")
+    assert id1 == "id: db-1"
+    envelope1 = json.loads(data1.removeprefix("data: "))
+    assert envelope1 == {
+        "type": "transcript",
+        "data": {"role": "user", "text": "I need a claim status."},
+        "ts": 0,
+    }
+
+    _id2, data2 = frames[2].split("\n")
+    envelope2 = json.loads(data2.removeprefix("data: "))
+    assert envelope2["type"] == "call_status"
+    assert envelope2["data"] == {"status": CallStatus.COMPLETED.value}
+
+
+@pytest.mark.asyncio
+async def test_call_events_live_call_no_stream_terminates_at_deadline(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live (non-terminal) call whose stream never appears must not pin the SSE
+    connection open forever — bound the tail with a tiny deadline for the test."""
+    monkeypatch.setattr("control_plane.api.v1.calls._LIVE_TAIL_FIRST_ENTRY_DEADLINE_S", 0.05)
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert await call_stream_service.exists(room) is False
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events",
+        headers=_auth(rbac_world.admin_token),
+        timeout=5.0,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    # The stream never appeared, so no frames are emitted and the connection closes.
+    assert resp.text == ""

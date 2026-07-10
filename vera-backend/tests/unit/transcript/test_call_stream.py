@@ -21,6 +21,7 @@ class _MemStore:
     def __init__(self) -> None:
         self.events: list[CallStreamEvent] = []
         self.ended = False
+        self.last_read_deadline: float | None = None
 
     async def publish(self, room_name: str, event: CallStreamEvent) -> None:
         self.events.append(event)
@@ -31,7 +32,13 @@ class _MemStore:
     async def delete(self, room_name: str) -> None:
         self.events.clear()
 
-    async def read(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+    async def exists(self, room_name: str) -> bool:
+        return bool(self.events) or self.ended
+
+    async def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        self.last_read_deadline = first_entry_deadline_s
         for i, event in enumerate(self.events):
             yield (f"{i}-0", event)
 
@@ -78,6 +85,37 @@ async def test_consume_yields_envelope_events() -> None:
     await svc.publish_turn("r", "user", "hi", ts=1)
     got = [e async for _id, e in svc.consume("r")]
     assert got[0].type == "transcript" and got[0].data["text"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_consume_forwards_first_entry_deadline_to_store() -> None:
+    store = _MemStore()
+    svc = CallStreamService(store)
+    _ = [e async for _id, e in svc.consume("r", first_entry_deadline_s=12.5)]
+    assert store.last_read_deadline == 12.5
+
+
+@pytest.mark.asyncio
+async def test_consume_defaults_first_entry_deadline_to_none() -> None:
+    store = _MemStore()
+    svc = CallStreamService(store)
+    _ = [e async for _id, e in svc.consume("r")]
+    assert store.last_read_deadline is None
+
+
+@pytest.mark.asyncio
+async def test_service_exists_false_for_untouched_room() -> None:
+    store = _MemStore()
+    svc = CallStreamService(store)
+    assert await svc.exists("r") is False
+
+
+@pytest.mark.asyncio
+async def test_service_exists_true_after_publish() -> None:
+    store = _MemStore()
+    svc = CallStreamService(store)
+    await svc.publish_turn("r", "user", "hi", ts=1)
+    assert await svc.exists("r") is True
 
 
 @pytest.mark.asyncio

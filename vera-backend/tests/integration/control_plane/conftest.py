@@ -149,7 +149,15 @@ class _MemCallStreamStore:
     async def delete(self, room_name: str) -> None:
         self._entries.pop(room_name, None)
 
-    async def read(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+    async def exists(self, room_name: str) -> bool:
+        return room_name in self._entries
+
+    async def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        # This fake replays a fixed snapshot and never blocks, so there is no idle
+        # wait for a deadline to bound — a never-published room simply yields
+        # nothing and the generator ends immediately, same observable effect.
         for entry_id, event in list(self._entries.get(room_name, [])):
             yield entry_id, event
 

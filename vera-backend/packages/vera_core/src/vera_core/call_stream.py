@@ -8,6 +8,7 @@ de-identified only (same PHI contract as the transcript stream); never hydrated
 raw PHI.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -51,7 +52,10 @@ class CallStreamStore(Protocol):
     async def publish(self, room_name: str, event: CallStreamEvent) -> None: ...
     async def mark_ended(self, room_name: str) -> None: ...
     async def delete(self, room_name: str) -> None: ...
-    def read(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]: ...
+    async def exists(self, room_name: str) -> bool: ...
+    def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]: ...
     async def read_all(self, room_name: str) -> list[CallStreamEvent]: ...
 
 
@@ -90,10 +94,25 @@ class RedisCallStreamStore:
     async def delete(self, room_name: str) -> None:
         await self._redis.delete(call_stream_key(room_name))
 
-    async def read(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+    async def exists(self, room_name: str) -> bool:
+        return bool(await self._redis.exists(call_stream_key(room_name)))
+
+    async def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        """Replay-then-tail. When `first_entry_deadline_s` is set and nothing has
+        EVER been seen on this stream, give up once that many seconds have elapsed
+        since the read started — bounds a tail on a stream that may never appear
+        (see `stream_call_events`'s live-no-stream branch). A stream that has
+        already yielded at least one entry tails indefinitely regardless — the
+        deadline only guards the "is anything ever going to show up" question."""
         key = call_stream_key(room_name)
         last_id = "0"
         seen = False
+        loop = asyncio.get_running_loop()
+        deadline = (
+            loop.time() + first_entry_deadline_s if first_entry_deadline_s is not None else None
+        )
         while True:
             try:
                 result = await self._redis.xread({key: last_id}, block=self._block_ms)
@@ -102,6 +121,8 @@ class RedisCallStreamStore:
                 result = None
             if not result:
                 if seen and not await self._redis.exists(key):
+                    return
+                if not seen and deadline is not None and loop.time() >= deadline:
                     return
                 continue
             seen = True
@@ -160,8 +181,13 @@ class CallStreamService:
             room_name, CallStreamEvent(type=TYPE_CALL_STATUS, data={"status": status}, ts=ts)
         )
 
-    def consume(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent]]:
-        return self._store.read(room_name)
+    def consume(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        return self._store.read(room_name, first_entry_deadline_s=first_entry_deadline_s)
+
+    async def exists(self, room_name: str) -> bool:
+        return await self._store.exists(room_name)
 
     async def read_all(self, room_name: str) -> list[CallStreamEvent]:
         """One-shot snapshot for the terminal-path finalizer (see `read_all` above)."""

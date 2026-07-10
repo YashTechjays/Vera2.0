@@ -10,7 +10,9 @@ in each handler.
 """
 
 import logging
+import time
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -22,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.call_closeout import TERMINAL_VALUES
 from control_plane.deps import (
     current_identity,
     get_call_stream_service,
@@ -36,9 +39,14 @@ from control_plane.exceptions import (
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
-from vera_core.call_stream import CallStreamService
+from vera_core.call_stream import (
+    TYPE_CALL_STATUS,
+    TYPE_TRANSCRIPT,
+    CallStreamEvent,
+    CallStreamService,
+)
 from vera_core.db.rls import tenant_session
-from vera_core.models import Call, PatientForm
+from vera_core.models import Call, PatientForm, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallStatus
 from vera_core.observability.correlation import room_name_for_call
@@ -56,6 +64,38 @@ _ACTIVE_STATUSES = (
     CallStatus.WAITING,
     CallStatus.CRITICAL,
 )
+
+# Bound on tailing a stream that may never appear (no stream yet, call still live).
+# Pre-answer ring/IVR wait is bounded ~60s; 180s sits safely above any legitimate
+# pre-first-publish silence, so a genuinely stuck/never-dispatched room still lets
+# go instead of pinning the SSE connection open forever.
+_LIVE_TAIL_FIRST_ENTRY_DEADLINE_S: float = 180
+
+# Transcript.source ("rep"/"bot") -> envelope role, used only when the row's own
+# `role` is blank (older rows / a source the worker didn't stamp a role for).
+_SOURCE_TO_ROLE = {"rep": "user", "bot": "agent"}
+
+
+def _transcript_role(row: Transcript) -> str:
+    return row.role or _SOURCE_TO_ROLE.get(row.source, row.source)
+
+
+def _epoch_ms(dt: datetime | None) -> int:
+    return int(dt.timestamp() * 1000) if dt is not None else 0
+
+
+def _sse_frame(entry_id: str, event: CallStreamEvent) -> str:
+    """One SSE frame: the entry id line plus the full de-identified envelope as JSON."""
+    return f"id: {entry_id}\ndata: {event.model_dump_json()}\n\n"
+
+
+def _sse_response(frames: AsyncIterator[str]) -> StreamingResponse:
+    """SSE response with the no-store / no-buffering headers every call-events branch returns."""
+    return StreamingResponse(
+        frames,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 def _supervisor_identity(user_id: UUID) -> str:
@@ -195,15 +235,69 @@ async def stream_call_events(
         )
     room_name = room_name_for_call(tenant_id, call.id)
 
-    async def _events() -> AsyncIterator[str]:
-        async for entry_id, event in service.consume(room_name):
-            yield f"id: {entry_id}\ndata: {event.model_dump_json()}\n\n"
+    # Task 16 persists transcripts to the DB and deletes the stream at closeout, so
+    # a terminal call's stream is normally already gone — one EXISTS round-trip
+    # decides which record to serve. Race: the stream is deleted between this check
+    # and the tail branch's read — that branch's own deadline still bounds it. Or a
+    # stream is (re)created between this EXISTS(false) and the terminal branch's DB
+    # read below — the finalizer will persist those rows too; the client just gets
+    # the DB snapshot as it stood at read time.
+    stream_exists = await service.exists(room_name)
 
-    return StreamingResponse(
-        _events(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    if not stream_exists and call.current_status in TERMINAL_VALUES:
+        async with tenant_session(sessionmaker, tenant_id) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(Transcript)
+                        .where(Transcript.call_id == call.id)
+                        .order_by(Transcript.seq)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        db_events = [
+            (
+                f"db-{row.seq}",
+                CallStreamEvent(
+                    type=TYPE_TRANSCRIPT,
+                    data={"role": _transcript_role(row), "text": row.message},
+                    ts=_epoch_ms(row.spoke_at),
+                ),
+            )
+            for row in rows
+        ]
+        db_events.append(
+            (
+                "db-status",
+                CallStreamEvent(
+                    type=TYPE_CALL_STATUS,
+                    data={"status": call.current_status},
+                    ts=_epoch_ms(call.ended_at) or int(time.time() * 1000),
+                ),
+            )
+        )
+
+        async def _db_frames() -> AsyncIterator[str]:
+            for entry_id, event in db_events:
+                yield _sse_frame(entry_id, event)
+
+        return _sse_response(_db_frames())
+
+    # No stream and the call is still live: the worker may not have published its
+    # first event yet (or never will, e.g. a crashed dispatch). Bound the wait so a
+    # stream that never appears can't pin the connection open forever; a stream
+    # that already exists tails with no deadline (today's behavior, unbounded).
+    first_entry_deadline_s = None if stream_exists else _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
+
+    async def _live_frames() -> AsyncIterator[str]:
+        async for entry_id, event in service.consume(
+            room_name, first_entry_deadline_s=first_entry_deadline_s
+        ):
+            yield _sse_frame(entry_id, event)
+
+    return _sse_response(_live_frames())
 
 
 @router.post(
