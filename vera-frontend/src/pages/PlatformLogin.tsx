@@ -58,8 +58,8 @@ export function PlatformLogin() {
     }
     setBusy(true)
     try {
-      await dispatch(platformLoginThunk({ email, password })).unwrap()
-      navigate("/mfa")
+      const step = await dispatch(platformLoginThunk({ email, password })).unwrap()
+      navigate(step === "enroll" ? "/mfa-enroll" : "/mfa")
     } catch (err) {
       setError(
         apiErrorHttpStatus(err) === 401

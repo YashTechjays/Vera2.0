@@ -5,13 +5,19 @@ vi.mock("@/lib/auth/storage", () => ({
   getToken: () => null,
   setSession: vi.fn(),
   clearSession: vi.fn(),
+  getAuthPlane: vi.fn(() => null),
+  setAuthPlane: vi.fn(),
 }))
 
 import { configureStore } from "@reduxjs/toolkit"
 import * as api from "@/lib/auth/api"
+import * as storage from "@/lib/auth/storage"
 import authReducer, {
   forceLogout,
   loginThunk,
+  loginRedirectPath,
+  platformLoginThunk,
+  platformEnrollActivateThunk,
   fetchMe,
   selectStatus,
   selectMfa,
@@ -62,6 +68,50 @@ describe("authSlice", () => {
     expect(selectStatus(store.getState())).toBe("authenticated")
   })
 
+  it("platform login with enroll shows the QR (enroll step + provisioning uri)", async () => {
+    vi.mocked(api.platformLogin).mockResolvedValue({
+      mfa: "enroll",
+      session_token: null,
+      mfa_token: "et",
+      provisioning_uri: "otpauth://totp/Vera:ops?secret=ABC",
+    })
+    const store = makeStore()
+    const step = await store.dispatch(
+      platformLoginThunk({ email: "ops@vera.example", password: "x" }),
+    ).unwrap()
+    expect(step).toBe("enroll")
+    const mfa = selectMfa(store.getState())
+    expect(mfa?.step).toBe("enroll")
+    expect(mfa?.platform).toBe(true)
+    expect(mfa?.provisioningUri).toBe("otpauth://totp/Vera:ops?secret=ABC")
+    expect(selectStatus(store.getState())).toBe("anonymous")
+  })
+
+  it("platform enroll-activate mints the session and clears mfa (no recovery codes)", async () => {
+    vi.mocked(api.platformEnrollActivate).mockResolvedValue({ session_token: "tok" })
+    vi.mocked(api.getMe).mockResolvedValue({
+      ...me, account_type: "platform", tenant_id: null, tenant_slug: null,
+    })
+    const store = makeStore()
+    await store.dispatch(
+      platformEnrollActivateThunk({ mfaToken: "et", code: "123456" }),
+    ).unwrap()
+    expect(selectStatus(store.getState())).toBe("authenticated")
+    expect(selectMfa(store.getState())).toBeNull()
+  })
+
+  it("platform login with verify goes to the verify step", async () => {
+    vi.mocked(api.platformLogin).mockResolvedValue({
+      mfa: "verify", session_token: null, mfa_token: "mt", provisioning_uri: null,
+    })
+    const store = makeStore()
+    const step = await store.dispatch(
+      platformLoginThunk({ email: "ops@vera.example", password: "x" }),
+    ).unwrap()
+    expect(step).toBe("verify")
+    expect(selectMfa(store.getState())?.step).toBe("verify")
+  })
+
   it("login with MFA verify does not authenticate", async () => {
     vi.mocked(api.login).mockResolvedValue({
       mfa: "verify", session_token: null, mfa_token: "mt", provisioning_uri: null,
@@ -99,5 +149,16 @@ describe("authSlice", () => {
     expect(deadline).not.toBeNull()
     expect(deadline!).toBeGreaterThanOrEqual(before + 10 * 3600 * 1000)
     expect(deadline!).toBeLessThanOrEqual(after + 10 * 3600 * 1000)
+  })
+
+  it("loginRedirectPath is platform-aware from state, else the persisted plane", () => {
+    // In-memory challenge → trust its plane flag.
+    expect(loginRedirectPath({ platform: true })).toBe("/platform/login")
+    expect(loginRedirectPath({ platform: false })).toBe("/login")
+    // No challenge (refresh) → fall back to the persisted hint.
+    vi.mocked(storage.getAuthPlane).mockReturnValueOnce("platform")
+    expect(loginRedirectPath(null)).toBe("/platform/login")
+    vi.mocked(storage.getAuthPlane).mockReturnValueOnce(null)
+    expect(loginRedirectPath(null)).toBe("/login")
   })
 })

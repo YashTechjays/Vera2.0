@@ -8,7 +8,13 @@ import { Label } from "@/components/ui/label"
 import { apiErrorMessage } from "@/lib/api/client"
 import { RecoveryCodes } from "@/components/auth/RecoveryCodes"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
-import { selectMfa, selectTenantSlug, enrollActivateThunk } from "@/store/authSlice"
+import {
+  selectMfa,
+  selectTenantSlug,
+  enrollActivateThunk,
+  platformEnrollActivateThunk,
+  loginRedirectPath,
+} from "@/store/authSlice"
 
 export function MfaEnroll() {
   const dispatch = useAppDispatch()
@@ -20,13 +26,19 @@ export function MfaEnroll() {
   const [busy, setBusy] = useState(false)
   const [recovery, setRecovery] = useState<string[] | null>(null)
 
-  if (!mfa || mfa.step !== "enroll") return <Navigate to="/login" replace />
+  if (!mfa || mfa.step !== "enroll") return <Navigate to={loginRedirectPath(mfa)} replace />
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
     setBusy(true)
     try {
+      if (mfa!.platform) {
+        // Platform enrollment is TOTP-only — no recovery codes to show, straight in.
+        await dispatch(platformEnrollActivateThunk({ mfaToken: mfa!.token, code })).unwrap()
+        navigate("/", { replace: true })
+        return
+      }
       const codes = await dispatch(
         enrollActivateThunk({ slug, mfaToken: mfa!.token, code }),
       ).unwrap()

@@ -7,9 +7,13 @@
 
 const TOKEN_KEY = "vera.session_token"
 const TENANT_SLUG_KEY = "vera.tenant_slug"
+// Non-sensitive hint (no token) for which login plane an in-flight MFA challenge is on,
+// so a refresh bounces back to the right login.
+const AUTH_PLANE_KEY = "vera.auth_plane"
 
 let token: string | null = sessionStorage.getItem(TOKEN_KEY)
 let tenantSlug: string | null = sessionStorage.getItem(TENANT_SLUG_KEY)
+let authPlane: string | null = sessionStorage.getItem(AUTH_PLANE_KEY)
 
 export function getToken(): string | null {
   return token
@@ -19,11 +23,21 @@ export function getTenantSlug(): string | null {
   return tenantSlug
 }
 
+export function getAuthPlane(): string | null {
+  return authPlane
+}
+
+export function setAuthPlane(plane: "platform" | "tenant"): void {
+  authPlane = plane
+  sessionStorage.setItem(AUTH_PLANE_KEY, plane)
+}
+
 export function setSession(nextToken: string, nextTenantSlug: string): void {
   token = nextToken
   tenantSlug = nextTenantSlug
   sessionStorage.setItem(TOKEN_KEY, nextToken)
   sessionStorage.setItem(TENANT_SLUG_KEY, nextTenantSlug)
+  clearAuthPlane()  // challenge complete — the pending-plane hint is moot
 }
 
 export function clearSession(): void {
@@ -31,4 +45,10 @@ export function clearSession(): void {
   tenantSlug = null
   sessionStorage.removeItem(TOKEN_KEY)
   sessionStorage.removeItem(TENANT_SLUG_KEY)
+  clearAuthPlane()
+}
+
+function clearAuthPlane(): void {
+  authPlane = null
+  sessionStorage.removeItem(AUTH_PLANE_KEY)
 }

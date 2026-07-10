@@ -101,6 +101,12 @@ def rls_database_url(database_url: str) -> str:
                     f" TO {RLS_ROLE}"
                 )
             )
+            # vera_rls_test stands in for the deployed app role, which the definer
+            # functions now grant EXECUTE to explicitly (migration f066c667ddc1 revokes
+            # the PUBLIC default). Mirror that grant so the RLS role can still invoke them.
+            await conn.execute(
+                text(f"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {RLS_ROLE}")
+            )
         await engine.dispose()
 
     asyncio.run(setup())

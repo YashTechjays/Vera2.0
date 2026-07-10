@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label"
 import { apiErrorMessage } from "@/lib/api/client"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import {
+  loginRedirectPath,
   platformVerifyMfaThunk,
   selectMfa,
   selectTenantSlug,
@@ -22,8 +23,8 @@ export function MfaVerify() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  // No challenge in state (e.g. refresh) → back to login.
-  if (!mfa || mfa.step !== "verify") return <Navigate to="/login" replace />
+  // No challenge in state (e.g. refresh) → back to the right login (platform vs tenant).
+  if (!mfa || mfa.step !== "verify") return <Navigate to={loginRedirectPath(mfa)} replace />
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
