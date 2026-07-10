@@ -248,3 +248,62 @@ async def test_carry_forward_on_schema_republish(
         assert current.composite_json["task_overrides"] == {
             "wrap_up": {"intro": None, "outro": "Edited goodbye.", "prompt": None}
         }
+
+
+async def test_carry_forward_warns_on_stale_placeholders(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    clean_prompts: None,
+) -> None:
+    """Pruning only drops vanished task keys; surviving text referencing a
+    placeholder the new schema no longer defines must be surfaced in the seed
+    summary (it would render literally on calls) while carry-forward proceeds."""
+    async with admin_sessionmaker() as session, session.begin():
+        await _seed_form_schemas(session)
+        await _seed_prompts(session)
+
+    async with admin_sessionmaker() as session, session.begin():
+        version = (
+            await session.execute(
+                select(PromptVersion)
+                .join(Prompt, PromptVersion.prompt_id == Prompt.id)
+                .join(FormSchema, Prompt.schema_id == FormSchema.id)
+                .where(FormSchema.insurance_type == INSURANCE_TYPE)
+            )
+        ).scalar_one()
+        version.composite_json = {
+            **version.composite_json,
+            "task_overrides": {"wrap_up": {"outro": "Bye {{gone_handle}}."}},
+        }
+
+    # Republish the schema (same content, new version) to trigger carry-forward.
+    async with admin_sessionmaker() as session, session.begin():
+        published = (
+            await session.execute(
+                select(SchemaVersion)
+                .join(FormSchema, SchemaVersion.schema_id == FormSchema.id)
+                .where(
+                    FormSchema.insurance_type == INSURANCE_TYPE,
+                    SchemaVersion.status == VersionStatus.PUBLISHED,
+                )
+            )
+        ).scalar_one()
+        published.status = VersionStatus.DRAFT
+        await session.flush()
+        session.add(
+            SchemaVersion(
+                schema_id=published.schema_id,
+                version=published.version + 1,
+                schema_json=published.schema_json,
+                status=VersionStatus.PUBLISHED,
+            )
+        )
+
+    async with admin_sessionmaker() as session, session.begin():
+        summary = await _seed_prompts(session)
+    line = next(entry for entry in summary if entry.startswith(INSURANCE_TYPE))
+    assert "WARNING stale content" in line
+    assert "gone_handle" in line
+    # Carry-forward still proceeds — the stale document is published (operator
+    # fixes the text in the editor; the seeder only reports).
+    async with admin_sessionmaker() as session:
+        assert (await _counts(session))[2] == 1

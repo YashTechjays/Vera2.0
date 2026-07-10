@@ -33,6 +33,7 @@ from vera_core.forms.dsl import (
     Leaf,
     Task,
     condition_field_paths,
+    malformed_placeholders,
 )
 from vera_core.forms.prompt_text import build_condition_renderer
 
@@ -474,4 +475,9 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
         for token in PLACEHOLDER_RE.findall(text or ""):
             if token not in valid_tokens:
                 errors.append(f"{where}: unknown placeholder {{{{{token}}}}}")
+        for snippet in malformed_placeholders(text or ""):
+            errors.append(
+                f"{where}: malformed placeholder {snippet!r} "
+                "(use {{token}} — word characters and dots only, no spaces)"
+            )
     return errors

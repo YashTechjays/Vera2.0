@@ -112,3 +112,19 @@ class TestContentValidation:
     def test_value_token_exempt(self) -> None:
         doc = prompt_doc(task_overrides={"main": {"prompt": "Confirm {{value}} politely."}})
         assert validate_prompt_document(doc, schema_doc()) == []
+
+    def test_malformed_placeholder_with_spaces_flagged(self) -> None:
+        doc = prompt_doc(session={**SESSION, "persona": "I serve {{ member_id }}."})
+        errors = validate_prompt_document(doc, schema_doc())
+        assert any("malformed placeholder" in e and "session.persona" in e for e in errors)
+
+    def test_malformed_placeholder_in_override_flagged(self) -> None:
+        doc = prompt_doc(task_overrides={"main": {"outro": "Bye {{patient name}}."}})
+        errors = validate_prompt_document(doc, schema_doc())
+        assert any(
+            "malformed placeholder" in e and "task_overrides.main.outro" in e for e in errors
+        )
+
+    def test_unclosed_braces_still_pass(self) -> None:
+        doc = prompt_doc(task_overrides={"main": {"prompt": "A literal {{ stays legal."}})
+        assert validate_prompt_document(doc, schema_doc()) == []

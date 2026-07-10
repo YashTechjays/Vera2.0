@@ -28,6 +28,20 @@ KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # {{token}} placeholders in task-level text; token = a system_fields key or the
 # root-anchored path of a context-role leaf (2026-07-08 spec §4).
 PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
+# A complete {{…}} pair whose innards did NOT parse as a token above — e.g.
+# "{{ member_id }}" (inner whitespace) or "{{patient-name}}" (bad chars). These
+# are operator typos that would otherwise reach the spoken prompt as literal
+# braces, so validation flags them. A lone unclosed "{{" stays legal literal
+# text (2026-07-06 spec §8).
+_MALFORMED_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]*\}\}")
+
+
+def malformed_placeholders(text: str) -> list[str]:
+    """Brace pairs that look like placeholders but fail PLACEHOLDER_RE, in
+    document order. Valid tokens are stripped first so only leftovers report."""
+    return _MALFORMED_PLACEHOLDER_RE.findall(PLACEHOLDER_RE.sub("", text))
+
+
 PATH_PREFIX = "sections."
 MAX_PATH_LENGTH = 255
 MAX_STT_KEY_TERMS = 100  # Deepgram keyterm-prompting limit
@@ -512,6 +526,11 @@ class FormSchemaDoc(_Model):
                             f"task {task.task_key}.{attr}: unknown placeholder "
                             f"{{{{{token}}}}} (not a system_fields key or context-leaf path)"
                         )
+                for snippet in malformed_placeholders(text or ""):
+                    errors.append(
+                        f"task {task.task_key}.{attr}: malformed placeholder {snippet!r} "
+                        "(use {{token}} — word characters and dots only, no spaces)"
+                    )
         if len(set(task_keys)) != len(task_keys):
             errors.append("duplicate task_key")
         for skey, section in self.sections.items():

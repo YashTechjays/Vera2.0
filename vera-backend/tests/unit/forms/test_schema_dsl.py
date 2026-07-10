@@ -176,6 +176,18 @@ class TestDocumentValidation:
         doc["tasks"][0]["intro"] = "This {{ is not a placeholder."
         FormSchemaDoc.model_validate(doc)
 
+    def test_malformed_placeholder_with_spaces_rejected(self) -> None:
+        doc = minimal_doc(system_fields={"member_id": "sections.basics.plan_type"})
+        doc["tasks"][0]["intro"] = "Your id is {{ member_id }}."
+        with pytest.raises(ValidationError, match="malformed placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_malformed_placeholder_bad_chars_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["prompt"] = "Mention {{patient-name}} politely."
+        with pytest.raises(ValidationError, match="malformed placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
     def test_stt_key_terms_valid_list_accepted(self) -> None:
         FormSchemaDoc.model_validate(minimal_doc(stt_key_terms=["coinsurance", "IVF"]))
 

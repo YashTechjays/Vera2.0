@@ -27,7 +27,7 @@ from control_plane.auth.password import hash_password
 from vera_core.config import get_settings
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.forms.dsl import FormSchemaDoc
-from vera_core.forms.prompting import FACTORY_SESSION, PromptDocument
+from vera_core.forms.prompting import FACTORY_SESSION, PromptDocument, validate_prompt_document
 from vera_core.models import (
     AppUser,
     FormSchema,
@@ -374,6 +374,21 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
             dropped = sorted(set(prior.task_overrides) - task_keys)
             doc_model = prior.model_copy(update={"task_overrides": kept})
             note = "carried forward" + (f", dropped: {', '.join(dropped)}" if dropped else "")
+            # Pruning only removes vanished task keys; surviving text can still
+            # reference placeholders the new schema no longer defines (a renamed
+            # system_fields handle or context leaf). Such tokens would render
+            # literally on calls, so surface them at seed time — carry-forward
+            # still proceeds (the document stays operator-owned; fixing the text
+            # is an editor job, not the seeder's).
+            stale = validate_prompt_document(doc_model, schema_doc)
+            if stale:
+                note += f"; WARNING stale content: {'; '.join(stale)}"
+                print(
+                    f"WARNING: {insurance_type} carried-forward prompt no longer "
+                    f"validates against schema v{published_schema.version}: "
+                    f"{'; '.join(stale)}",
+                    file=sys.stderr,
+                )
         doc = doc_model.model_dump(mode="json")
 
         max_version = (
