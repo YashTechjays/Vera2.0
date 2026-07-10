@@ -86,10 +86,10 @@ export async function apiRequestBlob(path: string, opts: RequestOptions = {}): P
       /* non-JSON error body */
     }
     // Reuse apiRequest's 401 handling so an expired session clears auth state.
-    if (res.status === 401) authFailureHandler?.()
+    if (res.status === 401 && auth) authFailureHandler?.()
     throw new ApiError(
       res.status,
-      envelope?.error_code ?? "HTTP_ERROR",
+      envelope?.error_code ?? null,
       envelope?.message ?? `Request failed (${res.status})`,
     )
   }

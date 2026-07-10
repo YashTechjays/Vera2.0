@@ -226,7 +226,10 @@ export function IbvProvider({
     [seed],
   )
 
-  const closeForm = useCallback(() => setModalOpen(false), [])
+  const closeForm = useCallback(() => {
+    setModalOpen(false)
+    setProvenance({})
+  }, [])
 
   const setValue = useCallback((path: string, value: string) => {
     setValues((prev) => ({ ...prev, [path]: value }))
