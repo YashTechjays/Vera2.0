@@ -34,6 +34,12 @@ jobs:
           cache: npm
           cache-dependency-path: vera-frontend/package-lock.json
 
+      # Enforces the npm version pinned in package.json's `packageManager` field, so CI
+      # can never silently drift onto a different npm than the one the lock file was
+      # generated with (root cause of a past `npm ci` EUSAGE failure on dev).
+      - name: Enable corepack
+        run: corepack enable
+
       - name: Install (locked)
         run: npm ci
 
