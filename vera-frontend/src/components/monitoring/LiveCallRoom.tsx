@@ -25,6 +25,7 @@ import {
   speakerButtonState,
   type ConnectionPhase,
   type ParticipantLike,
+  type ParticipantMode,
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 
@@ -35,11 +36,11 @@ const PHASE_ICON_CLASS: Record<ConnectionPhase, string> = {
   ended: "text-muted-foreground",
 }
 
-const MODE_BADGE_CLASS: Record<string, string> = {
-  Intervening: "text-amber-600",
-  Listening: "text-muted-foreground",
-  "AI Agent": "text-emerald-600",
-  Caller: "text-muted-foreground",
+const MODE_BADGE_CLASS: Record<ParticipantMode, string> = {
+  intervener: "text-amber-600",
+  listener: "text-muted-foreground",
+  agent: "text-emerald-600",
+  callee: "text-muted-foreground",
 }
 
 function toParticipantLike(p: Participant): ParticipantLike {
@@ -56,14 +57,16 @@ function ParticipantRow({ participant }: { participant: Participant }) {
   // Subscribes to attributesChanged so a mode flip re-renders this row live.
   const { attributes } = useParticipantAttributes({ participant })
   const like = { ...toParticipantLike(participant), attributes }
-  const badge = PARTICIPANT_MODE_BADGE[participantMode(like)]
+  const mode = participantMode(like)
   return (
     <li className="flex items-center justify-between gap-2">
       <span className="truncate text-xs">
         {participantLabel(like)}
         {participant.isLocal && <span className="text-muted-foreground"> (you)</span>}
       </span>
-      <span className={`shrink-0 text-xs ${MODE_BADGE_CLASS[badge]}`}>{badge}</span>
+      <span className={`shrink-0 text-xs ${MODE_BADGE_CLASS[mode]}`}>
+        {PARTICIPANT_MODE_BADGE[mode]}
+      </span>
     </li>
   )
 }
@@ -95,15 +98,16 @@ function SpeakerToggle({
   )
 }
 
+function micToggleTitle(canSpeak: boolean, enabled: boolean): string {
+  if (!canSpeak) return "Listen-only — intervene to speak"
+  return enabled ? "Mute microphone" : "Unmute microphone"
+}
+
 /** Mic mute/unmute. Rendered in every mode; disabled while listen-only (the
  *  token cannot publish — the server, not this button, keeps listeners mute). */
 function MicToggle({ canSpeak }: { canSpeak: boolean }) {
   const { enabled, pending, toggle } = useTrackToggle({ source: Track.Source.Microphone })
-  const title = !canSpeak
-    ? "Listen-only — intervene to speak"
-    : enabled
-      ? "Mute microphone"
-      : "Unmute microphone"
+  const title = micToggleTitle(canSpeak, enabled)
   return (
     <Button
       type="button"
