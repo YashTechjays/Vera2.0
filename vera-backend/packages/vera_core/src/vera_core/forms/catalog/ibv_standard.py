@@ -1041,7 +1041,7 @@ def build_ibv_standard() -> FormSchemaDoc:
             appointment_date="sections.appointment_information.appointment_date",
             appointment_type="sections.appointment_information.appointment_type",
             member_id="sections.insurance_information.policy_number",
-            insurance_provider=("sections.insurance_reference_information.insurance_provider_name"),
+            insurance_provider="sections.insurance_reference_information.insurance_provider_name",
             insurance_provider_phone_number=(
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
