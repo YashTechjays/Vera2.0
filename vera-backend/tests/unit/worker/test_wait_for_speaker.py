@@ -72,6 +72,10 @@ class _FakeRoom:
         for cb in list(self._handlers.get("participant_disconnected", [])):
             cb(participant)
 
+    def emit_room_disconnected(self, reason: object = None) -> None:
+        for cb in list(self._handlers.get("disconnected", [])):
+            cb(reason)
+
 
 class _FakeCtx:
     def __init__(self, room: _FakeRoom) -> None:
@@ -196,6 +200,25 @@ async def test_no_answer_when_no_one_joins() -> None:
     ctx = _FakeCtx(_FakeRoom())
     result = await wait_for_speaker(ctx, timeout_s=0.05)  # type: ignore[arg-type]
     assert result == CallFailed(CallFailureReason.NO_ANSWER)
+
+
+@pytest.mark.asyncio
+async def test_room_disconnect_resolves_failed_immediately() -> None:
+    """Room deleted mid-dial (user cancel / sweeper teardown): the wait must
+    resolve at once so the entrypoint exits cleanly and publishes an outcome,
+    instead of hanging until the framework force-cancels the job (which would
+    skip the call.failed publish entirely)."""
+    room = _FakeRoom()
+    ctx = _FakeCtx(room)
+
+    async def _delete_room() -> None:
+        await asyncio.sleep(0)
+        room.emit_room_disconnected("room deleted")
+
+    task = asyncio.create_task(_delete_room())
+    result = await asyncio.wait_for(wait_for_speaker(ctx, timeout_s=30.0), timeout=1.0)  # type: ignore[arg-type]
+    assert result == CallFailed(CallFailureReason.FAILED)
+    await task
 
 
 def test_classify_sip_disconnect_maps_reasons() -> None:

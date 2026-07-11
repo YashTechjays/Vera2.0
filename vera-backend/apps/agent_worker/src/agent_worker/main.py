@@ -153,9 +153,24 @@ async def wait_for_speaker(ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_
             return
         result.set_result(CallFailed(classify_sip_disconnect(participant.disconnect_reason)))
 
+    def _on_room_disconnected(reason: object = None) -> None:
+        # The whole room went away mid-dial (user canceled from Live Monitoring,
+        # sweeper teardown, server-side delete). Resolve immediately so the
+        # entrypoint exits cleanly and publishes an outcome — left unresolved,
+        # the framework force-cancels the job and no call.failed is ever emitted.
+        # The consumer no-ops if the control plane already closed the call.
+        logger.info(
+            "wait_for_speaker[%s]: room disconnected (%s) — resolving as failed",
+            ctx.room.name,
+            reason,
+        )
+        if not result.done():
+            result.set_result(CallFailed(CallFailureReason.FAILED))
+
     ctx.room.on("participant_connected", _on_connected)
     ctx.room.on("participant_attributes_changed", _on_attributes_changed)
     ctx.room.on("participant_disconnected", _on_disconnected)
+    ctx.room.on("disconnected", _on_room_disconnected)
     try:
         logger.info(
             "wait_for_speaker[%s]: participants at scan = %s",
@@ -177,6 +192,7 @@ async def wait_for_speaker(ctx: JobContext, timeout_s: float = _SPEAKER_TIMEOUT_
         ctx.room.off("participant_connected", _on_connected)
         ctx.room.off("participant_attributes_changed", _on_attributes_changed)
         ctx.room.off("participant_disconnected", _on_disconnected)
+        ctx.room.off("disconnected", _on_room_disconnected)
 
 
 def build_room_input_options(speaker_identity: str | NotGiven) -> RoomInputOptions:
