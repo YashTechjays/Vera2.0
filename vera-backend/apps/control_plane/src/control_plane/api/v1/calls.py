@@ -229,14 +229,13 @@ async def join_token(
     intervene: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
-    # Intervening claims the single-intervener lock — row-lock so concurrent
-    # claims serialize; the listen path stays lock-free.
+    # Intervening claims the single-intervener lock — the row lock serializes
+    # concurrent claims while the listen path stays lock-free. RLS already
+    # constrains the row to the caller's tenant.
     stmt = select(Call).where(Call.id == call_id)
     if intervene:
         stmt = stmt.with_for_update()
-    call = (
-        await session.execute(stmt)
-    ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
+    call = (await session.execute(stmt)).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
     is_owner = call.initiated_by_id == caller.user_id
