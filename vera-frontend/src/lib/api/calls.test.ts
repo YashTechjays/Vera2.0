@@ -18,6 +18,7 @@ vi.mock("@/lib/api/client", () => {
 
 import { apiRequest, ApiError } from "@/lib/api/client"
 import {
+  endCall,
   getJoinToken,
   listCalls,
   publishCall,
@@ -91,6 +92,20 @@ describe("calls API client", () => {
       method: "POST",
       body: { target_user_id: "u2" },
     })
+  })
+
+  it("ends a call (POST, no body)", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({ ...call, status: "completed" })
+    const out = await endCall("c1")
+    expect(out.status).toBe("completed")
+    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/end", { method: "POST" })
+  })
+
+  it("propagates ApiError when a non-intervener tries to end (403)", async () => {
+    vi.mocked(apiRequest).mockRejectedValue(
+      new ApiError(403, "FORBIDDEN", "only the active intervener can end the call"),
+    )
+    await expect(endCall("c1")).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when a non-owner tries to publish (403)", async () => {

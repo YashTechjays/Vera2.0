@@ -52,6 +52,12 @@ export function getJoinToken(callId: string, intervene = false): Promise<JoinTok
   return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
 }
 
+/** POST /calls/{id}/end — active intervener only; tears the LiveKit room down
+ *  and marks the call completed. 403 for anyone else surfaces as ApiError. */
+export function endCall(callId: string): Promise<CallSummary> {
+  return apiRequest<CallSummary>(`/calls/${encodeURIComponent(callId)}/end`, { method: "POST" })
+}
+
 /** POST /calls/{id}/revoke-access — owner ejects an intervener from the room. */
 export function revokeAccess(callId: string, targetUserId: string): Promise<null> {
   return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/revoke-access`, {
