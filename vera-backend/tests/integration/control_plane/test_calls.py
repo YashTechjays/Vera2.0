@@ -946,6 +946,178 @@ async def test_listen_token_carries_listener_mode(
 
 
 @pytest.mark.asyncio
+async def test_end_call_by_intervener_completes_and_tears_down(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert joined.status_code == 200, joined.text
+    room_name = joined.json()["data"]["room_name"]
+
+    ended = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert ended.status_code == 200, ended.text
+    assert ended.json()["data"]["status"] == "completed"
+
+    # Call terminal, ended_at stamped, lock released.
+    call = (await admin_session.execute(select(Call).where(Call.id == UUID(call_id)))).scalar_one()
+    assert call.current_status == "completed"
+    assert call.ended_at is not None
+    assert call.intervener_user_id is None
+    assert call.intervener_claimed_at is None
+
+    # Form followed the call to completed; the status log has the terminal row.
+    form_status = (
+        await admin_session.execute(
+            text("SELECT status FROM patient_form WHERE id = :fid").bindparams(fid=seeded_form_id)
+        )
+    ).scalar_one()
+    assert form_status == "completed"
+    event_count = (
+        await admin_session.execute(
+            text(
+                "SELECT count(*) FROM call_event WHERE call_id = :cid "
+                "AND event_type = 'status' AND event_value = 'completed'"
+            ).bindparams(cid=UUID(call_id))
+        )
+    ).scalar_one()
+    assert event_count == 1
+
+    # Room torn down; the end is audited.
+    assert fake_livekit.deleted[-1] == room_name
+    rows = (
+        await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.end.supervisor", AuditLog.resource_id == call_id
+            )
+        )
+    ).scalars()
+    assert len(list(rows)) == 1
+
+
+@pytest.mark.asyncio
+async def test_end_call_requires_intervener_lock(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert joined.status_code == 200, joined.text
+
+    # The admin holds calls:intervene but is not the active intervener (nor is
+    # ownership enough) — only the lock holder may end the call.
+    refused = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token)
+    )
+    assert refused.status_code == 403, refused.text
+
+
+@pytest.mark.asyncio
+async def test_end_call_requires_calls_intervene(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    denied = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.listener_token)
+    )
+    assert denied.status_code == 403, denied.text
+
+
+@pytest.mark.asyncio
+async def test_end_call_idempotent_when_terminal(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert joined.status_code == 200, joined.text
+
+    first = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert first.status_code == 200, first.text
+    deletes_after_first = len(fake_livekit.deleted)
+
+    # A second end is a no-op 200 — even from a non-holder (the lock is gone).
+    second = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token)
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["data"]["status"] == "completed"
+    assert len(fake_livekit.deleted) == deletes_after_first
+
+    rows = (
+        await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.end.supervisor", AuditLog.resource_id == call_id
+            )
+        )
+    ).scalars()
+    assert len(list(rows)) == 1
+
+
+@pytest.mark.asyncio
+async def test_end_call_unknown_call_404(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    missing = await client.post(
+        f"/api/v1/calls/{uuid4()}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert missing.status_code == 404, missing.text
+
+
+@pytest.mark.asyncio
+async def test_end_call_illegal_form_edge_does_not_500(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert joined.status_code == 200, joined.text
+
+    # Another path already moved the form to a state with no edge to completed;
+    # ending the call still succeeds and records the call's terminal status.
+    await admin_session.execute(
+        text("UPDATE patient_form SET status = 'completed' WHERE id = :fid").bindparams(
+            fid=seeded_form_id
+        )
+    )
+    await admin_session.commit()
+
+    ended = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert ended.status_code == 200, ended.text
+    assert ended.json()["data"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_owner_revokes_intervener_access(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

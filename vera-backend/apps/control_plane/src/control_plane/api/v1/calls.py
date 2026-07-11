@@ -524,6 +524,106 @@ async def revoke_access(
     return ok(None, message="Access revoked.")
 
 
+@router.post(
+    "/calls/{call_id}/end",
+    response_model=ResponseModel[CallSummary],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def end_call(
+    call_id: UUID,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    livekit: LiveKit,
+    audit: Audit,
+    caller: VerifiedIdentity = require("calls:intervene"),
+) -> ResponseModel[CallSummary]:
+    """The active intervener hangs the call up: room torn down (agent + SIP
+    callee + listeners all disconnect), call and form marked completed.
+
+    Deliberately holder-only — a supervisor who wants to end someone else's
+    call must intervene first. Returns no patient_name (the modal is closing;
+    minimum-necessary says don't disclose what nothing displays).
+    """
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
+    ).scalar_one_or_none()
+    if call is None:
+        raise NotFoundError(message="call not found")
+    # Idempotent — checked before the holder gate: ending clears the lock, so a
+    # retried request must return 200, not 403.
+    if call.current_status in _TERMINAL_CALL_STATUS_VALUES:
+        return ok(_summary(call, None, caller.user_id))
+    if call.intervener_user_id != caller.user_id:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="only the active intervener can end the call"
+        )
+
+    form = (
+        await session.execute(
+            select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
+    call.current_status = CallStatus.COMPLETED.value
+    call.ended_at = func.now()
+    call.intervener_user_id = None
+    call.intervener_claimed_at = None
+    session.add(
+        CallEvent(
+            tenant_id=tenant_id,
+            call_id=call.id,
+            event_type=CallEventType.STATUS,
+            event_value=CallStatus.COMPLETED.value,
+        )
+    )
+
+    # A deliberate human end completes the form — never CALL_FAILED (that would
+    # auto-redial the patient's insurer). An illegal edge must not 500: the
+    # call's terminal status is already recorded; log and continue.
+    previous_form_status = form.status
+    try:
+        FormStateMachine().transition(
+            form, FormStatus.COMPLETED, tenant_max_retries=tenant.max_retries
+        )
+    except InvalidTransitionError:
+        logger.warning(
+            "supervisor end: form %s cannot transition from '%s' on call %s; "
+            "call status recorded, form left unchanged",
+            form.id,
+            previous_form_status,
+            call_id,
+        )
+    await session.flush()
+
+    await livekit.delete_room(room_name_for_call(tenant_id, call.id))
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.CALL_END_SUPERVISOR.value,
+            resource_type="call",
+            resource_id=str(call.id),
+            permission_key="calls:intervene",
+            decision="allow",
+            request_id=current_request_id(request),
+            detail={"status": CallStatus.COMPLETED.value},
+        )
+    )
+    # Fire the dispatcher — a concurrency slot just freed up.
+    await try_dispatch(session, tenant_id, livekit, audit=audit)
+    return ok(_summary(call, None, caller.user_id))
+
+
 class UpdateCallStatusRequest(BaseModel):
     status: CallStatus
 
