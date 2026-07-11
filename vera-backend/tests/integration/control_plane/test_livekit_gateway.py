@@ -32,6 +32,86 @@ def test_mint_join_token_grants_room_join() -> None:
     assert claims["video"]["roomJoin"] is True
 
 
+def test_mint_join_token_carries_name_and_attributes() -> None:
+    gw = LiveKitGateway(url="ws://localhost:7880", api_key="devkey", api_secret="secret")
+    token = gw.mint_join_token(
+        room_name="call--t--c",
+        identity="supervisor-1",
+        can_publish=False,
+        name="supervisor@test.example",
+        attributes={"vera.mode": "listener"},
+    )
+
+    claims = jwt.decode(token, "secret", algorithms=["HS256"])
+    assert claims["name"] == "supervisor@test.example"
+    assert claims["attributes"] == {"vera.mode": "listener"}
+    assert claims["video"]["canPublish"] is False
+
+
+def test_mint_join_token_omits_name_and_attributes_by_default() -> None:
+    # Existing call sites (Voice Lab) pass neither — their tokens must not change.
+    gw = LiveKitGateway(url="ws://localhost:7880", api_key="devkey", api_secret="secret")
+    token = gw.mint_join_token(room_name="call--t--c", identity="caller-1")
+
+    claims = jwt.decode(token, "secret", algorithms=["HS256"])
+    assert "name" not in claims
+    assert "attributes" not in claims
+
+
+def test_list_participants_returns_identities(monkeypatch: pytest.MonkeyPatch) -> None:
+    from livekit import api
+
+    class _FakeRoomService:
+        async def list_participants(
+            self, req: api.ListParticipantsRequest
+        ) -> api.ListParticipantsResponse:
+            assert req.room == "call--t--c"
+            return api.ListParticipantsResponse(
+                participants=[
+                    api.ParticipantInfo(identity="supervisor-1"),
+                    api.ParticipantInfo(identity="phone-callee"),
+                ]
+            )
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    assert asyncio.run(gw.list_participants("call--t--c")) == ["supervisor-1", "phone-callee"]
+
+
+def test_list_participants_not_found_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A vanished room means every participant is gone — [] rather than an error."""
+    from livekit import api
+    from livekit.api.twirp_client import TwirpError
+
+    class _FakeRoomService:
+        async def list_participants(
+            self, req: api.ListParticipantsRequest
+        ) -> api.ListParticipantsResponse:
+            raise TwirpError(code="not_found", msg="room not found", status=404)
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    assert asyncio.run(gw.list_participants("call--t--c")) == []
+
+
 def test_build_livekit_gateway_raises_when_url_missing() -> None:
     settings = Settings(livekit_url=None)
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})

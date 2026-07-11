@@ -5,6 +5,7 @@ verify path (SessionVerifier -> tenant_guard -> require) without re-running the
 password/MFA dance, which has its own tests."""
 
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from typing import NamedTuple
 from uuid import UUID
 
 import httpx
@@ -38,6 +39,17 @@ from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 _LONG_TTL = 3600
 
 
+class MintedToken(NamedTuple):
+    """One mint_join_token call. A NamedTuple so older tests' positional
+    assertions (minted[-1][2] is the can_publish flag) keep working."""
+
+    room: str
+    identity: str
+    can_publish: bool
+    name: str | None
+    attributes: dict[str, str] | None
+
+
 class FakeLiveKit(LiveKitGateway):
     """Minimal LiveKitGateway stand-in for integration tests.
 
@@ -54,7 +66,9 @@ class FakeLiveKit(LiveKitGateway):
         self.deleted: list[str] = []
         self.removed: list[tuple[str, str]] = []
         self.room_metadata: list[tuple[str, dict[str, object]]] = []
-        self.minted: list[tuple[str, str, bool]] = []
+        self.minted: list[MintedToken] = []
+        # Room → identities knob for list_participants (reset by reset_livekit_knobs).
+        self.participants: dict[str, list[str]] = {}
         self._url = "ws://fake:7880"
         # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
@@ -99,8 +113,19 @@ class FakeLiveKit(LiveKitGateway):
     async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
         self.room_metadata.append((room_name, metadata))
 
-    def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
-        self.minted.append((room_name, identity, can_publish))
+    async def list_participants(self, room_name: str) -> list[str]:
+        return self.participants.get(room_name, [])
+
+    def mint_join_token(
+        self,
+        room_name: str,
+        identity: str,
+        *,
+        can_publish: bool = True,
+        name: str | None = None,
+        attributes: dict[str, str] | None = None,
+    ) -> str:
+        self.minted.append(MintedToken(room_name, identity, can_publish, name, attributes))
         return f"faketoken:{room_name}:{identity}"
 
 
@@ -117,6 +142,7 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
     fake_livekit.remove_not_found = False
+    fake_livekit.participants = {}
     yield
 
 

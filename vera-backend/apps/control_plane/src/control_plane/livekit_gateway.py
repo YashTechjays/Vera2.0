@@ -168,18 +168,39 @@ class LiveKitGateway:
                 api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
             )
 
-    def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
+    async def list_participants(self, room_name: str) -> list[str]:
+        """Identities currently connected to the room; [] when the room is gone
+        (a vanished room means every intervener lock on it is stale)."""
+        async with self._client() as lk:
+            try:
+                resp = await lk.room.list_participants(api.ListParticipantsRequest(room=room_name))
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return []
+                raise
+        return [p.identity for p in resp.participants]
+
+    def mint_join_token(
+        self,
+        room_name: str,
+        identity: str,
+        *,
+        can_publish: bool = True,
+        name: str | None = None,
+        attributes: dict[str, str] | None = None,
+    ) -> str:
         # Short TTL: the token is used immediately; the SDK default (~6h) would
         # let a revoked user's old token keep working. can_publish=False makes
         # watch-only viewers server-side mute — the client can't override it.
+        # `name`/`attributes` ride to every room participant (display name +
+        # vera.mode badge) — workforce identifiers only, never patient PHI.
         grants = api.VideoGrants(room_join=True, room=room_name, can_publish=can_publish)
-        return (
-            api.AccessToken(self._api_key, self._api_secret)
-            .with_identity(identity)
-            .with_grants(grants)
-            .with_ttl(timedelta(minutes=5))
-            .to_jwt()
-        )
+        token = api.AccessToken(self._api_key, self._api_secret).with_identity(identity)
+        if name is not None:
+            token = token.with_name(name)
+        if attributes:
+            token = token.with_attributes(attributes)
+        return token.with_grants(grants).with_ttl(timedelta(minutes=5)).to_jwt()
 
 
 def build_livekit_gateway(settings: Settings, secrets: SecretProvider) -> LiveKitGateway:
