@@ -24,6 +24,9 @@ _FORM_EDGE: dict[CallStatus, FormStatus] = {
     CallStatus.FAILED: FormStatus.CALL_FAILED,
     CallStatus.NO_ANSWER: FormStatus.CALL_FAILED,
     CallStatus.BUSY: FormStatus.CALL_FAILED,
+    # User-requested end: park the form for a human; NEVER auto-requeue (a
+    # supervisor who canceled a dial does not want the number redialed).
+    CallStatus.CANCELED: FormStatus.CALL_FAILED,
 }
 
 
@@ -42,7 +45,7 @@ def apply_terminal_call_status(
     requeued = False
     try:
         sm.transition(form, _FORM_EDGE[status], tenant_max_retries=tenant_max_retries)
-        if _FORM_EDGE[status] is FormStatus.CALL_FAILED:
+        if _FORM_EDGE[status] is FormStatus.CALL_FAILED and status is not CallStatus.CANCELED:
             # Auto-retry while retries remain; silently stay CALL_FAILED when exhausted.
             with contextlib.suppress(InvalidTransitionError):
                 sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant_max_retries)

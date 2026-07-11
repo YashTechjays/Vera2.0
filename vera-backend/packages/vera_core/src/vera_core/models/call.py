@@ -41,6 +41,7 @@ TERMINAL_CALL_STATUSES = (
     CallStatus.FAILED,
     CallStatus.NO_ANSWER,
     CallStatus.BUSY,
+    CallStatus.CANCELED,
 )
 _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in TERMINAL_CALL_STATUSES)
 
@@ -78,6 +79,12 @@ class Call(Base, TenantScopedMixin):
     )
     # The owning supervisor (drives Supervisor-Performance reporting, ADR §6).
     initiated_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    # Stamped by POST /calls/{id}/end BEFORE the room is torn down: durable "a user
+    # asked to end this" signal. The sweeper closes such a call as CANCELED (no
+    # auto-redial) if the worker's call.ended never arrives.
+    end_requested_by_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
 

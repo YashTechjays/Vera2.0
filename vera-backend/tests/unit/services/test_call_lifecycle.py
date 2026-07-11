@@ -40,6 +40,23 @@ def test_failed_call_stays_call_failed_when_retries_exhausted() -> None:
     assert requeued is False
 
 
+def test_canceled_is_terminal() -> None:
+    from vera_core.models.call import TERMINAL_CALL_STATUSES
+
+    assert CallStatus.CANCELED in TERMINAL_CALL_STATUSES
+
+
+def test_canceled_parks_form_without_retry() -> None:
+    """User-requested end: the form parks at CALL_FAILED for a human — never
+    auto-requeued, even with every retry remaining."""
+    call, form = _call(), _form(retry_count=0)
+    requeued = apply_terminal_call_status(call, form, CallStatus.CANCELED, tenant_max_retries=5)
+    assert call.current_status == CallStatus.CANCELED.value
+    assert form.status == FormStatus.CALL_FAILED.value
+    assert form.retry_count == 0
+    assert requeued is False
+
+
 def test_illegal_form_edge_still_records_call_status() -> None:
     call, form = _call(), _form(status=FormStatus.COMPLETED)  # form already terminal
     requeued = apply_terminal_call_status(call, form, CallStatus.FAILED, tenant_max_retries=3)
