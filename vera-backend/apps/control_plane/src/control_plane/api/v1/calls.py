@@ -13,6 +13,7 @@ visibility 404s (owners included).
 
 import contextlib
 import logging
+from datetime import timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import get_audit
 from control_plane.exceptions import (
+    ConflictError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
@@ -34,10 +36,29 @@ from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
-from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.models import (
+    Call,
+    CallEvent,
+    InsuranceProvider,
+    InterventionEvent,
+    PatientForm,
+    Tenant,
+)
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ProviderStatus
-from vera_core.observability.correlation import room_name_for_call
+from vera_core.models.call import TERMINAL_CALL_STATUSES
+from vera_core.models.enums import (
+    CallEventType,
+    CallStatus,
+    FormStatus,
+    InterventionType,
+    ProviderStatus,
+)
+from vera_core.observability.correlation import (
+    PARTICIPANT_MODE_ATTR,
+    PARTICIPANT_MODE_INTERVENER,
+    PARTICIPANT_MODE_LISTENER,
+    room_name_for_call,
+)
 from vera_core.schemas import (
     CallSummary,
     JoinTokenResponse,
@@ -65,6 +86,14 @@ _ACTIVE_STATUSES = (
 def _supervisor_identity(user_id: UUID) -> str:
     """LiveKit participant identity for a VA joining/intervening on a call."""
     return f"supervisor-{user_id}"
+
+
+# A just-minted intervene token belongs to a user who hasn't connected to LiveKit
+# yet, so a list_participants staleness probe would wrongly call the lock stale.
+# Inside this window a held lock is refused outright; past it, the holder must
+# actually be in the room or the lock is stolen.
+_INTERVENE_CONNECT_GRACE = timedelta(seconds=30)
+_TERMINAL_CALL_STATUS_VALUES = frozenset(s.value for s in TERMINAL_CALL_STATUSES)
 
 
 def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
@@ -200,8 +229,13 @@ async def join_token(
     intervene: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
+    # Intervening claims the single-intervener lock — row-lock so concurrent
+    # claims serialize; the listen path stays lock-free.
+    stmt = select(Call).where(Call.id == call_id)
+    if intervene:
+        stmt = stmt.with_for_update()
     call = (
-        await session.execute(select(Call).where(Call.id == call_id))
+        await session.execute(stmt)
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
@@ -212,6 +246,8 @@ async def join_token(
         revoked = str(caller.user_id) in call.revoked_user_ids
         if revoked or (call.initiated_by_id is not None and not call.published):
             raise NotFoundError(message="call not found")  # don't reveal a private call
+    room_name = room_name_for_call(tenant_id, call.id)
+    stolen_from: UUID | None = None
     if intervene:
         # Publishing audio into a live call needs calls:intervene — owners included.
         # Checked AFTER the visibility 404s so a private call never turns into a 403.
@@ -239,7 +275,51 @@ async def join_token(
             raise CustomAPIException(
                 DefaultExceptionCode.FORBIDDEN, message="missing permission calls:intervene"
             )
-    if not is_owner:
+        if call.current_status in _TERMINAL_CALL_STATUS_VALUES:
+            raise ConflictError(message="call already ended")
+
+        holder = call.intervener_user_id
+        if holder == caller.user_id:
+            # The holder reconnecting (tab refresh/crash) — refresh the claim,
+            # no new intervention rows.
+            call.intervener_claimed_at = func.now()
+        else:
+            if holder is not None:
+                claimed_at = call.intervener_claimed_at
+                db_now = (await session.execute(select(func.now()))).scalar_one()
+                inside_grace = (
+                    claimed_at is not None and db_now - claimed_at < _INTERVENE_CONNECT_GRACE
+                )
+                if inside_grace or _supervisor_identity(holder) in (
+                    await livekit.list_participants(room_name)
+                ):
+                    raise ConflictError(
+                        message="another supervisor is currently intervening on this call"
+                    )
+                stolen_from = holder  # claim aged past grace and holder left the room
+            call.intervener_user_id = caller.user_id
+            call.intervener_claimed_at = func.now()
+            # The purpose-built intervention audit trail: a row = an intervention
+            # occurred (ADR §6). No payload — nothing beyond ids to record.
+            session.add(
+                InterventionEvent(
+                    tenant_id=tenant_id,
+                    call_id=call.id,
+                    supervisor_id=caller.user_id,
+                    type=InterventionType.TAKEOVER.value,
+                    payload_ref={},
+                )
+            )
+    # One join audit row per disclosure-relevant join: any non-owner join, plus
+    # every intervene claim (owners included — intervening is its own disclosure).
+    if not is_owner or intervene:
+        detail: dict[str, object] = {}
+        if not is_owner:
+            detail["owner_id"] = str(call.initiated_by_id) if call.initiated_by_id else None
+        if intervene:
+            detail["intervene"] = True
+        if stolen_from is not None:
+            detail["stale_lock_released"] = str(stolen_from)
         await audit.emit(
             AuditRecord(
                 tenant_id=tenant_id,
@@ -249,16 +329,26 @@ async def join_token(
                 event_type=AuditEvent.CALL_INTERVENE_JOIN.value,
                 resource_type="call",
                 resource_id=str(call.id),
-                permission_key="calls:read",
+                permission_key="calls:intervene" if intervene else "calls:read",
                 decision="allow",
                 request_id=current_request_id(request),
-                detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
+                detail=detail,
             )
         )
-    room_name = room_name_for_call(tenant_id, call.id)
     identity = _supervisor_identity(caller.user_id)
     # Watch-only tokens are server-side mute; only ?intervene=true may publish.
-    token = livekit.mint_join_token(room_name=room_name, identity=identity, can_publish=intervene)
+    # Name + mode attribute label the participant for everyone in the room.
+    token = livekit.mint_join_token(
+        room_name=room_name,
+        identity=identity,
+        can_publish=intervene,
+        name=caller.email or caller.subject,
+        attributes={
+            PARTICIPANT_MODE_ATTR: (
+                PARTICIPANT_MODE_INTERVENER if intervene else PARTICIPANT_MODE_LISTENER
+            )
+        },
+    )
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 
 

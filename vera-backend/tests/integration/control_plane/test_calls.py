@@ -14,7 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
 from vera_core.db import uuid7
-from vera_core.models import AppUser, AuditLog, Call, InsuranceProvider, PatientForm
+from vera_core.models import (
+    AppUser,
+    AuditLog,
+    Call,
+    InsuranceProvider,
+    InterventionEvent,
+    PatientForm,
+)
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 from vera_core.observability.correlation import parse_room_name
@@ -691,6 +698,251 @@ async def test_supervisor_can_intervene_on_published_call(
     )
     assert joined.status_code == 200, joined.text
     assert fake_livekit.minted[-1][2] is True
+
+
+async def _create_published_call(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, form_id: UUID
+) -> str:
+    """Admin-owned, published call — the canonical setup for intervene tests."""
+    created = await client.post(
+        "/api/v1/calls",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_id": str(form_id)},
+    )
+    assert created.status_code == 200, created.text
+    call_id: str = created.json()["data"]["id"]
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert published.status_code == 200, published.text
+    return call_id
+
+
+async def _intervention_events(session: AsyncSession, call_id: str) -> list[InterventionEvent]:
+    result = await session.execute(
+        select(InterventionEvent).where(InterventionEvent.call_id == UUID(call_id))
+    )
+    return list(result.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_intervene_claims_lock_and_writes_intervention_event(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert joined.status_code == 200, joined.text
+
+    # Lock claimed by the supervisor, with a DB-clock claim time.
+    call = (await admin_session.execute(select(Call).where(Call.id == UUID(call_id)))).scalar_one()
+    assert call.intervener_user_id == rbac_world.supervisor_id
+    assert call.intervener_claimed_at is not None
+
+    # Exactly one takeover row in the purpose-built intervention audit table.
+    events = await _intervention_events(admin_session, call_id)
+    assert len(events) == 1
+    assert events[0].type == "takeover"
+    assert events[0].supervisor_id == rbac_world.supervisor_id
+
+    # The token carries the supervisor's email + intervener mode for the room UI.
+    minted = fake_livekit.minted[-1]
+    assert minted.can_publish is True
+    assert minted.name == "supervisor@test.example"
+    assert minted.attributes == {"vera.mode": "intervener"}
+
+    # The join audit row records that this join was an intervention.
+    rows = (
+        await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.intervene.join", AuditLog.resource_id == call_id
+            )
+        )
+    ).scalars()
+    details = [row.detail for row in rows]
+    assert any(d.get("intervene") is True for d in details)
+
+
+@pytest.mark.asyncio
+async def test_second_intervener_conflicts_within_grace(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+
+    first = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert first.status_code == 200, first.text
+
+    # A fresh claim is inside the connect-grace window: no LiveKit staleness
+    # probe (fake_livekit.participants is empty — a probe would allow a steal),
+    # the second caller is refused outright.
+    second = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert second.status_code == 409, second.text
+
+
+@pytest.mark.asyncio
+async def test_stale_lock_is_stolen_when_holder_absent(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    first = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert first.status_code == 200, first.text
+
+    # Age the claim past the grace window; the holder is NOT in the room
+    # (closed their tab before/after connecting) → the lock is stale.
+    await admin_session.execute(
+        update(Call)
+        .where(Call.id == UUID(call_id))
+        .values(intervener_claimed_at=text("now() - interval '5 minutes'"))
+    )
+    await admin_session.commit()
+
+    room_name = (
+        await client.get(
+            f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.admin_token)
+        )
+    ).json()["data"]["room_name"]
+    fake_livekit.participants[room_name] = []
+
+    stolen = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert stolen.status_code == 200, stolen.text
+
+    call = (await admin_session.execute(select(Call).where(Call.id == UUID(call_id)))).scalar_one()
+    assert call.intervener_user_id == rbac_world.admin_id
+
+    # Both claims are recorded; the steal's join audit names the released holder.
+    assert len(await _intervention_events(admin_session, call_id)) == 2
+    rows = (
+        await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.intervene.join", AuditLog.resource_id == call_id
+            )
+        )
+    ).scalars()
+    assert any(
+        row.detail.get("stale_lock_released") == str(rbac_world.supervisor_id) for row in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_check_respects_present_holder(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    first = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert first.status_code == 200, first.text
+
+    await admin_session.execute(
+        update(Call)
+        .where(Call.id == UUID(call_id))
+        .values(intervener_claimed_at=text("now() - interval '5 minutes'"))
+    )
+    await admin_session.commit()
+
+    room_name = (
+        await client.get(
+            f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.admin_token)
+        )
+    ).json()["data"]["room_name"]
+    # The holder is still connected — an old claim is not a stale claim.
+    fake_livekit.participants[room_name] = [f"supervisor-{rbac_world.supervisor_id}"]
+
+    refused = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert refused.status_code == 409, refused.text
+
+
+@pytest.mark.asyncio
+async def test_self_reclaim_is_idempotent(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+
+    for _ in range(2):  # tab refresh: the holder re-requests an intervene token
+        joined = await client.get(
+            f"/api/v1/calls/{call_id}/join-token?intervene=true",
+            headers=_auth(rbac_world.supervisor_token),
+        )
+        assert joined.status_code == 200, joined.text
+
+    # A reconnect is not a new intervention — still exactly one takeover row.
+    assert len(await _intervention_events(admin_session, call_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_intervene_on_terminal_call_conflicts(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+    await admin_session.execute(
+        update(Call).where(Call.id == UUID(call_id)).values(current_status="completed")
+    )
+    await admin_session.commit()
+
+    ended = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert ended.status_code == 409, ended.text
+
+
+@pytest.mark.asyncio
+async def test_listen_token_carries_listener_mode(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+) -> None:
+    call_id = await _create_published_call(client, rbac_world, seeded_form_id)
+
+    watched = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert watched.status_code == 200, watched.text
+
+    minted = fake_livekit.minted[-1]
+    assert minted.can_publish is False
+    assert minted.name == "supervisor@test.example"
+    assert minted.attributes == {"vera.mode": "listener"}
 
 
 @pytest.mark.asyncio

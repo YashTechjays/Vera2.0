@@ -155,8 +155,9 @@ class RBACWorld:
     def __init__(self, tenant_id: UUID, other_tenant_id: UUID) -> None:
         self.tenant_id = tenant_id
         self.other_tenant_id = other_tenant_id
-        # Filled once the admin AppUser row is created (see rbac_world).
+        # Filled once the admin/supervisor AppUser rows are created (see rbac_world).
         self.admin_id: UUID = UUID(int=0)
+        self.supervisor_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
@@ -288,6 +289,7 @@ async def rbac_world(
             UserRole(tenant_id=tenant_id, app_user_id=supervisor.id, role_id=supervisor_role)
         )
         supervisor_id = supervisor.id
+        world.supervisor_id = supervisor_id
 
         # Every system role with calls:read now also holds calls:intervene, so a
         # custom LISTENER role is the only way to test read-without-intervene.
