@@ -16,6 +16,7 @@ from control_plane.dispatch import drain_pending
 from scripts.seed import _seed_form_schemas
 from tests.integration.control_plane.conftest import RBACWorld, seed_outbound_trunk
 from vera_core.config.kms import LocalDevKMS
+from vera_core.db.rls import tenant_session
 from vera_core.models import (
     DisputeAction,
     FieldAnswer,
@@ -1239,6 +1240,44 @@ async def test_status_queues_a_ready_form(
     assert resp.json()["data"]["status"] == "in_queue"
     await drain_pending()
     assert await _status(admin_sessionmaker, form_id) == "in_call"
+
+
+async def test_status_manual_requeue_bypasses_exhausted_retry_budget(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    """The retry cap bounds the AUTOMATIC redial loop within one enqueue
+    episode; an operator's manual requeue starts a fresh episode — it must
+    succeed even at the cap, and reset the budget for the new episode."""
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.CALL_FAILED,
+        phone="+15551234567",
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+        form = (await s.execute(select(PatientForm).where(PatientForm.id == form_id))).scalar_one()
+        form.retry_count = 5  # tenant max_retries — auto-retry budget exhausted
+
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+    await drain_pending()
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+        form = (await s.execute(select(PatientForm).where(PatientForm.id == form_id))).scalar_one()
+        assert form.retry_count == 0  # fresh episode: full auto-retry allowance
+        assert form.status in ("in_queue", "in_call")  # dispatcher may already have fired
 
 
 async def test_status_rejects_illegal_transition(

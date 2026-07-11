@@ -110,6 +110,30 @@ class TestFormStateMachine:
         with pytest.raises(InvalidTransitionError, match="retries exhausted"):
             sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
 
+    def test_manual_requeue_from_call_failed_bypasses_cap_and_resets_budget(self) -> None:
+        """An operator's manual enqueue starts a FRESH episode: it neither
+        consumes nor is blocked by the auto-retry budget, and it resets the
+        counter so the new episode gets its full auto-retry allowance. The cap
+        exists to stop the automatic redial loop within one episode — not to
+        permanently retire the form."""
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.CALL_FAILED, retry_count=5)
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5, manual=True)
+        assert form.status == FormStatus.IN_QUEUE.value
+        assert form.retry_count == 0
+
+    def test_manual_requeue_from_exception_review_resets_budget(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.EXCEPTION_REVIEW, retry_count=5)
+        sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5, manual=True)
+        assert form.retry_count == 0
+
+    def test_auto_requeue_from_call_failed_still_capped(self) -> None:
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.CALL_FAILED, retry_count=5)
+        with pytest.raises(InvalidTransitionError, match="retries exhausted"):
+            sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
+
     def test_transition_exception_review_to_in_queue_does_not_touch_retry(self) -> None:
         """Manual requeue from review is an operator decision, not a retry —
         it must not consume the auto-retry budget."""

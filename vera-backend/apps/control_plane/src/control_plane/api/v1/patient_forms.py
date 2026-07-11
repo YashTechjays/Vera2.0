@@ -886,7 +886,9 @@ async def update_patient_form_status(
 
     sm = FormStateMachine()
     try:
-        sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+        # This endpoint is the operator surface — manual transitions start a
+        # fresh enqueue episode (never blocked by, and resetting, the retry cap).
+        sm.transition(form, target, tenant_max_retries=tenant.max_retries, manual=True)
     except InvalidTransitionError as exc:
         raise CustomAPIException(
             DefaultExceptionCode.VALIDATION_ERROR,

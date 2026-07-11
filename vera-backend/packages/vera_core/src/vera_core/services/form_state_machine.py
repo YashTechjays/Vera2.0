@@ -53,6 +53,7 @@ class FormStateMachine:
         target: FormStatus,
         *,
         tenant_max_retries: int,
+        manual: bool = False,
     ) -> None:
         """Move *form* to *target* status, applying side effects.
 
@@ -66,6 +67,12 @@ class FormStateMachine:
         tenant_max_retries:
             The tenant's ``max_retries`` cap — guards the retry edges
             (``CALL_FAILED → IN_QUEUE`` and ``AI_PROCESSING → IN_QUEUE``).
+        manual:
+            True when an operator (not the system) drives the transition. The
+            retry cap bounds the AUTOMATIC redial loop within one enqueue
+            episode; a manual enqueue starts a fresh episode — it is never
+            blocked by the cap and resets ``retry_count`` so the new episode
+            gets its full auto-retry allowance.
 
         Raises
         ------
@@ -82,12 +89,16 @@ class FormStateMachine:
         if target not in allowed:
             raise InvalidTransitionError(current.value, target.value)
 
-        # Guard: retry cap on the retry edges into IN_QUEUE.
-        if current in _RETRY_SOURCES and target == FormStatus.IN_QUEUE:
-            if form.retry_count >= tenant_max_retries:
-                raise InvalidTransitionError(
-                    current.value, target.value, reason="retries exhausted"
-                )
-            form.retry_count += 1
+        if target == FormStatus.IN_QUEUE:
+            if manual:
+                # Operator decision: fresh episode, fresh auto-retry budget.
+                form.retry_count = 0
+            elif current in _RETRY_SOURCES:
+                # Guard: retry cap on the automatic retry edges into IN_QUEUE.
+                if form.retry_count >= tenant_max_retries:
+                    raise InvalidTransitionError(
+                        current.value, target.value, reason="retries exhausted"
+                    )
+                form.retry_count += 1
 
         form.status = target.value
