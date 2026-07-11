@@ -22,6 +22,13 @@ CALLER_IDENTITY_PREFIX = "caller-"  # browser participant that publishes its mic
 MONITOR_IDENTITY_PREFIX = "monitor-"  # listen-only browser observer (outbound mode)
 SIP_CALLEE_IDENTITY = "phone-callee"  # outbound phone callee dialed in via SIP
 
+# Participant-attribute key carrying a supervisor's join mode, stamped into the
+# join token by the control plane and mirrored by the frontend to badge
+# participants and live-disable its Intervene button.
+PARTICIPANT_MODE_ATTR = "vera.mode"
+PARTICIPANT_MODE_LISTENER = "listener"
+PARTICIPANT_MODE_INTERVENER = "intervener"
+
 
 def is_listen_only_identity(identity: str) -> bool:
     """True for a participant that only listens (the monitor) and so must not, on

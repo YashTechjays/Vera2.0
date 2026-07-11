@@ -47,6 +47,9 @@ class AuditEvent(enum.StrEnum):
     CALL_INTERVENE_JOIN = "call.intervene.join"
     # The owner ejected an intervener from a published call. Ids only.
     CALL_INTERVENE_REVOKE = "call.intervene.revoke"
+    # The active intervener ended a live call: room torn down, call marked
+    # completed. Ids only, never PHI.
+    CALL_END_SUPERVISOR = "call.end.supervisor"
     # Queue dispatch: the dispatcher picked a form off the queue and initiated a
     # call. Records form id + tenant — no PHI field values.
     QUEUE_DISPATCH = "queue.dispatch"

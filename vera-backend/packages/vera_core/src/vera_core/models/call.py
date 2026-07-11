@@ -100,6 +100,14 @@ class Call(Base, TenantScopedMixin):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # User ids the owner revoked — join_token refuses them even while published.
     revoked_user_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Single-intervener lock: the user currently intervening (NULL = nobody) and
+    # the DB-clock claim time driving the stale-lock grace window (join_token).
+    intervener_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    intervener_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class CallLineage(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
