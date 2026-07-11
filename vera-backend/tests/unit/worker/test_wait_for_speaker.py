@@ -94,6 +94,9 @@ def test_is_ready_speaker_classifies_participants() -> None:
     assert _is_ready_speaker(_FakeParticipant("phone-callee", kind=_SIP)) is False  # type: ignore[arg-type]
     # The listen-only monitor never qualifies.
     assert _is_ready_speaker(_FakeParticipant("monitor-123")) is False  # type: ignore[arg-type]
+    # A supervisor (the /calls watch/intervene identity) is an observer, never the
+    # call's speaker — even though it is a browser participant.
+    assert _is_ready_speaker(_FakeParticipant("supervisor-123")) is False  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -155,6 +158,29 @@ async def test_no_answer_when_sip_never_answers() -> None:
     result = await wait_for_speaker(ctx, timeout_s=0.05)  # type: ignore[arg-type]
     assert result == CallFailed(CallFailureReason.NO_ANSWER)
     await task
+
+
+@pytest.mark.asyncio
+async def test_supervisor_scanned_before_answered_callee_never_wins() -> None:
+    # Production incident regression: a listen-only supervisor that joined before
+    # the callee answered sits FIRST in the participant scan. It must never be
+    # resolved as the speaker — otherwise RoomIO pins close_on_disconnect to the
+    # supervisor and its browser logout hangs up the whole call.
+    supervisor = _FakeParticipant("supervisor-019f4be0")
+    callee = _active_sip()
+    ctx = _FakeCtx(_FakeRoom(supervisor, callee))
+    result = await wait_for_speaker(ctx, timeout_s=5.0)  # type: ignore[arg-type]
+    assert result == SpeakerReady(callee)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_no_answer_when_only_supervisor_present() -> None:
+    # A supervisor alone (callee not yet answered, then never answers) must time
+    # out as no-answer, not trigger the greeting.
+    room = _FakeRoom(_FakeParticipant("supervisor-1"))
+    ctx = _FakeCtx(room)
+    result = await wait_for_speaker(ctx, timeout_s=0.05)  # type: ignore[arg-type]
+    assert result == CallFailed(CallFailureReason.NO_ANSWER)
 
 
 @pytest.mark.asyncio

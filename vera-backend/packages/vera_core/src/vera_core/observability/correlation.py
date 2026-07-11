@@ -15,18 +15,24 @@ _PREFIX = "call"
 _SEP = "--"
 
 # Voice-session participant identities — a cross-process vocabulary the control
-# plane mints and the agent worker reads. The worker greets only once a non-monitor
-# participant (the browser caller or the SIP callee) is present, so the monitor is
-# the one identity it must recognize as listen-only.
+# plane mints and the agent worker reads. The worker treats observers (monitor,
+# supervisor) as invisible for speaker resolution: only the browser caller or the
+# SIP callee may trigger the greeting or become the participant the session is
+# pinned to (close_on_disconnect), so an observer leaving never ends the call.
 CALLER_IDENTITY_PREFIX = "caller-"  # browser participant that publishes its mic
-MONITOR_IDENTITY_PREFIX = "monitor-"  # listen-only browser observer (outbound mode)
+MONITOR_IDENTITY_PREFIX = "monitor-"  # listen-only browser observer (voice-lab outbound)
+SUPERVISOR_IDENTITY_PREFIX = "supervisor-"  # /calls watch/intervene browser observer
 SIP_CALLEE_IDENTITY = "phone-callee"  # outbound phone callee dialed in via SIP
 
+_OBSERVER_PREFIXES = (MONITOR_IDENTITY_PREFIX, SUPERVISOR_IDENTITY_PREFIX)
 
-def is_listen_only_identity(identity: str) -> bool:
-    """True for a participant that only listens (the monitor) and so must not, on
-    its own, trigger the agent's greeting."""
-    return identity.startswith(MONITOR_IDENTITY_PREFIX)
+
+def is_observer_identity(identity: str) -> bool:
+    """True for a participant that observes the call (monitor, supervisor) rather
+    than being its speaker. Observers must never trigger the agent's greeting or
+    become the session's pinned participant — even a supervisor that intervenes
+    (publishes audio) stays an observer; the call's speaker is the callee."""
+    return identity.startswith(_OBSERVER_PREFIXES)
 
 
 class RoomRef(NamedTuple):

@@ -45,7 +45,7 @@ from vera_core.events import (
 )
 from vera_core.observability.correlation import (
     call_trace_attributes,
-    is_listen_only_identity,
+    is_observer_identity,
     parse_room_name,
 )
 from vera_core.observability.otel import configure_observability
@@ -68,9 +68,10 @@ _SIP_CALL_STATUS_ACTIVE = "active"
 
 def _is_ready_speaker(participant: rtc.Participant) -> bool:
     """A participant whose presence means the agent may greet: a browser caller
-    (ready as soon as it joins) or a SIP callee that has answered. The listen-only
-    monitor never qualifies, and a SIP callee that is merely ringing does not yet."""
-    if is_listen_only_identity(participant.identity):
+    (ready as soon as it joins) or a SIP callee that has answered. Observers
+    (monitor, supervisor) never qualify, and a SIP callee that is merely ringing
+    does not yet."""
+    if is_observer_identity(participant.identity):
         return False
     if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
         return participant.attributes.get(_SIP_CALL_STATUS_ATTR) == _SIP_CALL_STATUS_ACTIVE

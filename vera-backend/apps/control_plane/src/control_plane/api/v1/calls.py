@@ -49,7 +49,7 @@ from vera_core.db.rls import tenant_session
 from vera_core.models import Call, PatientForm, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallStatus
-from vera_core.observability.correlation import room_name_for_call
+from vera_core.observability.correlation import SUPERVISOR_IDENTITY_PREFIX, room_name_for_call
 from vera_core.schemas import CallSummary, JoinTokenResponse, RevokeAccessRequest
 
 logger = logging.getLogger(__name__)
@@ -102,8 +102,10 @@ def _sse_response(frames: AsyncIterator[str]) -> StreamingResponse:
 
 
 def _supervisor_identity(user_id: UUID) -> str:
-    """LiveKit participant identity for a VA joining/intervening on a call."""
-    return f"supervisor-{user_id}"
+    """LiveKit participant identity for a VA joining/intervening on a call. Uses the
+    shared observer prefix so the worker never treats a supervisor as the call's
+    speaker (see vera_core.observability.correlation.is_observer_identity)."""
+    return f"{SUPERVISOR_IDENTITY_PREFIX}{user_id}"
 
 
 def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
