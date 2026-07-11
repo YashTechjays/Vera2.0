@@ -129,9 +129,38 @@ automatically; the literal is the documented contract.)
   ibv is not republished since its bytes don't change.
 - **Breaking for already-seeded rows:** any pinned `dsl_version: "2.1"`
   `schema_version` row lacking a full eight-key `promoted_fields` block now
-  fails `FormSchemaDoc` validation on load (intake/review/resolve). Accepted
-  pre-prod; the shared dev DB is routinely wiped/reseeded. No prod deployments
-  exist.
+  fails `FormSchemaDoc` validation on load (intake/review/resolve). New forms
+  are unaffected (deploy runs `seed.py`, which republishes valid documents),
+  but existing forms stay pinned via a RESTRICT FK — handled by the cleanup
+  migration below. v1 documents never parse through `FormSchemaDoc`; untouched.
+
+### 6. Cleanup data migration (user-confirmed: timestamp-gated destructive)
+
+One alembic data migration that removes dev/test forms pinned to now-invalid
+documents. Old documents cannot be backfilled (`disease_only`'s historical
+sections lack the leaves the new columns must reference), so removal is the
+only honest cleanup.
+
+- **Predicate (both conditions must hold):**
+  1. the form's pinned `schema_version.schema_json` has `dsl_version` `2.x`
+     AND its `promoted_fields` is missing any of the eight required keys
+     (`NOT COALESCE(jsonb ?& array[...eight keys...], false)` — `schema_json`
+     is `JSON`, so cast to `jsonb` in the query);
+  2. `patient_form.created_at < '2026-07-12T00:00:00Z'` — a hard-coded cutoff.
+     Even in a worst-case future (validation loosened, predicate bug), no row
+     created after this change can ever match. Alembic additionally runs each
+     revision once per DB, and on fresh DBs the tables are empty — no-op.
+- **Delete order (FK-safe):** `call` rows of affected forms first (transcripts,
+  call events, call-scoped oversight all CASCADE off `call`), then
+  form-scoped oversight rows (`form_id` FK is RESTRICT), then the
+  `patient_form` rows (`field_answer` CASCADEs). Stale `schema_version` rows
+  are left in place — nothing loads a version no form pins, and deleting them
+  would trip the `prompt_version` RESTRICT FK.
+- **RLS note:** the affected tables are FORCE-RLS; the deletes only work on the
+  privileged migration connection (`migration-database-url` in the deploy,
+  the local superuser via `just migrate`) — which is exactly how migrations
+  already run.
+- **downgrade():** no-op with a comment (data deletion is irreversible).
 - Test churn: `test_schema_dsl.py` / `test_intake.py` fixtures must carry a
   full `promoted_fields` block (plus backing leaves + `system_fields`); the
   "valid subset" test becomes "all eight required"; the "unknown column"
