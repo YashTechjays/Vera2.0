@@ -122,9 +122,9 @@ def iter_leaf_answers(payload: dict[str, Any]) -> Iterator[tuple[str, Any]]:
 @dataclass(frozen=True)
 class PromotedIdentifiers:
     """The typed `patient_form` columns a schema's `promoted_fields` maps to — both the
-    searchable identifiers and the worklist display fields. A schema that doesn't
-    promote a given column (e.g. disease_only has no appointment/insurance-reference
-    sections) leaves that field at its `None` default."""
+    searchable identifiers and the worklist display fields. Every schema maps every
+    column (PromotedFields is total), but a mapped value can still come back `None`
+    (payload omitted a defaulted leaf; chart_number's "N/A" normalization)."""
 
     patient_name: str | None = None
     patient_dob: date | None = None
@@ -171,7 +171,7 @@ def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> Prom
     `InvalidIntakeValue` on a bad date."""
     leaves = dict(doc.leaf_items())
     values: dict[str, Any] = {}
-    for column, path in (doc.promoted_fields or {}).items():
+    for column, path in doc.promoted_fields.items():
         raw = get_value(path)
         if column in ("patient_dob", "appointment_date"):
             leaf = leaves.get(path)

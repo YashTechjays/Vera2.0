@@ -21,6 +21,7 @@ from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
+from vera_core.forms.dsl import PromotedFields
 from vera_core.models import (
     AppUser,
     FormSchema,
@@ -56,6 +57,7 @@ VALID_SCHEMA_JSON: dict[str, Any] = {
     "name": "IBV",
     "insurance_type": "infertility_treatment",
     "system_fields": {"member_id": "sections.basics.plan_type"},
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.basics.plan_type"),
     "sections": {
         "basics": {
             "title": "Basics",

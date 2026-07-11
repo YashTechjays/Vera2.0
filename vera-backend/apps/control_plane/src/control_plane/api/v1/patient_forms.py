@@ -673,7 +673,7 @@ async def resolve_disputes(
     # keeps the worklist columns in sync, not just intake (2026-07-10 design doc).
     if doc is not None:
         promoted = _promote_or_422(current_values.get, doc)
-        for column in doc.promoted_fields or {}:
+        for column, _path in doc.promoted_fields.items():
             new_value = getattr(promoted, column)
             if getattr(form, column) != new_value:
                 setattr(form, column, new_value)

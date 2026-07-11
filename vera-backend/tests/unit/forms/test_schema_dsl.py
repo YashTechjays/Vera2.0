@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from vera_core.forms.catalog import SCHEMAS
 from vera_core.forms.dsl import (
     FormSchemaDoc,
+    PromotedFields,
     Validation,
     compile_document,
     load_document,
@@ -18,6 +19,18 @@ from vera_core.forms.dsl import (
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 
+# The eight patient_form columns every schema must promote, in artifact key order.
+PROMOTED_COLUMNS: tuple[str, ...] = (
+    "patient_name",
+    "patient_dob",
+    "chart_number",
+    "appointment_date",
+    "appointment_type",
+    "member_id",
+    "insurance_provider",
+    "insurance_provider_phone_number",
+)
+
 
 def minimal_doc(**overrides: Any) -> dict[str, Any]:
     """Smallest valid document; tests mutate copies of it."""
@@ -25,6 +38,8 @@ def minimal_doc(**overrides: Any) -> dict[str, Any]:
         "dsl_version": "2.1",
         "name": "Test",
         "insurance_type": "infertility_treatment",
+        "system_fields": {"plan_type": "sections.basics.plan_type"},
+        "promoted_fields": dict.fromkeys(PROMOTED_COLUMNS, "sections.basics.plan_type"),
         "sections": {
             "basics": {
                 "title": "Basics",
@@ -105,29 +120,33 @@ class TestCompiledArtifacts:
 
     def test_ibv_promotes_the_full_column_set(self) -> None:
         doc = SCHEMAS["infertility_treatment"][1]()
-        assert doc.promoted_fields == {
-            "patient_name": "sections.patient_information.patient_name",
-            "patient_dob": "sections.patient_information.patient_dob",
-            "chart_number": "sections.patient_information.chart_number",
-            "appointment_date": "sections.appointment_information.appointment_date",
-            "appointment_type": "sections.appointment_information.appointment_type",
-            "member_id": "sections.insurance_information.policy_number",
-            "insurance_provider": (
-                "sections.insurance_reference_information.insurance_provider_name"
-            ),
-            "insurance_provider_phone_number": (
+        assert doc.promoted_fields == PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.insurance_information.policy_number",
+            insurance_provider=("sections.insurance_reference_information.insurance_provider_name"),
+            insurance_provider_phone_number=(
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
-        }
+        )
 
-    def test_disease_only_promotes_identity_and_member_id(self) -> None:
+    def test_disease_only_promotes_the_full_column_set(self) -> None:
         doc = SCHEMAS["disease_only"][1]()
-        assert doc.promoted_fields == {
-            "patient_name": "sections.patient_information.patient_name",
-            "patient_dob": "sections.patient_information.patient_dob",
-            "chart_number": "sections.patient_information.chart_number",
-            "member_id": "sections.policy_details.policy_number",
-        }
+        assert doc.promoted_fields == PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.policy_details.policy_number",
+            insurance_provider=("sections.insurance_reference_information.insurance_provider_name"),
+            insurance_provider_phone_number=(
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
+        )
 
 
 class TestDocumentValidation:
@@ -351,31 +370,34 @@ class TestDocumentValidation:
         }
         FormSchemaDoc.model_validate(doc)  # anchor found via the group-gated leaf
 
-    def test_promoted_fields_accepts_a_valid_subset_of_system_fields(self) -> None:
-        doc = minimal_doc(
-            system_fields={"plan_type": "sections.basics.plan_type"},
-            promoted_fields={"patient_name": "sections.basics.plan_type"},
-        )
-        FormSchemaDoc.model_validate(doc)
+    def test_promoted_fields_block_is_required(self) -> None:
+        doc = minimal_doc()
+        del doc["promoted_fields"]
+        with pytest.raises(ValidationError, match="Field required"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_every_column_is_required(self) -> None:
+        doc = minimal_doc()
+        del doc["promoted_fields"]["member_id"]
+        with pytest.raises(ValidationError, match="Field required"):
+            FormSchemaDoc.model_validate(doc)
 
     def test_promoted_fields_rejects_unknown_column(self) -> None:
-        doc = minimal_doc(
-            system_fields={"plan_type": "sections.basics.plan_type"},
-            promoted_fields={"not_a_column": "sections.basics.plan_type"},
-        )
-        with pytest.raises(ValidationError, match="not a promotable patient_form column"):
+        doc = minimal_doc()
+        doc["promoted_fields"]["not_a_column"] = "sections.basics.plan_type"
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             FormSchemaDoc.model_validate(doc)
 
     def test_promoted_fields_rejects_path_not_a_leaf(self) -> None:
-        doc = minimal_doc(
-            system_fields={"plan_type": "sections.basics.plan_type"},
-            promoted_fields={"patient_name": "sections.basics.missing"},
-        )
+        doc = minimal_doc()
+        doc["promoted_fields"]["patient_name"] = "sections.basics.missing"
         with pytest.raises(ValidationError, match="does not resolve to a leaf"):
             FormSchemaDoc.model_validate(doc)
 
     def test_promoted_fields_rejects_path_not_backed_by_system_fields(self) -> None:
-        doc = minimal_doc(promoted_fields={"patient_name": "sections.basics.plan_type"})
+        # sections.basics.notes is a real leaf but not a system_fields target.
+        doc = minimal_doc()
+        doc["promoted_fields"]["patient_name"] = "sections.basics.notes"
         with pytest.raises(ValidationError, match="not a system_fields target"):
             FormSchemaDoc.model_validate(doc)
 

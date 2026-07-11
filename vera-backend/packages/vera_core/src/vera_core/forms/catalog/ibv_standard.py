@@ -39,6 +39,7 @@ from vera_core.forms.dsl import (
     FormSchemaDoc,
     Group,
     Leaf,
+    PromotedFields,
     RequiredWhen,
     Section,
     Task,
@@ -1031,20 +1032,20 @@ def build_ibv_standard() -> FormSchemaDoc:
             "doctor_npi": "sections.provider_reference_information.npi",
         },
         # patient_form columns re-derived from the current answer at intake AND
-        # dispute-resolve (2026-07-10 design doc). Every path here must also be a
+        # dispute-resolve (2026-07-10 design doc). Every path must also be a
         # system_fields target (dsl.py validates this).
-        promoted_fields={
-            "patient_name": "sections.patient_information.patient_name",
-            "patient_dob": "sections.patient_information.patient_dob",
-            "chart_number": "sections.patient_information.chart_number",
-            "appointment_date": "sections.appointment_information.appointment_date",
-            "appointment_type": "sections.appointment_information.appointment_type",
-            "member_id": "sections.insurance_information.policy_number",
-            "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
-            "insurance_provider_phone_number": (
+        promoted_fields=PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.insurance_information.policy_number",
+            insurance_provider=("sections.insurance_reference_information.insurance_provider_name"),
+            insurance_provider_phone_number=(
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
-        },
+        ),
         stt_key_terms=[
             # treatments
             "intrauterine insemination",

@@ -53,20 +53,6 @@ LeafType = Literal["text", "enum", "date", "currency", "percent", "integer", "ph
 ComparisonOp = Literal["eq", "ne", "in", "not_in"]
 RANGE_TYPES: frozenset[str] = frozenset({"currency", "percent", "integer"})
 COLLECTED_ROLES: frozenset[str] = frozenset({"ask", "confirm"})
-# patient_form columns a schema may declare in `promoted_fields` (dsl.py `_validate_document`
-# below, and vera_core.forms.intake.promote_columns).
-PROMOTABLE_COLUMNS: frozenset[str] = frozenset(
-    {
-        "patient_name",
-        "patient_dob",
-        "appointment_date",
-        "chart_number",
-        "appointment_type",
-        "member_id",
-        "insurance_provider",
-        "insurance_provider_phone_number",
-    }
-)
 
 
 class _Model(BaseModel):
@@ -415,19 +401,46 @@ class Contradiction(_Model):
 # ---------------------------------------------------------------------------
 
 
+class PromotedFields(_Model):
+    """patient_form column -> root-anchored leaf path.
+
+    The attribute set mirrors PatientForm's promoted columns (searchable
+    identifiers + worklist display fields); every schema must map all of them,
+    so a new schema can neither forget nor typo a column (enforced at
+    authoring/compile/load — extra="forbid", no defaults). Declaration order
+    is the compiled-artifact key order. Consumed by
+    vera_core.forms.intake.promote_columns and the dispute-resolve promotion
+    in control_plane.api.v1.patient_forms.
+    """
+
+    patient_name: str
+    patient_dob: str
+    chart_number: str
+    appointment_date: str
+    appointment_type: str
+    member_id: str
+    insurance_provider: str
+    insurance_provider_phone_number: str
+
+    def items(self) -> list[tuple[str, str]]:
+        """(column, leaf path) pairs, in declaration order."""
+        return [(column, getattr(self, column)) for column in type(self).model_fields]
+
+
 class FormSchemaDoc(_Model):
     dsl_version: Literal["2.1"]
     name: str
     insurance_type: str
     description: str | None = None
     system_fields: dict[str, str] | None = None
-    # patient_form column name -> root-anchored leaf path. Always a subset of
-    # system_fields (validated below) — that guarantees a promoted column can never be
-    # *unexpectedly* empty at intake (system_fields targets are exactly what
+    # patient_form column name -> root-anchored leaf path. Required: every schema
+    # must map every promotable column (PromotedFields). Each path must also be a
+    # system_fields target (validated below) — that guarantees a promoted column can
+    # never be *unexpectedly* empty at intake (system_fields targets are exactly what
     # required_intake_fields enforces at creation, intake.py), though a leaf with its
     # own `default` is still allowed to be absent from the payload (it counts as
     # filled either way).
-    promoted_fields: dict[str, str] | None = None
+    promoted_fields: PromotedFields
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.
     stt_key_terms: list[str] | None = None
@@ -661,15 +674,11 @@ class FormSchemaDoc(_Model):
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
 
         # promoted fields — patient_form columns re-derived from the current answer at
-        # dispute-resolve time too (not just intake). Must be a subset of system_fields:
-        # that's what guarantees a promoted column is never legitimately empty.
+        # dispute-resolve time too (not just intake). Column names are enforced by the
+        # PromotedFields model itself; each path must be a system_fields target so a
+        # promoted column is never legitimately empty.
         system_field_paths = set((self.system_fields or {}).values())
-        for column, path in (self.promoted_fields or {}).items():
-            if column not in PROMOTABLE_COLUMNS:
-                errors.append(
-                    f"promoted_fields.{column}: not a promotable patient_form column "
-                    f"(one of {sorted(PROMOTABLE_COLUMNS)})"
-                )
+        for column, path in self.promoted_fields.items():
             if path not in leaves:
                 errors.append(f"promoted_fields.{column}: {path!r} does not resolve to a leaf")
             elif path not in system_field_paths:
