@@ -21,6 +21,15 @@ __all__ = ["LiveKitGateway", "LiveKitUnavailable", "OutboundDialError", "build_l
 
 AGENT_NAME = "vera-agent"
 
+# Belt-and-suspenders room lifetimes (the pipeline sweeper is the primary net):
+# empty_timeout — a room nobody ever joined (dispatch crashed before the dial)
+# self-deletes; departure_timeout — a room lingers only briefly once the last
+# participant leaves. NOTE: a watching supervisor counts as a participant, so
+# neither fires for observer-held rooms — the sweeper's observer-only probe
+# (room_participant_identities) handles those.
+_ROOM_EMPTY_TIMEOUT_S = 300
+_ROOM_DEPARTURE_TIMEOUT_S = 120
+
 # Transport-level failures the LiveKit SDK raises: a Twirp API error or an aiohttp
 # connection failure. Caught at this gateway boundary and re-raised as domain errors so
 # SDK exception types never leak to the routers.
@@ -58,7 +67,13 @@ class LiveKitGateway:
         self, room_name: str, metadata: dict[str, object] | None = None
     ) -> None:
         async with self._client() as lk:
-            await lk.room.create_room(api.CreateRoomRequest(name=room_name))
+            await lk.room.create_room(
+                api.CreateRoomRequest(
+                    name=room_name,
+                    empty_timeout=_ROOM_EMPTY_TIMEOUT_S,
+                    departure_timeout=_ROOM_DEPARTURE_TIMEOUT_S,
+                )
+            )
             # metadata rides on the dispatch as a JSON string the worker parses
             # (e.g. {"wait_for_speaker": true}); None → "" → existing callers unchanged.
             await lk.agent_dispatch.create_dispatch(

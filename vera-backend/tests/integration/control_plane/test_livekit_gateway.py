@@ -167,6 +167,40 @@ def test_configured_agent_name_flows_to_dispatch(monkeypatch: pytest.MonkeyPatch
     assert captured["agent_name"] == "vera-agent-local"
 
 
+def test_create_call_room_sets_room_lifetimes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rooms carry explicit empty/departure timeouts (belt-and-suspenders under
+    the sweeper): a never-joined room self-deletes, and a room lingers only
+    briefly once its last participant leaves."""
+    from livekit import api
+
+    captured: dict[str, object] = {}
+
+    class _FakeRoomService:
+        async def create_room(self, req: api.CreateRoomRequest) -> None:
+            captured["empty_timeout"] = req.empty_timeout
+            captured["departure_timeout"] = req.departure_timeout
+
+    class _FakeDispatchService:
+        async def create_dispatch(self, req: api.CreateAgentDispatchRequest) -> None:
+            return None
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+        agent_dispatch = _FakeDispatchService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    asyncio.run(gw.create_call_room("call--t--c"))
+    assert captured["empty_timeout"] == 300
+    assert captured["departure_timeout"] == 120
+
+
 def test_default_agent_name_stays_vera_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected.
 
