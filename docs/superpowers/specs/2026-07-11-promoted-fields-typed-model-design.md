@@ -146,10 +146,15 @@ only honest cleanup.
      AND its `promoted_fields` is missing any of the eight required keys
      (`NOT COALESCE(jsonb ?& array[...eight keys...], false)` — `schema_json`
      is `JSON`, so cast to `jsonb` in the query);
-  2. `patient_form.created_at < '2026-07-12T00:00:00Z'` — a hard-coded cutoff.
+  2. `patient_form.created_at < '2026-07-31T00:00:00Z'` — a hard-coded cutoff.
      Even in a worst-case future (validation loosened, predicate bug), no row
-     created after this change can ever match. Alembic additionally runs each
-     revision once per DB, and on fresh DBs the tables are empty — no-op.
+     created after July 2026 can ever match. The cutoff is deliberately a few
+     weeks past authoring (not "today"): dev keeps creating forms pinned to the
+     still-published block-less document until this branch deploys, and those
+     must be swept too (verified 2026-07-11: origin/dev's artifact has no
+     promoted_fields; a fresh dev form is pinned to the Jul-10 block-less
+     version). Alembic additionally runs each revision once per DB, and on
+     fresh DBs the tables are empty — no-op.
 - **Delete order (FK-safe):** `call` rows of affected forms first (transcripts,
   call events, call-scoped oversight all CASCADE off `call`), then
   form-scoped oversight rows (`form_id` FK is RESTRICT), then the

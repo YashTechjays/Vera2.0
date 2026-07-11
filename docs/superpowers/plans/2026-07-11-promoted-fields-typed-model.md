@@ -571,7 +571,7 @@ git commit -m "test(forms): pin PromotedFields/PromotedIdentifiers/PatientForm c
 
 ### Task 3: Timestamp-gated cleanup data migration
 
-Removes forms pinned to `dsl_version 2.x` documents whose `promoted_fields` block is incomplete (all pre-this-change v2 forms). Gated twice: the predicate can't match documents produced after this change (validation forbids them), and a hard `created_at < 2026-07-12` cutoff means no future row can ever be deleted even if that assumption breaks. Old `schema_version` rows stay (nothing loads an unpinned version; deleting them would trip `prompt_version`'s RESTRICT FK).
+Removes forms pinned to `dsl_version 2.x` documents whose `promoted_fields` block is incomplete (all pre-this-change v2 forms). Gated twice: the predicate can't match documents produced after this change (validation forbids them), and a hard `created_at < 2026-07-31` cutoff means no far-future row can ever be deleted even if that assumption breaks (a few weeks of headroom, because dev keeps creating forms pinned to the still-published block-less document until this branch deploys). Old `schema_version` rows stay (nothing loads an unpinned version; deleting them would trip `prompt_version`'s RESTRICT FK).
 
 **Files:**
 - Create: `migrations/versions/<generated>_delete_forms_pinned_to_pre_promoted_fields_docs.py` (via `just makemigration`)
@@ -601,9 +601,10 @@ Two independent guards, so this can never eat future data:
 - predicate: the pinned document is dsl 2.x AND its promoted_fields block is
   missing at least one required key — impossible for any document compiled
   after this change (dsl.py validation rejects it at authoring/compile/load);
-- cutoff: only rows created before 2026-07-12 UTC qualify, so even a
-  worst-case future (validation loosened, predicate bug) touches nothing
-  created after this migration was written.
+- cutoff: only rows created before 2026-07-31 UTC qualify — headroom past
+  the planned deploy (dev keeps creating forms pinned to the block-less
+  document until then), while still guaranteeing a worst-case future
+  (validation loosened, predicate bug) touches nothing created after July 2026.
 
 Delete order honors the RESTRICT FKs: export_artifact and call first
 (everything under call CASCADEs), then patient_form (field_answer CASCADEs).
@@ -636,7 +637,7 @@ _REQUIRED_KEYS = (
     "insurance_provider_phone_number",
 )
 _KEYS_SQL = ", ".join(f"'{k}'" for k in _REQUIRED_KEYS)
-_CUTOFF = "2026-07-12 00:00:00+00"
+_CUTOFF = "2026-07-31 00:00:00+00"
 
 _STALE_FORMS = f"""
     SELECT pf.id
