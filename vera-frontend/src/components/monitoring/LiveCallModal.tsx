@@ -2,7 +2,6 @@ import { useState } from "react"
 import {
   Maximize2,
   X,
-  Volume2,
   Grid3x3,
   MessageSquare,
   Copy,
@@ -17,6 +16,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { usePermission } from "@/lib/auth/permissions"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
@@ -29,34 +29,41 @@ function confidenceColor(score: number): string {
 }
 
 /**
- * Live-call detail overview (matches smart-caller-fe's ViewLiveModal):
+ * The live-call modal: auto-connects listen-only on open, and — for holders of
+ * calls:intervene — upgrades in place to a publish-capable connection via
+ * Intervene / Stop speaking. The mode is part of LiveCallRoom's key: LiveKit
+ * ignores a token swap while connected, so switching modes remounts the room
+ * with a freshly minted token.
  *  - left: collapsible "Patient Information Form" summary + call controls
- *  - right: live transcripts
- *  - footer: End Call · Intervene · Show Summary
- * Intervene opens the next (intervention) modal; the maximize icon opens the
- * full Patient Information form.
+ *  - right: live call panel (connection, participants, audio)
+ *  - footer: End Call · Intervene / Stop speaking
  */
-export function CallOverviewModal({
+export function LiveCallModal({
   call,
   open,
   onOpenChange,
   onExpand,
-  onIntervene,
-  onShowSummary,
 }: {
   call: LiveCall | null
   open: boolean
   onOpenChange: (open: boolean) => void
   onExpand: () => void
-  onIntervene: () => void
-  onShowSummary?: () => void
 }) {
+  const canIntervene = usePermission("calls:intervene")
+  const [mode, setMode] = useState<"listen" | "intervene">("listen")
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
   const progress = call?.formProgress ?? 0
 
+  // A fresh open always starts listen-only (the call can't change while open —
+  // the worklist is behind the modal), so resetting on close covers every path.
+  function handleOpenChange(next: boolean) {
+    if (!next) setMode("listen")
+    onOpenChange(next)
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         showCloseButton={false}
         className="flex max-h-[92vh] w-[96vw] max-w-[1100px] flex-col gap-0 p-0"
@@ -81,7 +88,7 @@ export function CallOverviewModal({
               </button>
               <button
                 type="button"
-                onClick={() => onOpenChange(false)}
+                onClick={() => handleOpenChange(false)}
                 title="Close"
                 className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
               >
@@ -169,27 +176,18 @@ export function CallOverviewModal({
                 <span className="size-2 rounded-full bg-amber-500" />
                 {call?.callTime ?? "00:00"}
               </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
-                  title="Audio"
-                >
-                  <Volume2 className="size-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setKeypadOpen(true)}
-                  className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
-                  title="Keypad"
-                >
-                  <Grid3x3 className="size-4" />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setKeypadOpen(true)}
+                className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
+                title="Keypad"
+              >
+                <Grid3x3 className="size-4" />
+              </button>
             </div>
           </div>
 
-          {/* Right — live transcripts */}
+          {/* Right — live call panel */}
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
             <div className="flex items-center justify-between bg-[#f3f5f7] px-4 py-3">
               <h3 className="font-semibold text-foreground">Live Transcripts</h3>
@@ -199,7 +197,11 @@ export function CallOverviewModal({
               </Button>
             </div>
             {call?.id ? (
-              <LiveCallRoom key={call.id} callId={call.id} />
+              <LiveCallRoom
+                key={`${call.id}:${mode}`}
+                callId={call.id}
+                microphone={mode === "intervene"}
+              />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
                 <MessageSquare className="size-10 opacity-30" />
@@ -212,20 +214,24 @@ export function CallOverviewModal({
         {/* Footer */}
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <Button
-            onClick={() => onOpenChange(false)}
+            onClick={() => handleOpenChange(false)}
             className="bg-red-500 text-white hover:bg-red-600"
           >
             End Call
           </Button>
-          <div className="flex items-center gap-3">
-            <Button
-              onClick={onIntervene}
-              className="bg-orange-500 text-white hover:bg-orange-600"
-            >
-              Intervene
-            </Button>
-            <Button onClick={onShowSummary}>Show Summary</Button>
-          </div>
+          {canIntervene &&
+            (mode === "listen" ? (
+              <Button
+                onClick={() => setMode("intervene")}
+                className="bg-orange-500 text-white hover:bg-orange-600"
+              >
+                Intervene
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={() => setMode("listen")}>
+                Stop speaking
+              </Button>
+            ))}
         </div>
 
         <Keypad open={keypadOpen} onOpenChange={setKeypadOpen} />
