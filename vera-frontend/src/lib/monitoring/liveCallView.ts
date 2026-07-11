@@ -26,15 +26,72 @@ export function connectionPhase(state: string, everConnected: boolean): Connecti
   }
 }
 
-/** Connected but nobody else is in the room yet — the agent/callee are still joining. */
-export function isWaitingForCall(state: string, remoteParticipantCount: number): boolean {
-  return state === "connected" && remoteParticipantCount === 0
+// Mirrors the backend vocabulary (vera_core.observability.correlation): the
+// control plane stamps each supervisor token with vera.mode, and human
+// participant identities are prefixed supervisor-/monitor-/caller-.
+export const MODE_ATTR = "vera.mode"
+const HUMAN_IDENTITY_PREFIXES = ["supervisor-", "monitor-", "caller-"]
+const SIP_CALLEE_IDENTITY = "phone-callee"
+
+export type ParticipantMode = "intervener" | "listener" | "agent" | "callee"
+
+/** The slice of a LiveKit Participant the view logic needs — kept structural so
+ *  it unit-tests without a browser. `isAgent` is `p.kind === ParticipantKind.Agent`,
+ *  precomputed by the caller. */
+export type ParticipantLike = {
+  identity: string
+  name?: string
+  isAgent?: boolean
+  isLocal?: boolean
+  attributes?: Readonly<Record<string, string>>
 }
 
-/** Tag for a participant row. Permissions can arrive a beat after the participant
- *  does — treat unknown as listen-only rather than overclaiming. */
-export function participantModeLabel(canPublish: boolean | undefined): "Can speak" | "Listening" {
-  return canPublish ? "Can speak" : "Listening"
+/** Room state the modal needs from inside the LiveKit context: whether the
+ *  call is over (gates closing while intervening) and whether someone else
+ *  holds the mic (disables Intervene live). */
+export type RoomStatus = {
+  phase: ConnectionPhase
+  otherIntervener: boolean
+}
+
+export const PARTICIPANT_MODE_BADGE: Record<ParticipantMode, string> = {
+  intervener: "Intervening",
+  listener: "Listening",
+  agent: "AI Agent",
+  callee: "Caller",
+}
+
+/** Kind beats identity beats attribute; an unrecognized identity is treated as
+ *  the agent (self-hosted workers may not carry ParticipantKind.Agent). */
+export function participantMode(p: ParticipantLike): ParticipantMode {
+  if (p.isAgent) return "agent"
+  if (p.identity === SIP_CALLEE_IDENTITY) return "callee"
+  const mode = p.attributes?.[MODE_ATTR]
+  if (mode === "intervener" || mode === "listener") return mode
+  if (HUMAN_IDENTITY_PREFIXES.some((prefix) => p.identity.startsWith(prefix))) return "listener"
+  return "agent"
+}
+
+/** Display name: supervisors carry their email as the token name. */
+export function participantLabel(p: ParticipantLike): string {
+  const mode = participantMode(p)
+  if (mode === "agent") return "Vera Agent"
+  if (mode === "callee") return "Caller"
+  return p.name || p.identity
+}
+
+export function agentJoined(participants: ParticipantLike[]): boolean {
+  return participants.some((p) => participantMode(p) === "agent")
+}
+
+/** Someone ELSE holds the mic — the local user's Intervene action must disable. */
+export function otherIntervenerPresent(participants: ParticipantLike[]): boolean {
+  return participants.some((p) => !p.isLocal && participantMode(p) === "intervener")
+}
+
+/** Connected but the AI agent hasn't entered the room yet. */
+export function isWaitingForCall(state: string, participants: ParticipantLike[]): boolean {
+  return state === "connected" && !agentJoined(participants)
 }
 
 export type SpeakerButtonState = {

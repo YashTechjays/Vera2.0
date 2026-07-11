@@ -5,22 +5,27 @@ import {
   RoomAudioRenderer,
   useAudioPlayback,
   useConnectionState,
-  useParticipantPermissions,
-  useRemoteParticipants,
+  useParticipantAttributes,
+  useParticipants,
   useTrackToggle,
 } from "@livekit/components-react"
-import { ConnectionState, Track, type RemoteParticipant } from "livekit-client"
+import { ConnectionState, ParticipantKind, Track, type Participant } from "livekit-client"
 
 import { Button } from "@/components/ui/button"
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
 import {
   CONNECTION_PHASE_LABEL,
+  PARTICIPANT_MODE_BADGE,
   connectionPhase,
   isWaitingForCall,
-  participantModeLabel,
+  otherIntervenerPresent,
+  participantLabel,
+  participantMode,
   speakerButtonState,
   type ConnectionPhase,
+  type ParticipantLike,
+  type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 
 const PHASE_ICON_CLASS: Record<ConnectionPhase, string> = {
@@ -30,14 +35,35 @@ const PHASE_ICON_CLASS: Record<ConnectionPhase, string> = {
   ended: "text-muted-foreground",
 }
 
-function ParticipantRow({ participant }: { participant: RemoteParticipant }) {
-  const permissions = useParticipantPermissions({ participant })
+const MODE_BADGE_CLASS: Record<string, string> = {
+  Intervening: "text-amber-600",
+  Listening: "text-muted-foreground",
+  "AI Agent": "text-emerald-600",
+  Caller: "text-muted-foreground",
+}
+
+function toParticipantLike(p: Participant): ParticipantLike {
+  return {
+    identity: p.identity,
+    name: p.name,
+    isAgent: p.kind === ParticipantKind.AGENT,
+    isLocal: p.isLocal,
+    attributes: p.attributes,
+  }
+}
+
+function ParticipantRow({ participant }: { participant: Participant }) {
+  // Subscribes to attributesChanged so a mode flip re-renders this row live.
+  const { attributes } = useParticipantAttributes({ participant })
+  const like = { ...toParticipantLike(participant), attributes }
+  const badge = PARTICIPANT_MODE_BADGE[participantMode(like)]
   return (
     <li className="flex items-center justify-between gap-2">
-      <span className="font-mono text-xs">{participant.identity}</span>
-      <span className="text-xs text-muted-foreground">
-        {participantModeLabel(permissions?.canPublish)}
+      <span className="truncate text-xs">
+        {participantLabel(like)}
+        {participant.isLocal && <span className="text-muted-foreground"> (you)</span>}
       </span>
+      <span className={`shrink-0 text-xs ${MODE_BADGE_CLASS[badge]}`}>{badge}</span>
     </li>
   )
 }
@@ -69,9 +95,15 @@ function SpeakerToggle({
   )
 }
 
-function MicToggle() {
+/** Mic mute/unmute. Rendered in every mode; disabled while listen-only (the
+ *  token cannot publish — the server, not this button, keeps listeners mute). */
+function MicToggle({ canSpeak }: { canSpeak: boolean }) {
   const { enabled, pending, toggle } = useTrackToggle({ source: Track.Source.Microphone })
-  const title = enabled ? "Mute microphone" : "Unmute microphone"
+  const title = !canSpeak
+    ? "Listen-only — intervene to speak"
+    : enabled
+      ? "Mute microphone"
+      : "Unmute microphone"
   return (
     <Button
       type="button"
@@ -79,24 +111,37 @@ function MicToggle() {
       size="icon"
       title={title}
       aria-label={title}
-      disabled={pending}
+      disabled={!canSpeak || pending}
       onClick={() => void toggle()}
     >
-      {enabled ? <Mic className="size-4" /> : <MicOff className="size-4" />}
+      {canSpeak && enabled ? <Mic className="size-4" /> : <MicOff className="size-4" />}
     </Button>
   )
 }
 
-function RoomView({ microphone }: { microphone: boolean }) {
+function RoomView({
+  microphone,
+  onStatus,
+}: {
+  microphone: boolean
+  onStatus?: (status: RoomStatus) => void
+}) {
   const state = useConnectionState()
-  const remotes = useRemoteParticipants()
+  const participants = useParticipants()
   const [outputMuted, setOutputMuted] = useState(false)
   // Latch (adjusted during render): once connected, a later disconnect means
   // the room is gone, not that the initial connect is still in flight.
   const [everConnected, setEverConnected] = useState(false)
   if (state === ConnectionState.Connected && !everConnected) setEverConnected(true)
 
+  const likes = participants.map(toParticipantLike)
   const phase = connectionPhase(state, everConnected)
+  const otherIntervener = otherIntervenerPresent(likes)
+
+  useEffect(() => {
+    onStatus?.({ phase, otherIntervener })
+  }, [onStatus, phase, otherIntervener])
+
   return (
     <div className="flex flex-1 flex-col gap-3 p-4 text-sm">
       <div className="flex items-center justify-between gap-2">
@@ -106,33 +151,34 @@ function RoomView({ microphone }: { microphone: boolean }) {
         </div>
         <div className="flex items-center gap-1">
           <SpeakerToggle outputMuted={outputMuted} onOutputMutedChange={setOutputMuted} />
-          {microphone && <MicToggle />}
+          <MicToggle canSpeak={microphone} />
         </div>
       </div>
-      {isWaitingForCall(state, remotes.length) ? (
+      {isWaitingForCall(state, likes) ? (
         <p className="text-muted-foreground">Waiting for the call…</p>
       ) : (
         <div>
           <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Participants ({remotes.length})
+            Participants ({participants.length})
           </p>
           <ul className="space-y-1">
-            {remotes.map((p) => (
+            {participants.map((p) => (
               <ParticipantRow key={p.sid} participant={p} />
             ))}
           </ul>
         </div>
       )}
-      <RoomAudioRenderer volume={outputMuted ? 0 : 1} />
+      <RoomAudioRenderer muted={outputMuted} />
     </div>
   )
 }
 
 /**
  * Joins a call's LiveKit room via a server-minted token and renders the live
- * panel: connection phase, remote participants with their speak/listen mode,
- * a speaker toggle (autoplay unlock + output mute), and — when intervening —
- * a mic toggle. Unmounting (closing the modal) disconnects the participant.
+ * panel: connection phase, all participants (email + join-mode badge), a
+ * speaker toggle (autoplay unlock + output mute), and a mic toggle (active
+ * while intervening). Unmounting (closing the modal) disconnects the
+ * participant.
  *
  * Changing `microphone` needs a NEW token with different grants, and LiveKit
  * ignores a token swap while connected — the parent must remount this
@@ -141,12 +187,19 @@ function RoomView({ microphone }: { microphone: boolean }) {
 export function LiveCallRoom({
   callId,
   microphone = false,
+  onStatus,
+  onJoinFailed,
 }: {
   callId: string
   /** Publish the local mic (intervene only). Watch views must leave this off —
    *  a viewer must never be audible in the room, and requesting mic access
    *  fails outright where getUserMedia is blocked (e.g. incognito). */
   microphone?: boolean
+  /** Room state lifted to the modal (close blocking, Intervene disabling). */
+  onStatus?: (status: RoomStatus) => void
+  /** Token fetch failed — e.g. 409 while another supervisor holds the mic.
+   *  The modal uses it to fall back to listen-only. */
+  onJoinFailed?: (error: unknown) => void
 }) {
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -160,7 +213,9 @@ export function LiveCallRoom({
         if (!cancelled) setJoin(res)
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : "Could not join the call.")
+        if (cancelled) return
+        setError(e instanceof ApiError ? e.message : "Could not join the call.")
+        onJoinFailed?.(e)
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -168,6 +223,9 @@ export function LiveCallRoom({
     return () => {
       cancelled = true
     }
+    // onJoinFailed is deliberately not a dependency: modals pass a fresh
+    // closure each render and a re-fetch on that would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [callId, microphone])
 
   if (error) {
@@ -199,7 +257,7 @@ export function LiveCallRoom({
           Microphone unavailable — listening only.
         </p>
       )}
-      <RoomView microphone={micActive} />
+      <RoomView microphone={micActive} onStatus={onStatus} />
     </LiveKitRoom>
   )
 }

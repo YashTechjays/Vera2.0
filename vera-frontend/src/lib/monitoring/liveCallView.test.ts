@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest"
 
 import {
   CONNECTION_PHASE_LABEL,
+  PARTICIPANT_MODE_BADGE,
+  agentJoined,
   connectionPhase,
   isWaitingForCall,
-  participantModeLabel,
+  otherIntervenerPresent,
+  participantLabel,
+  participantMode,
   speakerButtonState,
+  type ParticipantLike,
 } from "@/lib/monitoring/liveCallView"
 
 describe("connectionPhase", () => {
@@ -36,23 +41,86 @@ describe("connectionPhase", () => {
   })
 })
 
-describe("isWaitingForCall", () => {
-  it("waits only while connected with no remote participants", () => {
-    expect(isWaitingForCall("connected", 0)).toBe(true)
-    expect(isWaitingForCall("connected", 1)).toBe(false)
-    expect(isWaitingForCall("connecting", 0)).toBe(false)
-    expect(isWaitingForCall("disconnected", 0)).toBe(false)
+const supervisor = (over: Partial<ParticipantLike> = {}): ParticipantLike => ({
+  identity: "supervisor-u1",
+  name: "va@tenant.example",
+  attributes: { "vera.mode": "listener" },
+  ...over,
+})
+
+describe("participantMode", () => {
+  it("recognizes the agent by participant kind", () => {
+    expect(participantMode({ identity: "whatever", isAgent: true })).toBe("agent")
+  })
+
+  it("recognizes the SIP callee by its fixed identity", () => {
+    expect(participantMode({ identity: "phone-callee" })).toBe("callee")
+  })
+
+  it("reads the supervisor mode from the vera.mode attribute", () => {
+    expect(participantMode(supervisor())).toBe("listener")
+    expect(participantMode(supervisor({ attributes: { "vera.mode": "intervener" } }))).toBe(
+      "intervener",
+    )
+  })
+
+  it("treats human-prefixed identities without the attribute as listeners", () => {
+    expect(participantMode({ identity: "supervisor-u1" })).toBe("listener")
+    expect(participantMode({ identity: "monitor-x" })).toBe("listener")
+    expect(participantMode({ identity: "caller-x" })).toBe("listener")
+  })
+
+  it("falls back to agent for unrecognized identities (kind-less agent worker)", () => {
+    expect(participantMode({ identity: "vera-agent-abc" })).toBe("agent")
+  })
+
+  it("has a badge for every mode", () => {
+    expect(PARTICIPANT_MODE_BADGE.intervener).toBe("Intervening")
+    expect(PARTICIPANT_MODE_BADGE.listener).toBe("Listening")
+    expect(PARTICIPANT_MODE_BADGE.agent).toBe("AI Agent")
+    expect(PARTICIPANT_MODE_BADGE.callee).toBe("Caller")
   })
 })
 
-describe("participantModeLabel", () => {
-  it("labels publishers as speakers", () => {
-    expect(participantModeLabel(true)).toBe("Can speak")
+describe("participantLabel", () => {
+  it("shows the supervisor's email (token name), falling back to identity", () => {
+    expect(participantLabel(supervisor())).toBe("va@tenant.example")
+    expect(participantLabel({ identity: "supervisor-u1" })).toBe("supervisor-u1")
   })
 
-  it("labels non-publishers and unknown permissions as listening", () => {
-    expect(participantModeLabel(false)).toBe("Listening")
-    expect(participantModeLabel(undefined)).toBe("Listening")
+  it("names the agent and the callee", () => {
+    expect(participantLabel({ identity: "x", isAgent: true })).toBe("Vera Agent")
+    expect(participantLabel({ identity: "phone-callee" })).toBe("Caller")
+  })
+})
+
+describe("otherIntervenerPresent", () => {
+  it("true only when a non-local participant is intervening", () => {
+    const me = supervisor({ isLocal: true, attributes: { "vera.mode": "intervener" } })
+    const other = supervisor({ identity: "supervisor-u2" })
+    expect(otherIntervenerPresent([me, other])).toBe(false)
+    expect(
+      otherIntervenerPresent([
+        me,
+        supervisor({ identity: "supervisor-u2", attributes: { "vera.mode": "intervener" } }),
+      ]),
+    ).toBe(true)
+  })
+})
+
+describe("isWaitingForCall", () => {
+  const agent: ParticipantLike = { identity: "x", isAgent: true }
+
+  it("waits only while connected without the agent", () => {
+    expect(isWaitingForCall("connected", [supervisor()])).toBe(true)
+    expect(isWaitingForCall("connected", [supervisor(), agent])).toBe(false)
+    expect(isWaitingForCall("connecting", [])).toBe(false)
+    expect(isWaitingForCall("disconnected", [])).toBe(false)
+  })
+
+  it("agentJoined backs the waiting check", () => {
+    expect(agentJoined([supervisor()])).toBe(false)
+    expect(agentJoined([agent])).toBe(true)
   })
 })
 
