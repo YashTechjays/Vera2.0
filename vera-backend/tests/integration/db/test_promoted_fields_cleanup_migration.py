@@ -198,6 +198,7 @@ async def cleanup_world(
         await session.flush()
         ids = {
             "tenant": tenant.id,
+            "schema": schema.id,
             "stale": stale.id,
             "stale_incomplete": stale_incomplete.id,
             "survivor_complete": survivor_complete.id,
@@ -241,9 +242,7 @@ async def test_deletes_only_pre_cutoff_forms_pinned_to_incomplete_blocks(
         # schema_version rows are never deleted — only the forms pinned to them.
         versions = (
             await session.execute(
-                select(SchemaVersion.id)
-                .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
-                .where(FormSchema.name == "Promoted Cleanup Fixture")
+                select(SchemaVersion.id).where(SchemaVersion.schema_id == cleanup_world["schema"])
             )
         ).all()
         assert len(versions) == 4

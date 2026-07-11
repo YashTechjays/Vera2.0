@@ -154,13 +154,18 @@ only honest cleanup.
      must be swept too (verified 2026-07-11: origin/dev's artifact has no
      promoted_fields; a fresh dev form is pinned to the Jul-10 block-less
      version). Alembic additionally runs each revision once per DB, and on
-     fresh DBs the tables are empty — no-op.
+     fresh DBs the tables are empty — no-op. If the deploy slips past this
+     cutoff, bump it — forms created in the gap would otherwise survive as
+     unparseable.
 - **Delete order (FK-safe):** `call` rows of affected forms first (transcripts,
   call events, call-scoped oversight all CASCADE off `call`), then
   form-scoped oversight rows (`form_id` FK is RESTRICT), then the
   `patient_form` rows (`field_answer` CASCADEs). Stale `schema_version` rows
-  are left in place — nothing loads a version no form pins, and deleting them
-  would trip the `prompt_version` RESTRICT FK.
+  are left in place — `prompt_version` RESTRICT-references them, so deleting
+  them would trip that FK. Historical prompt previews pinned to such a
+  version now return 409 (guarded at the API layer, see prompts.py
+  `preview_prompt`); the published prompt rebinds to a current schema
+  document at deploy via seed.
 - **RLS note:** the affected tables are FORCE-RLS; the deletes only work on the
   privileged migration connection (`migration-database-url` in the deploy,
   the local superuser via `just migrate`) — which is exactly how migrations

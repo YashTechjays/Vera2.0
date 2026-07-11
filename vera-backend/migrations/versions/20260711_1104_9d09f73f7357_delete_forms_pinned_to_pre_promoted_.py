@@ -14,11 +14,15 @@ Two independent guards, so this can never eat future data:
   the planned deploy (dev keeps creating forms pinned to the block-less
   document until then), while still guaranteeing a worst-case future
   (validation loosened, predicate bug) touches nothing created after July 2026.
+  If the deploy slips past this cutoff, bump it — forms created in the gap
+  would otherwise survive as unparseable.
 
 Delete order honors the RESTRICT FKs: export_artifact and call first
 (everything under call CASCADEs), then patient_form (field_answer CASCADEs).
-Stale schema_version rows stay — nothing loads a version no form pins, and
-prompt_version references them RESTRICT.
+Stale schema_version rows stay — prompt_version RESTRICT-references them, so
+they cannot be deleted here. Historical prompt previews pinned to such a
+version now return 409 (guarded at the API layer); the published prompt
+rebinds to a current schema document at deploy via seed.
 
 Runs on the privileged migration connection (BYPASSRLS) like every migration;
 the affected tables are FORCE RLS, so an RLS-bound role would silently match
