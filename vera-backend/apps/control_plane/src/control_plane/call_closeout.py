@@ -10,6 +10,7 @@ consumer/sweeper races are harmless (the row lock serializes them).
 """
 
 import logging
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,6 +37,7 @@ async def close_call(
     *,
     trigger: str,
     actor_label: str = "agent-worker",
+    end_requested_by: UUID | None = None,
 ) -> RoomRef | None:
     """Apply *status* as the call's terminal state. Returns the RoomRef when a
     concurrency slot was freed (caller should run a dispatch pass), else None."""
@@ -48,6 +50,8 @@ async def close_call(
         ).scalar_one_or_none()
         if call is None or call.current_status in TERMINAL_VALUES:
             return None  # voice-lab room, or idempotent redelivery / lost race
+        if end_requested_by is not None:
+            call.end_requested_by_id = end_requested_by
         form = (
             await session.execute(
                 select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()

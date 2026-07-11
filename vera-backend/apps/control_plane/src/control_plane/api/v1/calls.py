@@ -24,12 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
-from control_plane.call_closeout import TERMINAL_VALUES
+from control_plane.call_closeout import TERMINAL_VALUES, close_call
 from control_plane.deps import (
     current_identity,
     get_call_stream_service,
+    get_kms,
     get_sessionmaker,
 )
+from control_plane.dispatch import run_dispatch_pass
 from control_plane.exceptions import (
     CustomAPIException,
     CustomAPIResponse,
@@ -37,8 +39,10 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.request_context import current_request_id
+from control_plane.transcript_finalizer import finalize_transcript
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
+from vera_core.config.kms import KeyManagementService
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
     TYPE_TRANSCRIPT,
@@ -399,12 +403,24 @@ async def end_call(
     session: TenantSession,
     livekit: LiveKit,
     audit: Audit,
+    sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
+    call_stream: Annotated[CallStreamService, Depends(get_call_stream_service)],
+    kms: Annotated[KeyManagementService, Depends(get_kms)],
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[None]:
-    """End a live call: audit, then delete the LiveKit room (hangs up the SIP leg
-    and shuts the agent down). Deliberately writes NO call status — the worker's
-    shutdown emits `call.ended`, and the worker-event consumer runs the one true
-    closeout path (close_call → transcript finalization → form lifecycle → refill).
+    """End a call from Live Monitoring.
+
+    LIVE call (answered — started_at set): stamp the caller's end intent on the
+    row (durable: if the worker's call.ended never arrives, the sweeper closes
+    the call as CANCELED instead of FAILED, so a user-ended call is never
+    auto-redialed), then delete the room; the worker's shutdown emits call.ended
+    and the consumer runs the one true closeout.
+
+    PRE-ANSWER call (still dialing): no worker session exists, so no call.ended
+    will ever come — close synchronously as CANCELED through the shared
+    close_call path FIRST, then delete the room (order is load-bearing: room
+    deletion makes the worker publish call.failed, which must find the row
+    already terminal and no-op).
 
     Visibility matches join-token (`_call_hidden_from`): anyone who may watch
     the call may end it; a hidden call 404s so it is never revealed.
@@ -416,6 +432,7 @@ async def end_call(
         raise NotFoundError(message="call not found")
     if call.current_status in TERMINAL_VALUES:
         return ok(None, message="Call already ended.")  # idempotent no-op
+    pre_answer = call.started_at is None
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
@@ -428,12 +445,37 @@ async def end_call(
             permission_key="calls:read",
             decision="allow",
             request_id=current_request_id(request),
-            detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
+            detail={
+                "owner_id": str(call.initiated_by_id) if call.initiated_by_id else None,
+                "phase": "pre_answer" if pre_answer else "live",
+            },
         )
     )
+    room_name = room_name_for_call(tenant_id, call.id)
+    if pre_answer:
+        ref = await close_call(
+            sessionmaker,
+            audit,
+            room_name,
+            CallStatus.CANCELED,
+            trigger="user_end_call",
+            actor_label=caller.email or caller.subject,
+            end_requested_by=caller.user_id,
+        )
+        await livekit.delete_room(room_name)
+        if ref is not None:  # freed a concurrency slot — let queued forms use it
+            await finalize_transcript(sessionmaker, call_stream, ref, room_name)
+            await run_dispatch_pass(sessionmaker, tenant_id, livekit, kms, audit)
+        return ok(None, message="Call canceled.")
+    async with tenant_session(sessionmaker, tenant_id) as stamp_session:
+        locked = (
+            await stamp_session.execute(select(Call).where(Call.id == call_id).with_for_update())
+        ).scalar_one_or_none()
+        if locked is not None and locked.current_status not in TERMINAL_VALUES:
+            locked.end_requested_by_id = caller.user_id
     # Idempotent server-side: deleting an already-gone room is a no-op, and the
     # in-flight call.ended event resolves the call's status either way.
-    await livekit.delete_room(room_name_for_call(tenant_id, call.id))
+    await livekit.delete_room(room_name)
     return ok(None, message="Call is ending.")
 
 

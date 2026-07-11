@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from livekit.api.twirp_client import TwirpError
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth.invitations import InMemoryInvitationStore
@@ -504,7 +504,9 @@ async def seed_call(
     published: bool = False,
 ) -> UUID:
     """Insert a Call row directly — the manual start-call endpoint is gone; tests
-    seed call state the way the dispatcher would."""
+    seed call state the way the dispatcher would. Production sets `started_at`
+    together with the answered (active) status, so seeded rows mirror that:
+    anything past the dialing phase carries a start timestamp."""
     async with tenant_session(sessionmaker, tenant_id) as session:
         call = Call(
             tenant_id=tenant_id,
@@ -512,6 +514,7 @@ async def seed_call(
             current_status=status,
             initiated_by_id=initiated_by_id,
             published=published,
+            started_at=None if status in ("initiated", "ringing", "ivr") else func.now(),
         )
         session.add(call)
         await session.flush()

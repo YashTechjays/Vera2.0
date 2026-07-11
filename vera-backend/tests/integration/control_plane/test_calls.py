@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.api.v1.calls import _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
@@ -936,7 +936,88 @@ async def test_end_call_visibility_matches_join_token(
         .scalars()
         .one()
     )
-    assert audit.detail == {"owner_id": str(rbac_world.admin_id)}
+    assert audit.detail == {"owner_id": str(rbac_world.admin_id), "phase": "live"}
+
+
+@pytest.mark.asyncio
+async def test_end_call_pre_answer_cancels_synchronously(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """End Call while still dialing: no worker session exists, so no call.ended
+    will ever arrive — the endpoint must close the call itself, as CANCELED
+    (user intent: parked for a human, never auto-redialed)."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    # Mirror the dispatcher: a form with a live call is IN_CALL.
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+        form_row = (
+            await s.execute(select(PatientForm).where(PatientForm.id == seeded_form_id))
+        ).scalar_one()
+        form_row.status = "in_call"
+
+    resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+
+    row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+    assert row.current_status == "canceled"
+    assert row.end_requested_by_id == rbac_world.admin_id
+    assert row.ended_at is not None
+    assert room_name_for_call(rbac_world.tenant_id, call_id) in fake_livekit.deleted
+
+    form = (
+        await admin_session.execute(select(PatientForm).where(PatientForm.id == seeded_form_id))
+    ).scalar_one()
+    assert form.status == "call_failed"  # parked for a human; NOT re-queued
+
+    audit = (
+        (
+            await admin_session.execute(
+                select(AuditLog).where(
+                    AuditLog.event_type == "call.end", AuditLog.resource_id == str(call_id)
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert audit.detail["phase"] == "pre_answer"
+
+
+@pytest.mark.asyncio
+async def test_end_call_live_stamps_intent_and_defers_to_worker(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """End Call on an answered call: intent is stamped durably (the sweeper
+    closes as CANCELED, not FAILED, if the worker's call.ended never lands),
+    but the status write is left to the worker-event consumer."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+    )
+    resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+
+    row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+    assert row.current_status == "active"  # the worker's call.ended owns closeout
+    assert row.end_requested_by_id == rbac_world.admin_id
+    assert room_name_for_call(rbac_world.tenant_id, call_id) in fake_livekit.deleted
 
 
 @pytest.mark.asyncio
