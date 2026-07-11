@@ -443,3 +443,29 @@ class TestDateFormatRejectsTwoDigitYear:
     def test_yy_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="date_format"):
             Validation(date_format="M/D/YY")
+
+
+class TestPromotedColumnParity:
+    """PromotedFields (DSL contract), PromotedIdentifiers (intake value carrier) and
+    PatientForm (the table) must agree on the promoted column set — a future column
+    add that misses one of the three fails here, not in production."""
+
+    # The documented contract: PatientForm's promoted searchable-identifier +
+    # worklist-display columns. PatientForm has many non-promoted columns, so
+    # this literal — not introspection — defines "promoted".
+    EXPECTED = frozenset(PROMOTED_COLUMNS)
+
+    def test_dsl_model_matches_the_contract(self) -> None:
+        assert set(PromotedFields.model_fields) == self.EXPECTED
+
+    def test_intake_dataclass_matches_the_contract(self) -> None:
+        from dataclasses import fields as dataclass_fields
+
+        from vera_core.forms.intake import PromotedIdentifiers
+
+        assert {f.name for f in dataclass_fields(PromotedIdentifiers)} == self.EXPECTED
+
+    def test_patient_form_table_has_every_promoted_column(self) -> None:
+        from vera_core.models.patient_form import PatientForm
+
+        assert {c.name for c in PatientForm.__table__.columns} >= self.EXPECTED
