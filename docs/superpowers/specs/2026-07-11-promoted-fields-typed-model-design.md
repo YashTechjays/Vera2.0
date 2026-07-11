@@ -166,6 +166,14 @@ only honest cleanup.
   the local superuser via `just migrate`) — which is exactly how migrations
   already run.
 - **downgrade():** no-op with a comment (data deletion is irreversible).
+- **Tested (user-required):** the migration exposes its statements as a module
+  constant (`DELETE_STATEMENTS`), and an integration test
+  (`tests/integration/db/test_promoted_fields_cleanup_migration.py`, following
+  the existing `test_prompt_version_data_migration.py` pattern) imports and
+  executes those exact statements against seeded fixtures covering every
+  branch: incomplete-block form deleted (with its call / export_artifact /
+  field_answer children), complete-block form survives, v1 form survives,
+  post-cutoff form survives, schema_version rows survive, second run no-op.
 - Test churn: `test_schema_dsl.py` / `test_intake.py` fixtures must carry a
   full `promoted_fields` block (plus backing leaves + `system_fields`); the
   "valid subset" test becomes "all eight required"; the "unknown column"

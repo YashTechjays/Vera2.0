@@ -19,7 +19,7 @@
 - Code style: PEP 695, ruff + mypy --strict clean (`just check` = lint + typecheck + test).
 - Migration revision IDs are alembic's random hex via `just makemigration` — never hand-numbered.
 - PHI rules: never log field values; the migration deletes PHI rows — the migration docstring must not embed example values.
-- Repo rule: after implementation, run the **code-simplifier** agent, then re-run `just check`, before claiming done (Task 5).
+- Repo rule: after implementation, run the **code-simplifier** agent, then re-run `just check`, before claiming done (Task 6).
 
 ---
 
@@ -654,10 +654,20 @@ _STALE_FORMS = f"""
 """
 
 
+# Exposed as a module constant so the integration test
+# (tests/integration/db/test_promoted_fields_cleanup_migration.py) executes the
+# EXACT statements the migration runs — the two cannot drift. Order honors the
+# RESTRICT FKs (see docstring).
+DELETE_STATEMENTS: tuple[str, ...] = (
+    f"DELETE FROM export_artifact WHERE form_id IN ({_STALE_FORMS})",
+    f"DELETE FROM call WHERE form_id IN ({_STALE_FORMS})",
+    f"DELETE FROM patient_form WHERE id IN ({_STALE_FORMS})",
+)
+
+
 def upgrade() -> None:
-    op.execute(f"DELETE FROM export_artifact WHERE form_id IN ({_STALE_FORMS})")
-    op.execute(f"DELETE FROM call WHERE form_id IN ({_STALE_FORMS})")
-    op.execute(f"DELETE FROM patient_form WHERE id IN ({_STALE_FORMS})")
+    for statement in DELETE_STATEMENTS:
+        op.execute(statement)
 
 
 def downgrade() -> None:
@@ -709,7 +719,299 @@ git commit -m "chore(db): timestamp-gated cleanup of forms pinned to pre-promote
 
 ---
 
-### Task 4: Reseed locally and prove the end-to-end promotion path
+### Task 4: Integration tests for the destructive migration
+
+Mirrors the repo's existing data-migration test pattern
+(`tests/integration/db/test_prompt_version_data_migration.py`): the test imports
+`DELETE_STATEMENTS` from the migration module by file path and executes the real
+statements against the integration DB, so the test and the migration cannot
+drift. Skips automatically without a reachable DB (integration conftest).
+
+**Files:**
+- Create: `tests/integration/db/test_promoted_fields_cleanup_migration.py`
+
+**Interfaces:**
+- Consumes: `DELETE_STATEMENTS: tuple[str, ...]` from the Task 3 migration module; `admin_sessionmaker` fixture from `tests/integration/conftest.py` (privileged connection — required, the tables are FORCE RLS).
+
+- [ ] **Step 1: Write the test module**
+
+```python
+"""The promoted_fields cleanup migration deletes exactly the patient_form rows
+pinned to a dsl 2.x schema_version whose promoted_fields block is incomplete
+AND that were created before the 2026-07-31 cutoff — and nothing else. The test
+imports DELETE_STATEMENTS from the migration module itself, so it exercises the
+statements the migration actually runs — the two cannot drift. Skips without a
+reachable DB (see conftest)."""
+
+import importlib.util
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+import pytest
+from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from vera_core.models import (
+    Call,
+    ExportArtifact,
+    FieldAnswer,
+    FormSchema,
+    PatientForm,
+    SchemaVersion,
+    Tenant,
+)
+from vera_core.models.enums import (
+    AnswerSource,
+    CallStatus,
+    ExportFormat,
+    InsuranceType,
+    VersionStatus,
+)
+
+INSURANCE_TYPE = InsuranceType.INFERTILITY_TREATMENT.value
+TENANT_SLUG = "promoted-cleanup-mig-test"
+
+# Random-hex prefix is minted at `just makemigration` time — glob, don't hardcode.
+MIGRATION_FILE = next(
+    (Path(__file__).resolve().parents[3] / "migrations" / "versions").glob(
+        "*_delete_forms_pinned_to_pre_promoted_fields_docs.py"
+    )
+)
+
+_ALL_PROMOTED = {
+    column: "sections.x.y"
+    for column in (
+        "patient_name",
+        "patient_dob",
+        "chart_number",
+        "appointment_date",
+        "appointment_type",
+        "member_id",
+        "insurance_provider",
+        "insurance_provider_phone_number",
+    )
+}
+# The migration inspects the RAW pinned JSON — these fixtures only need the
+# shape the predicate reads (dsl_version + promoted_fields keys), not a fully
+# valid FormSchemaDoc.
+BLOCKLESS_V2: dict[str, Any] = {"dsl_version": "2.1", "name": "blockless", "sections": {}}
+INCOMPLETE_V2: dict[str, Any] = {
+    **BLOCKLESS_V2,
+    "name": "incomplete",
+    "promoted_fields": {"patient_name": "sections.x.y"},  # 1 of 8 keys
+}
+COMPLETE_V2: dict[str, Any] = {**BLOCKLESS_V2, "name": "complete", "promoted_fields": _ALL_PROMOTED}
+V1_DOC: dict[str, Any] = {"name": "legacy v1", "sections": []}  # no dsl_version
+
+
+def _delete_statements() -> tuple[str, ...]:
+    spec = importlib.util.spec_from_file_location("migration_promoted_cleanup", MIGRATION_FILE)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    statements: tuple[str, ...] = module.DELETE_STATEMENTS
+    return statements
+
+
+async def _run_cleanup(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    async with sessionmaker() as session, session.begin():
+        for statement in _delete_statements():
+            await session.execute(text(statement))
+
+
+async def _wipe(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """Delete the fixture tenant's world in FK order (calls/exports → forms →
+    versions → schema → tenant)."""
+    async with sessionmaker() as session, session.begin():
+        tenant_id = (
+            await session.execute(select(Tenant.id).where(Tenant.slug == TENANT_SLUG))
+        ).scalar_one_or_none()
+        if tenant_id is None:
+            return
+        await session.execute(delete(Call).where(Call.tenant_id == tenant_id))
+        await session.execute(delete(ExportArtifact).where(ExportArtifact.tenant_id == tenant_id))
+        await session.execute(delete(PatientForm).where(PatientForm.tenant_id == tenant_id))
+        schema_ids = (
+            (
+                await session.execute(
+                    select(FormSchema.id).where(FormSchema.name == "Promoted Cleanup Fixture")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if schema_ids:
+            await session.execute(
+                delete(SchemaVersion).where(SchemaVersion.schema_id.in_(schema_ids))
+            )
+            await session.execute(delete(FormSchema).where(FormSchema.id.in_(schema_ids)))
+        await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
+
+
+@pytest.fixture
+async def cleanup_world(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> AsyncGenerator[dict[str, UUID]]:
+    """Seed one tenant + four pinned forms covering every predicate branch, plus
+    call/export/answer children on the doomed form. Yields the ids the test
+    asserts against."""
+    await _wipe(admin_sessionmaker)
+    async with admin_sessionmaker() as session, session.begin():
+        tenant = Tenant(slug=TENANT_SLUG, name="Promoted Cleanup Test", status="active")
+        session.add(tenant)
+        await session.flush()
+        schema = FormSchema(insurance_type=INSURANCE_TYPE, name="Promoted Cleanup Fixture")
+        session.add(schema)
+        await session.flush()
+        versions = {
+            key: SchemaVersion(
+                schema_id=schema.id, version=i + 1, schema_json=doc, status=VersionStatus.DRAFT
+            )
+            for i, (key, doc) in enumerate(
+                [
+                    ("blockless", BLOCKLESS_V2),
+                    ("incomplete", INCOMPLETE_V2),
+                    ("complete", COMPLETE_V2),
+                    ("v1", V1_DOC),
+                ]
+            )
+        }
+        session.add_all(versions.values())
+        await session.flush()
+
+        def form(version_key: str, **kwargs: Any) -> PatientForm:
+            row = PatientForm(
+                tenant_id=tenant.id, schema_version_id=versions[version_key].id, **kwargs
+            )
+            session.add(row)
+            return row
+
+        stale = form("blockless")  # created now (< cutoff) → DELETED
+        stale_incomplete = form("incomplete")  # partial block → DELETED
+        survivor_complete = form("complete")  # full block → survives
+        survivor_v1 = form("v1")  # not dsl 2.x → survives
+        # Matches the predicate but post-dates the 2026-07-31 cutoff → survives.
+        survivor_late = form("blockless", created_at=datetime(2026, 8, 15, tzinfo=UTC))
+        await session.flush()
+
+        # Children on the doomed form: RESTRICT FKs (call, export_artifact) the
+        # migration deletes explicitly, CASCADE (field_answer) it relies on.
+        session.add(
+            Call(
+                tenant_id=tenant.id,
+                form_id=stale.id,
+                current_status=CallStatus.COMPLETED,
+            )
+        )
+        session.add(
+            ExportArtifact(
+                tenant_id=tenant.id,
+                form_id=stale.id,
+                format=ExportFormat.PDF,
+                gcs_uri="gs://test/promoted-cleanup",
+            )
+        )
+        session.add(
+            FieldAnswer(
+                tenant_id=tenant.id,
+                form_id=stale.id,
+                field_path="sections.x.y",
+                value={"value": "fixture"},
+                source=AnswerSource.INTAKE,
+            )
+        )
+        await session.flush()
+        ids = {
+            "tenant": tenant.id,
+            "stale": stale.id,
+            "stale_incomplete": stale_incomplete.id,
+            "survivor_complete": survivor_complete.id,
+            "survivor_v1": survivor_v1.id,
+            "survivor_late": survivor_late.id,
+        }
+    yield ids
+    await _wipe(admin_sessionmaker)
+
+
+async def _form_ids(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: UUID
+) -> set[UUID]:
+    async with sessionmaker() as session:
+        rows = (
+            await session.execute(
+                select(PatientForm.id).where(PatientForm.tenant_id == tenant_id)
+            )
+        ).scalars()
+        return set(rows)
+
+
+async def test_deletes_only_pre_cutoff_forms_pinned_to_incomplete_blocks(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    cleanup_world: dict[str, UUID],
+) -> None:
+    await _run_cleanup(admin_sessionmaker)
+
+    remaining = await _form_ids(admin_sessionmaker, cleanup_world["tenant"])
+    assert remaining == {
+        cleanup_world["survivor_complete"],
+        cleanup_world["survivor_v1"],
+        cleanup_world["survivor_late"],
+    }
+
+    async with admin_sessionmaker() as session:
+        # RESTRICT children were deleted first, CASCADE children followed the form.
+        for model in (Call, ExportArtifact, FieldAnswer):
+            count = (
+                await session.execute(
+                    select(model.id).where(model.tenant_id == cleanup_world["tenant"])
+                )
+            ).all()
+            assert count == [], f"{model.__tablename__} rows survived"
+        # schema_version rows are never deleted — only the forms pinned to them.
+        versions = (
+            await session.execute(
+                select(SchemaVersion.id)
+                .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
+                .where(FormSchema.name == "Promoted Cleanup Fixture")
+            )
+        ).all()
+        assert len(versions) == 4
+
+
+async def test_second_run_is_a_no_op(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    cleanup_world: dict[str, UUID],
+) -> None:
+    await _run_cleanup(admin_sessionmaker)
+    before = await _form_ids(admin_sessionmaker, cleanup_world["tenant"])
+    await _run_cleanup(admin_sessionmaker)
+    assert await _form_ids(admin_sessionmaker, cleanup_world["tenant"]) == before
+```
+
+- [ ] **Step 2: Run the tests against the local DB**
+
+Requires `just up` + `just migrate` (integration tests skip without a DB — a skip is NOT a pass here; make sure they actually run).
+
+Run: `uv run pytest tests/integration/db/test_promoted_fields_cleanup_migration.py -v`
+Expected: 2 passed.
+
+- [ ] **Step 3: Sanity-check the test bites**
+
+Temporarily change `_CUTOFF` in the migration to `"2020-01-01 00:00:00+00"`, rerun — expect `test_deletes_only_pre_cutoff_forms_pinned_to_incomplete_blocks` to FAIL (the stale forms survive). Restore, rerun, green.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/integration/db/test_promoted_fields_cleanup_migration.py
+git commit -m "test(db): promoted_fields cleanup migration deletes exactly the gated rows"
+```
+
+---
+
+### Task 5: Reseed locally and prove the end-to-end promotion path
 
 **Files:** none created — this is runtime verification of Tasks 1-3 against the local stack.
 
@@ -734,7 +1036,7 @@ Expected: green.
 
 ---
 
-### Task 5: Docs touch-up, simplifier pass, final gate
+### Task 6: Docs touch-up, simplifier pass, final gate
 
 **Files:**
 - Modify: `packages/vera_core/src/vera_core/forms/CLAUDE.md` (validator-rules list)
@@ -769,6 +1071,6 @@ git commit -m "docs(forms): promoted_fields validator rule; simplifier pass"
 
 ## Self-Review Notes
 
-- **Spec coverage:** model+requiredness (Task 1 Steps 1-3), catalog upgrades incl. disease_only sections/task/system_fields (Task 1 Steps 4-5), consumers (Step 6), artifacts byte-identity check (Step 8), parity guard (Task 2), cleanup migration with both gates + FK order + RLS note + no-op downgrade (Task 3), seed/runtime verification (Task 4), docs + mandated simplifier (Task 5). Spec's "no compiler/loader changes" is honored — no `compile_document` edits anywhere.
+- **Spec coverage:** model+requiredness (Task 1 Steps 1-3), catalog upgrades incl. disease_only sections/task/system_fields (Task 1 Steps 4-5), consumers (Step 6), artifacts byte-identity check (Step 8), parity guard (Task 2), cleanup migration with both gates + FK order + RLS note + no-op downgrade (Task 3), migration integration tests exercising the real `DELETE_STATEMENTS` — predicate branches, cutoff gate, RESTRICT/CASCADE children, schema_version survival, idempotency (Task 4), seed/runtime verification (Task 5), docs + mandated simplifier (Task 6). Spec's "no compiler/loader changes" is honored — no `compile_document` edits anywhere.
 - **Types:** `items()` defined in Task 1 and consumed with identical signature in Steps 6 and the validator; `PROMOTED_COLUMNS` tuple defined once in the test module and reused by the parity test.
 - **Placeholders:** the two `<KEEP GENERATED>` markers in Task 3 are deliberate — alembic mints those ids at Step 1; everything else is concrete.
