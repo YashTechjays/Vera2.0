@@ -15,7 +15,7 @@ import {
 import { cn } from "@/lib/utils"
 import { useIbv } from "@/components/ibv/IbvProvider"
 import { usePermission } from "@/lib/auth/permissions"
-import { listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
+import { endCall, listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
 import { ApiError } from "@/lib/api/client"
 import { CallOverviewModal } from "@/components/monitoring/CallOverviewModal"
 import { InterveneModal } from "@/components/monitoring/InterveneModal"
@@ -108,6 +108,7 @@ export function LiveMonitoring() {
   const [modalCall, setModalCall] = useState<LiveCall | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
   const [interveneOpen, setInterveneOpen] = useState(false)
+  const [ending, setEnding] = useState(false)
 
   // Load + poll (skip while the tab is hidden).
   useEffect(() => {
@@ -159,6 +160,26 @@ export function LiveMonitoring() {
   function openOverview(call: CallSummary) {
     setModalCall(toLiveCall(call, now))
     setOverviewOpen(true)
+  }
+
+  // Ends the call for real: the backend deletes the LiveKit room (hanging up the
+  // SIP leg and shutting the agent down) and its pipeline completes the call.
+  // Optimistically drop the row on success (the poll re-syncs); either way close
+  // the modals, so a failure's error banner is visible behind them.
+  async function onEndCall() {
+    const id = modalCall?.id
+    if (!id || ending) return
+    setEnding(true)
+    try {
+      await endCall(id)
+      setCalls((cs) => cs.filter((c) => c.id !== id))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not end the call.")
+    } finally {
+      setEnding(false)
+      setOverviewOpen(false)
+      setInterveneOpen(false)
+    }
   }
 
   return (
@@ -303,9 +324,17 @@ export function LiveMonitoring() {
           setOverviewOpen(false)
           setInterveneOpen(true)
         }}
+        onEndCall={onEndCall}
+        ending={ending}
       />
 
-      <InterveneModal call={modalCall} open={interveneOpen} onOpenChange={setInterveneOpen} />
+      <InterveneModal
+        call={modalCall}
+        open={interveneOpen}
+        onOpenChange={setInterveneOpen}
+        onEndCall={onEndCall}
+        ending={ending}
+      />
     </div>
   )
 }

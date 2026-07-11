@@ -4,6 +4,7 @@ import {
   X,
   Volume2,
   Grid3x3,
+  Loader2,
   MessageSquare,
   Copy,
   ChevronDown,
@@ -43,6 +44,8 @@ export function CallOverviewModal({
   onOpenChange,
   onExpand,
   onIntervene,
+  onEndCall,
+  ending,
   onShowSummary,
 }: {
   call: LiveCall | null
@@ -50,6 +53,10 @@ export function CallOverviewModal({
   onOpenChange: (open: boolean) => void
   onExpand: () => void
   onIntervene: () => void
+  /** Ends the call for real (backend room teardown), not just closes the modal. */
+  onEndCall: () => void
+  /** True while the end-call request is in flight — disables the button. */
+  ending: boolean
   onShowSummary?: () => void
 }) {
   const [keypadOpen, setKeypadOpen] = useState(false)
@@ -218,10 +225,12 @@ export function CallOverviewModal({
         {/* Footer */}
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <Button
-            onClick={() => onOpenChange(false)}
+            onClick={onEndCall}
+            disabled={ending}
             className="bg-red-500 text-white hover:bg-red-600"
           >
-            End Call
+            {ending && <Loader2 className="size-4 animate-spin" />}
+            {ending ? "Ending…" : "End Call"}
           </Button>
           <div className="flex items-center gap-3">
             <Button

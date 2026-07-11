@@ -1,5 +1,5 @@
 """Verification-call endpoints: join-token, active-list, live event stream,
-publish, and revoke-access.
+publish, end, and revoke-access.
 
 Auth note (acknowledged stopgap): join-token / active-list guard with
 `require("calls:read")` for now — the SPA has no real auth yet, and the
@@ -373,6 +373,60 @@ async def publish_call(
         )
     )
     return ok(_summary(call, patient_name, caller.user_id))
+
+
+@router.post(
+    "/calls/{call_id}/end",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+    ),
+)
+async def end_call(
+    call_id: UUID,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    livekit: LiveKit,
+    audit: Audit,
+    caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[None]:
+    """End a live call: audit, then delete the LiveKit room (hangs up the SIP leg
+    and shuts the agent down). Deliberately writes NO call status — the worker's
+    shutdown emits `call.ended`, and the worker-event consumer runs the one true
+    closeout path (close_call → transcript finalization → form lifecycle → refill).
+
+    Visibility matches join-token (`_call_hidden_from`): anyone who may watch or
+    intervene on the call may end it; a hidden call 404s so it is never revealed.
+    """
+    call = (
+        await session.execute(select(Call).where(Call.id == call_id))
+    ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
+    if call is None or _call_hidden_from(call, caller.user_id):
+        raise NotFoundError(message="call not found")
+    if call.current_status in TERMINAL_VALUES:
+        return ok(None, message="Call already ended.")  # idempotent no-op
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.CALL_END.value,
+            resource_type="call",
+            resource_id=str(call.id),
+            permission_key="calls:read",
+            decision="allow",
+            request_id=current_request_id(request),
+            detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
+        )
+    )
+    # Idempotent server-side: deleting an already-gone room is a no-op, and the
+    # in-flight call.ended event resolves the call's status either way.
+    await livekit.delete_room(room_name_for_call(tenant_id, call.id))
+    return ok(None, message="Call is ending.")
 
 
 @router.get(

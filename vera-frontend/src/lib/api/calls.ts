@@ -47,6 +47,16 @@ export function getJoinToken(callId: string, intervene = false): Promise<JoinTok
   return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
 }
 
+/** POST /calls/{id}/end — tear down the call's LiveKit room (hangs up the SIP
+ *  leg, shuts the agent down); the backend pipeline then completes the call.
+ *  Allowed for anyone who can watch/intervene on the call (owner, or a
+ *  published call minus revoked users). */
+export function endCall(callId: string): Promise<null> {
+  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/end`, {
+    method: "POST",
+  })
+}
+
 /** POST /calls/{id}/revoke-access — owner ejects an intervener from the room. */
 export function revokeAccess(callId: string, targetUserId: string): Promise<null> {
   return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/revoke-access`, {
