@@ -17,7 +17,7 @@ from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
@@ -146,6 +146,27 @@ async def try_dispatch(
     # func.make_interval takes positional args (years, months, weeks, days, hours, ...);
     # SQLAlchemy's func does not forward keyword args, so hours is the 5th positional.
     expiry_interval = func.make_interval(0, 0, 0, 0, tenant.queue_expiry_hours)
+    # The working-hours gate is ALSO pushed into the WHERE: filtered after a
+    # LIMIT(slots) FIFO fetch, a few stale forms for a closed provider would
+    # occupy the whole window and starve every dispatchable form behind them
+    # for up to the expiry horizon (head-of-line blocking). Mirrors
+    # _resolve_provider + is_within_working_hours: only an ACTIVE provider with
+    # both bounds set can be outside its window.
+    now_eastern = _now_eastern_time()
+    provider_outside_hours = (
+        select(InsuranceProvider.id)
+        .where(
+            InsuranceProvider.name == PatientForm.insurance_provider,
+            InsuranceProvider.status == "active",
+            InsuranceProvider.working_hour_start.is_not(None),
+            InsuranceProvider.working_hour_end.is_not(None),
+            or_(
+                InsuranceProvider.working_hour_start > now_eastern,
+                InsuranceProvider.working_hour_end < now_eastern,
+            ),
+        )
+        .exists()
+    )
     candidates = (
         (
             await session.execute(
@@ -155,6 +176,7 @@ async def try_dispatch(
                     PatientForm.status == FormStatus.IN_QUEUE.value,
                     (PatientForm.enqueued_at.is_(None))
                     | (PatientForm.enqueued_at > func.now() - expiry_interval),
+                    ~provider_outside_hours,
                 )
                 .order_by(PatientForm.enqueued_at.asc())
                 .limit(slots)
@@ -234,7 +256,9 @@ async def try_dispatch(
             candidates = []
 
     for form in candidates:
-        # 4b. Working-hours check (provider reused below for id + playbook).
+        # 4b. Working-hours re-check at dial time — the SQL gate above used the
+        # pass-start clock, and the window can close mid-pass (dial pacing).
+        # Provider reused below for id + playbook.
         provider = await _resolve_provider(session, form)
         if provider is not None and not is_within_working_hours(provider):
             continue

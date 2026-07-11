@@ -43,23 +43,55 @@ def schedule_dispatch_pass(
     for why this is a detached task and not fastapi.BackgroundTasks: background
     tasks run BEFORE yield-dependency teardown, i.e. before the request's
     transaction commits — the pass would see (and skip) the still-locked row."""
-    task = asyncio.create_task(
-        run_dispatch_pass(
-            sessionmaker, tenant_id, livekit, kms, audit, wait_for_form_id=wait_for_form_id
+    _track(
+        asyncio.create_task(
+            _dispatch_pass(
+                sessionmaker, tenant_id, livekit, kms, audit, wait_for_form_id=wait_for_form_id
+            )
         )
     )
+
+
+def _track(task: asyncio.Task[None]) -> None:
     _PENDING.add(task)
     task.add_done_callback(_PENDING.discard)
 
 
 async def drain_pending() -> None:
     """Await every in-flight detached dispatch task (test hook; also usable at
-    shutdown). Exceptions are already swallowed inside run_dispatch_pass."""
+    shutdown). Exceptions are already swallowed inside _dispatch_pass."""
     while _PENDING:
         await asyncio.gather(*list(_PENDING), return_exceptions=True)
 
 
 async def run_dispatch_pass(
+    sessionmaker: "async_sessionmaker[AsyncSession]",
+    tenant_id: "UUID",
+    livekit: Any,
+    kms: Any,
+    audit: "AuditSink | None",
+    *,
+    wait_for_form_id: "UUID | None" = None,
+) -> None:
+    """Await one dispatch pass, shielded from the caller's cancellation.
+
+    The pass dials INSIDE its DB transaction, so cancelling it mid-pass (the
+    consumer/sweeper tasks are cancelled on shutdown; a request handler can be
+    cancelled on client disconnect) would roll back already-dialed Call rows
+    while the SIP calls stay live — worker events would find no row and the
+    next pass would redial the same payer. The pass therefore runs as a
+    detached task in the shutdown-drained _PENDING set: the caller may be
+    cancelled, but the pass itself always runs to completion and commits."""
+    task = asyncio.create_task(
+        _dispatch_pass(
+            sessionmaker, tenant_id, livekit, kms, audit, wait_for_form_id=wait_for_form_id
+        )
+    )
+    _track(task)
+    await asyncio.shield(task)
+
+
+async def _dispatch_pass(
     sessionmaker: "async_sessionmaker[AsyncSession]",
     tenant_id: "UUID",
     livekit: Any,
@@ -86,5 +118,7 @@ async def run_dispatch_pass(
                 )
         async with tenant_session(sessionmaker, tenant_id) as session:
             await try_dispatch(session, tenant_id, livekit, kms, audit=audit)
-    except Exception:
-        logger.exception("dispatch pass failed for tenant %s", tenant_id)
+    except Exception as exc:
+        # Type name only — SQLAlchemy statement errors embed the bound
+        # parameters, and the pass touches patient_form rows (PHI).
+        logger.error("dispatch pass failed for tenant %s (%s)", tenant_id, type(exc).__name__)

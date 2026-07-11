@@ -543,6 +543,42 @@ async def test_call_ended_low_completion_defaults_to_review_when_flag_off(
 
 
 @pytest.mark.asyncio
+async def test_call_ended_after_user_end_request_closes_as_canceled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live path of /calls/{id}/end stamps end-intent and deletes the room;
+    the worker then emits a plain call.ended. The closeout must honor the stamp:
+    CANCELED (parked for a human), never COMPLETED — and never auto-requeued,
+    even with the auto-retry flag on (a supervisor who ended the call does not
+    want the payer redialed)."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(
+        tenant_id,
+        call_id,
+        form_id,
+        current_status=CallStatus.ACTIVE.value,
+        end_requested_by_id=uuid4(),
+    )
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=40.0)
+    tenant = _tenant(id=tenant_id, max_retries=3, retry_fill_threshold=0.95)
+    session = _FakeSession(call=call, form=form, tenant=tenant)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session, form_auto_retry_enabled=True)
+
+    event = CallEndedEvent(room_name=room, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert call.current_status == CallStatus.CANCELED.value
+    assert form.status == FormStatus.CALL_FAILED.value  # parked for a human; NOT re-queued
+    assert form.retry_count == 0
+    status_events = [e for e in session.added if e.event_type == CallEventType.STATUS.value]
+    assert [e.event_value for e in status_events] == [CallStatus.CANCELED.value]
+    assert len(wired.dispatch_calls) == 1  # the slot was still freed
+    assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
 async def test_call_ended_finalizes_transcript_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

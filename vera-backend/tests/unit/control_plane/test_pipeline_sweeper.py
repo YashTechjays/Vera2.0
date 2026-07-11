@@ -14,29 +14,62 @@ from vera_core.models.enums import CallStatus
 from vera_core.observability.correlation import room_name_for_call
 
 
-def test_room_gone_is_closed_without_room_delete() -> None:
+def test_room_gone_first_sighting_is_deferred_not_closed() -> None:
+    """Room-gone is also the healthy closeout's transient state (the worker
+    deletes the room moments before close_call commits) — a first sighting must
+    wait one tick instead of failing a normally completed call (→ auto-redial)."""
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    result = rooms_to_close(
-        [(call, False, False)], live_rooms=set(), observer_only_rooms=set(), tenant_id=tenant
+    result, newly_gone = rooms_to_close(
+        [(call, False, False)],
+        live_rooms=set(),
+        observer_only_rooms=set(),
+        tenant_id=tenant,
+        confirmed_gone=set(),
+    )
+    assert result == []
+    assert newly_gone == {room}
+
+
+def test_room_gone_two_consecutive_ticks_is_closed_without_room_delete() -> None:
+    tenant, call = uuid4(), uuid4()
+    room = room_name_for_call(tenant, call)
+    result, newly_gone = rooms_to_close(
+        [(call, False, False)],
+        live_rooms=set(),
+        observer_only_rooms=set(),
+        tenant_id=tenant,
+        confirmed_gone={room},
     )
     assert result == [(room, False, CallStatus.FAILED)]  # close it; no room left to delete
+    assert newly_gone == set()
 
 
 def test_live_room_within_cap_is_left_alone() -> None:
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    result = rooms_to_close(
-        [(call, False, False)], live_rooms={room}, observer_only_rooms=set(), tenant_id=tenant
+    result, newly_gone = rooms_to_close(
+        [(call, False, False)],
+        live_rooms={room},
+        observer_only_rooms=set(),
+        tenant_id=tenant,
+        confirmed_gone=set(),
     )
     assert result == []
+    assert newly_gone == set()
 
 
 def test_live_room_past_cap_is_deleted_then_closed() -> None:
+    """A wedged session past the hard cap needs no two-tick patience — the room
+    is LIVE, so this can't be the healthy closeout's delete-then-commit window."""
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    result = rooms_to_close(
-        [(call, True, False)], live_rooms={room}, observer_only_rooms=set(), tenant_id=tenant
+    result, _ = rooms_to_close(
+        [(call, True, False)],
+        live_rooms={room},
+        observer_only_rooms=set(),
+        tenant_id=tenant,
+        confirmed_gone=set(),
     )
     assert result == [(room, True, CallStatus.FAILED)]  # wedged session: delete, then close
 
@@ -47,8 +80,12 @@ def test_end_requested_closes_as_canceled() -> None:
     never FAILED (FAILED would auto-redial the number)."""
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    result = rooms_to_close(
-        [(call, False, True)], live_rooms=set(), observer_only_rooms=set(), tenant_id=tenant
+    result, _ = rooms_to_close(
+        [(call, False, True)],
+        live_rooms=set(),
+        observer_only_rooms=set(),
+        tenant_id=tenant,
+        confirmed_gone={room},
     )
     assert result == [(room, False, CallStatus.CANCELED)]
 
@@ -59,11 +96,12 @@ def test_observer_only_live_room_is_reaped_with_delete() -> None:
     so the sweeper deletes the room and closes the call."""
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    result = rooms_to_close(
+    result, _ = rooms_to_close(
         [(call, False, False)],
         live_rooms={room},
         observer_only_rooms={room},
         tenant_id=tenant,
+        confirmed_gone=set(),
     )
     assert result == [(room, True, CallStatus.FAILED)]
 

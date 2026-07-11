@@ -185,8 +185,12 @@ class WorkerEventConsumer:
             return
         try:
             event = parse_worker_event(raw)
-        except Exception:
-            logger.exception("dropping unparseable worker event %s", entry_id)
+        except Exception as exc:
+            # Type name only — a pydantic ValidationError's message/traceback
+            # embeds the raw event payload verbatim.
+            logger.warning(
+                "dropping unparseable worker event %s (%s)", entry_id, type(exc).__name__
+            )
             await self._ack(entry_id)  # poison entry — drop so it can't wedge the group
             return
         logger.info(
@@ -209,8 +213,14 @@ class WorkerEventConsumer:
                 getattr(event, "room_name", "?"),
             )
             return  # do NOT ack → XAUTOCLAIM retries once the Call row has committed
-        except Exception:
-            logger.exception("handler failed for event %s; leaving unacked for reclaim", entry_id)
+        except Exception as exc:
+            # Type name only — handlers run the transcript finalizer, whose
+            # SQLAlchemy/Redis errors embed transcript text (PHI).
+            logger.error(
+                "handler failed for event %s (%s); leaving unacked for reclaim",
+                entry_id,
+                type(exc).__name__,
+            )
             return  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
         await self._ack(entry_id)
 

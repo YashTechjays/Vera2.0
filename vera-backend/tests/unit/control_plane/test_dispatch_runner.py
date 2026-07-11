@@ -1,5 +1,6 @@
 """run_dispatch_pass — a self-contained, exception-safe dispatch pass."""
 
+import asyncio
 from typing import Any
 from uuid import uuid4
 
@@ -72,6 +73,37 @@ async def test_schedule_dispatch_pass_runs_detached(monkeypatch: Any) -> None:
     schedule_dispatch_pass(object(), tid, object(), object(), None)  # type: ignore
     await drain_pending()
     assert ran == [tid]
+
+
+@pytest.mark.asyncio
+async def test_pass_survives_caller_cancellation(monkeypatch: Any) -> None:
+    """Cancelling the awaiting caller (consumer/sweeper teardown on a deploy)
+    must NOT cancel the pass itself: dials happen inside the pass's DB
+    transaction, and a mid-pass rollback would strand live SIP calls with no
+    Call row — the next pass would redial the same payer. The pass runs
+    detached in the shutdown-drained _PENDING set."""
+    monkeypatch.setattr(dispatch_mod, "tenant_session", lambda sm, tid: _FakeSessionCtx())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    completed: list[object] = []
+
+    async def slow_try_dispatch(
+        session: Any, tenant_id: Any, livekit: Any, kms: Any, *, audit: Any = None
+    ) -> None:
+        entered.set()
+        await release.wait()
+        completed.append(tenant_id)
+
+    monkeypatch.setattr(dispatch_mod, "try_dispatch", slow_try_dispatch)
+    tid = uuid4()
+    caller = asyncio.create_task(run_dispatch_pass(object(), tid, object(), object(), None))  # type: ignore
+    await entered.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    release.set()
+    await drain_pending()  # the lifespan's shutdown barrier — the pass finishes here
+    assert completed == [tid]
 
 
 @pytest.mark.asyncio

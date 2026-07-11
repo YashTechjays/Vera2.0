@@ -6,9 +6,14 @@ refill), which leaves two timing holes this loop closes on every tick:
 1. RECONCILE stuck calls. A hard-crashed worker never emits `call.ended`, so its
    form would sit IN_CALL forever and leak a concurrency slot. Signal: the healthy
    end path always deletes the LiveKit room (delete_room_on_close / the consumer's
-   call.failed teardown), so a non-terminal Call whose room is GONE — past a grace
-   window — is dead; it is failed through the same `close_call` path the consumer
-   uses (bounded auto-retry, audit). A non-terminal call past the hard duration cap
+   call.failed teardown), so a non-terminal Call whose room is GONE — on two
+   consecutive ticks — is dead; it is failed through the same `close_call` path the
+   consumer uses (bounded auto-retry, audit). The two-tick confirmation exists
+   because room-gone is also the healthy closeout's transient state: the worker
+   deletes the room moments before the consumer's `close_call` commits, and a
+   single-sighting sweep in that window would misclassify a normally completed
+   call as FAILED and auto-redial the payer (the created_at grace window gives no
+   protection at end-of-call). A non-terminal call past the hard duration cap
    gets its room deleted first (ends a wedged session), then the same closeout.
 2. WAKE the dispatcher. Queued forms whose blocking condition lapsed (working
    hours reopened, a slot freed by reconciliation) get a dispatch pass without
@@ -40,7 +45,11 @@ from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import platform_session, tenant_session
 from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.enums import CallStatus, FormStatus
-from vera_core.observability.correlation import is_observer_identity, room_name_for_call
+from vera_core.observability.correlation import (
+    is_observer_identity,
+    parse_room_name,
+    room_name_for_call,
+)
 
 logger = logging.getLogger("control_plane.pipeline_sweeper")
 
@@ -50,26 +59,38 @@ def rooms_to_close(
     live_rooms: set[str],
     observer_only_rooms: set[str],
     tenant_id: UUID,
-) -> list[tuple[str, bool, CallStatus]]:
-    """Which stuck-call candidates to close: `(room_name, delete_room_first, status)`.
+    *,
+    confirmed_gone: set[str],
+) -> tuple[list[tuple[str, bool, CallStatus]], set[str]]:
+    """Which stuck-call candidates to close: `(to_close, newly_gone)` where
+    to_close is `[(room_name, delete_room_first, status), ...]`.
 
     rows: (call_id, past_cap, end_requested) for non-terminal calls past the
-    grace window. Room gone → close (the room needs no delete). Room live but
-    past the hard cap, or held open only by browser observers (no agent, no SIP
-    callee — the call can never progress) → delete the room first, then close.
-    Room live and within the cap with a real participant → a long call still in
-    progress; leave it alone. A call whose end was user-requested closes as
-    CANCELED (never auto-redialed); everything else as FAILED.
+    grace window. Room gone → close (no room left to delete), but only when it
+    was ALSO gone on the previous tick (`confirmed_gone`); a first sighting is
+    deferred into `newly_gone` — the healthy closeout deletes the room moments
+    before `close_call` commits, so one tick of patience keeps the sweeper from
+    misclassifying a normally completed call as FAILED (→ auto-redial). Room
+    live but past the hard cap, or held open only by browser observers (no
+    agent, no SIP callee — the call can never progress) → delete the room
+    first, then close. Room live and within the cap with a real participant →
+    a long call still in progress; leave it alone. A call whose end was
+    user-requested closes as CANCELED (never auto-redialed); everything else
+    as FAILED.
     """
     result: list[tuple[str, bool, CallStatus]] = []
+    newly_gone: set[str] = set()
     for call_id, past_cap, end_requested in rows:
         room_name = room_name_for_call(tenant_id, call_id)
         status = CallStatus.CANCELED if end_requested else CallStatus.FAILED
         if room_name not in live_rooms:
-            result.append((room_name, False, status))
+            if room_name in confirmed_gone:
+                result.append((room_name, False, status))
+            else:
+                newly_gone.add(room_name)
         elif past_cap or room_name in observer_only_rooms:
             result.append((room_name, True, status))
-    return result
+    return result, newly_gone
 
 
 class PipelineSweeper:
@@ -97,6 +118,10 @@ class PipelineSweeper:
         self._stuck_grace_s = stuck_grace_s
         self._max_call_duration_s = max_call_duration_s
         self._form_auto_retry_enabled = form_auto_retry_enabled
+        # Rooms observed GONE on the previous tick (per-process memory for the
+        # two-tick confirmation; room names embed the tenant id). Replicas each
+        # keep their own — close_call's row lock makes a double-close a no-op.
+        self._gone_rooms_pending: set[str] = set()
 
     async def run(self) -> None:
         """Sweep immediately on boot, then every interval. Mirrors the worker-event
@@ -106,8 +131,12 @@ class PipelineSweeper:
                 await self.sweep_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("pipeline sweep failed; retrying next interval")
+            except Exception as exc:
+                # Type name only — the sweep runs the transcript finalizer,
+                # whose SQLAlchemy/Redis errors embed transcript text (PHI).
+                logger.error(
+                    "pipeline sweep failed (%s); retrying next interval", type(exc).__name__
+                )
             await asyncio.sleep(self._interval_s)
 
     async def sweep_once(self) -> None:
@@ -116,8 +145,11 @@ class PipelineSweeper:
         for tenant_id in tenant_ids:
             try:
                 await self._sweep_tenant(tenant_id)
-            except Exception:  # one tenant's failure must not starve the rest
-                logger.exception("sweep failed for tenant %s; continuing", tenant_id)
+            except Exception as exc:  # one tenant's failure must not starve the rest
+                # Type name only — same PHI-in-exception risk as the run loop.
+                logger.error(
+                    "sweep failed for tenant %s (%s); continuing", tenant_id, type(exc).__name__
+                )
 
     async def _sweep_tenant(self, tenant_id: UUID) -> None:
         # Phase 1 (read-only, lock-free, DB-clock interval math): stuck-call
@@ -148,7 +180,10 @@ class PipelineSweeper:
             ).scalar_one_or_none() is not None
 
         # Phase 2: probe LiveKit once, close the dead ones via the shared path.
+        # A gone room is only closed on its second consecutive sighting (see
+        # rooms_to_close); first sightings wait in _gone_rooms_pending.
         closed = 0
+        newly_gone: set[str] = set()
         if rows:
             candidate_rooms = [room_name_for_call(tenant_id, cid) for cid, _, _ in rows]
             live_rooms = await self._livekit.existing_rooms(candidate_rooms)
@@ -160,9 +195,14 @@ class PipelineSweeper:
                 elif all(is_observer_identity(i) for i in identities):
                     # empty, or only supervisors/monitors — nothing can progress
                     observer_only.add(room_name)
-            for room_name, delete_first, status in rooms_to_close(
-                rows, live_rooms, observer_only, tenant_id
-            ):
+            to_close, newly_gone = rooms_to_close(
+                rows,
+                live_rooms,
+                observer_only,
+                tenant_id,
+                confirmed_gone=self._gone_rooms_pending,
+            )
+            for room_name, delete_first, status in to_close:
                 if delete_first:
                     logger.warning(
                         "sweeper: room %s is dead (past cap or observer-only); deleting", room_name
@@ -185,6 +225,17 @@ class PipelineSweeper:
                     logger.info(
                         "sweeper: reconciled stuck call room %s as %s", room_name, status.value
                     )
+
+        # Roll the two-tick memory: this tenant's previous sightings are now
+        # either closed, live again, or terminal (consumer won the race) — all
+        # stale, so drop them. Keep other tenants' pending entries untouched and
+        # carry over only this tick's first sightings.
+        other_tenants_pending = {
+            r
+            for r in self._gone_rooms_pending
+            if (ref := parse_room_name(r)) is None or ref.tenant_id != tenant_id
+        }
+        self._gone_rooms_pending = other_tenants_pending | newly_gone
 
         # Phase 3: resolve forms stranded in AI_PROCESSING (a crash between
         # closeout and post-call resolution leaks a concurrency slot forever —

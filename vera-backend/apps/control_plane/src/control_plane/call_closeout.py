@@ -60,7 +60,13 @@ async def close_call(
     end_requested_by: UUID | None = None,
 ) -> RoomRef | None:
     """Apply *status* as the call's terminal state. Returns the RoomRef when a
-    concurrency slot was freed (caller should run a dispatch pass), else None."""
+    concurrency slot was freed (caller should run a dispatch pass), else None.
+
+    A user-requested end always wins: when the row carries an end-intent stamp
+    (`end_requested_by_id`, set by POST /calls/{id}/end), the call closes as
+    CANCELED whatever the caller passed — the worker's call.ended arrives as a
+    plain "session over" and would otherwise close it COMPLETED, breaking the
+    invariant that a user-ended call is never auto-redialed."""
     ref = parse_room_name(room_name)
     if ref is None:
         return None
@@ -72,6 +78,8 @@ async def close_call(
             return None  # voice-lab room, or idempotent redelivery / lost race
         if end_requested_by is not None:
             call.end_requested_by_id = end_requested_by
+        if call.end_requested_by_id is not None:
+            status = CallStatus.CANCELED
         form = (
             await session.execute(
                 select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()

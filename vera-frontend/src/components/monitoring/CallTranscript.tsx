@@ -46,6 +46,10 @@ export function CallTranscript({
         const status = asCallStatus(e)
         if (status) onCallStatusRef.current?.(status)
       },
+      // A dropped connection was re-established and the server replays the
+      // stream from the start — discard the stale turns; the replay replaces
+      // them (and re-delivers any call_status the outage swallowed).
+      onReconnect: () => setTurns([]),
     }).catch((err) => {
       if (!controller.signal.aborted)
         setError(err instanceof Error ? err.message : "Transcript unavailable.")
