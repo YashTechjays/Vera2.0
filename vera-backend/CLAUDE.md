@@ -51,6 +51,15 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   A `SECURITY DEFINER` fn whose **param type** changes needs `DROP FUNCTION` + recreate +
   re-`ALTER FUNCTION … OWNER TO vera_definer_owner` — `CREATE OR REPLACE` leaves the old
   overload behind and the recreated fn loses its definer ownership (so BYPASSRLS stops applying).
+  **Superseding a column is ONE change — never leave the old column behind.** Before adding a
+  column, check whether an existing one already holds the concept; if the new column replaces it
+  (rename, semantic successor), the same migration must `ALTER TABLE … RENAME COLUMN` (keeps
+  data; prefer this for pure renames) or ADD-new + backfill + DROP-old (when type/semantics
+  change), with the model updated in the same commit. A dead column reads as live schema and
+  misleads every later reader. Anti-example: `1e6c84132026` introduced `enqueued_at` to replace
+  `scheduled_at` but left the dead column in place until `3083477bf7a5` removed it months of
+  commits later; correct example: `39f81ad53651` renamed `member_policy_id` and dropped the dead
+  `member_id` in one migration.
   Revision IDs are alembic's **random hex** (`just makemigration` auto-generates them; files are
   date-prefixed for chronological order) — **never hand-number them sequentially** (`0023`, `0024`…).
   Sequential IDs collide when two branches both grab "the next number," which silently breaks
