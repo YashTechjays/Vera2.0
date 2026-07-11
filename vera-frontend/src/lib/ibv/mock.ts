@@ -69,8 +69,6 @@ const OVERRIDES: FormValues = {
   "sections.insurance_reference_information.insurance_provider_name": "Demo Health Plan",
   "sections.insurance_reference_information.insurance_phone_number": "+1 555 0100",
   "sections.insurance_reference_information.web_portal": "demo-portal.example.com",
-  "sections.insurance_reference_information.web_portal_reference_number": "WP-22107",
-  "sections.insurance_reference_information.employer_name": "Umbrella Corp",
 }
 
 /** Sensible per-field value when there's no explicit override. */
