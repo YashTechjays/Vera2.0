@@ -3,6 +3,7 @@ import { MessageSquare } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
+  asCallStatus,
   asTranscriptTurn,
   streamCallEvents,
   type TranscriptTurn,
@@ -15,10 +16,25 @@ import {
  * Callers MUST key this component by callId (state resets rely on keyed remount —
  * see both modal call sites).
  */
-export function CallTranscript({ callId }: { callId: string }) {
+export function CallTranscript({
+  callId,
+  onCallStatus,
+}: {
+  callId: string
+  /** Fires for every call_status envelope on the stream ("active", "ended", or a
+   *  terminal CallStatus value on DB replay) — the modal lifts this into its
+   *  call-ended indication. */
+  onCallStatus?: (status: string) => void
+}) {
   const [turns, setTurns] = useState<TranscriptTurn[]>([])
   const [error, setError] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  // The stream callback must always see the latest handler without re-opening
+  // the SSE (the stream effect below deliberately depends on callId only).
+  const onCallStatusRef = useRef(onCallStatus)
+  useEffect(() => {
+    onCallStatusRef.current = onCallStatus
+  }, [onCallStatus])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -27,6 +43,8 @@ export function CallTranscript({ callId }: { callId: string }) {
       onEvent: (e) => {
         const turn = asTranscriptTurn(e)
         if (turn) setTurns((prev) => [...prev, turn])
+        const status = asCallStatus(e)
+        if (status) onCallStatusRef.current?.(status)
       },
     }).catch((err) => {
       if (!controller.signal.aborted)

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Loader2, Radio } from "lucide-react"
+import { Loader2, PhoneOff, Radio } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -77,12 +77,18 @@ function RoomState() {
 export function LiveCallRoom({
   callId,
   microphone = false,
+  ended = false,
 }: {
   callId: string
   /** Enable the local mic (intervene only). Watch views must leave this off —
    *  a viewer must never be audible in the room, and requesting mic access
    *  fails outright where getUserMedia is blocked (e.g. incognito). */
   microphone?: boolean
+  /** The call reached a terminal status (from the events stream). Shows the
+   *  ended banner and leaves/never joins the room — the room can outlive the
+   *  call while a supervisor sits in it, so room connection state alone would
+   *  keep reading "Connected" after the callee hung up. */
+  ended?: boolean
 }) {
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -90,6 +96,7 @@ export function LiveCallRoom({
   const [micFailed, setMicFailed] = useState(false)
 
   useEffect(() => {
+    if (ended) return
     let cancelled = false
     getJoinToken(callId, microphone)
       .then((res) => {
@@ -104,8 +111,17 @@ export function LiveCallRoom({
     return () => {
       cancelled = true
     }
-  }, [callId, microphone])
+  }, [callId, microphone, ended])
 
+  if (ended) {
+    return (
+      <div className="flex flex-1 items-center gap-2 p-4 text-sm">
+        <PhoneOff className="size-4 text-red-500" />
+        <span className="font-medium text-foreground">Call ended</span>
+        <span className="text-muted-foreground">— no longer live.</span>
+      </div>
+    )
+  }
   if (error) {
     return <div className="flex flex-1 items-center justify-center p-6 text-sm text-destructive">{error}</div>
   }

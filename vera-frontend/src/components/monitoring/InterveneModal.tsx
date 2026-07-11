@@ -21,6 +21,7 @@ import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
 import { CallTranscript } from "./CallTranscript"
+import { useCallEnded } from "./useCallEnded"
 import type { LiveCall } from "@/lib/mock-data"
 
 type TabKey = "info" | "transcript"
@@ -53,6 +54,7 @@ export function InterveneModal({
 }) {
   const [tab, setTab] = useState<TabKey>("info")
   const [keypadOpen, setKeypadOpen] = useState(false)
+  const { callEnded, onCallStatus } = useCallEnded(call?.id)
   const progress = call?.formProgress ?? 0
 
   return (
@@ -151,9 +153,9 @@ export function InterveneModal({
               {call?.id ? (
                 <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border">
                   <div className="shrink-0 border-b border-border">
-                    <LiveCallRoom key={call.id} callId={call.id} microphone />
+                    <LiveCallRoom key={call.id} callId={call.id} microphone ended={callEnded} />
                   </div>
-                  <CallTranscript key={`t-${call.id}`} callId={call.id} />
+                  <CallTranscript key={`t-${call.id}`} callId={call.id} onCallStatus={onCallStatus} />
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
@@ -195,11 +197,11 @@ export function InterveneModal({
             </Button>
             <Button
               onClick={onEndCall}
-              disabled={ending}
+              disabled={ending || callEnded}
               className="gap-1.5 bg-red-500 text-white hover:bg-red-600"
             >
               {ending ? <Loader2 className="size-4 animate-spin" /> : <PhoneOff className="size-4" />}
-              {ending ? "Ending…" : "End Call"}
+              {callEnded ? "Call Ended" : ending ? "Ending…" : "End Call"}
             </Button>
           </div>
         </div>

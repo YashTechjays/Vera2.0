@@ -17,6 +17,22 @@ export function asTranscriptTurn(e: CallStreamEvent): TranscriptTurn | null {
   return { role, text, ts: e.ts }
 }
 
+/** Narrow an envelope to a call-status value; null for other/malformed event types. */
+export function asCallStatus(e: CallStreamEvent): string | null {
+  if (e.type !== "call_status") return null
+  const { status } = e.data as { status?: unknown }
+  return typeof status === "string" ? status : null
+}
+
+// The worker publishes "ended" on its live stream; the DB replay of an already-terminal
+// call carries the CallStatus enum value instead — treat both vocabularies as terminal.
+const TERMINAL_CALL_STATUSES = new Set(["ended", "completed", "failed", "no_answer", "busy"])
+
+/** Whether a call_status value means the call is over (no longer live). */
+export function isTerminalCallStatus(status: string): boolean {
+  return TERMINAL_CALL_STATUSES.has(status)
+}
+
 export async function streamCallEvents(
   callId: string,
   opts: { signal: AbortSignal; onEvent: (e: CallStreamEvent) => void },

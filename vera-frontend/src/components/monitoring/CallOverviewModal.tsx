@@ -22,6 +22,7 @@ import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
 import { CallTranscript } from "./CallTranscript"
+import { useCallEnded } from "./useCallEnded"
 import type { LiveCall } from "@/lib/mock-data"
 
 function confidenceColor(score: number): string {
@@ -61,6 +62,7 @@ export function CallOverviewModal({
 }) {
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
+  const { callEnded, onCallStatus } = useCallEnded(call?.id)
   const progress = call?.formProgress ?? 0
 
   return (
@@ -209,9 +211,9 @@ export function CallOverviewModal({
             {call?.id ? (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="shrink-0 border-b border-border">
-                  <LiveCallRoom key={call.id} callId={call.id} />
+                  <LiveCallRoom key={call.id} callId={call.id} ended={callEnded} />
                 </div>
-                <CallTranscript key={`t-${call.id}`} callId={call.id} />
+                <CallTranscript key={`t-${call.id}`} callId={call.id} onCallStatus={onCallStatus} />
               </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
@@ -226,15 +228,16 @@ export function CallOverviewModal({
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <Button
             onClick={onEndCall}
-            disabled={ending}
+            disabled={ending || callEnded}
             className="bg-red-500 text-white hover:bg-red-600"
           >
             {ending && <Loader2 className="size-4 animate-spin" />}
-            {ending ? "Ending…" : "End Call"}
+            {callEnded ? "Call Ended" : ending ? "Ending…" : "End Call"}
           </Button>
           <div className="flex items-center gap-3">
             <Button
               onClick={onIntervene}
+              disabled={callEnded}
               className="bg-orange-500 text-white hover:bg-orange-600"
             >
               Intervene
