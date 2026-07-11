@@ -167,8 +167,14 @@ def test_configured_agent_name_flows_to_dispatch(monkeypatch: pytest.MonkeyPatch
     assert captured["agent_name"] == "vera-agent-local"
 
 
-def test_default_agent_name_stays_vera_agent() -> None:
-    """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected."""
-    settings = Settings(livekit_url="ws://x")
+def test_default_agent_name_stays_vera_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected.
+
+    Settings reads VERA_* env vars and the local .env — a dev box overriding
+    VERA_LIVEKIT_AGENT_NAME (e.g. "vera-agent-local") must not fail this test,
+    which asserts the *shipped* default.
+    """
+    monkeypatch.delenv("VERA_LIVEKIT_AGENT_NAME", raising=False)
+    settings = Settings(livekit_url="ws://x", _env_file=None)
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})
     assert build_livekit_gateway(settings, secrets)._agent_name == "vera-agent"
