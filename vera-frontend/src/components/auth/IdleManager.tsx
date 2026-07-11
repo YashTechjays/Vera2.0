@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { IdleWarningDialog } from "@/components/auth/IdleWarningDialog"
-import { computeIdleState, KEEPALIVE_THROTTLE_MS } from "@/lib/auth/idle"
+import {
+  computeIdleState,
+  KEEPALIVE_THROTTLE_MS,
+  LIVE_CALL_ACTIVITY_EVENT,
+} from "@/lib/auth/idle"
 import {
   keepaliveThunk,
   logoutThunk,
@@ -10,7 +14,16 @@ import {
 } from "@/store/authSlice"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 
-const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"] as const
+// User input plus the live-call beacon: an open live-call connection counts as
+// activity (the supervisor is actively listening even without touching the page).
+const ACTIVITY_EVENTS = [
+  "mousemove",
+  "mousedown",
+  "keydown",
+  "scroll",
+  "touchstart",
+  LIVE_CALL_ACTIVITY_EVENT,
+] as const
 
 // Single idle-manager. Mounted only inside AppShell (authenticated), so every
 // listener/timer is torn down on logout via the effect cleanups when it unmounts.

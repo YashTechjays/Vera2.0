@@ -10,6 +10,10 @@ import { ConnectionState } from "livekit-client"
 
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
+import {
+  LIVE_CALL_ACTIVITY_EVENT,
+  LIVE_CALL_ACTIVITY_INTERVAL_MS,
+} from "@/lib/auth/idle"
 
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.Disconnected]: "Disconnected",
@@ -17,6 +21,22 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.Connected]: "Connected",
   [ConnectionState.Reconnecting]: "Reconnecting…",
   [ConnectionState.SignalReconnecting]: "Reconnecting…",
+}
+
+// While connected to the room, periodically signal the IdleManager that the user
+// is active — listening to a live call needs no mouse/keyboard, and without this
+// the session idle-expires mid-call and the logout tears the supervisor out of
+// the room. Renders nothing; must live inside <LiveKitRoom>.
+function LiveActivityBeacon() {
+  const state = useConnectionState()
+  useEffect(() => {
+    if (state !== ConnectionState.Connected) return
+    const beat = () => window.dispatchEvent(new Event(LIVE_CALL_ACTIVITY_EVENT))
+    beat()
+    const id = window.setInterval(beat, LIVE_CALL_ACTIVITY_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [state])
+  return null
 }
 
 function RoomState() {
@@ -113,6 +133,7 @@ export function LiveCallRoom({
           Microphone unavailable — listening only.
         </p>
       )}
+      <LiveActivityBeacon />
       <RoomState />
       <RoomAudioRenderer />
     </LiveKitRoom>
