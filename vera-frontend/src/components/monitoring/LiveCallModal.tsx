@@ -17,6 +17,14 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { usePermission } from "@/lib/auth/permissions"
+import { ApiError } from "@/lib/api/client"
+import { endCall } from "@/lib/api/calls"
+import {
+  interveneButtonState,
+  shouldAllowClose,
+  type LiveCallMode,
+  type RoomStatus,
+} from "@/lib/monitoring/liveCallView"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
@@ -31,12 +39,13 @@ function confidenceColor(score: number): string {
 /**
  * The live-call modal: auto-connects listen-only on open, and — for holders of
  * calls:intervene — upgrades in place to a publish-capable connection via
- * Intervene / Stop speaking. The mode is part of LiveCallRoom's key: LiveKit
- * ignores a token swap while connected, so switching modes remounts the room
- * with a freshly minted token.
+ * Intervene. The mode is part of LiveCallRoom's key: LiveKit ignores a token
+ * swap while connected, so switching modes remounts the room with a freshly
+ * minted token. Intervening is one-way: the modal cannot be closed (and the
+ * mode cannot be dropped) until the intervener ends the call.
  *  - left: collapsible "Patient Information Form" summary + call controls
  *  - right: live call panel (connection, participants, audio)
- *  - footer: End Call · Intervene / Stop speaking
+ *  - footer: Close / End Call · Intervene
  */
 export function LiveCallModal({
   call,
@@ -50,16 +59,54 @@ export function LiveCallModal({
   onExpand: () => void
 }) {
   const canIntervene = usePermission("calls:intervene")
-  const [mode, setMode] = useState<"listen" | "intervene">("listen")
+  const [mode, setMode] = useState<LiveCallMode>("listen")
+  const [roomStatus, setRoomStatus] = useState<RoomStatus | null>(null)
+  const [ending, setEnding] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
   const progress = call?.formProgress ?? 0
 
+  const callEnded = roomStatus?.phase === "ended"
+  const closeAllowed = shouldAllowClose(mode, callEnded, false)
+  const intervene = interveneButtonState(canIntervene, roomStatus)
+
   // A fresh open always starts listen-only (the call can't change while open —
   // the worklist is behind the modal), so resetting on close covers every path.
+  // Radix routes Esc/overlay-click here too, so an intervener can't escape
+  // without ending the call.
   function handleOpenChange(next: boolean) {
-    if (!next) setMode("listen")
+    if (!shouldAllowClose(mode, callEnded, next)) return
+    if (!next) {
+      setMode("listen")
+      setRoomStatus(null)
+      setActionError(null)
+    }
     onOpenChange(next)
+  }
+
+  async function handleEndCall() {
+    if (!call?.id) return
+    setEnding(true)
+    try {
+      await endCall(call.id)
+      setMode("listen")
+      setRoomStatus(null)
+      setActionError(null)
+      onOpenChange(false)
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.message : "Could not end the call.")
+    } finally {
+      setEnding(false)
+    }
+  }
+
+  // An intervene token can be refused (e.g. someone else took the mic first —
+  // 409) — fall back to listening instead of a dead panel.
+  function handleJoinFailed(error: unknown) {
+    if (mode !== "intervene") return
+    setMode("listen")
+    setActionError(error instanceof ApiError ? error.message : "Could not intervene.")
   }
 
   return (
@@ -86,14 +133,16 @@ export function LiveCallModal({
               >
                 <Maximize2 className="size-4" />
               </button>
-              <button
-                type="button"
-                onClick={() => handleOpenChange(false)}
-                title="Close"
-                className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
-              >
-                <X className="size-4" />
-              </button>
+              {closeAllowed && (
+                <button
+                  type="button"
+                  onClick={() => handleOpenChange(false)}
+                  title="Close"
+                  className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
+                >
+                  <X className="size-4" />
+                </button>
+              )}
             </div>
           </div>
 
@@ -201,6 +250,8 @@ export function LiveCallModal({
                 key={`${call.id}:${mode}`}
                 callId={call.id}
                 microphone={mode === "intervene"}
+                onStatus={setRoomStatus}
+                onJoinFailed={handleJoinFailed}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
@@ -213,25 +264,35 @@ export function LiveCallModal({
 
         {/* Footer */}
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
-          <Button
-            onClick={() => handleOpenChange(false)}
-            className="bg-red-500 text-white hover:bg-red-600"
-          >
-            End Call
-          </Button>
-          {canIntervene &&
-            (mode === "listen" ? (
+          <div className="flex items-center gap-3">
+            {mode === "intervene" && !callEnded ? (
               <Button
-                onClick={() => setMode("intervene")}
-                className="bg-orange-500 text-white hover:bg-orange-600"
+                onClick={() => void handleEndCall()}
+                disabled={ending}
+                className="bg-red-500 text-white hover:bg-red-600"
               >
-                Intervene
+                {ending ? "Ending…" : "End Call"}
               </Button>
             ) : (
-              <Button variant="outline" onClick={() => setMode("listen")}>
-                Stop speaking
+              <Button variant="outline" onClick={() => handleOpenChange(false)}>
+                Close
               </Button>
-            ))}
+            )}
+            {actionError && <span className="text-sm text-destructive">{actionError}</span>}
+          </div>
+          {intervene.visible && mode === "listen" && (
+            <Button
+              onClick={() => {
+                setActionError(null)
+                setMode("intervene")
+              }}
+              disabled={intervene.disabled}
+              title={intervene.title}
+              className="bg-orange-500 text-white hover:bg-orange-600"
+            >
+              Intervene
+            </Button>
+          )}
         </div>
 
         <Keypad open={keypadOpen} onOpenChange={setKeypadOpen} />

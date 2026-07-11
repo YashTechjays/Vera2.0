@@ -5,12 +5,15 @@ import {
   PARTICIPANT_MODE_BADGE,
   agentJoined,
   connectionPhase,
+  interveneButtonState,
   isWaitingForCall,
   otherIntervenerPresent,
   participantLabel,
   participantMode,
+  shouldAllowClose,
   speakerButtonState,
   type ParticipantLike,
+  type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 
 describe("connectionPhase", () => {
@@ -121,6 +124,42 @@ describe("isWaitingForCall", () => {
   it("agentJoined backs the waiting check", () => {
     expect(agentJoined([supervisor()])).toBe(false)
     expect(agentJoined([agent])).toBe(true)
+  })
+})
+
+describe("shouldAllowClose", () => {
+  it("always allows opening", () => {
+    expect(shouldAllowClose("intervene", false, true)).toBe(true)
+  })
+
+  it("blocks closing while intervening until the call has ended", () => {
+    expect(shouldAllowClose("intervene", false, false)).toBe(false)
+    expect(shouldAllowClose("intervene", true, false)).toBe(true)
+  })
+
+  it("lets listeners close freely", () => {
+    expect(shouldAllowClose("listen", false, false)).toBe(true)
+  })
+})
+
+describe("interveneButtonState", () => {
+  const live: RoomStatus = { phase: "live", otherIntervener: false }
+
+  it("hides the button without the permission", () => {
+    expect(interveneButtonState(false, live).visible).toBe(false)
+  })
+
+  it("enables only while live with no other intervener", () => {
+    expect(interveneButtonState(true, live)).toEqual({ visible: true, disabled: false })
+    expect(interveneButtonState(true, null).disabled).toBe(true)
+    expect(interveneButtonState(true, { ...live, phase: "connecting" }).disabled).toBe(true)
+    expect(interveneButtonState(true, { ...live, phase: "ended" }).disabled).toBe(true)
+  })
+
+  it("disables with a reason while another supervisor is intervening", () => {
+    const state = interveneButtonState(true, { ...live, otherIntervener: true })
+    expect(state.disabled).toBe(true)
+    expect(state.title).toBe("Another supervisor is intervening")
   })
 })
 

@@ -94,6 +94,40 @@ export function isWaitingForCall(state: string, participants: ParticipantLike[])
   return state === "connected" && !agentJoined(participants)
 }
 
+export type LiveCallMode = "listen" | "intervene"
+
+/** Radix routes every close path (X, Esc, overlay) through onOpenChange —
+ *  an intervener may not leave until the call is over (End Call or the room
+ *  dying on its own). */
+export function shouldAllowClose(
+  mode: LiveCallMode,
+  callEnded: boolean,
+  requestedOpen: boolean,
+): boolean {
+  if (requestedOpen) return true
+  return mode !== "intervene" || callEnded
+}
+
+export type InterveneButtonState = {
+  visible: boolean
+  disabled: boolean
+  title?: string
+}
+
+/** Intervene is hidden without the permission, and enabled only while live
+ *  with the mic free — mirroring the backend's calls:intervene gate + lock. */
+export function interveneButtonState(
+  canIntervene: boolean,
+  status: RoomStatus | null,
+): InterveneButtonState {
+  if (!canIntervene) return { visible: false, disabled: true }
+  if (status?.phase !== "live") return { visible: true, disabled: true }
+  if (status.otherIntervener) {
+    return { visible: true, disabled: true, title: "Another supervisor is intervening" }
+  }
+  return { visible: true, disabled: false }
+}
+
 export type SpeakerButtonState = {
   action: "unlock" | "mute" | "unmute"
   title: string
