@@ -39,16 +39,16 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.request_context import current_request_id
-from control_plane.transcript_finalizer import finalize_transcript
 from control_plane.responses import ResponseModel, ok
+from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditRecord
-from vera_core.config.kms import KeyManagementService
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
     TYPE_TRANSCRIPT,
     CallStreamEvent,
     CallStreamService,
 )
+from vera_core.config.kms import KeyManagementService
 from vera_core.db.rls import tenant_session
 from vera_core.models import Call, PatientForm, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -433,12 +433,13 @@ async def end_call(
     if call.current_status in TERMINAL_VALUES:
         return ok(None, message="Call already ended.")  # idempotent no-op
     pre_answer = call.started_at is None
+    actor_label = caller.email or caller.subject
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
             actor_type=ActorType.USER,
             actor_user_id=caller.user_id,
-            actor_label=caller.email or caller.subject,
+            actor_label=actor_label,
             event_type=AuditEvent.CALL_END.value,
             resource_type="call",
             resource_id=str(call.id),
@@ -459,7 +460,7 @@ async def end_call(
             room_name,
             CallStatus.CANCELED,
             trigger="user_end_call",
-            actor_label=caller.email or caller.subject,
+            actor_label=actor_label,
             end_requested_by=caller.user_id,
         )
         await livekit.delete_room(room_name)
