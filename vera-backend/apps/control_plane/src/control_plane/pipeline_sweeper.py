@@ -40,28 +40,35 @@ from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import platform_session, tenant_session
 from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.enums import CallStatus, FormStatus
-from vera_core.observability.correlation import room_name_for_call
+from vera_core.observability.correlation import is_observer_identity, room_name_for_call
 
 logger = logging.getLogger("control_plane.pipeline_sweeper")
 
 
 def rooms_to_close(
-    rows: list[tuple[UUID, bool]], live_rooms: set[str], tenant_id: UUID
-) -> list[tuple[str, bool]]:
-    """Which stuck-call candidates to close: `(room_name, delete_room_first)`.
+    rows: list[tuple[UUID, bool, bool]],
+    live_rooms: set[str],
+    observer_only_rooms: set[str],
+    tenant_id: UUID,
+) -> list[tuple[str, bool, CallStatus]]:
+    """Which stuck-call candidates to close: `(room_name, delete_room_first, status)`.
 
-    rows: (call_id, past_cap) for non-terminal calls past the grace window.
-    Room gone → close (the room needs no delete). Room live but past the hard
-    cap → delete the room (ends the wedged session), then close. Room live and
-    within the cap → a long call still in progress; leave it alone.
+    rows: (call_id, past_cap, end_requested) for non-terminal calls past the
+    grace window. Room gone → close (the room needs no delete). Room live but
+    past the hard cap, or held open only by browser observers (no agent, no SIP
+    callee — the call can never progress) → delete the room first, then close.
+    Room live and within the cap with a real participant → a long call still in
+    progress; leave it alone. A call whose end was user-requested closes as
+    CANCELED (never auto-redialed); everything else as FAILED.
     """
-    result: list[tuple[str, bool]] = []
-    for call_id, past_cap in rows:
+    result: list[tuple[str, bool, CallStatus]] = []
+    for call_id, past_cap, end_requested in rows:
         room_name = room_name_for_call(tenant_id, call_id)
+        status = CallStatus.CANCELED if end_requested else CallStatus.FAILED
         if room_name not in live_rooms:
-            result.append((room_name, False))
-        elif past_cap:
-            result.append((room_name, True))
+            result.append((room_name, False, status))
+        elif past_cap or room_name in observer_only_rooms:
+            result.append((room_name, True, status))
     return result
 
 
@@ -124,13 +131,14 @@ class PipelineSweeper:
                 select(
                     Call.id,
                     (Call.created_at < func.now() - cap).label("past_cap"),
+                    Call.end_requested_by_id.is_not(None).label("end_requested"),
                 ).where(
                     Call.tenant_id == tenant_id,
                     Call.current_status.not_in(list(TERMINAL_VALUES)),
                     Call.created_at < func.now() - grace,
                 )
             )
-            rows = [(row.id, row.past_cap) for row in stuck_candidates.all()]
+            rows = [(row.id, row.past_cap, row.end_requested) for row in stuck_candidates.all()]
             has_queued = (
                 await session.execute(
                     select(PatientForm.id)
@@ -142,24 +150,38 @@ class PipelineSweeper:
         # Phase 2: probe LiveKit once, close the dead ones via the shared path.
         closed = 0
         if rows:
-            candidate_rooms = [room_name_for_call(tenant_id, cid) for cid, _ in rows]
+            candidate_rooms = [room_name_for_call(tenant_id, cid) for cid, _, _ in rows]
             live_rooms = await self._livekit.existing_rooms(candidate_rooms)
-            for room_name, delete_first in rooms_to_close(rows, live_rooms, tenant_id):
+            observer_only: set[str] = set()
+            for room_name in sorted(live_rooms):
+                identities = await self._livekit.room_participant_identities(room_name)
+                if identities is None:
+                    live_rooms.discard(room_name)  # vanished between the two probes
+                elif all(is_observer_identity(i) for i in identities):
+                    # empty, or only supervisors/monitors — nothing can progress
+                    observer_only.add(room_name)
+            for room_name, delete_first, status in rooms_to_close(
+                rows, live_rooms, observer_only, tenant_id
+            ):
                 if delete_first:
-                    logger.warning("sweeper: room %s past max call duration; deleting", room_name)
+                    logger.warning(
+                        "sweeper: room %s is dead (past cap or observer-only); deleting", room_name
+                    )
                     await self._livekit.delete_room(room_name)
                 ref = await close_call(
                     self._sessionmaker,
                     self._audit,
                     room_name,
-                    CallStatus.FAILED,
+                    status,
                     trigger="sweeper_reconcile",
                     actor_label="pipeline-sweeper",
                 )
                 if ref is not None:
                     await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
                     closed += 1
-                    logger.info("sweeper: reconciled stuck call room %s", room_name)
+                    logger.info(
+                        "sweeper: reconciled stuck call room %s as %s", room_name, status.value
+                    )
 
         # Phase 3: resolve forms stranded in AI_PROCESSING (a crash between
         # closeout and post-call resolution leaks a concurrency slot forever —

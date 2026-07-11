@@ -130,6 +130,21 @@ class LiveKitGateway:
             resp = await lk.room.list_rooms(api.ListRoomsRequest(names=room_names))
         return {room.name for room in resp.rooms}
 
+    async def room_participant_identities(self, room_name: str) -> list[str] | None:
+        """Identities currently in the room, or None when the room doesn't exist.
+        The sweeper uses this to spot dead-but-open rooms: a room holding only
+        browser observers (supervisor-*/monitor-*) has no agent and no SIP callee,
+        so the call can never progress — but the observers keep the room's
+        departure timeout from ever firing."""
+        async with self._client() as lk:
+            try:
+                resp = await lk.room.list_participants(api.ListParticipantsRequest(room=room_name))
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return None
+                raise
+        return [p.identity for p in resp.participants]
+
     async def delete_room(self, room_name: str) -> None:
         """Tear the room down server-side: removes every participant — the agent
         worker (→ its session shuts down) and any SIP callee (→ the outbound call is

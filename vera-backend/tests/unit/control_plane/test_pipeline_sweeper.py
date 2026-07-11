@@ -10,27 +10,62 @@ import control_plane.pipeline_sweeper as sweeper_mod
 from control_plane.pipeline_sweeper import PipelineSweeper, rooms_to_close
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
+from vera_core.models.enums import CallStatus
 from vera_core.observability.correlation import room_name_for_call
 
 
 def test_room_gone_is_closed_without_room_delete() -> None:
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    result = rooms_to_close([(call, False)], live_rooms=set(), tenant_id=tenant)
-    assert result == [(room, False)]  # close it; no room left to delete
+    result = rooms_to_close(
+        [(call, False, False)], live_rooms=set(), observer_only_rooms=set(), tenant_id=tenant
+    )
+    assert result == [(room, False, CallStatus.FAILED)]  # close it; no room left to delete
 
 
 def test_live_room_within_cap_is_left_alone() -> None:
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    assert rooms_to_close([(call, False)], live_rooms={room}, tenant_id=tenant) == []
+    result = rooms_to_close(
+        [(call, False, False)], live_rooms={room}, observer_only_rooms=set(), tenant_id=tenant
+    )
+    assert result == []
 
 
 def test_live_room_past_cap_is_deleted_then_closed() -> None:
     tenant, call = uuid4(), uuid4()
     room = room_name_for_call(tenant, call)
-    result = rooms_to_close([(call, True)], live_rooms={room}, tenant_id=tenant)
-    assert result == [(room, True)]  # wedged session: delete the room, then close
+    result = rooms_to_close(
+        [(call, True, False)], live_rooms={room}, observer_only_rooms=set(), tenant_id=tenant
+    )
+    assert result == [(room, True, CallStatus.FAILED)]  # wedged session: delete, then close
+
+
+def test_end_requested_closes_as_canceled() -> None:
+    """A user asked to end this call (End Call in Live Monitoring) but the
+    worker's event never landed — the sweeper must honor the intent: CANCELED,
+    never FAILED (FAILED would auto-redial the number)."""
+    tenant, call = uuid4(), uuid4()
+    room = room_name_for_call(tenant, call)
+    result = rooms_to_close(
+        [(call, False, True)], live_rooms=set(), observer_only_rooms=set(), tenant_id=tenant
+    )
+    assert result == [(room, False, CallStatus.CANCELED)]
+
+
+def test_observer_only_live_room_is_reaped_with_delete() -> None:
+    """A room held open only by browser observers (no agent, no SIP callee) can
+    never progress — the observers keep LiveKit's departure timeout from firing,
+    so the sweeper deletes the room and closes the call."""
+    tenant, call = uuid4(), uuid4()
+    room = room_name_for_call(tenant, call)
+    result = rooms_to_close(
+        [(call, False, False)],
+        live_rooms={room},
+        observer_only_rooms={room},
+        tenant_id=tenant,
+    )
+    assert result == [(room, True, CallStatus.FAILED)]
 
 
 @pytest.mark.asyncio

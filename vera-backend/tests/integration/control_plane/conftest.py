@@ -57,6 +57,12 @@ class FakeLiveKit(LiveKitGateway):
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
         self.remove_not_found = False  # remove_participant raises TwirpError(not_found)
+        # room -> current participant identities; rooms absent from the map are
+        # "gone" (room_participant_identities returns None), mirroring LiveKit.
+        self.participants: dict[str, list[str]] = {}
+
+    async def room_participant_identities(self, room_name: str) -> list[str] | None:
+        return self.participants.get(room_name)
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -113,6 +119,7 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
     fake_livekit.remove_not_found = False
+    fake_livekit.participants = {}
     yield
 
 
