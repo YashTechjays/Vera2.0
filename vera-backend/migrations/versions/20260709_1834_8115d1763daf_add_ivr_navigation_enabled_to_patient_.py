@@ -5,7 +5,7 @@ Idempotent: migration `0001`'s `create_all` already gives a *fresh* DB this colu
 migrations bullet in CLAUDE.md.
 
 Revision ID: 8115d1763daf
-Revises: efa94eaaf3f9
+Revises: f503e82734cc
 Create Date: 2026-07-09 18:34:18.700931
 
 """
@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "8115d1763daf"
-down_revision: str | None = "089b3e98f0b0"
+down_revision: str | None = "f503e82734cc"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
