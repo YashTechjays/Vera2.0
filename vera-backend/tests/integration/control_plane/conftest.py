@@ -149,10 +149,16 @@ class _MemCallStreamStore:
         # pin WHICH deadline each SSE branch passes down (a None on a tail branch
         # would reopen the unbounded-hang hole if the stream vanishes post-EXISTS).
         self.read_deadlines: list[tuple[str, float | None]] = []
+        # Every call_status ever published, SURVIVING delete() — in production a
+        # blocked XREAD receives the entry before the finalizer's DEL, but this
+        # fake has no reader, so closeout-announce assertions need a durable log.
+        self.status_log: list[tuple[str, object]] = []
 
     async def publish(self, room_name: str, event: CallStreamEvent) -> None:
         entries = self._entries.setdefault(room_name, [])
         entries.append((f"{len(entries)}-0", event))
+        if event.type == "call_status":
+            self.status_log.append((room_name, event.data.get("status")))
 
     async def mark_ended(self, room_name: str) -> None:
         self._entries.setdefault(room_name, [])

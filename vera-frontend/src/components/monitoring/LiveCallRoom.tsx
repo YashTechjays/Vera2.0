@@ -10,6 +10,7 @@ import { ConnectionState } from "livekit-client"
 
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
+import { terminalStatusMessage } from "@/lib/api/callEvents"
 import {
   LIVE_CALL_ACTIVITY_EVENT,
   LIVE_CALL_ACTIVITY_INTERVAL_MS,
@@ -78,6 +79,7 @@ export function LiveCallRoom({
   callId,
   microphone = false,
   ended = false,
+  endedStatus = null,
 }: {
   callId: string
   /** Enable the local mic (intervene only). Watch views must leave this off —
@@ -89,6 +91,9 @@ export function LiveCallRoom({
    *  call while a supervisor sits in it, so room connection state alone would
    *  keep reading "Connected" after the callee hung up. */
   ended?: boolean
+  /** The terminal status itself, for status-specific banner copy — a busy or
+   *  unanswered dial reads "Call failed — …", not "Call ended". */
+  endedStatus?: string | null
 }) {
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -117,8 +122,7 @@ export function LiveCallRoom({
     return (
       <div className="flex flex-1 items-center gap-2 p-4 text-sm">
         <PhoneOff className="size-4 text-red-500" />
-        <span className="font-medium text-foreground">Call ended</span>
-        <span className="text-muted-foreground">— no longer live.</span>
+        <span className="font-medium text-foreground">{terminalStatusMessage(endedStatus)}</span>
       </div>
     )
   }

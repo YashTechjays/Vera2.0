@@ -62,7 +62,7 @@ export function CallOverviewModal({
 }) {
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
-  const { callEnded, onCallStatus } = useCallEnded(call?.id)
+  const { callEnded, terminalStatus, onCallStatus } = useCallEnded(call?.id)
   const progress = call?.formProgress ?? 0
 
   return (
@@ -211,7 +211,7 @@ export function CallOverviewModal({
             {call?.id ? (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="shrink-0 border-b border-border">
-                  <LiveCallRoom key={call.id} callId={call.id} ended={callEnded} />
+                  <LiveCallRoom key={call.id} callId={call.id} ended={callEnded} endedStatus={terminalStatus} />
                 </div>
                 <CallTranscript key={`t-${call.id}`} callId={call.id} onCallStatus={onCallStatus} />
               </div>

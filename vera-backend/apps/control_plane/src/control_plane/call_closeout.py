@@ -10,12 +10,14 @@ consumer/sweeper races are harmless (the row lock serializes them).
 """
 
 import logging
+import time
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera_core.audit import AuditRecord, AuditSink
+from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.models import Call, CallEvent, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -27,6 +29,24 @@ from vera_core.services.call_lifecycle import apply_terminal_call_status
 logger = logging.getLogger(__name__)
 
 TERMINAL_VALUES = frozenset(s.value for s in TERMINAL_CALL_STATUSES)
+
+
+async def announce_terminal_status(
+    call_stream: CallStreamService, room_name: str, status: CallStatus
+) -> None:
+    """Push *status* onto the per-call event stream and end it, so a supervisor
+    already tailing the live SSE sees the call die. The worker only publishes
+    call_status frames once a session exists — a failed, canceled, or swept dial
+    never gets one, and without this the watcher's UI keeps showing a live room.
+    Best-effort: an announce failure must never block closeout (the SSE's DB
+    replay branch serves the terminal status to reconnecting clients anyway)."""
+    try:
+        await call_stream.publish_status(room_name, status.value, ts=int(time.time() * 1000))
+        await call_stream.end(room_name)
+    except Exception:  # best-effort; ids/statuses only, no PHI in this path
+        logger.warning(
+            "failed to announce terminal status for %s; SSE DB replay is the backstop", room_name
+        )
 
 
 async def close_call(

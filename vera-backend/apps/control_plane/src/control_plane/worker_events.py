@@ -19,7 +19,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.call_closeout import TERMINAL_VALUES, close_call
+from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.dispatch import run_dispatch_pass
 from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.post_call import resolve_ai_processing
@@ -232,6 +232,12 @@ class WorkerEventConsumer:
         )
         await self._livekit.set_room_metadata(
             event.room_name, {"status": "call_failed", "reason": event.reason.value}
+        )
+        # A supervisor already tailing the live SSE learns the call died — the
+        # worker never publishes a call_status frame for a failed dial (no
+        # session ever existed), so the closeout announces it instead.
+        await announce_terminal_status(
+            self._call_stream, event.room_name, _FAILURE_STATUS[event.reason]
         )
         # Let the RoomMetadataChanged frame reach the browser before we tear the room down.
         if self._teardown_grace_ms:

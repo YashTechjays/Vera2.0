@@ -31,7 +31,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.call_closeout import TERMINAL_VALUES, close_call
+from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.dispatch import run_dispatch_pass
 from control_plane.post_call import sweep_stuck_ai_processing
 from control_plane.transcript_finalizer import finalize_transcript
@@ -177,6 +177,9 @@ class PipelineSweeper:
                     actor_label="pipeline-sweeper",
                 )
                 if ref is not None:
+                    # Tell anyone tailing the live SSE before the finalizer
+                    # deletes the stream (a swept call has no worker to publish).
+                    await announce_terminal_status(self._call_stream, room_name, status)
                     await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
                     closed += 1
                     logger.info(

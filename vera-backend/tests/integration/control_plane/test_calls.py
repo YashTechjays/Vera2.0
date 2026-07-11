@@ -945,6 +945,7 @@ async def test_end_call_pre_answer_cancels_synchronously(
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     fake_livekit: FakeLiveKit,
+    call_stream_store: _MemCallStreamStore,
     admin_session: AsyncSession,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -990,6 +991,13 @@ async def test_end_call_pre_answer_cancels_synchronously(
         .one()
     )
     assert audit.detail["phase"] == "pre_answer"
+
+    # A supervisor already tailing the live SSE learns the cancel: the terminal
+    # status rides the per-call event stream (the worker never publishes for a
+    # pre-answer call — no session ever existed). Asserted via the fake's
+    # delete-surviving log — the finalizer deletes the stream right after.
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert (room, "canceled") in call_stream_store.status_log
 
 
 @pytest.mark.asyncio

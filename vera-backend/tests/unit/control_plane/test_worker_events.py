@@ -142,11 +142,15 @@ class _FakeSession:
 
 class _FakeCallStream:
     """In-memory call-stream double for the finalizer: read_all returns a fixed
-    snapshot until clear() runs (mirrors a real Redis DEL)."""
+    snapshot until clear() runs (mirrors a real Redis DEL). Also records the
+    terminal-status announcements (publish_status/end) the closeout paths push
+    for supervisors watching the live SSE."""
 
     def __init__(self, events: list[CallStreamEvent] | None = None) -> None:
         self._events = events or []
         self.cleared: list[str] = []
+        self.published: list[tuple[str, str]] = []
+        self.ended: list[str] = []
 
     async def read_all(self, room_name: str) -> list[CallStreamEvent]:
         return self._events
@@ -154,6 +158,12 @@ class _FakeCallStream:
     async def clear(self, room_name: str) -> None:
         self.cleared.append(room_name)
         self._events = []
+
+    async def publish_status(self, room_name: str, status: str, *, ts: int) -> None:
+        self.published.append((room_name, status))
+
+    async def end(self, room_name: str) -> None:
+        self.ended.append(room_name)
 
 
 class _FakeSessionCtx:
@@ -302,6 +312,12 @@ async def test_handle_call_failed_sets_metadata_then_deletes(
         ("delete", _VALID_ROOM),
     ]
     assert redis.acked == ["1-0"]
+    # A supervisor already tailing the live SSE learns the call died: the mapped
+    # terminal status is pushed onto the per-call event stream, then the stream
+    # is ended so readers stop (the worker never publishes for a failed dial —
+    # no session ever existed).
+    assert wired.call_stream.published == [(_VALID_ROOM, "no_answer")]
+    assert wired.call_stream.ended == [_VALID_ROOM]
 
 
 @pytest.mark.asyncio

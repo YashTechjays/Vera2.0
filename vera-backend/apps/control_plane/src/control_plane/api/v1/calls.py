@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
-from control_plane.call_closeout import TERMINAL_VALUES, close_call
+from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.deps import (
     current_identity,
     get_call_stream_service,
@@ -465,6 +465,9 @@ async def end_call(
         )
         await livekit.delete_room(room_name)
         if ref is not None:  # freed a concurrency slot — let queued forms use it
+            # Tell anyone tailing the live SSE before the finalizer deletes the
+            # stream (the worker never publishes for a pre-answer call).
+            await announce_terminal_status(call_stream, room_name, CallStatus.CANCELED)
             await finalize_transcript(sessionmaker, call_stream, ref, room_name)
             await run_dispatch_pass(sessionmaker, tenant_id, livekit, kms, audit)
         return ok(None, message="Call canceled.")

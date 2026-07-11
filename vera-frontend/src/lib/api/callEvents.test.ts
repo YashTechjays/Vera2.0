@@ -9,6 +9,7 @@ import {
   asCallStatus,
   asTranscriptTurn,
   isTerminalCallStatus,
+  terminalStatusMessage,
   type CallStreamEvent,
 } from "@/lib/api/callEvents"
 
@@ -59,4 +60,18 @@ describe("isTerminalCallStatus", () => {
       expect(isTerminalCallStatus(s)).toBe(false)
     },
   )
+})
+
+describe("terminalStatusMessage", () => {
+  it("names the failure for a supervisor", () => {
+    expect(terminalStatusMessage("busy")).toBe("Call failed — the line was busy.")
+    expect(terminalStatusMessage("no_answer")).toBe("Call failed — no answer.")
+    expect(terminalStatusMessage("failed")).toBe("Call failed.")
+    expect(terminalStatusMessage("canceled")).toBe("Call canceled by a supervisor.")
+  })
+
+  it("reads as a normal ending otherwise", () => {
+    expect(terminalStatusMessage("ended")).toBe("Call ended — no longer live.")
+    expect(terminalStatusMessage("completed")).toBe("Call ended — no longer live.")
+  })
 })

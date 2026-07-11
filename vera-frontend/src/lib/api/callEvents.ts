@@ -40,6 +40,23 @@ export function isTerminalCallStatus(status: string): boolean {
   return TERMINAL_CALL_STATUSES.has(status)
 }
 
+/** Supervisor-facing banner line for a terminal call status. Failure statuses
+ *  name what happened (busy / no answer); anything else reads as a normal end. */
+export function terminalStatusMessage(status: string | null): string {
+  switch (status) {
+    case "busy":
+      return "Call failed — the line was busy."
+    case "no_answer":
+      return "Call failed — no answer."
+    case "failed":
+      return "Call failed."
+    case "canceled":
+      return "Call canceled by a supervisor."
+    default:
+      return "Call ended — no longer live."
+  }
+}
+
 export async function streamCallEvents(
   callId: string,
   opts: { signal: AbortSignal; onEvent: (e: CallStreamEvent) => void },
