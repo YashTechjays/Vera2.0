@@ -182,6 +182,7 @@ async def test_join_token_returns_room_scoped_token(
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     call_id = await seed_call(
@@ -209,6 +210,17 @@ async def test_join_token_returns_room_scoped_token(
     )
     assert talk.status_code == 200, talk.text
     assert fake_livekit.minted[-1][2] is True
+
+    # Owner joins are audited too, and the event names the mode: the watch-only
+    # mint above is a listen-only join; the publish-capable one audits as the
+    # (feature-pending) intervene join.
+    result = await admin_session.execute(
+        select(AuditLog)
+        .where(AuditLog.resource_type == "call", AuditLog.resource_id == str(call_id))
+        .order_by(AuditLog.created_at)
+    )
+    events = [row.event_type for row in result.scalars().all()]
+    assert events == ["call.listen-only.join", "call.intervene.join"]
 
 
 @pytest.mark.asyncio
@@ -448,14 +460,14 @@ async def test_join_token_gated_and_audited_for_non_owner(
 
     result = await admin_session.execute(
         select(AuditLog).where(
-            AuditLog.event_type == "call.intervene.join", AuditLog.resource_id == str(call_id)
+            AuditLog.event_type == "call.listen-only.join", AuditLog.resource_id == str(call_id)
         )
     )
     assert len(result.scalars().all()) == 1
 
 
 @pytest.mark.asyncio
-async def test_owner_revokes_intervener_access(
+async def test_owner_revokes_viewer_access(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
@@ -507,7 +519,7 @@ async def test_owner_revokes_intervener_access(
 
     result = await admin_session.execute(
         select(AuditLog).where(
-            AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == str(call_id)
+            AuditLog.event_type == "call.access.revoke", AuditLog.resource_id == str(call_id)
         )
     )
     assert len(result.scalars().all()) == 1
@@ -523,7 +535,7 @@ async def test_owner_revokes_intervener_access(
 
 
 @pytest.mark.asyncio
-async def test_owner_revoke_of_departed_intervener_is_noop_but_audited(
+async def test_owner_revoke_of_departed_viewer_is_noop_but_audited(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
@@ -542,7 +554,7 @@ async def test_owner_revoke_of_departed_intervener_is_noop_but_audited(
     )
     assert published.status_code == 200, published.text
 
-    # The intervener already left / never joined — LiveKit reports not_found.
+    # The viewer already left / never joined — LiveKit reports not_found.
     fake_livekit.remove_not_found = True
 
     revoked = await client.post(
@@ -554,7 +566,7 @@ async def test_owner_revoke_of_departed_intervener_is_noop_but_audited(
 
     result = await admin_session.execute(
         select(AuditLog).where(
-            AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == str(call_id)
+            AuditLog.event_type == "call.access.revoke", AuditLog.resource_id == str(call_id)
         )
     )
     assert len(result.scalars().all()) == 1

@@ -102,7 +102,7 @@ def _sse_response(frames: AsyncIterator[str]) -> StreamingResponse:
 
 
 def _supervisor_identity(user_id: UUID) -> str:
-    """LiveKit participant identity for a VA joining/intervening on a call. Uses the
+    """LiveKit participant identity for a VA listening in on a call. Uses the
     shared observer prefix so the worker never treats a supervisor as the call's
     speaker (see vera_core.observability.correlation.is_observer_identity)."""
     return f"{SUPERVISOR_IDENTITY_PREFIX}{user_id}"
@@ -165,25 +165,31 @@ async def join_token(
         raise NotFoundError(message="call not found")
     if _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")  # don't reveal a private call
-    if call.initiated_by_id != caller.user_id:  # non-owner joining another's call
-        await audit.emit(
-            AuditRecord(
-                tenant_id=tenant_id,
-                actor_type=ActorType.USER,
-                actor_user_id=caller.user_id,
-                actor_label=caller.email or caller.subject,
-                event_type=AuditEvent.CALL_INTERVENE_JOIN.value,
-                resource_type="call",
-                resource_id=str(call.id),
-                permission_key="calls:read",
-                decision="allow",
-                request_id=current_request_id(request),
-                detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
-            )
+    # Every join is audited — owner included (their join is a PHI access too), and
+    # the event name carries the mode: listen-only, or the publish-capable
+    # intervene join (whose full feature — agent takeover behavior — is still TODO).
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=(
+                AuditEvent.CALL_INTERVENE_JOIN if intervene else AuditEvent.CALL_LISTEN_ONLY_JOIN
+            ).value,
+            resource_type="call",
+            resource_id=str(call.id),
+            permission_key="calls:read",
+            decision="allow",
+            request_id=current_request_id(request),
+            detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
         )
+    )
     room_name = room_name_for_call(tenant_id, call.id)
     identity = _supervisor_identity(caller.user_id)
     # Watch-only tokens are server-side mute; only ?intervene=true may publish.
+    # NOTE: the intervention FEATURE is not implemented — the UI never sends
+    # intervene=true; this is dormant plumbing for the future mode.
     token = livekit.mint_join_token(room_name=room_name, identity=identity, can_publish=intervene)
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 
@@ -400,8 +406,8 @@ async def end_call(
     shutdown emits `call.ended`, and the worker-event consumer runs the one true
     closeout path (close_call → transcript finalization → form lifecycle → refill).
 
-    Visibility matches join-token (`_call_hidden_from`): anyone who may watch or
-    intervene on the call may end it; a hidden call 404s so it is never revealed.
+    Visibility matches join-token (`_call_hidden_from`): anyone who may watch
+    the call may end it; a hidden call 404s so it is never revealed.
     """
     call = (
         await session.execute(select(Call).where(Call.id == call_id))
@@ -522,7 +528,7 @@ async def revoke_access(
             actor_type=ActorType.USER,
             actor_user_id=caller.user_id,
             actor_label=caller.email or caller.subject,
-            event_type=AuditEvent.CALL_INTERVENE_REVOKE.value,
+            event_type=AuditEvent.CALL_ACCESS_REVOKE.value,
             resource_type="call",
             resource_id=str(call.id),
             permission_key="calls:publish",

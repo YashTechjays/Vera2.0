@@ -21,7 +21,7 @@ _SEP = "--"
 # pinned to (close_on_disconnect), so an observer leaving never ends the call.
 CALLER_IDENTITY_PREFIX = "caller-"  # browser participant that publishes its mic
 MONITOR_IDENTITY_PREFIX = "monitor-"  # listen-only browser observer (voice-lab outbound)
-SUPERVISOR_IDENTITY_PREFIX = "supervisor-"  # /calls watch/intervene browser observer
+SUPERVISOR_IDENTITY_PREFIX = "supervisor-"  # /calls listen-only browser observer
 SIP_CALLEE_IDENTITY = "phone-callee"  # outbound phone callee dialed in via SIP
 
 _OBSERVER_PREFIXES = (MONITOR_IDENTITY_PREFIX, SUPERVISOR_IDENTITY_PREFIX)
@@ -30,8 +30,9 @@ _OBSERVER_PREFIXES = (MONITOR_IDENTITY_PREFIX, SUPERVISOR_IDENTITY_PREFIX)
 def is_observer_identity(identity: str) -> bool:
     """True for a participant that observes the call (monitor, supervisor) rather
     than being its speaker. Observers must never trigger the agent's greeting or
-    become the session's pinned participant — even a supervisor that intervenes
-    (publishes audio) stays an observer; the call's speaker is the callee."""
+    become the session's pinned participant. Invariant to preserve when the
+    (not-yet-implemented) intervention mode ships: even a supervisor publishing
+    audio stays an observer; the call's speaker is always the callee."""
     return identity.startswith(_OBSERVER_PREFIXES)
 
 
