@@ -26,7 +26,14 @@ export function asCallStatus(e: CallStreamEvent): string | null {
 
 // The worker publishes "ended" on its live stream; the DB replay of an already-terminal
 // call carries the CallStatus enum value instead — treat both vocabularies as terminal.
-const TERMINAL_CALL_STATUSES = new Set(["ended", "completed", "failed", "no_answer", "busy"])
+const TERMINAL_CALL_STATUSES = new Set([
+  "ended",
+  "completed",
+  "failed",
+  "no_answer",
+  "busy",
+  "canceled",
+])
 
 /** Whether a call_status value means the call is over (no longer live). */
 export function isTerminalCallStatus(status: string): boolean {

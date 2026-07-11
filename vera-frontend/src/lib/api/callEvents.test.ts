@@ -46,9 +46,12 @@ describe("asCallStatus", () => {
 })
 
 describe("isTerminalCallStatus", () => {
-  it.each(["ended", "completed", "failed", "no_answer", "busy"])("%s is terminal", (s) => {
-    expect(isTerminalCallStatus(s)).toBe(true)
-  })
+  it.each(["ended", "completed", "failed", "no_answer", "busy", "canceled"])(
+    "%s is terminal",
+    (s) => {
+      expect(isTerminalCallStatus(s)).toBe(true)
+    },
+  )
 
   it.each(["active", "ringing", "ivr", "waiting", "critical", "initiated"])(
     "%s is not terminal",
