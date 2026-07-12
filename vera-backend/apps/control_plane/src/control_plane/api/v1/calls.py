@@ -41,6 +41,7 @@ from control_plane.exceptions import (
 from control_plane.post_call import resolve_ai_processing
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
+from control_plane.sse import frames_with_keepalive
 from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditRecord
 from vera_core.call_stream import (
@@ -314,13 +315,12 @@ async def stream_call_events(
     # only bounds the exists->deleted TOCTOU window above, where a None deadline on
     # a now-vanished, never-seen stream would pin the SSE connection open forever.
 
-    async def _live_frames() -> AsyncIterator[str]:
-        async for entry_id, event in service.consume(
-            room_name, first_entry_deadline_s=_LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
-        ):
-            yield _sse_frame(entry_id, event)
-
-    return _sse_response(_live_frames())
+    return _sse_response(
+        frames_with_keepalive(
+            service.consume(room_name, first_entry_deadline_s=_LIVE_TAIL_FIRST_ENTRY_DEADLINE_S),
+            _sse_frame,
+        )
+    )
 
 
 @router.post(

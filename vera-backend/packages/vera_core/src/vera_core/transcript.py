@@ -92,7 +92,7 @@ class TranscriptStore(Protocol):
     async def publish(self, room_name: str, event: TranscriptEvent) -> None: ...
     async def mark_ended(self, room_name: str) -> None: ...
     async def delete(self, room_name: str) -> None: ...
-    def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]: ...
+    def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]: ...
 
 
 class InMemoryTranscriptStore:
@@ -125,7 +125,9 @@ class InMemoryTranscriptStore:
             self._entries.pop(key, None)
             self._cond.notify_all()
 
-    async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
+    async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]:
+        # Never yields the None keepalive tick — it waits on a Condition, not a
+        # blocking read, so there is no idle window to surface.
         key = transcript_stream_key(room_name)
         idx = 0
         while True:
@@ -182,7 +184,7 @@ class RedisTranscriptStore:
     async def delete(self, room_name: str) -> None:
         await self._redis.delete(transcript_stream_key(room_name))
 
-    async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
+    async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]:
         key = transcript_stream_key(room_name)
         last_id = "0"
         seen = False  # have we observed the stream actually exist yet?
@@ -200,6 +202,9 @@ class RedisTranscriptStore:
                 # for its first entry (the worker may still be spinning up).
                 if seen and not await self._redis.exists(key):
                     return
+                # Keepalive tick: the SSE endpoint frames this as a comment so a
+                # silent call keeps bytes flowing through proxy read timeouts.
+                yield None
                 continue
             seen = True
             xread_result = cast(
@@ -238,8 +243,9 @@ class TranscriptService:
             TranscriptEvent(role=role, source=source or source_for_role(role), text=text, ts=ts),
         )
 
-    def consume(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
-        """Replay from the start, then tail until the stream ends. The single shared
+    def consume(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]:
+        """Replay from the start, then tail until the stream ends. A `None` item is
+        an idle-window keepalive tick (Redis store only). The single shared
         consume method — the SSE endpoint frames over it, the finalizer drains it.
 
         Producer contract: turns are published in chronological order (`event.ts`
@@ -255,7 +261,7 @@ class TranscriptService:
         Precondition: end() must have been called for this room, otherwise this
         coroutine blocks indefinitely (it tails until the ended sentinel).
         """
-        return [event async for _id, event in self._store.read(room_name)]
+        return [item[1] async for item in self._store.read(room_name) if item is not None]
 
     async def end(self, room_name: str) -> None:
         await self._store.mark_ended(room_name)

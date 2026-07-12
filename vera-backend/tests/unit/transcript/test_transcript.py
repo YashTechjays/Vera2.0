@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -75,8 +76,9 @@ async def test_consume_tails_live_then_ends() -> None:
     seen: list[str] = []
 
     async def consume() -> None:
-        async for _id, event in svc.consume("room"):
-            seen.append(event.text)
+        async for item in svc.consume("room"):
+            if item is not None:  # skip keepalive ticks
+                seen.append(item[1].text)
 
     task = asyncio.create_task(consume())
     await asyncio.sleep(0)  # reader starts and blocks (stream empty)
@@ -87,10 +89,28 @@ async def test_consume_tails_live_then_ends() -> None:
 
 
 @pytest.mark.asyncio
+async def test_collect_skips_keepalive_sentinels() -> None:
+    # The Redis store surfaces None keepalive ticks on idle BLOCK windows (SSE
+    # heartbeat); collect() must drain events only, never a sentinel.
+    class _TickingStore(InMemoryTranscriptStore):
+        async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]:
+            yield None  # idle tick before the first entry
+            async for item in super().read(room_name):
+                yield item
+                yield None  # idle tick between entries
+
+    svc = TranscriptService(_TickingStore())
+    await svc.publish_turn("room", ROLE_USER, "hi", ts=1)
+    await svc.end("room")
+    got = await svc.collect("room")
+    assert [(e.role, e.text) for e in got] == [(ROLE_USER, "hi")]
+
+
+@pytest.mark.asyncio
 async def test_consume_yields_unique_entry_ids() -> None:
     svc = _service()
     await svc.publish_turn("room", ROLE_USER, "a", ts=1)
     await svc.publish_turn("room", ROLE_USER, "b", ts=2)
     await svc.end("room")
-    ids = [entry_id async for entry_id, _e in svc.consume("room")]
+    ids = [item[0] async for item in svc.consume("room") if item is not None]
     assert len(ids) == len(set(ids)) == 2

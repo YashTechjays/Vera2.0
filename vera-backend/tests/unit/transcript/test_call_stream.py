@@ -99,7 +99,7 @@ async def test_consume_yields_envelope_events() -> None:
     store = _MemStore()
     svc = CallStreamService(store)
     await svc.publish_turn("r", "user", "hi", ts=1)
-    got = [e async for _id, e in svc.consume("r")]
+    got = [item[1] async for item in svc.consume("r") if item is not None]
     assert got[0].type == "transcript" and got[0].data["text"] == "hi"
 
 
@@ -107,7 +107,7 @@ async def test_consume_yields_envelope_events() -> None:
 async def test_consume_forwards_first_entry_deadline_to_store() -> None:
     store = _MemStore()
     svc = CallStreamService(store)
-    _ = [e async for _id, e in svc.consume("r", first_entry_deadline_s=12.5)]
+    _ = [item async for item in svc.consume("r", first_entry_deadline_s=12.5)]
     assert store.last_read_deadline == 12.5
 
 
@@ -115,7 +115,7 @@ async def test_consume_forwards_first_entry_deadline_to_store() -> None:
 async def test_consume_defaults_first_entry_deadline_to_none() -> None:
     store = _MemStore()
     svc = CallStreamService(store)
-    _ = [e async for _id, e in svc.consume("r")]
+    _ = [item async for item in svc.consume("r")]
     assert store.last_read_deadline is None
 
 

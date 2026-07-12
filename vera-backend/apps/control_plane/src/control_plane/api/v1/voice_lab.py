@@ -12,7 +12,6 @@ VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
 import logging
-from collections.abc import AsyncIterator
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -37,6 +36,7 @@ from control_plane.livekit_gateway import OutboundDialError
 from control_plane.queueability import E164_RE
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
+from control_plane.sse import frames_with_keepalive
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
@@ -260,12 +260,8 @@ async def stream_transcript(
             DefaultExceptionCode.FORBIDDEN, message="missing permission voice_lab:sandbox"
         )
 
-    async def _events() -> AsyncIterator[str]:
-        async for entry_id, event in service.consume(room_name):
-            yield _sse_frame(entry_id, event)
-
     return StreamingResponse(
-        _events(),
+        frames_with_keepalive(service.consume(room_name), _sse_frame),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
