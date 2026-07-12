@@ -158,9 +158,10 @@ function RoomView({
           <MicToggle canSpeak={microphone} />
         </div>
       </div>
-      {isWaitingForCall(state, likes) ? (
+      {isWaitingForCall(state, likes) && (
         <p className="text-muted-foreground">Waiting for the call…</p>
-      ) : (
+      )}
+      {participants.length > 0 && (
         <div>
           <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Participants ({participants.length})
