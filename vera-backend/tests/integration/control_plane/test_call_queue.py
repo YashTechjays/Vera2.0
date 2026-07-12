@@ -6,15 +6,16 @@ Runs against live RLS-enforcing Postgres with FakeLiveKit.
 """
 
 from collections.abc import AsyncGenerator
+from datetime import time as dt_time
 from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import Update, delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.dispatch import drain_pending
-from tests.integration.control_plane.conftest import RBACWorld
+from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
 from tests.integration.control_plane.test_patient_forms_intake import (
     INTAKE_PAYLOAD,
     _issue_key,
@@ -25,10 +26,14 @@ from tests.integration.control_plane.test_patient_forms_intake import (
 from tests.integration.control_plane.test_patient_forms_intake import (
     ibv_schema as ibv_schema,
 )
+from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
-from vera_core.models import PatientForm
+from vera_core.db.rls import tenant_session
+from vera_core.models import InsuranceProvider, PatientForm, Tenant
 from vera_core.models.authoring import FormSchema, SchemaVersion
-from vera_core.models.enums import InsuranceType
+from vera_core.models.enums import FormStatus, InsuranceType
+from vera_core.services import queue_dispatcher
+from vera_core.services.queue_dispatcher import try_dispatch
 
 _DIALABLE_PHONE = "+15551234567"
 
@@ -449,3 +454,196 @@ async def test_detail_exposes_ivr_toggle(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"]["ivr_navigation_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Head-of-line blocking: the working-hours gate lives in try_dispatch's raw SQL
+# (the `provider_outside_hours` EXISTS subquery), where a quiet regression —
+# status string, name-join, NULL semantics — would silently strand every form
+# queued behind a closed provider. These tests run that SQL on real Postgres.
+# ---------------------------------------------------------------------------
+
+_HOL_CLOSED_PROVIDER = "HOL Test Closed Payer"
+_HOL_OPEN_PROVIDER = "HOL Test Open Payer"
+_HOL_CLOSED_PHONE = "+15550001111"
+_HOL_OPEN_PHONE = "+15550002222"
+
+
+def _requeue(form_id: UUID, *, provider: str | None, minutes_ago: int) -> Update:
+    """Back-date a form into IN_QUEUE for a given provider (None exercises the NULL
+    leg of the EXISTS gate). `minutes_ago` sets FIFO order via enqueued_at."""
+    return (
+        update(PatientForm)
+        .where(PatientForm.id == form_id)
+        .values(
+            status=FormStatus.IN_QUEUE.value,
+            enqueued_at=text(f"now() - interval '{minutes_ago} minutes'"),
+            insurance_provider=provider,
+        )
+    )
+
+
+@pytest.fixture
+async def hol_providers(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> AsyncGenerator[None]:
+    """Two ACTIVE global providers: one whose window excludes the patched noon
+    clock (closed) and one whose window includes it (open). Delete-first setup
+    so residue from an interrupted run can't trip the unique lower(name) index."""
+
+    async def _purge(session: AsyncSession) -> None:
+        await session.execute(
+            delete(InsuranceProvider).where(
+                InsuranceProvider.name.in_([_HOL_CLOSED_PROVIDER, _HOL_OPEN_PROVIDER])
+            )
+        )
+
+    async with admin_sessionmaker() as session, session.begin():
+        await _purge(session)
+        session.add_all(
+            [
+                InsuranceProvider(
+                    name=_HOL_CLOSED_PROVIDER,
+                    working_hour_start=dt_time(8, 0),
+                    working_hour_end=dt_time(9, 0),
+                ),
+                InsuranceProvider(
+                    name=_HOL_OPEN_PROVIDER,
+                    working_hour_start=dt_time(8, 0),
+                    working_hour_end=dt_time(18, 0),
+                ),
+            ]
+        )
+    yield
+    async with admin_sessionmaker() as session, session.begin():
+        await _purge(session)
+
+
+@pytest.fixture
+async def hol_form_ids(
+    database_url: str,
+    rbac_world: RBACWorld,
+) -> AsyncGenerator[tuple[UUID, UUID]]:
+    """(closed_form_id, open_form_id) — two queue-test forms with distinct payer
+    phones so the dial assertions can tell which one actually went out."""
+    engine = create_async_engine(database_url)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async for closed_id in _seed_ready_form(
+            sessionmaker, rbac_world.tenant_id, phone=_HOL_CLOSED_PHONE
+        ):
+            async for open_id in _seed_ready_form(
+                sessionmaker, rbac_world.tenant_id, phone=_HOL_OPEN_PHONE
+            ):
+                yield closed_id, open_id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_closed_provider_head_does_not_block_dispatchable_form_behind_it(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_configured: None,
+    hol_providers: None,
+    hol_form_ids: tuple[UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale head-of-queue form for a closed provider must not consume the FIFO
+    window: with exactly one concurrency slot, the SQL gate has to skip it so the
+    younger open-provider form behind it dials. Before the gate was pushed into
+    the WHERE clause, the closed form won the LIMIT(slots) fetch, the dial-time
+    re-check dropped it, and everything behind it starved until expiry."""
+    closed_form_id, open_form_id = hol_form_ids
+    # Freeze the dispatcher's clock at noon Eastern: closed 08:00-09:00, open 08:00-18:00.
+    monkeypatch.setattr(queue_dispatcher, "_now_eastern_time", lambda: dt_time(12, 0))
+
+    async with admin_sessionmaker() as session, session.begin():
+        # Closed-provider form at the head of the FIFO (older enqueued_at), open
+        # form behind it.
+        await session.execute(
+            _requeue(closed_form_id, provider=_HOL_CLOSED_PROVIDER, minutes_ago=10)
+        )
+        await session.execute(_requeue(open_form_id, provider=_HOL_OPEN_PROVIDER, minutes_ago=5))
+        # One slot: if the closed form wins the fetch, nothing dials this pass.
+        old_max = (
+            await session.execute(
+                select(Tenant.max_agents_per_va).where(Tenant.id == rbac_world.tenant_id)
+            )
+        ).scalar_one()
+        await session.execute(
+            update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_agents_per_va=1)
+        )
+
+    fake = FakeLiveKit()
+    try:
+        async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+            dispatched = await try_dispatch(
+                session,
+                rbac_world.tenant_id,
+                fake,
+                LocalDevKMS(master_key=b"a" * 32),
+                dial_pacing_s=0,
+            )
+        assert dispatched == 1
+        assert [phone for _room, phone, _trunk in fake.sip_calls] == [_HOL_OPEN_PHONE]
+
+        async with admin_sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    select(PatientForm.id, PatientForm.status).where(
+                        PatientForm.id.in_([closed_form_id, open_form_id])
+                    )
+                )
+            ).tuples()
+        statuses = dict(rows.all())
+        assert statuses[open_form_id] == FormStatus.IN_CALL.value
+        # The closed-provider form is skipped, not consumed: still queued for
+        # a later pass inside its provider's window.
+        assert statuses[closed_form_id] == FormStatus.IN_QUEUE.value
+    finally:
+        async with admin_sessionmaker() as session, session.begin():
+            await session.execute(
+                update(Tenant)
+                .where(Tenant.id == rbac_world.tenant_id)
+                .values(max_agents_per_va=old_max)
+            )
+
+
+@pytest.mark.asyncio
+async def test_open_provider_form_dispatches_through_the_sql_hours_gate(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_configured: None,
+    hol_providers: None,
+    hol_form_ids: tuple[UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Complement of the HOL test: inside the window (and for a form with no
+    provider row at all) the EXISTS gate must not filter — both forms dial."""
+    closed_form_id, open_form_id = hol_form_ids
+    # 08:30 Eastern is inside BOTH windows.
+    monkeypatch.setattr(queue_dispatcher, "_now_eastern_time", lambda: dt_time(8, 30))
+
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(
+            _requeue(closed_form_id, provider=_HOL_CLOSED_PROVIDER, minutes_ago=10)
+        )
+        # NULL-semantics leg: no provider name — the correlated EXISTS matches no
+        # row, so the form must remain dispatchable.
+        await session.execute(_requeue(open_form_id, provider=None, minutes_ago=5))
+
+    fake = FakeLiveKit()
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        dispatched = await try_dispatch(
+            session,
+            rbac_world.tenant_id,
+            fake,
+            LocalDevKMS(master_key=b"a" * 32),
+            dial_pacing_s=0,
+        )
+    assert dispatched == 2
+    assert sorted(phone for _room, phone, _trunk in fake.sip_calls) == [
+        _HOL_CLOSED_PHONE,
+        _HOL_OPEN_PHONE,
+    ]
