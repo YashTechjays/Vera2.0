@@ -38,6 +38,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.post_call import resolve_ai_processing
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from control_plane.transcript_finalizer import finalize_transcript
@@ -454,7 +455,7 @@ async def end_call(
     )
     room_name = room_name_for_call(tenant_id, call.id)
     if pre_answer:
-        ref = await close_call(
+        closed = await close_call(
             sessionmaker,
             audit,
             room_name,
@@ -464,11 +465,18 @@ async def end_call(
             end_requested_by=caller.user_id,
         )
         await livekit.delete_room(room_name)
-        if ref is not None:  # freed a concurrency slot — let queued forms use it
+        if closed is not None:  # freed a concurrency slot — let queued forms use it
+            ref, _ = closed  # a stamped close is always applied as CANCELED
             # Tell anyone tailing the live SSE before the finalizer deletes the
             # stream (the worker never publishes for a pre-answer call).
             await announce_terminal_status(call_stream, room_name, CallStatus.CANCELED)
             await finalize_transcript(sessionmaker, call_stream, ref, room_name)
+            # The cancel parked the form in AI_PROCESSING (the transcript rides
+            # the normal post-call pipeline); resolve it to EXCEPTION_REVIEW
+            # now — the resolver's canceled gate never auto-requeues.
+            await resolve_ai_processing(
+                sessionmaker, audit, ref, trigger="user_end_call", actor_label=actor_label
+            )
             await run_dispatch_pass(sessionmaker, tenant_id, livekit, kms, audit)
         return ok(None, message="Call canceled.")
     async with tenant_session(sessionmaker, tenant_id) as stamp_session:

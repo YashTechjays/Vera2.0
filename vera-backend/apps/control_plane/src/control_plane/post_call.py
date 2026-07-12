@@ -1,14 +1,17 @@
 """Post-call resolution — the system edge OUT of AI_PROCESSING.
 
-A completed call parks its form in AI_PROCESSING (`call_closeout.close_call`,
-in its own committed transaction). This module then decides the lifecycle's
-next system transition:
+A completed call — and a user-canceled one, whose transcript may still carry
+extractable data for post-call validation — parks its form in AI_PROCESSING
+(`call_closeout.close_call`, in its own committed transaction). This module
+then decides the lifecycle's next system transition:
 
 - completion below the tenant's ``retry_fill_threshold`` and retries remaining
   → auto-requeue (``AI_PROCESSING → IN_QUEUE``, consuming the retry budget) —
   feature-gated behind ``auto_retry_enabled`` (default OFF) until a post-call
   form-filling mechanism exists, since today nothing raises ``completion_pct``
-  between calls and a retry would redial to no benefit;
+  between calls and a retry would redial to no benefit. NEVER taken for a
+  user-ended (CANCELED) call — the supervisor who ended it does not want the
+  payer redialed;
 - otherwise → ``EXCEPTION_REVIEW`` for human review. ``COMPLETED`` is never set
   here — only a reviewer's manual approve reaches it.
 
@@ -76,9 +79,16 @@ async def resolve_ai_processing(
 
         sm = FormStateMachine()
         requeued = False
+        # A user-ended (CANCELED) call never auto-retries, whatever the fill:
+        # the supervisor who ended it does not want the payer redialed. The
+        # end-intent stamp is checked too, in case a resolver races the
+        # closeout's status write.
+        user_ended = (
+            call.current_status == CallStatus.CANCELED.value or call.end_requested_by_id is not None
+        )
         # completion_pct is 0-100; retry_fill_threshold is a 0-1 fraction.
         low_fill = float(form.completion_pct) < float(tenant.retry_fill_threshold) * 100
-        if auto_retry_enabled and low_fill:
+        if auto_retry_enabled and low_fill and not user_ended:
             # Auto-retry while retries remain; fall through to human review when exhausted.
             with contextlib.suppress(InvalidTransitionError):
                 sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
@@ -116,7 +126,8 @@ async def sweep_stuck_ai_processing(
     auto_retry_enabled: bool = False,
 ) -> int:
     """Resolve forms stranded in AI_PROCESSING (a crash between closeout and
-    resolution) whose call completed more than *grace_s* ago. Returns the number
+    resolution) whose call ended more than *grace_s* ago. Both AI_PROCESSING
+    writers are covered — COMPLETED and CANCELED closeouts. Returns the number
     of forms resolved — each freed a leaked concurrency slot, so the caller
     should run a dispatch pass when it's non-zero."""
     grace = func.make_interval(0, 0, 0, 0, 0, 0, grace_s)
@@ -128,7 +139,9 @@ async def sweep_stuck_ai_processing(
                     .join(PatientForm, PatientForm.id == Call.form_id)
                     .where(
                         Call.tenant_id == tenant_id,
-                        Call.current_status == CallStatus.COMPLETED.value,
+                        Call.current_status.in_(
+                            [CallStatus.COMPLETED.value, CallStatus.CANCELED.value]
+                        ),
                         Call.ended_at < func.now() - grace,
                         PatientForm.status == FormStatus.AI_PROCESSING.value,
                     )

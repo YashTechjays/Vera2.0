@@ -950,7 +950,8 @@ async def test_end_call_pre_answer_cancels_synchronously(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """End Call while still dialing: no worker session exists, so no call.ended
-    will ever arrive — the endpoint must close the call itself, as CANCELED
+    will ever arrive — the endpoint must close the call itself, as CANCELED,
+    and resolve the form through the post-call pipeline into EXCEPTION_REVIEW
     (user intent: parked for a human, never auto-redialed)."""
     call_id = await seed_call(
         admin_sessionmaker,
@@ -977,7 +978,7 @@ async def test_end_call_pre_answer_cancels_synchronously(
     form = (
         await admin_session.execute(select(PatientForm).where(PatientForm.id == seeded_form_id))
     ).scalar_one()
-    assert form.status == "call_failed"  # parked for a human; NOT re-queued
+    assert form.status == "exception_review"  # parked for a human; NOT re-queued
 
     audit = (
         (

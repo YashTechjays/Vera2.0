@@ -110,13 +110,15 @@ def _tenant(tenant_id: UUID, **overrides: Any) -> Tenant:
     return Tenant(**defaults)
 
 
-def _call_row(tenant_id: UUID, call_id: UUID, form_id: UUID) -> Call:
-    return Call(
-        id=call_id,
-        tenant_id=tenant_id,
-        form_id=form_id,
-        current_status=CallStatus.COMPLETED.value,
-    )
+def _call_row(tenant_id: UUID, call_id: UUID, form_id: UUID, **overrides: Any) -> Call:
+    defaults: dict[str, Any] = {
+        "id": call_id,
+        "tenant_id": tenant_id,
+        "form_id": form_id,
+        "current_status": CallStatus.COMPLETED.value,
+    }
+    defaults.update(overrides)
+    return Call(**defaults)
 
 
 def _form_row(tenant_id: UUID, form_id: UUID, **overrides: Any) -> PatientForm:
@@ -234,6 +236,53 @@ async def test_low_completion_with_retries_exhausted_goes_to_review(
     assert requeued is False
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.retry_count == 3  # budget untouched — the requeue was refused
+
+
+@pytest.mark.asyncio
+async def test_canceled_call_never_auto_requeues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user-ended (CANCELED) call rides the post-call pipeline for transcript
+    validation, but the auto-retry edge is refused whatever the fill and flag —
+    the supervisor who ended the call does not want the payer redialed."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=40.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id, current_status=CallStatus.CANCELED.value),
+        form=form,
+        tenant=_tenant(tenant_id, max_retries=3, retry_fill_threshold=0.95),
+    )
+    audit = _wire(monkeypatch, session)
+
+    requeued = await resolve_ai_processing(
+        _SM, audit, ref, trigger="user_end_call", auto_retry_enabled=True
+    )
+
+    assert requeued is False
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.retry_count == 0  # budget untouched — cancels are operator decisions
+    assert audit.records[0].detail["to"] == FormStatus.EXCEPTION_REVIEW.value
+
+
+@pytest.mark.asyncio
+async def test_end_intent_stamp_alone_blocks_auto_requeue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Belt-and-braces: the stamp suppresses the retry even if the resolver
+    races the closeout's status write and still sees a non-CANCELED status."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=40.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id, end_requested_by_id=uuid4()),
+        form=form,
+        tenant=_tenant(tenant_id, max_retries=3, retry_fill_threshold=0.95),
+    )
+    audit = _wire(monkeypatch, session)
+
+    requeued = await resolve_ai_processing(
+        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
+    )
+
+    assert requeued is False
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
 
 
 @pytest.mark.asyncio

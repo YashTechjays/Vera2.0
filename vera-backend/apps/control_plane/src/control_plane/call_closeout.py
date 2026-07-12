@@ -58,9 +58,12 @@ async def close_call(
     trigger: str,
     actor_label: str = "agent-worker",
     end_requested_by: UUID | None = None,
-) -> RoomRef | None:
-    """Apply *status* as the call's terminal state. Returns the RoomRef when a
-    concurrency slot was freed (caller should run a dispatch pass), else None.
+) -> tuple[RoomRef, CallStatus] | None:
+    """Apply *status* as the call's terminal state. Returns ``(ref, applied)``
+    when a concurrency slot was freed (caller should run a dispatch pass), else
+    None. *applied* is the status actually recorded — it can differ from the
+    requested one, and the caller's follow-up work depends on it (COMPLETED and
+    CANCELED park the form in AI_PROCESSING, which must then be resolved).
 
     A user-requested end always wins: when the row carries an end-intent stamp
     (`end_requested_by_id`, set by POST /calls/{id}/end), the call closes as
@@ -124,4 +127,4 @@ async def close_call(
                     },
                 )
             )
-    return ref
+    return ref, status

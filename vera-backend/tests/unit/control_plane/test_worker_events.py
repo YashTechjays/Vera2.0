@@ -548,9 +548,10 @@ async def test_call_ended_after_user_end_request_closes_as_canceled(
 ) -> None:
     """The live path of /calls/{id}/end stamps end-intent and deletes the room;
     the worker then emits a plain call.ended. The closeout must honor the stamp:
-    CANCELED (parked for a human), never COMPLETED — and never auto-requeued,
-    even with the auto-retry flag on (a supervisor who ended the call does not
-    want the payer redialed)."""
+    CANCELED, never COMPLETED. The form still rides the post-call pipeline (the
+    transcript may carry extractable data) and lands in EXCEPTION_REVIEW —
+    never auto-requeued, even with the auto-retry flag on and low completion
+    (a supervisor who ended the call does not want the payer redialed)."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
     call = _call_row(
@@ -570,10 +571,21 @@ async def test_call_ended_after_user_end_request_closes_as_canceled(
     await wired.consumer._process("1-0", {"event": event.model_dump_json()})
 
     assert call.current_status == CallStatus.CANCELED.value
-    assert form.status == FormStatus.CALL_FAILED.value  # parked for a human; NOT re-queued
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value  # for a human; NOT re-queued
     assert form.retry_count == 0
     status_events = [e for e in session.added if e.event_type == CallEventType.STATUS.value]
     assert [e.event_value for e in status_events] == [CallStatus.CANCELED.value]
+    # Two audited form transitions: IN_CALL → AI_PROCESSING (closeout), then
+    # AI_PROCESSING → EXCEPTION_REVIEW (the resolver's canceled gate refused
+    # the low-completion auto-requeue).
+    assert [
+        (r.detail["from"], r.detail["to"])
+        for r in wired.audit.records
+        if r.event_type == AuditEvent.FORM_STATUS_CHANGE.value
+    ] == [
+        (FormStatus.IN_CALL.value, FormStatus.AI_PROCESSING.value),
+        (FormStatus.AI_PROCESSING.value, FormStatus.EXCEPTION_REVIEW.value),
+    ]
     assert len(wired.dispatch_calls) == 1  # the slot was still freed
     assert redis.acked == ["1-0"]
 

@@ -46,13 +46,15 @@ def test_canceled_is_terminal() -> None:
     assert CallStatus.CANCELED in TERMINAL_CALL_STATUSES
 
 
-def test_canceled_parks_form_without_retry() -> None:
-    """User-requested end: the form parks at CALL_FAILED for a human — never
-    auto-requeued, even with every retry remaining."""
+def test_canceled_rides_the_post_call_pipeline_without_retry() -> None:
+    """User-requested end: the transcript may still carry extractable data, so
+    the form rides the normal post-call pipeline (AI_PROCESSING) instead of
+    parking at CALL_FAILED — and is never auto-requeued here, even with every
+    retry remaining (resolve_ai_processing enforces the same for its edge)."""
     call, form = _call(), _form(retry_count=0)
     requeued = apply_terminal_call_status(call, form, CallStatus.CANCELED, tenant_max_retries=5)
     assert call.current_status == CallStatus.CANCELED.value
-    assert form.status == FormStatus.CALL_FAILED.value
+    assert form.status == FormStatus.AI_PROCESSING.value
     assert form.retry_count == 0
     assert requeued is False
 

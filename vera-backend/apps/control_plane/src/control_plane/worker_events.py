@@ -310,13 +310,17 @@ class WorkerEventConsumer:
             if row is None:
                 _retry_young_or_drop(room_name, ts)
                 return  # voice-lab room
-        ref = await close_call(self._sessionmaker, self._audit, room_name, status, trigger=trigger)
-        if ref is not None:
+        closed = await close_call(
+            self._sessionmaker, self._audit, room_name, status, trigger=trigger
+        )
+        if closed is not None:
+            ref, applied = closed  # applied may be CANCELED (user-requested end wins)
             await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
-            if status is CallStatus.COMPLETED:
-                # The closeout parked the form in AI_PROCESSING; resolve the
-                # lifecycle's next system edge (EXCEPTION_REVIEW or low-completion
-                # auto-requeue) before refilling — either way a slot is freed.
+            if applied in (CallStatus.COMPLETED, CallStatus.CANCELED):
+                # Both park the form in AI_PROCESSING; resolve the lifecycle's
+                # next system edge (EXCEPTION_REVIEW or low-completion
+                # auto-requeue — suppressed for a canceled call) before
+                # refilling — either way a slot is freed.
                 await resolve_ai_processing(
                     self._sessionmaker,
                     self._audit,

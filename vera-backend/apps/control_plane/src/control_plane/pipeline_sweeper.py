@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.dispatch import run_dispatch_pass
-from control_plane.post_call import sweep_stuck_ai_processing
+from control_plane.post_call import resolve_ai_processing, sweep_stuck_ai_processing
 from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
@@ -208,7 +208,7 @@ class PipelineSweeper:
                         "sweeper: room %s is dead (past cap or observer-only); deleting", room_name
                     )
                     await self._livekit.delete_room(room_name)
-                ref = await close_call(
+                closed_call = await close_call(
                     self._sessionmaker,
                     self._audit,
                     room_name,
@@ -216,14 +216,28 @@ class PipelineSweeper:
                     trigger="sweeper_reconcile",
                     actor_label="pipeline-sweeper",
                 )
-                if ref is not None:
+                if closed_call is not None:
+                    ref, applied = closed_call
                     # Tell anyone tailing the live SSE before the finalizer
                     # deletes the stream (a swept call has no worker to publish).
-                    await announce_terminal_status(self._call_stream, room_name, status)
+                    await announce_terminal_status(self._call_stream, room_name, applied)
                     await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
+                    if applied is CallStatus.CANCELED:
+                        # A canceled close parks the form in AI_PROCESSING —
+                        # resolve it now instead of leaving it to phase 3's
+                        # grace-delayed sweep (the resolver never auto-requeues
+                        # a canceled call).
+                        await resolve_ai_processing(
+                            self._sessionmaker,
+                            self._audit,
+                            ref,
+                            trigger="sweeper_reconcile",
+                            actor_label="pipeline-sweeper",
+                            auto_retry_enabled=self._form_auto_retry_enabled,
+                        )
                     closed += 1
                     logger.info(
-                        "sweeper: reconciled stuck call room %s as %s", room_name, status.value
+                        "sweeper: reconciled stuck call room %s as %s", room_name, applied.value
                     )
 
         # Roll the two-tick memory: this tenant's previous sightings are now
@@ -233,7 +247,7 @@ class PipelineSweeper:
         other_tenants_pending = {
             r
             for r in self._gone_rooms_pending
-            if (ref := parse_room_name(r)) is None or ref.tenant_id != tenant_id
+            if (room_ref := parse_room_name(r)) is None or room_ref.tenant_id != tenant_id
         }
         self._gone_rooms_pending = other_tenants_pending | newly_gone
 
