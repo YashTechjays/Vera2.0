@@ -18,11 +18,11 @@ vi.mock("@/lib/api/client", () => {
 
 import { apiRequest, ApiError } from "@/lib/api/client"
 import {
+  endCall,
   getJoinToken,
   listCalls,
   publishCall,
   revokeAccess,
-  startCall,
   type CallSummary,
   type JoinTokenResponse,
 } from "./calls"
@@ -55,15 +55,6 @@ describe("calls API client", () => {
     expect(apiRequest).toHaveBeenCalledWith("/calls")
   })
 
-  it("starts a call by POSTing the form id", async () => {
-    vi.mocked(apiRequest).mockResolvedValue(call)
-    await startCall("f1")
-    expect(apiRequest).toHaveBeenCalledWith("/calls", {
-      method: "POST",
-      body: { form_id: "f1" },
-    })
-  })
-
   it("publishes a call (POST, no body)", async () => {
     vi.mocked(apiRequest).mockResolvedValue({ ...call, published: true })
     const out = await publishCall("c1")
@@ -91,6 +82,17 @@ describe("calls API client", () => {
       method: "POST",
       body: { target_user_id: "u2" },
     })
+  })
+
+  it("ends a call (POST, no body)", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(null)
+    await endCall("c1")
+    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/end", { method: "POST" })
+  })
+
+  it("propagates ApiError when ending a hidden call (404)", async () => {
+    vi.mocked(apiRequest).mockRejectedValue(new ApiError(404, "NOT_FOUND", "call not found"))
+    await expect(endCall("c1")).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when a non-owner tries to publish (403)", async () => {

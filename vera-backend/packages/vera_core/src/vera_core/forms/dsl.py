@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
+from datetime import date
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -149,8 +150,52 @@ class Range(_Model):
 
 
 # Tokens legal in `date_format` (closed set — extend deliberately): month/day
-# with or without a leading zero, 4- or 2-digit year, `/` `-` `.` separators.
-DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY|YY)(?:[-/.](?:MM?|DD?|YYYY|YY))*$")
+# with or without a leading zero, 4-digit year, `/` `-` `.` separators. No 2-digit
+# year (`YY`): unsafe on a DOB field — "55" is ambiguous between 1955 and 2055 —
+# and never gets any better resolved by adding a pivot-year heuristic, so it's
+# rejected outright rather than silently guessing a century.
+DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY)(?:[-/.](?:MM?|DD?|YYYY))*$")
+
+_DATE_TOKEN_RE = re.compile(r"YYYY|MM?|DD?")
+_DATE_TOKEN_PATTERNS: dict[str, str] = {
+    "YYYY": r"(?P<year>\d{4})",
+    "MM": r"(?P<month>\d{2})",
+    "M": r"(?P<month>\d{1,2})",
+    "DD": r"(?P<day>\d{2})",
+    "D": r"(?P<day>\d{1,2})",
+}
+
+
+def parse_date_format(text: str, date_format: str) -> date | None:
+    """Parse `text` against a leaf's display/entry `date_format` (e.g. "M/D/YYYY" —
+    see `Validation.date_format`), for values a human typed in that format rather
+    than ISO (the review UI prompts and validates against this same format; see
+    `vera-frontend/src/lib/ibv/validation.ts`). Returns `None` on a shape or
+    calendar mismatch — never raises; the caller decides whether that's an error."""
+    pattern = ""
+    pos = 0
+    for m in _DATE_TOKEN_RE.finditer(date_format):
+        pattern += re.escape(date_format[pos : m.start()]) + _DATE_TOKEN_PATTERNS[m.group()]
+        pos = m.end()
+    pattern += re.escape(date_format[pos:])
+    try:
+        match = re.fullmatch(pattern, text)
+    except re.error:
+        # A grammar-legal but degenerate date_format (e.g. "M/M/YYYY" — DATE_FORMAT_RE
+        # doesn't forbid a repeated token) builds a pattern with a duplicate named
+        # group, which re.compile rejects. Not this function's contract to raise on
+        # a malformed schema — treat it as "doesn't parse," same as any other mismatch.
+        return None
+    if match is None:
+        return None
+    groups = match.groupdict()
+    month, day, year = groups.get("month"), groups.get("day"), groups.get("year")
+    if month is None or day is None or year is None:
+        return None
+    try:
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
 
 
 class Validation(_Model):
@@ -168,7 +213,8 @@ class Validation(_Model):
                 raise ValueError(f"invalid pattern regex: {exc}") from exc
         if self.date_format is not None and not DATE_FORMAT_RE.match(self.date_format):
             raise ValueError(
-                "date_format must combine M/MM, D/DD, YYYY/YY tokens with -/. separators"
+                "date_format must combine M/MM, D/DD, YYYY tokens with -/. separators "
+                "(no YY — a 2-digit year is ambiguous on a date field)"
             )
         return self
 
@@ -355,12 +401,46 @@ class Contradiction(_Model):
 # ---------------------------------------------------------------------------
 
 
+class PromotedFields(_Model):
+    """patient_form column -> root-anchored leaf path.
+
+    The attribute set mirrors PatientForm's promoted columns (searchable
+    identifiers + worklist display fields); every schema must map all of them,
+    so a new schema can neither forget nor typo a column (enforced at
+    authoring/compile/load — extra="forbid", no defaults). Declaration order
+    is the compiled-artifact key order. Consumed by
+    vera_core.forms.intake.promote_columns and the dispute-resolve promotion
+    in control_plane.api.v1.patient_forms.
+    """
+
+    patient_name: str
+    patient_dob: str
+    chart_number: str
+    appointment_date: str
+    appointment_type: str
+    member_id: str
+    insurance_provider: str
+    insurance_provider_phone_number: str
+
+    def items(self) -> list[tuple[str, str]]:
+        """(column, leaf path) pairs, in declaration order."""
+        return [(column, getattr(self, column)) for column in type(self).model_fields]
+
+
 class FormSchemaDoc(_Model):
     dsl_version: Literal["2.1"]
     name: str
     insurance_type: str
     description: str | None = None
     system_fields: dict[str, str] | None = None
+    # patient_form column name -> root-anchored leaf path. Required: every schema
+    # must map every promotable column (PromotedFields). Each path must also be a
+    # system_fields target (validated below) — that guarantees a promoted column can
+    # never be *unexpectedly* empty at intake (system_fields targets are exactly what
+    # required_intake_fields enforces at creation, intake.py), though a leaf with its
+    # own `default` is still allowed to be absent from the payload (it counts as
+    # filled either way).
+    promoted_fields: PromotedFields
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.
     stt_key_terms: list[str] | None = None
@@ -592,6 +672,20 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
+
+        # promoted fields — patient_form columns re-derived from the current answer at
+        # dispute-resolve time too (not just intake). Column names are enforced by the
+        # PromotedFields model itself; each path must be a system_fields target so a
+        # promoted column is never legitimately empty.
+        system_field_paths = set((self.system_fields or {}).values())
+        for column, path in self.promoted_fields.items():
+            if path not in leaves:
+                errors.append(f"promoted_fields.{column}: {path!r} does not resolve to a leaf")
+            elif path not in system_field_paths:
+                errors.append(
+                    f"promoted_fields.{column}: {path!r} is not a system_fields target "
+                    "(promoted fields must be guaranteed present at intake)"
+                )
 
         # stt key terms: bounded, unique, static vocabulary
         terms = self.stt_key_terms or []

@@ -5,7 +5,10 @@ import pytest
 from agent_worker.transcript_publisher import ReorderingEmitter, attach_transcript_publisher
 from vera_core.transcript import (
     ROLE_AGENT,
+    ROLE_DTMF,
     ROLE_USER,
+    SOURCE_BOT,
+    SOURCE_REP,
     InMemoryTranscriptStore,
     TranscriptEvent,
     TranscriptService,
@@ -180,6 +183,53 @@ async def test_published_ts_never_goes_backwards() -> None:
     events = await _drain(em, svc, "room")
     assert _rt(events) == [(ROLE_AGENT, "first"), (ROLE_USER, "second")]
     assert [e.ts for e in events] == [5000, 5000]  # clamped, not 5000 then 4000
+
+
+@pytest.mark.asyncio
+async def test_turns_carry_the_acting_source() -> None:
+    # `source` is the actor (drives UI attribution); the emitter stamps it per turn so
+    # consumers never derive it from the open-ended role vocabulary.
+    svc = _service()
+    em = ReorderingEmitter(svc, "room")
+    _state(em, "speaking")
+    em.on_agent_item(_ItemEvent(_Item("assistant", "hi", 1.0)))
+    em.on_user(_UserEvent("hello", is_final=True, created_at=2.0))
+    events = await _drain(em, svc, "room")
+    assert [(e.role, e.source) for e in events] == [
+        (ROLE_AGENT, SOURCE_BOT),
+        (ROLE_USER, SOURCE_REP),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_keypress_publishes_a_bot_dtmf_turn() -> None:
+    # A successful press_keypad must leave evidence in the transcript: a dtmf-role turn
+    # attributed to the bot, whose text is the digits sent.
+    svc = _service()
+    em = ReorderingEmitter(svc, "room")
+    em.on_user(_UserEvent("press 3 for claims", is_final=True, created_at=1.0))
+    em.on_keypress("3")
+    events = await _drain(em, svc, "room")
+    assert [(e.role, e.source, e.text) for e in events] == [
+        (ROLE_USER, SOURCE_REP, "press 3 for claims"),
+        (ROLE_DTMF, SOURCE_BOT, "3"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_keypress_is_held_behind_a_pending_agent_turn() -> None:
+    # The agent may speak ("I'll select claims") and press in the same turn; its spoken
+    # item commits late, so the keypress must wait behind it like a caller turn does.
+    svc = _service()
+    em = ReorderingEmitter(svc, "room")
+    _state(em, "speaking")
+    em.on_keypress("3")  # the speaking turn's item has not committed yet -> held
+    em.on_agent_item(_ItemEvent(_Item("assistant", "I'll select claims", 1.0)))
+    events = await _drain(em, svc, "room")
+    assert [(e.role, e.text) for e in events] == [
+        (ROLE_AGENT, "I'll select claims"),
+        (ROLE_DTMF, "3"),
+    ]
 
 
 @pytest.mark.asyncio

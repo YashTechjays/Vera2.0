@@ -15,25 +15,25 @@ from livekit.api.twirp_client import TwirpError
 from vera_core.config import SecretProvider
 from vera_core.config.settings import Settings
 from vera_core.observability.correlation import SIP_CALLEE_IDENTITY
+from vera_core.telephony import LiveKitUnavailable, OutboundDialError
+
+__all__ = ["LiveKitGateway", "LiveKitUnavailable", "OutboundDialError", "build_livekit_gateway"]
 
 AGENT_NAME = "vera-agent"
+
+# Belt-and-suspenders room lifetimes (the pipeline sweeper is the primary net):
+# empty_timeout — a room nobody ever joined (dispatch crashed before the dial)
+# self-deletes; departure_timeout — a room lingers only briefly once the last
+# participant leaves. NOTE: a watching supervisor counts as a participant, so
+# neither fires for observer-held rooms — the sweeper's observer-only probe
+# (room_participant_identities) handles those.
+_ROOM_EMPTY_TIMEOUT_S = 300
+_ROOM_DEPARTURE_TIMEOUT_S = 120
 
 # Transport-level failures the LiveKit SDK raises: a Twirp API error or an aiohttp
 # connection failure. Caught at this gateway boundary and re-raised as domain errors so
 # SDK exception types never leak to the routers.
 _LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError)
-
-
-class LiveKitUnavailable(Exception):
-    """The LiveKit SIP service could not be reached (or errored) while we probed it —
-    e.g. verifying a trunk id exists before storing the credential. Distinct from
-    "trunk not found": this means we could not get an answer, so we fail closed."""
-
-
-class OutboundDialError(Exception):
-    """Placing an outbound SIP call failed at the LiveKit / telephony seam — a
-    bad/deleted trunk, the provider rejecting the call, or LiveKit being unreachable.
-    The router translates this into a clean upstream-error response, never a raw 500."""
 
 
 class LiveKitGateway:
@@ -67,7 +67,13 @@ class LiveKitGateway:
         self, room_name: str, metadata: dict[str, object] | None = None
     ) -> None:
         async with self._client() as lk:
-            await lk.room.create_room(api.CreateRoomRequest(name=room_name))
+            await lk.room.create_room(
+                api.CreateRoomRequest(
+                    name=room_name,
+                    empty_timeout=_ROOM_EMPTY_TIMEOUT_S,
+                    departure_timeout=_ROOM_DEPARTURE_TIMEOUT_S,
+                )
+            )
             # metadata rides on the dispatch as a JSON string the worker parses
             # (e.g. {"wait_for_speaker": true}); None → "" → existing callers unchanged.
             await lk.agent_dispatch.create_dispatch(
@@ -129,6 +135,31 @@ class LiveKitGateway:
         except _LIVEKIT_TRANSPORT_ERRORS as e:
             raise OutboundDialError(str(e)) from e
 
+    async def existing_rooms(self, room_names: list[str]) -> set[str]:
+        """The subset of *room_names* that currently exist on the LiveKit server.
+        One RPC; the pipeline sweeper uses "room gone but call non-terminal" as the
+        worker-died signal (the healthy end path always deletes the room)."""
+        if not room_names:
+            return set()
+        async with self._client() as lk:
+            resp = await lk.room.list_rooms(api.ListRoomsRequest(names=room_names))
+        return {room.name for room in resp.rooms}
+
+    async def room_participant_identities(self, room_name: str) -> list[str] | None:
+        """Identities currently in the room, or None when the room doesn't exist.
+        The sweeper uses this to spot dead-but-open rooms: a room holding only
+        browser observers (supervisor-*/monitor-*) has no agent and no SIP callee,
+        so the call can never progress — but the observers keep the room's
+        departure timeout from ever firing."""
+        async with self._client() as lk:
+            try:
+                resp = await lk.room.list_participants(api.ListParticipantsRequest(room=room_name))
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return None
+                raise
+        return [p.identity for p in resp.participants]
+
     async def delete_room(self, room_name: str) -> None:
         """Tear the room down server-side: removes every participant — the agent
         worker (→ its session shuts down) and any SIP callee (→ the outbound call is
@@ -162,11 +193,20 @@ class LiveKitGateway:
         """Set room-level metadata (JSON-encoded). LiveKit pushes it to every
         participant as a RoomMetadataChanged event, so the browser can read
         session status (e.g. a failed outbound call) before the room is torn down.
+        Idempotent like `delete_room`: setting metadata on an already-deleted room
+        is a no-op — teardown paths may race (a crash after delete_room but before
+        ack, or a sweeper that already deleted the room, both redeliver call.failed
+        and re-enter this call after the room is gone).
         """
         async with self._client() as lk:
-            await lk.room.update_room_metadata(
-                api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
-            )
+            try:
+                await lk.room.update_room_metadata(
+                    api.UpdateRoomMetadataRequest(room=room_name, metadata=json.dumps(metadata))
+                )
+            except TwirpError as exc:
+                if exc.code == "not_found":
+                    return  # room already gone — nothing to update
+                raise
 
     def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
         # Short TTL: the token is used immediately; the SDK default (~6h) would

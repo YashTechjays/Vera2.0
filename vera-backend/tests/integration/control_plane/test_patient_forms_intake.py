@@ -12,6 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth import api_key as apikey
+from control_plane.dispatch import drain_pending
 from scripts.seed import _seed_form_schemas
 from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import tenant_session, uuid7
@@ -71,6 +72,9 @@ async def cleanup_forms(
     admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
 ) -> AsyncGenerator[None]:
     yield
+    # An in-flight detached dispatch task could insert a call row FK-referencing
+    # a form mid-delete — let it finish first.
+    await drain_pending()
     async with admin_sessionmaker() as session, session.begin():
         # field_answer cascades on the form delete.
         await session.execute(
@@ -188,9 +192,8 @@ async def test_upload_promotes_worklist_columns(
             "appointment_type": "New Patient",
         },
         "insurance_reference_information": {
-            **INTAKE_PAYLOAD["insurance_reference_information"],
-            "insurance": "Blue Cross",
-            "phone_number": "+1 555 0100",
+            "insurance_provider_name": "Blue Cross",
+            "insurance_phone_number": "+1 555 0100",
         },
     }
     resp = await client.post(
@@ -210,7 +213,7 @@ async def test_upload_promotes_worklist_columns(
             await session.execute(select(PatientForm).where(PatientForm.id == form_id))
         ).scalar_one()
         assert form.appointment_type == "New Patient"
-        assert form.member_policy_id == "POL-550411"
+        assert form.member_id == "POL-550411"
         assert form.insurance_provider == "Blue Cross"
         assert form.insurance_provider_phone_number == "+1 555 0100"
 

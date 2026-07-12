@@ -9,6 +9,7 @@ from vera_core.transcript import (
     ROLE_AGENT,
     ROLE_USER,
     RedisTranscriptStore,
+    TranscriptEvent,
     TranscriptService,
     transcript_stream_key,
 )
@@ -51,8 +52,9 @@ async def test_consume_tails_live(svc: tuple[TranscriptService, Redis]) -> None:
     seen: list[str] = []
 
     async def consume() -> None:
-        async for _id, e in service.consume("itroom"):
-            seen.append(e.text)
+        async for item in service.consume("itroom"):
+            if item is not None:  # skip keepalive ticks
+                seen.append(item[1].text)
 
     task = asyncio.create_task(consume())
     await asyncio.sleep(0.1)
@@ -60,6 +62,36 @@ async def test_consume_tails_live(svc: tuple[TranscriptService, Redis]) -> None:
     await service.end("itroom")
     await asyncio.wait_for(task, timeout=2.0)
     assert seen == ["live"]
+
+
+async def test_read_yields_keepalive_sentinel_on_idle_block_timeout() -> None:
+    """Every idle XREAD BLOCK window surfaces a None keepalive tick so the SSE
+    layer can emit a comment heartbeat (see the call-stream twin test)."""
+    redis = create_redis("redis://localhost:6379/0")
+    await redis.delete(transcript_stream_key("karoom"))
+    service = TranscriptService(
+        RedisTranscriptStore(redis, ttl_seconds=3600, end_grace_seconds=60, block_ms=50)
+    )
+    items: list[tuple[str, TranscriptEvent] | None] = []
+
+    async def consume() -> None:
+        async for item in service.consume("karoom"):
+            items.append(item)
+
+    await service.publish_turn("karoom", ROLE_USER, "first", ts=1)
+    task = asyncio.create_task(consume())
+    try:
+        # Sit idle across several block windows; each must yield a keepalive tick.
+        await asyncio.sleep(0.5)
+        assert None in items
+        await service.end("karoom")
+        await asyncio.wait_for(task, timeout=2.0)
+        assert [item[1].text for item in items if item is not None] == ["first"]
+    finally:
+        if not task.done():
+            task.cancel()
+        await redis.delete(transcript_stream_key("karoom"))
+        await redis.aclose()
 
 
 async def test_consume_survives_idle_block_timeout() -> None:
@@ -74,8 +106,9 @@ async def test_consume_survives_idle_block_timeout() -> None:
     seen: list[str] = []
 
     async def consume() -> None:
-        async for _id, e in service.consume("idleroom"):
-            seen.append(e.text)
+        async for item in service.consume("idleroom"):
+            if item is not None:  # skip keepalive ticks
+                seen.append(item[1].text)
 
     await service.publish_turn("idleroom", ROLE_USER, "first", ts=1)  # stream now exists
     task = asyncio.create_task(consume())

@@ -11,20 +11,24 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from livekit.api.twirp_client import TwirpError
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth.invitations import InMemoryInvitationStore
 from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import InMemorySessionStore, SessionData
+from control_plane.dispatch import drain_pending
 from control_plane.email import InMemoryEmailSender
 from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
+from vera_core.call_stream import CallStreamEvent, CallStreamService
 from vera_core.config import EnvSecretProvider, Settings
-from vera_core.config.kms import LocalDevKMS
+from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
-from vera_core.models import AppUser, Integration, IntegrationType, Tenant, UserRole
+from vera_core.db.rls import tenant_session
+from vera_core.integrations.credentials import seal_credentials
+from vera_core.models import AppUser, Call, Integration, IntegrationType, Tenant, UserRole
 from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
@@ -53,6 +57,12 @@ class FakeLiveKit(LiveKitGateway):
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
         self.remove_not_found = False  # remove_participant raises TwirpError(not_found)
+        # room -> current participant identities; rooms absent from the map are
+        # "gone" (room_participant_identities returns None), mirroring LiveKit.
+        self.participants: dict[str, list[str]] = {}
+
+    async def room_participant_identities(self, room_name: str) -> list[str] | None:
+        return self.participants.get(room_name)
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -109,12 +119,79 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
     fake_livekit.remove_not_found = False
+    fake_livekit.participants = {}
     yield
+
+
+@pytest.fixture(autouse=True)
+async def drain_dispatch_tasks() -> AsyncIterator[None]:
+    """Enqueue endpoints schedule detached post-commit dispatch tasks
+    (control_plane.dispatch). Never let one cross a test boundary — a stray task
+    would insert call rows mid-teardown or pollute the next test's tenant."""
+    yield
+    await drain_pending()
 
 
 @pytest.fixture(scope="session")
 def transcript_service() -> TranscriptService:
     return TranscriptService(InMemoryTranscriptStore())
+
+
+class _MemCallStreamStore:
+    """In-memory CallStreamStore fake, keyed by room_name (mirrors the room-keying
+    InMemoryTranscriptStore uses, not the flat _MemStore in the Task 9 unit tests) —
+    this fixture is session-scoped like transcript_service, so it must not let one
+    test's preloaded events bleed into another's; every test uses a distinct room_name."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, list[tuple[str, CallStreamEvent]]] = {}
+        # (room_name, first_entry_deadline_s) per read() call — lets endpoint tests
+        # pin WHICH deadline each SSE branch passes down (a None on a tail branch
+        # would reopen the unbounded-hang hole if the stream vanishes post-EXISTS).
+        self.read_deadlines: list[tuple[str, float | None]] = []
+        # Every call_status ever published, SURVIVING delete() — in production a
+        # blocked XREAD receives the entry before the finalizer's DEL, but this
+        # fake has no reader, so closeout-announce assertions need a durable log.
+        self.status_log: list[tuple[str, object]] = []
+
+    async def publish(self, room_name: str, event: CallStreamEvent) -> None:
+        entries = self._entries.setdefault(room_name, [])
+        entries.append((f"{len(entries)}-0", event))
+        if event.type == "call_status":
+            self.status_log.append((room_name, event.data.get("status")))
+
+    async def mark_ended(self, room_name: str) -> None:
+        self._entries.setdefault(room_name, [])
+
+    async def delete(self, room_name: str) -> None:
+        self._entries.pop(room_name, None)
+
+    async def exists(self, room_name: str) -> bool:
+        return room_name in self._entries
+
+    async def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        # This fake replays a fixed snapshot and never blocks, so there is no idle
+        # wait for a deadline to bound — a never-published room simply yields
+        # nothing and the generator ends immediately, same observable effect. The
+        # deadline is still RECORDED so endpoint tests can assert what was passed.
+        self.read_deadlines.append((room_name, first_entry_deadline_s))
+        for entry_id, event in list(self._entries.get(room_name, [])):
+            yield entry_id, event
+
+    async def read_all(self, room_name: str) -> list[CallStreamEvent]:
+        return [event for _entry_id, event in self._entries.get(room_name, [])]
+
+
+@pytest.fixture(scope="session")
+def call_stream_store() -> _MemCallStreamStore:
+    return _MemCallStreamStore()
+
+
+@pytest.fixture(scope="session")
+def call_stream_service(call_stream_store: _MemCallStreamStore) -> CallStreamService:
+    return CallStreamService(call_stream_store)
 
 
 class RBACWorld:
@@ -319,6 +396,7 @@ async def authz_app(
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
     transcript_service: TranscriptService,
+    call_stream_service: CallStreamService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
     the whole request path, including the audit writer. The session store is the
@@ -336,6 +414,7 @@ async def authz_app(
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
         transcript_service=transcript_service,
+        call_stream_service=call_stream_service,
     )
     async with app.router.lifespan_context(app):
         yield app
@@ -396,3 +475,74 @@ async def trunk_integration_type(
                 await session.execute(
                     delete(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
                 )
+
+
+# The trunk id value tests assert against when they check what got dialed
+# (test_voice_lab's outbound-call assertions).
+TEST_TRUNK_ID = "ST_test_trunk"
+
+
+async def seed_outbound_trunk(
+    sessionmaker: async_sessionmaker[AsyncSession], kms: KeyManagementService, tenant_id: UUID
+) -> None:
+    """Seal a `livekit_outbound_trunk_id` credential for `tenant_id` so any outbound-dial
+    seam (voice-lab, the queueability gate) resolves a trunk from the DB. Requires the
+    `trunk_integration_type` catalog-type fixture to already exist. The single seeding
+    mechanism shared by every test that needs a configured trunk — mirrors
+    `seal_credentials`'s envelope-encryption scheme (see its module docstring)."""
+    async with sessionmaker() as session, session.begin():
+        type_id = (
+            await session.execute(
+                select(IntegrationType.id).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+            )
+        ).scalar_one()
+        integration = Integration(
+            tenant_id=tenant_id,
+            integration_type_id=type_id,
+            status="active",
+        )
+        await seal_credentials(
+            kms, integration=integration, credentials={"trunk_id": TEST_TRUNK_ID}
+        )
+        session.add(integration)
+
+
+async def seed_call(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    form_id: UUID,
+    *,
+    initiated_by_id: UUID | None = None,
+    status: str = "initiated",
+    published: bool = False,
+) -> UUID:
+    """Insert a Call row directly — the manual start-call endpoint is gone; tests
+    seed call state the way the dispatcher would. Production sets `started_at`
+    together with the answered (active) status, so seeded rows mirror that:
+    anything past the dialing phase carries a start timestamp."""
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        call = Call(
+            tenant_id=tenant_id,
+            form_id=form_id,
+            current_status=status,
+            initiated_by_id=initiated_by_id,
+            published=published,
+            started_at=None if status in ("initiated", "ringing", "ivr") else func.now(),
+        )
+        session.add(call)
+        await session.flush()
+        return call.id
+
+
+@pytest.fixture
+async def trunk_configured(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_integration_type: None,
+) -> None:
+    """Seal the test tenant's outbound-trunk credential so any dial seam (voice-lab,
+    the queueability gate) resolves it. Uses the same LocalDevKMS master key as the app
+    under test (`authz_app`), so `get_integration_credentials` can open what we seal."""
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )

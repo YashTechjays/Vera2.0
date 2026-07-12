@@ -16,7 +16,7 @@ from vera_core.forms.conditions import (
     is_v2,
     leaf_gates,
 )
-from vera_core.forms.dsl import FormSchemaDoc, load_document
+from vera_core.forms.dsl import FormSchemaDoc, PromotedFields, load_document
 from vera_core.forms.intake import missing_required, required_intake_fields
 from vera_core.forms.review import completion_pct_v2
 
@@ -125,6 +125,8 @@ class TestCompletionPctV2:
         "dsl_version": "2.1",
         "name": "T",
         "insurance_type": "infertility_treatment",
+        "system_fields": {"a": "sections.s.a"},
+        "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.s.a"),
         "sections": {
             "s": {
                 "title": "S",
@@ -184,7 +186,7 @@ class TestIntakeV2:
         assert "sections.patient_information.spouse_partner_name" not in fields
         # dynamic over the WHOLE document, not just `patient_information`
         assert "sections.hospital_information.npi" in fields
-        # role=confirm, but it IS a system_fields target (member_id/policy_id)
+        # role=confirm, but it IS a system_fields target (member_id)
         # and carries no default → still required at creation.
         assert "sections.insurance_information.policy_number" in fields
 

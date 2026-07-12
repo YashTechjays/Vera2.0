@@ -21,6 +21,7 @@ from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.config import Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
+from vera_core.forms.dsl import PromotedFields
 from vera_core.models import (
     AppUser,
     FormSchema,
@@ -56,6 +57,7 @@ VALID_SCHEMA_JSON: dict[str, Any] = {
     "name": "IBV",
     "insurance_type": "infertility_treatment",
     "system_fields": {"member_id": "sections.basics.plan_type"},
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.basics.plan_type"),
     "sections": {
         "basics": {
             "title": "Basics",
@@ -623,6 +625,48 @@ async def test_stateless_preview_forbidden_for_tenant(
         json=VALID_PROMPT_DOC,
     )
     assert resp.status_code == 403
+
+
+async def test_preview_named_version_pinned_to_pre_promoted_fields_schema_conflicts(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A historical prompt_version can pin (RESTRICT FK) a schema_version whose
+    schema_json predates the required `promoted_fields` block — such rows are
+    left in place by the cleanup migration since prompt_version references them.
+    Requesting that version_id explicitly must 409, not 500."""
+    client, w, ids = prompts_world
+    pre_block_schema_json = {k: v for k, v in VALID_SCHEMA_JSON.items() if k != "promoted_fields"}
+
+    async with admin_sessionmaker() as s, s.begin():
+        # Insert the raw dict directly via the DB session (SQLAlchemy model, no
+        # Pydantic) — bypassing FormSchemaDoc validation is the whole point:
+        # this is exactly the shape a pre-existing row can have.
+        stale_schema_version = SchemaVersion(
+            schema_id=ids.form_schema_id,
+            version=99,
+            schema_json=pre_block_schema_json,
+            status=VersionStatus.DRAFT,
+        )
+        s.add(stale_schema_version)
+        await s.flush()
+        stale_prompt_version = PromptVersion(
+            prompt_id=ids.prompt_id,
+            schema_version_id=stale_schema_version.id,
+            version=99,
+            composite_json=VALID_PROMPT_DOC,
+            status=VersionStatus.DRAFT,
+        )
+        s.add(stale_prompt_version)
+        await s.flush()
+        stale_version_id = stale_prompt_version.id
+
+    resp = await client.get(
+        f"/api/v1/prompts/{ids.prompt_id}/preview",
+        headers=_auth(w.super_token),
+        params={"version_id": str(stale_version_id)},
+    )
+    assert resp.status_code == 409, resp.text
 
 
 async def test_stateless_preview_conflict_when_none_published(

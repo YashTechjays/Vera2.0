@@ -1,5 +1,6 @@
 """Form-schema DSL: compiler freshness, round-trip, and document validation."""
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -7,9 +8,28 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
-from vera_core.forms.dsl import FormSchemaDoc, compile_document, load_document
+from vera_core.forms.dsl import (
+    FormSchemaDoc,
+    PromotedFields,
+    Validation,
+    compile_document,
+    load_document,
+    parse_date_format,
+)
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
+
+# The eight patient_form columns every schema must promote, in artifact key order.
+PROMOTED_COLUMNS: tuple[str, ...] = (
+    "patient_name",
+    "patient_dob",
+    "chart_number",
+    "appointment_date",
+    "appointment_type",
+    "member_id",
+    "insurance_provider",
+    "insurance_provider_phone_number",
+)
 
 
 def minimal_doc(**overrides: Any) -> dict[str, Any]:
@@ -18,6 +38,8 @@ def minimal_doc(**overrides: Any) -> dict[str, Any]:
         "dsl_version": "2.1",
         "name": "Test",
         "insurance_type": "infertility_treatment",
+        "system_fields": {"plan_type": "sections.basics.plan_type"},
+        "promoted_fields": dict.fromkeys(PROMOTED_COLUMNS, "sections.basics.plan_type"),
         "sections": {
             "basics": {
                 "title": "Basics",
@@ -95,6 +117,36 @@ class TestCompiledArtifacts:
         assert doc.stt_key_terms is not None
         assert "intrauterine insemination" in doc.stt_key_terms
         assert len(doc.stt_key_terms) <= 100
+
+    def test_ibv_promotes_the_full_column_set(self) -> None:
+        doc = SCHEMAS["infertility_treatment"][1]()
+        assert doc.promoted_fields == PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.insurance_information.policy_number",
+            insurance_provider="sections.insurance_reference_information.insurance_provider_name",
+            insurance_provider_phone_number=(
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
+        )
+
+    def test_disease_only_promotes_the_full_column_set(self) -> None:
+        doc = SCHEMAS["disease_only"][1]()
+        assert doc.promoted_fields == PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.policy_details.policy_number",
+            insurance_provider="sections.insurance_reference_information.insurance_provider_name",
+            insurance_provider_phone_number=(
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
+        )
 
 
 class TestDocumentValidation:
@@ -317,3 +369,103 @@ class TestDocumentValidation:
             },
         }
         FormSchemaDoc.model_validate(doc)  # anchor found via the group-gated leaf
+
+    def test_promoted_fields_block_is_required(self) -> None:
+        doc = minimal_doc()
+        del doc["promoted_fields"]
+        with pytest.raises(ValidationError, match="Field required"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_every_column_is_required(self) -> None:
+        doc = minimal_doc()
+        del doc["promoted_fields"]["member_id"]
+        with pytest.raises(ValidationError, match="Field required"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_rejects_unknown_column(self) -> None:
+        doc = minimal_doc()
+        doc["promoted_fields"]["not_a_column"] = "sections.basics.plan_type"
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_rejects_path_not_a_leaf(self) -> None:
+        doc = minimal_doc()
+        doc["promoted_fields"]["patient_name"] = "sections.basics.missing"
+        with pytest.raises(ValidationError, match="does not resolve to a leaf"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_promoted_fields_rejects_path_not_backed_by_system_fields(self) -> None:
+        # sections.basics.notes is a real leaf but not a system_fields target.
+        doc = minimal_doc()
+        doc["promoted_fields"]["patient_name"] = "sections.basics.notes"
+        with pytest.raises(ValidationError, match="not a system_fields target"):
+            FormSchemaDoc.model_validate(doc)
+
+
+class TestParseDateFormat:
+    """`parse_date_format` — the display/entry `date_format` fallback parser used
+    when a human-typed value (e.g. from the review UI) doesn't parse as ISO."""
+
+    def test_parses_m_d_yyyy(self) -> None:
+        assert parse_date_format("12/4/1999", "M/D/YYYY") == date(1999, 12, 4)
+
+    def test_parses_with_leading_zeros(self) -> None:
+        assert parse_date_format("04/12/1990", "M/D/YYYY") == date(1990, 4, 12)
+
+    def test_parses_dd_mm_yyyy_with_dash_separator(self) -> None:
+        assert parse_date_format("04-12-1990", "DD-MM-YYYY") == date(1990, 12, 4)
+
+    def test_rejects_shape_mismatch(self) -> None:
+        assert parse_date_format("1990-04-12", "M/D/YYYY") is None
+
+    def test_rejects_wrong_separator(self) -> None:
+        assert parse_date_format("12-4-1999", "M/D/YYYY") is None
+
+    def test_rejects_out_of_range_calendar_date(self) -> None:
+        assert parse_date_format("13/45/1999", "M/D/YYYY") is None
+
+    def test_rejects_empty_string(self) -> None:
+        assert parse_date_format("", "M/D/YYYY") is None
+
+    def test_never_raises_on_a_grammar_valid_repeated_token_format(self) -> None:
+        # "M/M/YYYY" passes DATE_FORMAT_RE (repeated tokens aren't shape-illegal)
+        # but would build a regex with two `month` groups — must not crash.
+        assert parse_date_format("12/4/1999", "M/M/YYYY") is None
+
+
+class TestDateFormatRejectsTwoDigitYear:
+    """A 2-digit year is unsafe on a DOB field (e.g. "55" is ambiguous between
+    1955 and 2055) — rejected at schema-authoring time, not just at parse time."""
+
+    def test_yyyy_is_accepted(self) -> None:
+        Validation(date_format="M/D/YYYY")
+
+    def test_yy_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="M/D/YY")
+
+
+class TestPromotedColumnParity:
+    """PromotedFields (DSL contract), PromotedIdentifiers (intake value carrier) and
+    PatientForm (the table) must agree on the promoted column set — a future column
+    add that misses one of the three fails here, not in production."""
+
+    # The documented contract: PatientForm's promoted searchable-identifier +
+    # worklist-display columns. PatientForm has many non-promoted columns, so
+    # this literal — not introspection — defines "promoted".
+    EXPECTED = frozenset(PROMOTED_COLUMNS)
+
+    def test_dsl_model_matches_the_contract(self) -> None:
+        assert set(PromotedFields.model_fields) == self.EXPECTED
+
+    def test_intake_dataclass_matches_the_contract(self) -> None:
+        from dataclasses import fields as dataclass_fields
+
+        from vera_core.forms.intake import PromotedIdentifiers
+
+        assert {f.name for f in dataclass_fields(PromotedIdentifiers)} == self.EXPECTED
+
+    def test_patient_form_table_has_every_promoted_column(self) -> None:
+        from vera_core.models.patient_form import PatientForm
+
+        assert {c.name for c in PatientForm.__table__.columns} >= self.EXPECTED

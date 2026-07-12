@@ -10,7 +10,7 @@ for the IVR phase that reverts to the snappy human default at the handoff.
 import functools
 import logging
 import re
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable
 
 from livekit import rtc
 from livekit.agents import (
@@ -106,6 +106,7 @@ class IvrNavigatorAgent(Agent):
         playbook: IvrPlaybookConfig | None = None,
         verification_instructions: str | None = None,
         verification_greeting: str | None = None,
+        on_keypress: Callable[[str], None] | None = None,
     ) -> None:
         # Deferred import breaks the agent <-> ivr_agent import cycle: agent.py imports
         # IvrNavigatorAgent, and the navigator only needs VeraAgent at construction time.
@@ -122,6 +123,10 @@ class IvrNavigatorAgent(Agent):
         )
         self._turns = 0  # IVR turns taken; the give-up backstop caps this
         self._final_turn_used = False  # spent the one grace turn granted at the cap
+        # Reports the digits of a successful press to the live transcript (evidence of the
+        # action — a tool call is otherwise invisible in the transcript). None in rooms
+        # with no transcript stream enabled.
+        self._on_keypress = on_keypress
         # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
         # A per-provider playbook (when present) specializes the generic navigator prompt.
@@ -200,7 +205,7 @@ class IvrNavigatorAgent(Agent):
             logger.info("press_keypad: called with no digits; nothing sent")
             return "No keypad digits were provided, so nothing was pressed."
         try:
-            await send_dtmf(get_job_context().room.local_participant, digits)
+            sent = await send_dtmf(get_job_context().room.local_participant, digits)
         except InvalidDtmfError:
             # The exception names the offending characters; keep them out of the return
             # (they feed the LLM/traces and can be PHI). A fixed message says enough.
@@ -213,4 +218,12 @@ class IvrNavigatorAgent(Agent):
             logger.exception("press_keypad: DTMF publish failed (%d tone(s))", count)
             return "Could not send the keypad tones over the call; continue without pressing."
         logger.info("press_keypad: sent %d DTMF tone(s)", count)
+        if self._on_keypress is not None:
+            # Best-effort evidence — a transcript-side failure must never fail the press
+            # the model was told succeeded. Exception content stays out of the log (it can
+            # embed the digits); the type alone tells the operator what broke.
+            try:
+                self._on_keypress(sent)
+            except Exception as exc:
+                logger.warning("press_keypad: keypress event failed (%s)", type(exc).__name__)
         return "Sent the keypad tones."

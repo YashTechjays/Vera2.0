@@ -9,21 +9,16 @@ PHI note: these return field **paths** and (for promotion) typed values the call
 persists — never log the values. Validation errors carry paths only.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc
+from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, parse_date_format
 
-# Intake sections the promotion step reads structurally to lift typed columns out
-# of `intake_payload`. Everything else stays stored opaquely in `intake_payload`.
+# Legacy v1 section the required-fields fallback reads structurally.
 _PATIENT_INFO = "patient_information"
-_APPOINTMENT_INFO = "appointment_information"
-_INSURANCE_INFO = "insurance_information"
-# Payer-reference section (carrier name + phone) supplied alongside the form.
-_INSURANCE_REF = "insurance_reference_information"
 
 
 class InvalidIntakeValue(ValueError):
@@ -77,7 +72,7 @@ def required_intake_fields(schema_json: dict[str, Any]) -> list[str]:
     return []
 
 
-def _resolve_path(payload: dict[str, Any], path: str) -> Any:
+def resolve_path(payload: dict[str, Any], path: str) -> Any:
     """Look up a root-anchored `sections.<key>...` path inside an intake payload
     nested by section key (the payload itself has no `sections` root — see
     `iter_leaf_answers`)."""
@@ -97,7 +92,7 @@ def missing_required(payload: dict[str, Any], schema_json: dict[str, Any]) -> li
         return [
             path
             for path in required_intake_fields(schema_json)
-            if _is_empty(_resolve_path(payload, path))
+            if _is_empty(resolve_path(payload, path))
         ]
     values = payload.get(_PATIENT_INFO)
     values = values if isinstance(values, dict) else {}
@@ -126,25 +121,19 @@ def iter_leaf_answers(payload: dict[str, Any]) -> Iterator[tuple[str, Any]]:
 
 @dataclass(frozen=True)
 class PromotedIdentifiers:
-    """The typed columns promoted out of `intake_payload` at intake time — both the
-    searchable identifiers and the worklist display fields."""
+    """The typed `patient_form` columns a schema's `promoted_fields` maps to — both the
+    searchable identifiers and the worklist display fields. Every schema maps every
+    column (PromotedFields is total), but a mapped value can still come back `None`
+    (payload omitted a defaulted leaf; chart_number's "N/A" normalization)."""
 
-    patient_name: str | None
-    patient_dob: date | None
-    appointment_date: date | None
-    chart_number: str | None
-    member_id: str | None  # no schema source at intake — always None here
-    # Worklist display fields (projection-only; lifted so the list query selects
-    # columns instead of parsing `intake_payload` per row).
-    appointment_type: str | None
-    member_policy_id: str | None
-    insurance_provider: str | None
-    insurance_provider_phone_number: str | None
-
-
-def _get(payload: dict[str, Any], section: str, field: str) -> Any:
-    sec = payload.get(section)
-    return sec.get(field) if isinstance(sec, dict) else None
+    patient_name: str | None = None
+    patient_dob: date | None = None
+    appointment_date: date | None = None
+    chart_number: str | None = None
+    appointment_type: str | None = None
+    member_id: str | None = None
+    insurance_provider: str | None = None
+    insurance_provider_phone_number: str | None = None
 
 
 def _clean_str(value: Any) -> str | None:
@@ -154,39 +143,46 @@ def _clean_str(value: Any) -> str | None:
     return text or None
 
 
-def _parse_date(value: Any, field_path: str) -> date | None:
+def _parse_date(value: Any, field_path: str, date_format: str | None = None) -> date | None:
+    """ISO first — intake's caller is a separate machine system that always sends
+    ISO, regardless of the leaf's own `date_format`. Falls back to `date_format`
+    (the leaf's display/entry format, e.g. "M/D/YYYY") for a human-typed value —
+    the review UI prompts for and submits values in exactly that format, never ISO."""
     text = _clean_str(value)
     if text is None:
         return None
     try:
         return date.fromisoformat(text)
-    except ValueError as exc:
-        raise InvalidIntakeValue(field_path, "expected ISO date YYYY-MM-DD") from exc
+    except ValueError:
+        pass
+    if date_format is not None:
+        parsed = parse_date_format(text, date_format)
+        if parsed is not None:
+            return parsed
+    raise InvalidIntakeValue(field_path, "expected an ISO date or the field's configured format")
 
 
-def promote_columns(payload: dict[str, Any]) -> PromotedIdentifiers:
-    """Extract + normalize the searchable identifiers (ADR §5 rule 3 — stable input
-    for a future blind index). `intake_payload` keeps the original raw values; only
-    these promoted copies are normalized. Raises `InvalidIntakeValue` on a bad date."""
-    name = _clean_str(_get(payload, _PATIENT_INFO, "patient_name"))
-    chart = _clean_str(_get(payload, _PATIENT_INFO, "chart_number"))
-    if chart is not None and chart.upper() == "N/A":
-        chart = None
-    return PromotedIdentifiers(
-        patient_name=name.lower() if name is not None else None,
-        patient_dob=_parse_date(
-            _get(payload, _PATIENT_INFO, "patient_dob"), f"{_PATIENT_INFO}.patient_dob"
-        ),
-        appointment_date=_parse_date(
-            _get(payload, _APPOINTMENT_INFO, "appointment_date"),
-            f"{_APPOINTMENT_INFO}.appointment_date",
-        ),
-        chart_number=chart,
-        member_id=None,
-        # Display fields kept verbatim (trim/empty→None only): they're shown as
-        # captured, not matched against, so no case/format normalization.
-        appointment_type=_clean_str(_get(payload, _APPOINTMENT_INFO, "appointment_type")),
-        member_policy_id=_clean_str(_get(payload, _INSURANCE_INFO, "policy_number")),
-        insurance_provider=_clean_str(_get(payload, _INSURANCE_REF, "insurance")),
-        insurance_provider_phone_number=_clean_str(_get(payload, _INSURANCE_REF, "phone_number")),
-    )
+def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
+    """Extract + normalize the `patient_form` columns `doc.promoted_fields` maps to
+    (ADR §5 rule 3 — stable input for a future blind index). `get_value(path)` resolves
+    one root-anchored schema path to its raw value — the caller supplies a nested-payload
+    lookup at intake (`resolve_path`) or a flat `{field_path: value}` lookup at
+    dispute-resolve (`dict.get`); both share the same schema-path namespace. Raises
+    `InvalidIntakeValue` on a bad date."""
+    leaves = dict(doc.leaf_items())
+    values: dict[str, Any] = {}
+    for column, path in doc.promoted_fields.items():
+        raw = get_value(path)
+        if column in ("patient_dob", "appointment_date"):
+            leaf = leaves.get(path)
+            date_format = leaf.validation.date_format if leaf and leaf.validation else None
+            values[column] = _parse_date(raw, path, date_format)
+        elif column == "patient_name":
+            cleaned = _clean_str(raw)
+            values[column] = cleaned.lower() if cleaned is not None else None
+        elif column == "chart_number":
+            cleaned = _clean_str(raw)
+            values[column] = None if cleaned is not None and cleaned.upper() == "N/A" else cleaned
+        else:
+            values[column] = _clean_str(raw)
+    return PromotedIdentifiers(**values)
