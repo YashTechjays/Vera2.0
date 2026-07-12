@@ -22,9 +22,9 @@ export function CallTranscript({
 }: {
   callId: string
   /** Fires for every call_status envelope on the stream ("active", "ended", or a
-   *  terminal CallStatus value on DB replay) — the modal lifts this into its
-   *  call-ended indication. */
-  onCallStatus?: (status: string) => void
+   *  terminal CallStatus value on DB replay) with the event's timestamp — the
+   *  modal lifts this into its call-started timer and call-ended indication. */
+  onCallStatus?: (status: string, ts: number) => void
 }) {
   const [turns, setTurns] = useState<TranscriptTurn[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -44,7 +44,7 @@ export function CallTranscript({
         const turn = asTranscriptTurn(e)
         if (turn) setTurns((prev) => [...prev, turn])
         const status = asCallStatus(e)
-        if (status) onCallStatusRef.current?.(status)
+        if (status) onCallStatusRef.current?.(status, e.ts)
       },
       // A dropped connection was re-established and the server replays the
       // stream from the start — discard the stale turns; the replay replaces

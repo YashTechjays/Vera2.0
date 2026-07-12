@@ -21,7 +21,8 @@ import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
 import { CallTranscript } from "./CallTranscript"
-import { useCallEnded } from "./useCallEnded"
+import { useCallStatus } from "./useCallStatus"
+import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
 type TabKey = "info" | "transcript"
@@ -54,8 +55,17 @@ export function InterveneModal({
 }) {
   const [tab, setTab] = useState<TabKey>("info")
   const [keypadOpen, setKeypadOpen] = useState(false)
-  const { callEnded, terminalStatus, onCallStatus } = useCallEnded(call?.id)
+  const { startedAtMs, callEnded, terminalStatus, onCallStatus } = useCallStatus(call?.id)
   const progress = call?.formProgress ?? 0
+
+  // The SSE feed only runs while the transcript tab is mounted; on the info tab
+  // the polled started_at (refreshed through the modalCall prop) seeds the timer.
+  const { label: duration, running } = useLiveDuration({
+    open,
+    ended: callEnded,
+    sseMs: startedAtMs,
+    startedAt: call?.startedAt,
+  })
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -171,8 +181,13 @@ export function InterveneModal({
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-2 text-sm font-semibold tabular-nums">
-              <span className="size-2 rounded-full bg-emerald-500" />
-              {call?.callTime ?? "00:00"}
+              <span
+                className={cn(
+                  "size-2 rounded-full",
+                  running ? "bg-emerald-500" : "bg-amber-500",
+                )}
+              />
+              {duration}
             </span>
             <button
               type="button"

@@ -22,7 +22,8 @@ import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
 import { CallTranscript } from "./CallTranscript"
-import { useCallEnded } from "./useCallEnded"
+import { useCallStatus } from "./useCallStatus"
+import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
 function confidenceColor(score: number): string {
@@ -62,8 +63,15 @@ export function CallOverviewModal({
 }) {
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
-  const { callEnded, terminalStatus, onCallStatus } = useCallEnded(call?.id)
+  const { startedAtMs, callEnded, terminalStatus, onCallStatus } = useCallStatus(call?.id)
   const progress = call?.formProgress ?? 0
+
+  const { label: duration, running } = useLiveDuration({
+    open,
+    ended: callEnded,
+    sseMs: startedAtMs,
+    startedAt: call?.startedAt,
+  })
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -176,8 +184,13 @@ export function CallOverviewModal({
             {/* Call status / controls bar */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
               <span className="flex items-center gap-2 text-sm font-semibold tabular-nums">
-                <span className="size-2 rounded-full bg-amber-500" />
-                {call?.callTime ?? "00:00"}
+                <span
+                  className={cn(
+                    "size-2 rounded-full",
+                    running ? "bg-emerald-500" : "bg-amber-500",
+                  )}
+                />
+                {duration}
               </span>
               <div className="flex items-center gap-1">
                 <button
