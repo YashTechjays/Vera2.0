@@ -279,7 +279,11 @@ async def stream_call_events(
                 f"db-{row.seq}",
                 CallStreamEvent(
                     type=TYPE_TRANSCRIPT,
-                    data={"role": _transcript_role(row), "text": row.message},
+                    data={
+                        "role": _transcript_role(row),
+                        "source": row.source,
+                        "text": row.message,
+                    },
                     ts=_epoch_ms(row.spoke_at),
                 ),
             )

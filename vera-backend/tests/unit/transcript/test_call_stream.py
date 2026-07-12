@@ -61,12 +61,28 @@ def test_key_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_turn_wraps_transcript_envelope() -> None:
+async def test_publish_turn_wraps_transcript_envelope_with_source() -> None:
     store = _MemStore()
     svc = CallStreamService(store)
     await svc.publish_turn("r", "agent", "hello", ts=42)
     assert store.events == [
-        CallStreamEvent(type="transcript", data={"role": "agent", "text": "hello"}, ts=42)
+        CallStreamEvent(
+            type="transcript", data={"role": "agent", "source": "bot", "text": "hello"}, ts=42
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_turn_keeps_an_explicit_source() -> None:
+    # A DTMF keypress is a bot action with a non-speech role — the producer stamps the
+    # actor (source) explicitly; the role only says what kind of event it was.
+    store = _MemStore()
+    svc = CallStreamService(store)
+    await svc.publish_turn("r", "dtmf", "3", ts=42, source="bot")
+    assert store.events == [
+        CallStreamEvent(
+            type="transcript", data={"role": "dtmf", "source": "bot", "text": "3"}, ts=42
+        )
     ]
 
 
@@ -124,7 +140,11 @@ async def test_service_read_all_delegates_to_store() -> None:
     svc = CallStreamService(store)
     await svc.publish_turn("r", "user", "hi", ts=1)
     got = await svc.read_all("r")
-    assert got == [CallStreamEvent(type="transcript", data={"role": "user", "text": "hi"}, ts=1)]
+    assert got == [
+        CallStreamEvent(
+            type="transcript", data={"role": "user", "source": "rep", "text": "hi"}, ts=1
+        )
+    ]
 
 
 def _entry(fields: dict[str, str]) -> tuple[str, dict[str, str]]:

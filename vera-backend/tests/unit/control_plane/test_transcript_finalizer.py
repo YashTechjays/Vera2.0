@@ -80,6 +80,51 @@ def test_build_rows_skips_unknown_role_with_a_counted_skip() -> None:
     assert rows[0]["seq"] == 0  # the skipped row never occupies a seq slot either
 
 
+def test_build_rows_prefers_the_envelope_stamped_source() -> None:
+    """The worker stamps the acting source at the producer; the finalizer persists it
+    verbatim — a DTMF keypress is a bot action whose role ("dtmf") is not a speech role."""
+    ref = _ref()
+    events = [
+        CallStreamEvent(
+            type="transcript", data={"role": "dtmf", "source": "bot", "text": "3"}, ts=1000
+        ),
+    ]
+    rows, skipped = _build_rows(ref, events)
+    assert skipped == 0
+    assert rows[0]["source"] == TranscriptSource.BOT.value
+    assert rows[0]["role"] == "dtmf"
+    assert rows[0]["message"] == "3"
+
+
+def test_build_rows_falls_back_to_the_role_map_without_a_source() -> None:
+    # A legacy envelope (published before `source`) carrying the dtmf role still maps to
+    # the bot — the role map is the mid-deploy fallback.
+    ref = _ref()
+    events = [CallStreamEvent(type="transcript", data={"role": "dtmf", "text": "3"}, ts=1)]
+    rows, skipped = _build_rows(ref, events)
+    assert skipped == 0
+    assert rows[0]["source"] == TranscriptSource.BOT.value
+
+
+def test_build_rows_ignores_an_invalid_envelope_source() -> None:
+    # A source outside the TranscriptSource enum can only be corruption; it must not
+    # reach the CHECK-constrained column. The role map decides instead (or the row is
+    # skipped when the role is unusable too).
+    ref = _ref()
+    events = [
+        CallStreamEvent(
+            type="transcript", data={"role": "user", "source": "martian", "text": "hi"}, ts=1
+        ),
+        CallStreamEvent(
+            type="transcript", data={"role": "alien", "source": "martian", "text": "??"}, ts=2
+        ),
+    ]
+    rows, skipped = _build_rows(ref, events)
+    assert skipped == 1
+    assert len(rows) == 1
+    assert rows[0]["source"] == TranscriptSource.REP.value
+
+
 def test_build_rows_on_empty_events_returns_nothing() -> None:
     assert _build_rows(_ref(), []) == ([], 0)
 

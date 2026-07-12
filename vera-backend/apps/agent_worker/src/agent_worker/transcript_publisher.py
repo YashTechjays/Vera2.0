@@ -41,9 +41,17 @@ import asyncio
 import logging
 import time
 from collections.abc import Sequence
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
-from vera_core.transcript import ROLE_AGENT, ROLE_USER
+from vera_core.transcript import (
+    ROLE_AGENT,
+    ROLE_DTMF,
+    ROLE_USER,
+    SOURCE_BOT,
+    SOURCE_REP,
+    TurnRole,
+    TurnSource,
+)
 
 logger = logging.getLogger("agent_worker")
 
@@ -53,7 +61,13 @@ class TurnPublisher(Protocol):
     voice-lab stream; CallStreamService for the real-call envelope stream)."""
 
     async def publish_turn(
-        self, room_name: str, role: Literal["user", "agent"], text: str, *, ts: int
+        self,
+        room_name: str,
+        role: TurnRole,
+        text: str,
+        *,
+        ts: int,
+        source: TurnSource | None = None,
     ) -> None: ...
 
 
@@ -67,11 +81,17 @@ class FanOutTurnPublisher:
         self._sinks = sinks
 
     async def publish_turn(
-        self, room_name: str, role: Literal["user", "agent"], text: str, *, ts: int
+        self,
+        room_name: str,
+        role: TurnRole,
+        text: str,
+        *,
+        ts: int,
+        source: TurnSource | None = None,
     ) -> None:
         for sink in self._sinks:
             try:
-                await sink.publish_turn(room_name, role, text, ts=ts)
+                await sink.publish_turn(room_name, role, text, ts=ts, source=source)
             except Exception as exc:  # best-effort; one sink's failure must not break the rest
                 # Exception content is unsafe here — redis pipeline errors embed the failed
                 # command incl. the turn text (PHI), so log only the exception type.
@@ -87,8 +107,9 @@ class FanOutTurnPublisher:
 # commits), flush it after this long so the live transcript never stalls.
 _HOLD_TIMEOUT_S = 2.0
 
-type _Role = Literal["user", "agent"]
-type _Turn = tuple[float, _Role, str]  # (created_at seconds, role, text)
+# (created_at seconds, role, source, text) — source is stamped at ingress, where the
+# actor is known, so downstream sinks never derive it from the role.
+type _Turn = tuple[float, TurnRole, TurnSource, str]
 
 
 def _ts_s(created_at: Any) -> float:
@@ -137,13 +158,16 @@ class ReorderingEmitter:
             return
         # created_at marks when the caller's final transcript was produced.
         ts = _ts_s(getattr(ev, "created_at", None))
-        if self._pending > 0:
-            logger.debug(
-                "transcript: holding caller turn behind %d pending agent turn(s)", self._pending
-            )
-            self._hold((ts, ROLE_USER, text))
-        else:
-            self._emit(ts, ROLE_USER, text)
+        self._hold_or_emit((ts, ROLE_USER, SOURCE_REP, text))
+
+    def on_keypress(self, digits: str) -> None:
+        """Record a successful DTMF keypress as a bot-attributed `dtmf` turn, so the
+        transcript carries evidence of the action (`press_keypad` is otherwise invisible —
+        tool-call items are skipped in on_agent_item). Rides the same hold/emit ordering
+        as caller turns: the agent may speak and press in one turn, and its spoken item
+        commits late. The digits are the turn text (same PHI surface as speech) — they are
+        still never logged."""
+        self._hold_or_emit((time.time(), ROLE_DTMF, SOURCE_BOT, digits))
 
     def on_agent_item(self, ev: Any) -> None:
         item = ev.item
@@ -155,7 +179,7 @@ class ReorderingEmitter:
         # This agent turn committed; emit it, then release the caller turns it was blocking
         # (once nothing else is pending, so all earlier agent turns are out first).
         self._pending = max(0, self._pending - 1)
-        self._emit(_ts_s(getattr(item, "created_at", None)), ROLE_AGENT, text)
+        self._emit((_ts_s(getattr(item, "created_at", None)), ROLE_AGENT, SOURCE_BOT, text))
         if self._pending == 0:
             self._release_all()
 
@@ -169,11 +193,25 @@ class ReorderingEmitter:
 
     # --- ordering core ---
 
-    def _emit(self, ts: float, role: _Role, text: str) -> None:
+    def _hold_or_emit(self, turn: _Turn) -> None:
+        """Emit a non-agent-item turn now, or hold it while an agent turn is pending (its
+        item commits late and must publish first)."""
+        if self._pending > 0:
+            logger.debug(
+                "transcript: holding %s turn behind %d pending agent turn(s)",
+                turn[1],
+                self._pending,
+            )
+            self._hold(turn)
+        else:
+            self._emit(turn)
+
+    def _emit(self, turn: _Turn) -> None:
+        ts, role, source, text = turn
         ts = max(ts, self._last_ts)  # never publish out of order, even on small clock skew
         self._last_ts = ts
         logger.debug("transcript: emit %s turn ts=%.3f", role, ts)  # role/ts only, never text
-        self._queue.put_nowait((ts, role, text))
+        self._queue.put_nowait((ts, role, source, text))
 
     def _hold(self, turn: _Turn) -> None:
         self._buffer.append(turn)
@@ -181,10 +219,10 @@ class ReorderingEmitter:
         self._arm_timeout()
 
     def _release_all(self) -> None:
-        """Emit every held caller turn, in ts order (they all follow the agent turn that was
+        """Emit every held turn, in ts order (they all follow the agent turn that was
         just emitted)."""
-        for ts, role, text in self._buffer:
-            self._emit(ts, role, text)
+        for turn in self._buffer:
+            self._emit(turn)
         self._buffer.clear()
         self._arm_timeout()
 
@@ -212,9 +250,11 @@ class ReorderingEmitter:
             turn = await self._queue.get()
             if turn is None:
                 return
-            ts, role, text = turn
+            ts, role, source, text = turn
             try:
-                await self._service.publish_turn(self._room, role, text, ts=int(ts * 1000))
+                await self._service.publish_turn(
+                    self._room, role, text, ts=int(ts * 1000), source=source
+                )
             except Exception as exc:  # best-effort; a Redis failure must not break the call
                 # Exception content is unsafe here — redis pipeline errors embed the failed
                 # command incl. the turn text (PHI), so log only the exception type.

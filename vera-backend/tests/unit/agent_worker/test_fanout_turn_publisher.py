@@ -17,21 +17,27 @@ class _AnnotatedBoomSink:
     """Raises the way a redis pipeline failure does: exception args contain the failed
     command, including the turn text."""
 
-    async def publish_turn(self, room_name: str, role: str, text: str, *, ts: int) -> None:
+    async def publish_turn(
+        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+    ) -> None:
         raise RuntimeError(f"Command # 1 (XADD stream '*' text {text!r}) of pipeline: OOM")
 
 
 class _RecordingSink:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.calls: list[tuple[str, str, str, int]] = []
+        self.calls: list[tuple[str, str, str, int, str | None]] = []
 
-    async def publish_turn(self, room_name: str, role: str, text: str, *, ts: int) -> None:
-        self.calls.append((room_name, role, text, ts))
+    async def publish_turn(
+        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+    ) -> None:
+        self.calls.append((room_name, role, text, ts, source))
 
 
 class _BoomSink:
-    async def publish_turn(self, room_name: str, role: str, text: str, *, ts: int) -> None:
+    async def publish_turn(
+        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+    ) -> None:
         raise RuntimeError("sink down")
 
 
@@ -43,7 +49,9 @@ async def test_publishes_to_all_sinks_in_registration_order() -> None:
         def __init__(self, name: str) -> None:
             self._name = name
 
-        async def publish_turn(self, room_name: str, role: str, text: str, *, ts: int) -> None:
+        async def publish_turn(
+            self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        ) -> None:
             order.append(self._name)
 
     fan = FanOutTurnPublisher([_OrderSink("a"), _OrderSink("b"), _OrderSink("c")])
@@ -52,12 +60,12 @@ async def test_publishes_to_all_sinks_in_registration_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_sinks_receive_the_same_turn() -> None:
+async def test_all_sinks_receive_the_same_turn_including_source() -> None:
     a, b = _RecordingSink("a"), _RecordingSink("b")
     fan = FanOutTurnPublisher([a, b])
-    await fan.publish_turn("room", "agent", "hi there", ts=42)
-    assert a.calls == [("room", "agent", "hi there", 42)]
-    assert b.calls == [("room", "agent", "hi there", 42)]
+    await fan.publish_turn("room", "agent", "hi there", ts=42, source="bot")
+    assert a.calls == [("room", "agent", "hi there", 42, "bot")]
+    assert b.calls == [("room", "agent", "hi there", 42, "bot")]
 
 
 @pytest.mark.asyncio
@@ -65,7 +73,7 @@ async def test_a_raising_sink_does_not_block_later_sinks_or_raise() -> None:
     after = _RecordingSink("after")
     fan = FanOutTurnPublisher([_BoomSink(), after])
     await fan.publish_turn("room", "user", "hello", ts=1)  # must not raise
-    assert after.calls == [("room", "user", "hello", 1)]
+    assert after.calls == [("room", "user", "hello", 1, None)]
 
 
 @pytest.mark.asyncio

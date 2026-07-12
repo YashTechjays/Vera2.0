@@ -12,11 +12,13 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from redis.exceptions import TimeoutError as RedisTimeoutError
+
+from vera_core.transcript import TurnRole, TurnSource, source_for_role
 
 logger = logging.getLogger(__name__)
 
@@ -169,11 +171,23 @@ class CallStreamService:
         self._store = store
 
     async def publish_turn(
-        self, room_name: str, role: Literal["user", "agent"], text: str, *, ts: int
+        self,
+        room_name: str,
+        role: TurnRole,
+        text: str,
+        *,
+        ts: int,
+        source: TurnSource | None = None,
     ) -> None:
+        """Publish one finalized turn. `source` (the acting side — drives UI attribution)
+        defaults from the role; producers pass it explicitly when they know better."""
         await self._store.publish(
             room_name,
-            CallStreamEvent(type=TYPE_TRANSCRIPT, data={"role": role, "text": text}, ts=ts),
+            CallStreamEvent(
+                type=TYPE_TRANSCRIPT,
+                data={"role": role, "source": source or source_for_role(role), "text": text},
+                ts=ts,
+            ),
         )
 
     async def publish_status(self, room_name: str, status: str, *, ts: int) -> None:

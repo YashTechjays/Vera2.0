@@ -10,14 +10,39 @@ wall) — never hydrated raw PHI (see repo CLAUDE.md).
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from redis.asyncio import Redis
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
+# Turn vocabulary, shared by every live stream (voice-lab transcript + real-call events).
+# `role` says WHAT the turn is (speech vs. a keypad press vs. future event kinds) and is
+# meant to grow; `source` says WHO acted (the constrained actor set mirroring the
+# transcript table's `source` column) and drives attribution — e.g. which side of the
+# UI a turn renders on.
 ROLE_USER: Literal["user"] = "user"
 ROLE_AGENT: Literal["agent"] = "agent"
+ROLE_DTMF: Literal["dtmf"] = "dtmf"  # a keypad press (DTMF), text = the digits sent
+
+SOURCE_REP: Literal["rep"] = "rep"  # the human on the line (payer rep / IVR side)
+SOURCE_BOT: Literal["bot"] = "bot"  # Vera — speech or an action it took
+
+type TurnRole = Literal["user", "agent", "dtmf"]
+type TurnSource = Literal["rep", "bot"]
+
+_SOURCE_BY_ROLE: dict[str, TurnSource] = {
+    ROLE_USER: SOURCE_REP,
+    ROLE_AGENT: SOURCE_BOT,
+    ROLE_DTMF: SOURCE_BOT,
+}
+
+
+def source_for_role(role: TurnRole) -> TurnSource:
+    """The acting source implied by a role — the producer-side stamp for today's roles,
+    and the consumer-side fallback for legacy stream entries published before `source`."""
+    return _SOURCE_BY_ROLE[role]
+
 
 _KEY_PREFIX = "vera:transcript:"
 _ENDED_FIELD = "event"
@@ -32,9 +57,33 @@ def transcript_stream_key(room_name: str) -> str:
 class TranscriptEvent(BaseModel):
     """One finalized turn. `text` is always tokenized / de-identified."""
 
-    role: Literal["user", "agent"]
+    role: TurnRole
+    source: TurnSource
     text: str
     ts: int  # epoch milliseconds
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_source(cls, data: Any) -> Any:
+        # Legacy stream entries (published before `source` existed) carry only a role;
+        # derive the actor so no consumer ever sees a source-less turn mid-deploy.
+        if isinstance(data, dict) and data.get("source") is None:
+            role = data.get("role")
+            if isinstance(role, str) and role in _SOURCE_BY_ROLE:
+                return {**data, "source": _SOURCE_BY_ROLE[role]}
+        return data
+
+
+def _event_from_fields(fields: dict[str, str]) -> TranscriptEvent:
+    # `source` may be absent on legacy entries; the model validator derives it from role.
+    return TranscriptEvent.model_validate(
+        {
+            "role": fields["role"],
+            "source": fields.get("source"),
+            "text": fields["text"],
+            "ts": int(fields["ts"]),
+        }
+    )
 
 
 class TranscriptStore(Protocol):
@@ -63,7 +112,7 @@ class InMemoryTranscriptStore:
     async def publish(self, room_name: str, event: TranscriptEvent) -> None:
         await self._append(
             transcript_stream_key(room_name),
-            {"role": event.role, "text": event.text, "ts": str(event.ts)},
+            {"role": event.role, "source": event.source, "text": event.text, "ts": str(event.ts)},
         )
 
     async def mark_ended(self, room_name: str) -> None:
@@ -87,14 +136,7 @@ class InMemoryTranscriptStore:
                 idx += 1
             if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
                 return
-            yield (
-                entry_id,
-                TranscriptEvent(
-                    role=fields["role"],
-                    text=fields["text"],
-                    ts=int(fields["ts"]),
-                ),
-            )
+            yield entry_id, _event_from_fields(fields)
 
 
 class RedisTranscriptStore:
@@ -122,7 +164,10 @@ class RedisTranscriptStore:
         # XADD + the rolling backstop EXPIRE in a single round-trip.
         key = transcript_stream_key(room_name)
         pipe = self._redis.pipeline(transaction=False)
-        pipe.xadd(key, {"role": event.role, "text": event.text, "ts": str(event.ts)})
+        pipe.xadd(
+            key,
+            {"role": event.role, "source": event.source, "text": event.text, "ts": str(event.ts)},
+        )
         pipe.expire(key, self._ttl_seconds)
         await pipe.execute()
 
@@ -166,14 +211,7 @@ class RedisTranscriptStore:
                 last_id = entry_id
                 if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
                     return
-                yield (
-                    entry_id,
-                    TranscriptEvent(
-                        role=fields["role"],
-                        text=fields["text"],
-                        ts=int(fields["ts"]),
-                    ),
-                )
+                yield entry_id, _event_from_fields(fields)
 
 
 class TranscriptService:
@@ -187,12 +225,18 @@ class TranscriptService:
     async def publish_turn(
         self,
         room_name: str,
-        role: Literal["user", "agent"],
+        role: TurnRole,
         text: str,
         *,
         ts: int,
+        source: TurnSource | None = None,
     ) -> None:
-        await self._store.publish(room_name, TranscriptEvent(role=role, text=text, ts=ts))
+        """Publish one finalized turn. `source` (the acting side) defaults from the role
+        for today's vocabularies; producers pass it explicitly when they know better."""
+        await self._store.publish(
+            room_name,
+            TranscriptEvent(role=role, source=source or source_for_role(role), text=text, ts=ts),
+        )
 
     def consume(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent]]:
         """Replay from the start, then tail until the stream ends. The single shared

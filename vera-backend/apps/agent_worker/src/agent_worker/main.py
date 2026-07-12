@@ -478,6 +478,9 @@ async def entrypoint(ctx: JobContext) -> None:
             session_id=session_id,
             instructions=instructions,
             greeting=greeting,
+            # A successful IVR keypad press rides the live transcript as a dtmf turn
+            # (evidence of the action); rooms with no stream enabled report nowhere.
+            on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
         ),
         room=ctx.room,
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),

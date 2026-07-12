@@ -9,14 +9,40 @@ import { ApiError, BASE_URL } from "@/lib/api/client"
 import { getToken } from "@/lib/auth/storage"
 
 export type CallStreamEvent = { type: string; data: Record<string, unknown>; ts: number }
-export type TranscriptTurn = { role: "user" | "agent"; text: string; ts: number }
+
+/** Who acted (the constrained actor set — drives which side a turn renders on). */
+export type TranscriptTurnSource = "rep" | "bot"
+/** What kind of turn it was ("dtmf" = a keypad press whose text is the digits sent). */
+export type TranscriptTurnRole = "user" | "agent" | "dtmf"
+export type TranscriptTurn = {
+  role: TranscriptTurnRole
+  source: TranscriptTurnSource
+  text: string
+  ts: number
+}
+
+// Fallback for envelopes published before `source` existed (or with a corrupted one).
+const SOURCE_BY_ROLE: Record<TranscriptTurnRole, TranscriptTurnSource> = {
+  user: "rep",
+  agent: "bot",
+  dtmf: "bot",
+}
+
+function isTurnRole(role: unknown): role is TranscriptTurnRole {
+  return role === "user" || role === "agent" || role === "dtmf"
+}
 
 /** Narrow an envelope to a transcript turn; null for other/malformed event types. */
 export function asTranscriptTurn(e: CallStreamEvent): TranscriptTurn | null {
   if (e.type !== "transcript") return null
-  const { role, text } = e.data as { role?: unknown; text?: unknown }
-  if ((role !== "user" && role !== "agent") || typeof text !== "string") return null
-  return { role, text, ts: e.ts }
+  const { role, source, text } = e.data as { role?: unknown; source?: unknown; text?: unknown }
+  if (!isTurnRole(role) || typeof text !== "string") return null
+  return {
+    role,
+    source: source === "rep" || source === "bot" ? source : SOURCE_BY_ROLE[role],
+    text,
+    ts: e.ts,
+  }
 }
 
 /** Narrow an envelope to a call-status value; null for other/malformed event types. */

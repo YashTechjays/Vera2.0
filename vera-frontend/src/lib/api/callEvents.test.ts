@@ -16,13 +16,41 @@ import {
 import { ApiError } from "@/lib/api/errors"
 
 describe("asTranscriptTurn", () => {
-  it("maps a transcript envelope to a turn", () => {
+  it("maps a transcript envelope to a turn, keeping the acting source", () => {
     const e: CallStreamEvent = {
       type: "transcript",
-      data: { role: "agent", text: "hello" },
+      data: { role: "agent", source: "bot", text: "hello" },
       ts: 42,
     }
-    expect(asTranscriptTurn(e)).toEqual({ role: "agent", text: "hello", ts: 42 })
+    expect(asTranscriptTurn(e)).toEqual({ role: "agent", source: "bot", text: "hello", ts: 42 })
+  })
+
+  it("maps a dtmf keypress envelope (bot action, non-speech role)", () => {
+    const e: CallStreamEvent = {
+      type: "transcript",
+      data: { role: "dtmf", source: "bot", text: "3" },
+      ts: 7,
+    }
+    expect(asTranscriptTurn(e)).toEqual({ role: "dtmf", source: "bot", text: "3", ts: 7 })
+  })
+
+  it("derives the source for a legacy envelope published before source existed", () => {
+    expect(
+      asTranscriptTurn({ type: "transcript", data: { role: "user", text: "hi" }, ts: 1 }),
+    ).toEqual({ role: "user", source: "rep", text: "hi", ts: 1 })
+    expect(
+      asTranscriptTurn({ type: "transcript", data: { role: "agent", text: "yo" }, ts: 2 }),
+    ).toEqual({ role: "agent", source: "bot", text: "yo", ts: 2 })
+  })
+
+  it("falls back to the role-derived source when the stamped source is unknown", () => {
+    expect(
+      asTranscriptTurn({
+        type: "transcript",
+        data: { role: "user", source: "martian", text: "hi" },
+        ts: 1,
+      }),
+    ).toEqual({ role: "user", source: "rep", text: "hi", ts: 1 })
   })
 
   it("ignores non-transcript envelopes", () => {

@@ -630,7 +630,7 @@ async def test_call_events_streams_envelope_frames_for_owner(
     assert data_line.startswith("data: ")
     envelope = json.loads(data_line.removeprefix("data: "))
     assert envelope["type"] == "transcript"
-    assert envelope["data"] == {"role": "agent", "text": "hello"}
+    assert envelope["data"] == {"role": "agent", "source": "bot", "text": "hello"}
     assert isinstance(envelope["ts"], int)
 
     # The disclosure is audited with decision=allow.
@@ -732,6 +732,15 @@ async def test_call_events_terminal_call_no_stream_serves_db_transcript_then_clo
                     message="I need a claim status.",
                     spoke_at=None,
                 ),
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=call_id,
+                    seq=2,
+                    source="bot",
+                    role="dtmf",  # a keypad press: bot-attributed, non-speech role
+                    message="3",
+                    spoke_at=None,
+                ),
             ]
         )
 
@@ -742,14 +751,14 @@ async def test_call_events_terminal_call_no_stream_serves_db_transcript_then_clo
     assert resp.headers["content-type"].startswith("text/event-stream")
 
     frames = [f for f in resp.text.split("\n\n") if f]
-    assert len(frames) == 3, resp.text
+    assert len(frames) == 4, resp.text
 
     id0, data0 = frames[0].split("\n")
     assert id0 == "id: db-0"
     envelope0 = json.loads(data0.removeprefix("data: "))
     assert envelope0 == {
         "type": "transcript",
-        "data": {"role": "agent", "text": "Hello, how can I help?"},
+        "data": {"role": "agent", "source": "bot", "text": "Hello, how can I help?"},
         "ts": 0,
     }
 
@@ -758,14 +767,23 @@ async def test_call_events_terminal_call_no_stream_serves_db_transcript_then_clo
     envelope1 = json.loads(data1.removeprefix("data: "))
     assert envelope1 == {
         "type": "transcript",
-        "data": {"role": "user", "text": "I need a claim status."},
+        "data": {"role": "user", "source": "rep", "text": "I need a claim status."},
         "ts": 0,
     }
 
-    _id2, data2 = frames[2].split("\n")
+    id2, data2 = frames[2].split("\n")
+    assert id2 == "id: db-2"
     envelope2 = json.loads(data2.removeprefix("data: "))
-    assert envelope2["type"] == "call_status"
-    assert envelope2["data"] == {"status": CallStatus.COMPLETED.value}
+    assert envelope2 == {
+        "type": "transcript",
+        "data": {"role": "dtmf", "source": "bot", "text": "3"},
+        "ts": 0,
+    }
+
+    _id3, data3 = frames[3].split("\n")
+    envelope3 = json.loads(data3.removeprefix("data: "))
+    assert envelope3["type"] == "call_status"
+    assert envelope3["data"] == {"status": CallStatus.COMPLETED.value}
 
 
 @pytest.mark.asyncio

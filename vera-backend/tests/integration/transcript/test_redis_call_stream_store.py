@@ -31,7 +31,7 @@ async def test_publish_replay_and_end(svc: tuple[CallStreamService, Redis]) -> N
     await service.end("itroom")
     got = [event async for _id, event in service.consume("itroom")]
     assert [(e.type, e.data) for e in got] == [
-        ("transcript", {"role": "user", "text": "hi"}),
+        ("transcript", {"role": "user", "source": "rep", "text": "hi"}),
         ("call_status", {"status": "active"}),
     ]
 

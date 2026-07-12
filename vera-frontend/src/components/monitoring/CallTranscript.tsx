@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { MessageSquare } from "lucide-react"
+import { Hash, MessageSquare } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
@@ -74,26 +74,36 @@ export function CallTranscript({
   }
   return (
     <div className="flex-1 space-y-2 overflow-y-auto p-4">
-      {turns.map((t, i) => (
-        <div
-          key={`${t.ts}-${i}`}
-          className={cn("flex", t.role === "agent" ? "justify-start" : "justify-end")}
-        >
-          <div
-            className={cn(
-              "max-w-[85%] rounded-lg px-3 py-2 text-sm",
-              t.role === "agent"
-                ? "bg-muted text-foreground"
-                : "bg-primary/10 text-foreground",
+      {turns.map((t, i) => {
+        // `source` (the actor) decides the side and label; `role` decides the shape —
+        // speech renders as a bubble, a keypad press as an action chip.
+        const isBot = t.source === "bot"
+        const label = isBot ? "Vera" : "Rep"
+        return (
+          <div key={`${t.ts}-${i}`} className={cn("flex", isBot ? "justify-start" : "justify-end")}>
+            {t.role === "dtmf" ? (
+              <div className="flex items-center gap-1.5 rounded-full border border-dashed border-muted-foreground/40 px-3 py-1 text-xs text-muted-foreground">
+                <Hash className="size-3" aria-hidden />
+                <span>
+                  {label} pressed {t.text} on the keypad
+                </span>
+              </div>
+            ) : (
+              <div
+                className={cn(
+                  "max-w-[85%] rounded-lg px-3 py-2 text-sm",
+                  isBot ? "bg-muted text-foreground" : "bg-primary/10 text-foreground",
+                )}
+              >
+                <span className="mb-0.5 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {label}
+                </span>
+                {t.text}
+              </div>
             )}
-          >
-            <span className="mb-0.5 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              {t.role === "agent" ? "Vera" : "Rep"}
-            </span>
-            {t.text}
           </div>
-        </div>
-      ))}
+        )
+      })}
       <div ref={bottomRef} />
     </div>
   )

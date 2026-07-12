@@ -243,6 +243,56 @@ async def test_press_keypad_rejects_invalid_keys_without_echoing_them() -> None:
         assert ch not in result
 
 
+@pytest.mark.asyncio
+async def test_press_keypad_reports_a_successful_press_to_on_keypress() -> None:
+    # The transcript needs evidence of the action: a successful press reports the digits
+    # actually sent (normalized) to the injected callback, which feeds the live transcript.
+    pressed: list[str] = []
+    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    participant = _FakeParticipant()
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        await _press(agent, " 3 ")
+    assert pressed == ["3"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("digits", ["", "   ", "17x4"])
+async def test_press_keypad_does_not_report_a_press_that_sent_nothing(digits: str) -> None:
+    # Empty and invalid sequences emit no tones — nothing to evidence in the transcript.
+    pressed: list[str] = []
+    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    participant = _FakeParticipant()
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        await _press(agent, digits)
+    assert pressed == []
+
+
+@pytest.mark.asyncio
+async def test_press_keypad_does_not_report_a_failed_press() -> None:
+    # A transport failure means no tones reached the line — reporting it would fabricate
+    # evidence of an action that never happened.
+    pressed: list[str] = []
+    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    participant = _FakeParticipant(raise_on_publish=True)
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        await _press(agent, "3")
+    assert pressed == []
+
+
+def test_build_agent_passes_on_keypress_to_the_navigator() -> None:
+    def _cb(digits: str) -> None:  # pragma: no cover - never fired here
+        pass
+
+    agent = build_agent(
+        {"enable_ivr_navigation": True},
+        boundary=PassthroughPHIBoundary(),
+        session_id="s1",
+        on_keypress=_cb,
+    )
+    assert isinstance(agent, IvrNavigatorAgent)
+    assert agent._on_keypress is _cb
+
+
 async def _astream(*chunks: str) -> AsyncIterator[str]:
     for chunk in chunks:
         yield chunk
