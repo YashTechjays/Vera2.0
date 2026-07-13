@@ -70,5 +70,7 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
             "phi:detokenize",
         }
     ),
-    "VIRTUAL_ASSISTANT": frozenset({"voice_lab:sandbox"}),
+    "VIRTUAL_ASSISTANT": frozenset(
+        {"voice_lab:sandbox", "calls:read", "calls:publish", "forms:read", "forms:write"}
+    ),
 }

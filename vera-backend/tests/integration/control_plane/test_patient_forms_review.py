@@ -267,6 +267,16 @@ async def test_list_requires_forms_read(client: httpx.AsyncClient, rbac_world: R
     assert resp.status_code == 403, resp.text
 
 
+async def test_virtual_assistant_can_list_patient_forms(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """VA now holds forms:read/forms:write (Data Management page access)."""
+    resp = await client.get(
+        "/api/v1/patient-forms", headers=_auth(rbac_world.virtual_assistant_token)
+    )
+    assert resp.status_code == 200, resp.text
+
+
 # ---- schema version lookup ----------------------------------------------------
 
 
