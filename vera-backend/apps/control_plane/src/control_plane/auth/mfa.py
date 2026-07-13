@@ -18,6 +18,7 @@ recovery code on use.
 """
 
 import secrets
+import time
 
 import pyotp
 from sqlalchemy import text
@@ -31,6 +32,11 @@ from vera_core.models import UserIdentity
 _RECOVERY_CODE_COUNT = 10
 _ISSUER = "Vera"
 _UNDEFINED_FUNCTION = "42883"  # Postgres SQLSTATE for a missing function
+
+
+def _current_timestep() -> int:
+    """Current TOTP timestep (30-second window). Extracted for test patching."""
+    return int(time.time() // 30)
 
 
 def _provisioning_uri(totp_secret: str, account_email: str) -> str:
@@ -116,11 +122,25 @@ async def activate_platform(
 
 
 async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str) -> bool:
-    """Gate an MFA login: accept a current TOTP code, or consume a one-time recovery code."""
+    """Gate an MFA login: accept a current TOTP code (with ±1 window drift
+    tolerance), or consume a one-time recovery code. Each TOTP code is single-use
+    within its drift window — a replayed code in the same timestep is rejected."""
     totp_secret = await _decrypt_seed(kms, identity)
     if totp_secret is None:
         return False
-    if pyotp.TOTP(totp_secret).verify(code, valid_window=1):
+    totp = pyotp.TOTP(totp_secret)
+    # Find which of the three ±1-window timesteps (current, prev, next) matches the
+    # submitted code, so we can enforce single-use per timestep.
+    now_step = _current_timestep()
+    matched_step: int | None = next(
+        (now_step + o for o in (0, -1, 1) if totp.at(for_time=(now_step + o) * 30) == code),
+        None,
+    )
+    if matched_step is not None:
+        last = identity.totp_last_used_timestep
+        if last is not None and matched_step <= last:
+            return False  # replay within the drift window
+        identity.totp_last_used_timestep = matched_step
         return True
     hashes: list[str] = identity.recovery_code_hashes or []
     for i, hashed in enumerate(hashes):
