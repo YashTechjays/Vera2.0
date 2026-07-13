@@ -15,6 +15,7 @@ Every PHI response audits field **names** only (never values).
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -22,6 +23,7 @@ from uuid import UUID
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
@@ -114,6 +116,97 @@ def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> Prom
         ) from exc
 
 
+@dataclass(frozen=True)
+class CreatedPatientForm:
+    """What both create paths (API-key intake, in-app create) hand back to their
+    endpoint: the non-PHI ack payload plus the audit detail (section keys and
+    answer count — names/counts only, never values)."""
+
+    response: PatientFormResponse
+    sections: list[str]
+    answer_count: int
+
+
+async def _create_patient_form(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    version: SchemaVersion,
+    form_schema: FormSchema,
+    intake_payload: dict[str, Any],
+) -> CreatedPatientForm:
+    """Validate + persist one new patient form: `missing_required` against the
+    schema's `system_fields` (422 with paths), promote the typed worklist columns
+    (422 on bad values), insert the `PatientForm` (status ready_for_processing)
+    and one INTAKE-source `field_answer` per provided leaf. Shared verbatim by the
+    API-key intake endpoint and the session-user create endpoint."""
+    missing = missing_required(intake_payload, version.schema_json)
+    if missing:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="missing required fields",
+            data={"fields": missing},
+        )
+    doc = _v2_doc(version.schema_json)
+    promoted = PromotedIdentifiers()
+    if doc is not None:
+        promoted = _promote_or_422(lambda p: resolve_path(intake_payload, p), doc)
+
+    form = PatientForm(
+        tenant_id=tenant_id,
+        schema_version_id=version.id,
+        status=FormStatus.READY_FOR_PROCESSING.value,
+        intake_payload=intake_payload,
+        patient_name=promoted.patient_name,
+        patient_dob=promoted.patient_dob,
+        appointment_date=promoted.appointment_date,
+        chart_number=promoted.chart_number,
+        appointment_type=promoted.appointment_type,
+        member_id=promoted.member_id,
+        insurance_provider=promoted.insurance_provider,
+        insurance_provider_phone_number=promoted.insurance_provider_phone_number,
+        completion_pct=0,
+        retry_count=0,
+    )
+    session.add(form)
+    await session.flush()
+
+    # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
+    # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
+    # payload (nested by section_key) is flattened under a `sections` root.
+    payload_root = {"sections": intake_payload} if doc is not None else intake_payload
+    answers = list(iter_leaf_answers(payload_root))
+    session.add_all(
+        FieldAnswer(
+            tenant_id=tenant_id,
+            form_id=form.id,
+            call_id=None,
+            field_path=path,
+            value={"value": raw},
+            source=AnswerSource.INTAKE.value,
+            confidence=None,
+            evidence_seq=None,
+            evidence=None,
+            is_current=True,
+        )
+        for path, raw in answers
+    )
+
+    await session.refresh(form)  # populate server-defaulted created_at
+    return CreatedPatientForm(
+        response=PatientFormResponse(
+            id=form.id,
+            status=form.status,
+            insurance_type=form_schema.insurance_type,
+            schema_version_id=form.schema_version_id,
+            completion_pct=float(form.completion_pct),
+            created_at=form.created_at,
+        ),
+        sections=sorted(key for key, value in intake_payload.items() if isinstance(value, dict)),
+        answer_count=len(answers),
+    )
+
+
 @router.post(
     "/patient-forms",
     response_model=ResponseModel[PatientFormResponse],
@@ -150,69 +243,12 @@ async def upload_patient_form(
                 message="schema version does not belong to that form type",
             )
 
-        missing = missing_required(body.intake_payload, version.schema_json)
-        if missing:
-            raise CustomAPIException(
-                DefaultExceptionCode.VALIDATION_ERROR,
-                message="missing required fields",
-                data={"fields": missing},
-            )
-        doc = _v2_doc(version.schema_json)
-        promoted = PromotedIdentifiers()
-        if doc is not None:
-            promoted = _promote_or_422(lambda p: resolve_path(body.intake_payload, p), doc)
-
-        form = PatientForm(
+        created = await _create_patient_form(
+            session,
             tenant_id=principal.tenant_id,
-            schema_version_id=body.schema_version_id,
-            status=FormStatus.READY_FOR_PROCESSING.value,
+            version=version,
+            form_schema=form_schema,
             intake_payload=body.intake_payload,
-            patient_name=promoted.patient_name,
-            patient_dob=promoted.patient_dob,
-            appointment_date=promoted.appointment_date,
-            chart_number=promoted.chart_number,
-            appointment_type=promoted.appointment_type,
-            member_id=promoted.member_id,
-            insurance_provider=promoted.insurance_provider,
-            insurance_provider_phone_number=promoted.insurance_provider_phone_number,
-            completion_pct=0,
-            retry_count=0,
-        )
-        session.add(form)
-        await session.flush()
-
-        # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
-        # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
-        # payload (nested by section_key) is flattened under a `sections` root.
-        payload_root = {"sections": body.intake_payload} if doc is not None else body.intake_payload
-        answers = list(iter_leaf_answers(payload_root))
-        session.add_all(
-            FieldAnswer(
-                tenant_id=principal.tenant_id,
-                form_id=form.id,
-                call_id=None,
-                field_path=path,
-                value={"value": raw},
-                source=AnswerSource.INTAKE.value,
-                confidence=None,
-                evidence_seq=None,
-                evidence=None,
-                is_current=True,
-            )
-            for path, raw in answers
-        )
-
-        await session.refresh(form)  # populate server-defaulted created_at
-        response = PatientFormResponse(
-            id=form.id,
-            status=form.status,
-            insurance_type=form_schema.insurance_type,
-            schema_version_id=form.schema_version_id,
-            completion_pct=float(form.completion_pct),
-            created_at=form.created_at,
-        )
-        sections = sorted(
-            key for key, value in body.intake_payload.items() if isinstance(value, dict)
         )
 
     # Audit the PHI write after commit — field names/counts/ids only, never values.
@@ -224,15 +260,15 @@ async def upload_patient_form(
             actor_label=str(principal.key_id),
             event_type=AuditEvent.FORM_INTAKE.value,
             resource_type="patient_form",
-            resource_id=str(response.id),
+            resource_id=str(created.response.id),
             detail={
                 "schema_version_id": str(body.schema_version_id),
-                "sections": sections,
-                "answer_count": len(answers),
+                "sections": created.sections,
+                "answer_count": created.answer_count,
             },
         )
     )
-    return ok(response)
+    return ok(created.response)
 
 
 # ---------------------------------------------------------------------------
