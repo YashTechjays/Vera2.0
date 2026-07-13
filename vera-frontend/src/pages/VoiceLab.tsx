@@ -188,20 +188,21 @@ function TranscriptPanel({ roomName }: { roomName: string }) {
         {turns.length === 0 && !error && (
           <p className="text-muted-foreground">Waiting for the conversation…</p>
         )}
-        {turns.map((t, i) => (
-          <div key={i}>
-            <span
-              className={
-                t.role === "agent"
-                  ? "font-medium text-emerald-700"
-                  : "font-medium text-foreground"
-              }
-            >
-              {t.role === "agent" ? "Agent" : "Caller"}:
-            </span>{" "}
-            <span className="text-muted-foreground">{t.text}</span>
-          </div>
-        ))}
+        {turns.map((t, i) => {
+          // Use `source` ("bot"/"rep") when present — it's the authoritative
+          // actor field; fall back to `role` for older events without it.
+          const isAgent = t.source != null ? t.source === "bot" : t.role === "agent"
+          return (
+            <div key={i}>
+              <span
+                className={isAgent ? "font-medium text-emerald-700" : "font-medium text-foreground"}
+              >
+                {isAgent ? "Agent" : "Caller"}:
+              </span>{" "}
+              <span className="text-muted-foreground">{t.text}</span>
+            </div>
+          )
+        })}
         {error && <p className="text-destructive">{error}</p>}
       </CardContent>
     </Card>
@@ -240,9 +241,10 @@ export function VoiceLab() {
   const phoneValid = !!phone && isValidPhoneNumber(phone)
   const showPhoneError = touched && !phoneValid
 
-  // Load selectable providers once; a failed load just leaves the picker with the generic
-  // option, so errors are non-fatal here.
-  useEffect(() => {
+  // Load the selectable provider list. Fetched once on mount and again whenever
+  // ivrNavigation turns on (so the picker always shows fresh data after a toggle).
+  // A failed load is non-fatal — the picker falls back to the generic option.
+  const fetchProviders = useCallback(() => {
     let cancelled = false
     listCallProviders()
       .then((rows) => {
@@ -253,6 +255,12 @@ export function VoiceLab() {
       cancelled = true
     }
   }, [])
+
+  useEffect(fetchProviders, [fetchProviders])
+
+  useEffect(() => {
+    if (ivrNavigation) return fetchProviders()
+  }, [ivrNavigation, fetchProviders])
 
   async function start(mode: VoiceSessionMode) {
     setError(null)
