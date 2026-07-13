@@ -21,10 +21,15 @@ export async function copyText(text: string): Promise<boolean> {
   // Keep it out of view without triggering scroll-to-focus jumps.
   textarea.style.position = "fixed"
   textarea.style.opacity = "0"
-  document.body.appendChild(textarea)
+  // Append inside the Radix dialog's focus trap when present so .select() isn't
+  // silently dropped by the browser (focus-trap intercepts selections outside it).
+  const container = document.querySelector<HTMLElement>('[role="dialog"]') ?? document.body
+  container.appendChild(textarea)
+  textarea.focus()
   textarea.select()
   try {
-    return document.execCommand("copy")
+    const ok = document.execCommand("copy")
+    return ok
   } catch {
     return false
   } finally {
