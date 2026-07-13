@@ -115,6 +115,18 @@ async def test_invite_records_inviter_and_role_grant_provenance(
     assert granted_at is not None
 
 
+async def test_invite_rejects_invalid_email(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """Sprint-2 #11 — invalid email address must be rejected with 422."""
+    resp = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "not-an-email", "send_email": False},
+    )
+    assert resp.status_code == 422, resp.text
+
+
 async def test_invite_link_only_skips_email(
     client: httpx.AsyncClient, rbac_world: RBACWorld, email_sender: InMemoryEmailSender
 ) -> None:

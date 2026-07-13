@@ -15,7 +15,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 
 from control_plane.api.v1.common import (
@@ -53,7 +53,7 @@ router = APIRouter(tags=["users"])
 
 
 class InviteUserRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
+    email: EmailStr
     name: str = Field(default="", max_length=255)
     role_ids: list[UUID] = Field(default_factory=list)
     send_email: bool = True
@@ -119,7 +119,7 @@ async def invite_user(
         idempotency_key,
         settings.idempotency_lock_ttl_seconds,
     )
-    email = str(body.email)
+    email = body.email
     # Durable de-dup (no UNIQUE on email exists): a user with this email already in
     # the tenant is a conflict — also collapses a late retry into one account.
     existing = (
