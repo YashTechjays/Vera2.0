@@ -13,9 +13,12 @@ from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, build_agent
 from agent_worker.ivr_agent import (
+    _DIGIT_BREAK,
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
+    _spell_id_tokens,
     _strip_silence_token,
+    _tts_spoken_text,
     ivr_turn_handling,
 )
 from agent_worker.ivr_prompt import SILENCE_TOKEN
@@ -336,6 +339,68 @@ async def test_strip_silence_token_label_is_word_boundaried() -> None:
         await _drain(_strip_silence_token(_astream("read the SILENCE_TOKENS list")))
         == "read the SILENCE_TOKENS list"
     )
+
+
+def _spelled(token: str) -> str:
+    """The expected per-character spelled-and-paced rendering of an ID token (hyphens dropped)."""
+    return _DIGIT_BREAK.join(f"<spell>{char}</spell>" for char in token if char.isalnum())
+
+
+def test_spell_id_tokens_spells_each_digit_of_a_numeric_member_id() -> None:
+    # A bare ID would be number-normalized by Cartesia (mis-heard by the payer IVR); each digit is
+    # spelled individually and paced by a break AFTER every digit for a slow, separated readout.
+    assert _spell_id_tokens("200236789") == _spelled("200236789")
+    # a break separates every adjacent digit pair (n digits -> n-1 breaks)
+    assert _spell_id_tokens("200236789").count(_DIGIT_BREAK) == len("200236789") - 1
+
+
+def test_spell_id_tokens_spells_an_alphanumeric_member_id_char_by_char() -> None:
+    # "POL-661522" must be read "P O L 6 6 1 5 2 2" (per character), never voiced as the word "POL".
+    assert _spell_id_tokens("POL-661522") == _spelled("POL-661522")
+    # the hyphen is dropped (not spoken as "dash")
+    assert "-" not in _spell_id_tokens("POL-661522")
+
+
+def test_spell_id_tokens_spells_a_ten_digit_npi() -> None:
+    assert _spell_id_tokens("1234567890") == _spelled("1234567890")
+
+
+def test_spell_id_tokens_handles_hyphenated_digit_groups() -> None:
+    assert _spell_id_tokens("200-236-789") == _spelled("200236789")
+
+
+def test_spell_id_tokens_leaves_short_runs_and_words_untouched() -> None:
+    # Menu choices, 2-digit answers, a 4-digit year in a spoken DOB, and plain words (even a lone
+    # capitalized word) stay natural speech — only ID-like tokens are spelled.
+    for text in ("press 2", "Medical", "Provider", "Yes", "June 20, 1965", "option 22"):
+        assert _spell_id_tokens(text) == text
+
+
+def test_spell_id_tokens_leaves_already_spaced_digits_alone() -> None:
+    # If the model emits the ID already spaced, each digit is its own short token — left as-is
+    # (Cartesia reads space-separated digits individually anyway).
+    assert _spell_id_tokens("2 0 0 2 3 6 7 8 9") == "2 0 0 2 3 6 7 8 9"
+
+
+def test_spell_id_tokens_rewrites_only_the_id_inside_a_sentence() -> None:
+    assert (
+        _spell_id_tokens("the member ID is POL-661522 okay")
+        == f"the member ID is {_spelled('POL-661522')} okay"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tts_spoken_text_strips_silence_then_spells_ids() -> None:
+    # The TTS path composes both transforms: sentinel gone, ID spelled.
+    assert await _drain(_tts_spoken_text(_astream("POL-661522"))) == _spelled("POL-661522")
+    assert await _drain(_tts_spoken_text(_astream(SILENCE_TOKEN))) == ""  # silent turn: no sound
+
+
+@pytest.mark.asyncio
+async def test_transcription_path_keeps_plain_digits() -> None:
+    # transcription_node uses _strip_silence_token only, so the live transcript shows the plain
+    # digits — never the <spell>/<break> markup the TTS path injects.
+    assert await _drain(_strip_silence_token(_astream("200236789"))) == "200236789"
 
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:

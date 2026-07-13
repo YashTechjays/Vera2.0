@@ -59,6 +59,38 @@ async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
         yield cleaned
 
 
+
+_MIN_SPELL_DIGITS = 7  # a pure-number ID (member ID, NPI, Tax ID) is spelled only when this long
+_MIN_ALNUM_ID = 5  # a mixed letters+digits ID (e.g. "POL-661522") is spelled when this long
+# Pause after each character. Bigger = slower/more separated (tune here if the IVR still mis-hears).
+_DIGIT_BREAK = '<break time="300ms"/>'
+# A candidate identifier token: a run of letters/digits with internal hyphens ("POL-661522",
+# "200-236-789") but NO spaces, so it never spans words — whitespace splits a sentence into words
+# that are each tested independently, and only an ID-like token is spelled.
+_ID_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+
+
+def _spell_id_tokens(text: str) -> str:
+    """Rewrite each identifier token in `text` to per-character spelled, paced output for TTS."""
+
+    def _spell(match: re.Match[str]) -> str:
+        token = match.group(0)
+        chars = [c for c in token if c.isalnum()]  # drop the hyphens; spell only alnum
+        has_letter = any(c.isalpha() for c in chars)
+        is_alnum_id = has_letter and any(c.isdigit() for c in chars) and len(chars) >= _MIN_ALNUM_ID
+        is_long_number = not has_letter and len(chars) >= _MIN_SPELL_DIGITS
+        if not (is_alnum_id or is_long_number):
+            return token
+        return _DIGIT_BREAK.join(f"<spell>{char}</spell>" for char in chars)
+
+    return _ID_TOKEN_RE.sub(_spell, text)
+
+
+async def _tts_spoken_text(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    async for chunk in _strip_silence_token(text):
+        yield _spell_id_tokens(chunk)
+
+
 def ivr_turn_handling() -> TurnHandlingOptions:
     """Fresh `turn_handling` for the IVR navigator (pass as `Agent(turn_handling=...)`).
 
@@ -140,9 +172,7 @@ class IvrNavigatorAgent(Agent):
     def tts_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
     ) -> AsyncIterable[rtc.AudioFrame]:
-        # Not a PHI seam (the navigator injects no call_data, so there's nothing to hydrate);
-        # this only strips the silence sentinel so a "stay silent" turn makes no sound.
-        return Agent.default.tts_node(self, _strip_silence_token(text), model_settings)
+        return Agent.default.tts_node(self, _tts_spoken_text(text), model_settings)
 
     def transcription_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
