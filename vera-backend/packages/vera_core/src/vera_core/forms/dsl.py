@@ -681,9 +681,7 @@ class FormSchemaDoc(_Model):
         # prerequisite fields — every path must resolve to a defined leaf
         for i, path in enumerate(self.prerequisite_fields):
             if path not in leaves:
-                errors.append(
-                    f"prerequisite_fields[{i}]: {path!r} does not resolve to a leaf"
-                )
+                errors.append(f"prerequisite_fields[{i}]: {path!r} does not resolve to a leaf")
 
         # promoted fields — patient_form columns re-derived from the current answer at
         # dispute-resolve time too (not just intake). Column names are enforced by the

@@ -504,10 +504,12 @@ class TestPrerequisiteFields:
         group_paths = list(doc.group_paths())
         if group_paths:
             with pytest.raises(ValidationError, match="does not resolve to a leaf"):
-                FormSchemaDoc.model_validate({
-                    **json.loads(compile_document(doc)),
-                    "prerequisite_fields": [group_paths[0]],
-                })
+                FormSchemaDoc.model_validate(
+                    {
+                        **json.loads(compile_document(doc)),
+                        "prerequisite_fields": [group_paths[0]],
+                    }
+                )
 
     def test_ibv_standard_has_three_prerequisite_fields(self) -> None:
         """The IBV standard schema declares exactly the 3 prerequisite fields."""

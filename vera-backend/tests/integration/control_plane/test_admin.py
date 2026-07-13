@@ -229,9 +229,7 @@ async def test_deactivate_user(
 # --- invitations/validate -----------------------------------------------------
 
 
-async def test_validate_valid_token(
-    client: httpx.AsyncClient, rbac_world: RBACWorld
-) -> None:
+async def test_validate_valid_token(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
     """A fresh invite token returns state='valid'."""
     tid = rbac_world.tenant_id
     invite = await client.post(
