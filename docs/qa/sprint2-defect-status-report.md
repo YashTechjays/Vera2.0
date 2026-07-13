@@ -61,23 +61,22 @@ Legend: ✅ Fixed (PR #83) · ☑️ Already fixed on `dev` — retest on a curr
 |---|---|---|
 | Diagnostic Testing copay/coinsurance show no reference values | ✅ Fixed | Gated-off rows now show $0 / 0% — Playwright PASS |
 | Placeholder text instead of actual values after upload | ✅ Fixed | Upload now rejects (422) payload paths that don't match the schema — root cause of dead values |
-| Tooltip repeats multiple times on "Center of Excellence Required" hover | ❓ Untriaged | Not in the Sprint 2 RCA scope — needs triage |
-| Form saves even when mandatory prerequisite fields are cleared after upload | ❓ Untriaged | Not in the Sprint 2 RCA scope — needs triage |
-| Warning message shown only for small group and self-insured policy | ❓ Untriaged | Not in the Sprint 2 RCA scope — needs triage |
+| Tooltip repeats multiple times on "Center of Excellence Required" hover | ✅ Fixed (PR untriaged-branch) | A redundant native `title` on the field label cell duplicated the Radix reason tooltip → two tooltips per hover. Removed it — Playwright PASS (exactly one tooltip on hover) |
+| Form saves even when mandatory prerequisite fields are cleared after upload | ✅ Fixed (PR untriaged-branch) | Save is blocked (button + guard) when the reviewer empties a required, no-default field that had a value on load. Computed from schema requiredness, so a form that arrived incomplete/format-quirky still saves — Playwright PASS. NOTE: of the 3 "prerequisite" fields only Appointment Date is `required` with no default; Appointment Type has an `N/A` default and Callback Number isn't `required` — making all three hard-mandatory is a separate schema decision |
+| Warning message shown only for small group and self-insured policy | ✔️ Working as designed — needs product confirmation | It's an intentional contradiction rule (`small_group_self_insured_conflict`) that fires only for the one implausible combo (Small Group + Self Insured), prompting re-verification. The other 3 combos are valid and correctly don't warn. If product wants additional combos to warn, add a `Contradiction` entry + recompile — no code bug |
 
 ## Call status
 
 | Defect | Status | Note |
 |---|---|---|
-| "In queue" status displayed too long in Data Management after call end | ❓ Untriaged | Not in the Sprint 2 RCA scope — needs triage |
+| "In queue" status displayed too long in Data Management after call end | ✅ Fixed (PR untriaged-branch) | The worklist fetched once and never auto-refreshed, so a server-side status change (call end → post-call eval → completed/exception_review) never surfaced until a manual reload. Added a 30s poll — Playwright PASS (badge auto-updated from Ready For Processing to Exception Review within the poll window, no interaction) |
 
 ## Totals
 
-- ✅ **19 fixed** (18 in PR #83, 1 via PR #82 role broadening)
+- ✅ **22 fixed** (18 in PR #83, 1 via PR #82 role broadening, 3 in the untriaged-fixes branch)
 - ☑️ **3 already fixed on `dev`** — retest on a build that includes them
-- ✔️ **2 not a defect** (invite-link reuse; provider/playbook deactivation question)
+- ✔️ **3 not a defect / working as designed** (invite-link reuse; provider/playbook deactivation; small-group/self-insured warning — last one pending product confirmation)
 - 🛠️ **1 ops/data** (schema reseed on the affected environment)
 - ⏸️ **3 deferred** — voice-pipeline changes needing live-call validation or a design sign-off
-- ❓ **4 untriaged** — new items outside the Sprint 2 RCA scope
 
-Full RCA, per-fix commits, and Playwright details: `docs/qa/sprint2-defect-rca.md` (same branch).
+The 3 newly-fixed untriaged items were RCA'd, fixed, and Playwright-verified on the local app (branch `fix/sprint-2-untriaged`, off `fix/sprint-2-defects`). Full RCA + per-fix commits + Playwright details: `docs/qa/sprint2-defect-rca.md`.
