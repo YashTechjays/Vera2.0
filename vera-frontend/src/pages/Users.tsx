@@ -132,7 +132,19 @@ export function Users() {
         {canManage && <InviteUserDialog onInvited={load} />}
       </div>
 
-      {notice && <p className="text-sm text-emerald-600 dark:text-emerald-400" role="status">{notice}</p>}
+      {notice && (
+        <div className="flex items-center gap-2" role="status">
+          <p className="text-sm text-emerald-600 dark:text-emerald-400">{notice}</p>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setNotice(null)}
+            className="text-sm leading-none text-emerald-600 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-200"
+          >
+            ×
+          </button>
+        </div>
+      )}
       {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
 
       <div className="rounded-lg border border-border">
@@ -177,9 +189,11 @@ export function Users() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        // -ml-2.5 cancels the ghost button's own padding so its
-                        // label starts flush with the "Actions" header text.
-                        className="-ml-2.5 text-destructive hover:text-destructive"
+                        // The ghost button has px-2.5 (10px) inner padding and the
+                        // TableCell has p-2 (8px). -ml-2 offsets the cell padding so
+                        // the button label aligns with the "Actions" TableHead text
+                        // (which also has px-2). Previously -ml-2.5 over-shot by 2px.
+                        className="-ml-2 text-destructive hover:text-destructive"
                         onClick={() => askDeactivate(u)}
                       >
                         Deactivate
