@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { ArrowDown, ArrowUp, Search } from "lucide-react"
+import { ArrowDown, ArrowUp, Plus, Search } from "lucide-react"
 
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -57,7 +57,8 @@ const COLUMNS: { key: SortKey; label: string }[] = [
 
 export function DataManagement() {
   const canRead = usePermission("forms:read")
-  const { openFormById, savedTick } = useIbv()
+  const canWrite = usePermission("forms:write")
+  const { openFormById, openCreate, savedTick } = useIbv()
 
   const [items, setItems] = useState<PatientFormSummary[] | null>(null)
   const [total, setTotal] = useState(0)
@@ -191,6 +192,12 @@ export function DataManagement() {
                 ))}
               </Select>
             </div>
+            {canWrite && (
+              <Button size="sm" onClick={openCreate}>
+                <Plus className="size-4" />
+                Add patient form
+              </Button>
+            )}
           </div>
         </div>
 
