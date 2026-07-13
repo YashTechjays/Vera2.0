@@ -1,4 +1,4 @@
-import { allLeaves, isApplicable, isRequired } from "./schema"
+import { allLeaves, isApplicable, isRequired, systemFieldPaths } from "./schema"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -111,4 +111,37 @@ export function validateSection(
   return Object.fromEntries(
     Object.entries(validateAll(schema, values)).filter(([p]) => p.startsWith(prefix))
   )
+}
+
+/**
+ * Create-mode validation (new patient form): requiredness comes from the
+ * schema's `system_fields` block — the backend's `required_intake_fields` rule
+ * (targets without a declared default), NOT a leaf's own `required`, which
+ * governs voice collection. Filled fields still get the pattern / date-format /
+ * range checks. Backend parity: `missing_required` ignores applicability for
+ * system fields, so the required pass here does too. `includeRequired: false`
+ * yields format errors only (shown live before the first submit attempt).
+ */
+export function validateCreate(
+  schema: FormSchema,
+  values: FormValues,
+  { includeRequired = true }: { includeRequired?: boolean } = {},
+): ValidationErrors {
+  const errors: ValidationErrors = {}
+  for (const leaf of allLeaves(schema)) {
+    if (!isApplicable(schema, leaf.gates, values)) continue
+    if ((values[leaf.path] ?? "").trim() === "") continue
+    const message = validateLeaf(schema, leaf, values)
+    if (message) errors[leaf.path] = message
+  }
+  if (!includeRequired) return errors
+  const byPath = new Map(allLeaves(schema).map((l) => [l.path, l]))
+  for (const path of systemFieldPaths(schema)) {
+    const leaf = byPath.get(path)
+    if (!leaf || leaf.field.default !== undefined) continue
+    if ((values[path] ?? "").trim() === "" && !errors[path]) {
+      errors[path] = `${leaf.field.title} is required`
+    }
+  }
+  return errors
 }
