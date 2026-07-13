@@ -4,6 +4,9 @@ All three MFA operations (enroll, activate, verify) mutate a UserIdentity
 object in-place. These tests construct the identity in-memory — no DB needed.
 """
 
+import time
+from unittest.mock import patch
+
 import pyotp
 import pytest
 
@@ -88,8 +91,15 @@ async def test_verify_accepts_current_totp() -> None:
 async def test_verify_rejects_wrong_code() -> None:
     identity = _identity()
     secret = await _enrolled_secret(identity)
-    await mfa.activate(_KMS, identity=identity, code=pyotp.TOTP(secret).now())
-    assert not await mfa.verify(_KMS, identity=identity, code="000000")
+    totp = pyotp.TOTP(secret)
+    await mfa.activate(_KMS, identity=identity, code=totp.now())
+    # Freeze time and compute what the valid code IS, then submit anything else.
+    frozen_step = 1000
+    valid_code = totp.at(for_time=frozen_step * 30)
+    # Pick a code that's definitely not the valid one for this (or adjacent) timestep.
+    wrong_code = "000001" if valid_code != "000001" else "000002"
+    with patch("control_plane.auth.mfa._current_timestep", return_value=frozen_step):
+        assert await mfa.verify(_KMS, identity=identity, code=wrong_code) is None
 
 
 @pytest.mark.asyncio
@@ -112,9 +122,6 @@ async def test_verify_returns_false_when_no_seed_enrolled() -> None:
 @pytest.mark.asyncio
 async def test_totp_replay_is_rejected_on_same_step() -> None:
     """A TOTP code accepted once must be rejected on immediate re-submit (same timestep)."""
-    import time
-    from unittest.mock import patch
-
     identity = _identity()
     secret = await _enrolled_secret(identity)
     await mfa.activate(_KMS, identity=identity, code=pyotp.TOTP(secret).now())
@@ -126,15 +133,13 @@ async def test_totp_replay_is_rejected_on_same_step() -> None:
         first = await mfa.verify(_KMS, identity=identity, code=code)
         second = await mfa.verify(_KMS, identity=identity, code=code)
 
-    assert first is True
-    assert second is False
+    assert first is not None  # accepted — returns matched timestep (int)
+    assert second is None  # rejected replay
 
 
 @pytest.mark.asyncio
 async def test_totp_fresh_step_accepted_after_prior_step_consumed() -> None:
     """After consuming one step, the next step's code is accepted."""
-    from unittest.mock import patch
-
     identity = _identity()
     secret = await _enrolled_secret(identity)
     await mfa.activate(_KMS, identity=identity, code=pyotp.TOTP(secret).now())
@@ -145,11 +150,11 @@ async def test_totp_fresh_step_accepted_after_prior_step_consumed() -> None:
     with patch("control_plane.auth.mfa._current_timestep", return_value=1000):
         code1 = pyotp.TOTP(secret).at(frozen_ts_1)
         first = await mfa.verify(_KMS, identity=identity, code=code1)
-    assert first is True
+    assert first is not None  # accepted
     assert identity.totp_last_used_timestep == 1000
 
     with patch("control_plane.auth.mfa._current_timestep", return_value=1001):
         code2 = pyotp.TOTP(secret).at(frozen_ts_2)
         second = await mfa.verify(_KMS, identity=identity, code=code2)
-    assert second is True
+    assert second is not None  # accepted
     assert identity.totp_last_used_timestep == 1001

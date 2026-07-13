@@ -19,6 +19,7 @@ recovery code on use.
 
 import secrets
 import time
+from uuid import UUID
 
 import pyotp
 from sqlalchemy import text
@@ -32,6 +33,7 @@ from vera_core.models import UserIdentity
 _RECOVERY_CODE_COUNT = 10
 _ISSUER = "Vera"
 _UNDEFINED_FUNCTION = "42883"  # Postgres SQLSTATE for a missing function
+_RECOVERY_SENTINEL = -1  # verify() return value for "recovery code accepted, no timestep"
 
 
 def _current_timestep() -> int:
@@ -121,13 +123,21 @@ async def activate_platform(
     )
 
 
-async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str) -> bool:
+async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str) -> int | None:
     """Gate an MFA login: accept a current TOTP code (with ±1 window drift
     tolerance), or consume a one-time recovery code. Each TOTP code is single-use
-    within its drift window — a replayed code in the same timestep is rejected."""
+    within its drift window — a replayed code in the same timestep is rejected.
+
+    Returns:
+        int >= 0          — TOTP accepted; the matched timestep (caller may persist it for
+                            replay protection, e.g. via platform_update_totp_last_used).
+        _RECOVERY_SENTINEL — recovery code accepted (timestep tracking does not apply;
+                            recovery codes are already consumed in-place on ``identity``).
+        None              — rejected (wrong code, replay, or no seed enrolled).
+    """
     totp_secret = await _decrypt_seed(kms, identity)
     if totp_secret is None:
-        return False
+        return None
     totp = pyotp.TOTP(totp_secret)
     # Find which of the three ±1-window timesteps (current, prev, next) matches the
     # submitted code, so we can enforce single-use per timestep.
@@ -139,15 +149,28 @@ async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str
     if matched_step is not None:
         last = identity.totp_last_used_timestep
         if last is not None and matched_step <= last:
-            return False  # replay within the drift window
+            return None  # replay within the drift window
         identity.totp_last_used_timestep = matched_step
-        return True
+        return matched_step
     hashes: list[str] = identity.recovery_code_hashes or []
     for i, hashed in enumerate(hashes):
         if verify_password(code, hashed):
             identity.recovery_code_hashes = hashes[:i] + hashes[i + 1 :]
-            return True
-    return False
+            return _RECOVERY_SENTINEL
+    return None
+
+
+async def platform_update_totp_last_used(
+    session: AsyncSession, *, identity_id: UUID, step: int
+) -> None:
+    """Persist the matched TOTP timestep for a NULL-tenant platform identity via
+    SECURITY DEFINER (RLS-bound role cannot UPDATE NULL-tenant rows directly)."""
+    await _call_definer_void(
+        session,
+        "SELECT platform_update_totp_last_used(CAST(:id AS uuid), :step)",
+        id=identity_id,
+        step=step,
+    )
 
 
 async def _call_definer_bool(session: AsyncSession, sql: str, **params: object) -> bool:
@@ -163,6 +186,20 @@ async def _call_definer_bool(session: AsyncSession, sql: str, **params: object) 
             ) from exc
         raise
     return bool(result.scalar_one())
+
+
+async def _call_definer_void(session: AsyncSession, sql: str, **params: object) -> None:
+    """Run a platform-MFA SECURITY DEFINER function that returns void. A missing function
+    (migration not yet applied) surfaces a clear error, not a raw UndefinedFunctionError."""
+    try:
+        await session.execute(text(sql).bindparams(**params))
+    except ProgrammingError as exc:
+        if getattr(getattr(exc, "orig", None), "sqlstate", None) == _UNDEFINED_FUNCTION:
+            raise RuntimeError(
+                "platform MFA definer functions missing — apply migrations "
+                "f066c667ddc1 and 3f7a9c2e8b41"
+            ) from exc
+        raise
 
 
 async def _decrypt_seed(kms: KeyManagementService, identity: UserIdentity) -> str | None:

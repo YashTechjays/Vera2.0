@@ -218,13 +218,20 @@ async def platform_mfa_verify(
     ip = client_ip(request)
     challenge = _require_platform_challenge(await store.get(MFA_NS, body.mfa_token))
 
-    verified = False
+    result: int | None = None
     async with platform_session(sessionmaker) as session:
         ident = await _password_identity_row(session, challenge.user_id)
         if ident is not None:
-            verified = await mfa.verify(kms, identity=ident, code=body.code)
+            result = await mfa.verify(kms, identity=ident, code=body.code)
+        # Persist the matched TOTP timestep for platform (NULL-tenant) identities via
+        # SECURITY DEFINER — the RLS-bound role cannot UPDATE NULL-tenant rows directly.
+        # Recovery-code logins (result < 0) don't have a timestep to record.
+        if result is not None and result >= 0:
+            await mfa.platform_update_totp_last_used(
+                session, identity_id=challenge.user_id, step=result
+            )
 
-    if not verified:
+    if result is None:
         await emit_auth_event(
             audit, tenant_id=None, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=challenge.user_id
         )

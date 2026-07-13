@@ -441,7 +441,7 @@ async def mfa_verify(
     async with tenant_session(sessionmaker, tenant_id) as session:
         ident = await _password_identity_row(session, challenge.user_id)
         if ident is not None:
-            verified = await mfa.verify(kms, identity=ident, code=body.code)
+            verified = (await mfa.verify(kms, identity=ident, code=body.code)) is not None
 
     if not verified:
         await _audit(
