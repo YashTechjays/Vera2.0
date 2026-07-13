@@ -323,6 +323,7 @@ async def test_validate_used_token_returns_invalid(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"]["state"] == "invalid"
+    assert resp.headers.get("cache-control") == "no-store"
 
 
 async def test_admin_endpoint_denied_without_permission(
