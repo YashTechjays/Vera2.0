@@ -118,3 +118,42 @@ Every row below is implemented, committed, and passing gates (backend `just chec
 | 20 | No response from IVR/AI in Voice Lab (client-side half) | New `hasAgentParticipant()` helper (uses LiveKit's authoritative `isAgent` kind) + `useAgentJoinTimeout()` hook; after 15s Connected with no agent, the panel shows a clear "agent hasn't connected — worker may not be running" alert that auto-clears if the agent joins late. Backend `agent.ready` event is a noted follow-up. | `vera-frontend/src/lib/voice-lab/agentPresence.ts` (+test), `pages/VoiceLab.tsx` | `4cb8c9e` |
 
 **Regression caught & fixed during the work:** the first #17 attempt persisted the timestep by mutating the ORM identity inside `verify()`, which flushed through the RLS-bound session and broke **platform** MFA login (a NULL-tenant row can't satisfy the tenant RLS `WITH CHECK`). Fixed by making `verify()` a pure detector so each caller persists under its own privilege (`356cde9`).
+
+---
+
+# Master status index (all defects)
+
+Legend: ✅ Fixed in PR #83 · ☑️ Already fixed on `dev` (verify QA build) · ✔️ Verified — no defect · 🏷️ By design / product decision · 🛠️ Ops/data (no code) · ⏸️ Deferred (needs decision or live-call validation)
+
+| # | Defect | Status | Note |
+|---|---|---|---|
+| 1 | Copy icon not working in invitation URL | ✅ Fixed | dialog-scoped clipboard fallback |
+| 2 | "Action" column header misaligned | ✅ Fixed | margin `-ml-2` |
+| 3 | Duplicate eye icons in password field | ✅ Fixed | suppress webkit affordance |
+| 4 | Agent profile shown instead of VA profile | ☑️ On `dev` | sidebar reads `/auth/me` |
+| 5 | Data Management not accessible after VA login | 🏷️ By design | VA holds only `voice_lab:sandbox`; grant `forms:read` needs product sign-off (Voice Lab nav already fixed on `dev`) |
+| 6 | Generic error for deactivated VA login | ☑️ On `dev` | 403 + FE error serialization |
+| 7 | AI ignores interruption, repeats question | ⏸️ Deferred | config change documented; validate on real calls |
+| 8 | AI response delayed after transfer to human | ⏸️ Deferred | TTS pre-warm/handoff; validate on real calls |
+| 9 | "Deactivate msg showing for a long time" | ✅ Fixed | dismiss button |
+| 10 | AI fails to detect incorrect Member ID from IVR | ⏸️ Deferred (L) | PHI-wall gap; two designs written up, needs sign-off |
+| 11 | Account creatable with invalid email | ✅ Fixed | `EmailStr` |
+| 12 | Invite link usable after activation | ✔️ No defect | prod uses single-use `RedisInvitationStore` |
+| 13 | Set-Password page shown for deactivated user | ✅ Fixed | `validate` endpoint + FE pre-flight |
+| 14 | Password page reappears via browser Back | ✅ Fixed | `navigate(replace:true)` + no-store |
+| 15 | Session-timeout warning popup | ☑️ On `dev` | countdown dialog driven by `/auth/me` |
+| 16 | Platform operator → tenant login after logout | ✅ Fixed | `logoutPlane` redirect |
+| 17 | Sign-in with expired/replayed OTP | ✅ Fixed | single-use TOTP timestep |
+| 18 | Tenant Access duration appends input | ✅ Fixed | select-on-focus |
+| 19 | Voice Lab provider details not refreshed | ✅ Fixed | refetch on IVR toggle |
+| 20 | No response from IVR/AI in Voice Lab | ✅ Fixed (client half) | 15s "agent hasn't joined" warning; backend `agent.ready` event = follow-up |
+| 21 | Deactivate provider → deactivate its playbook? | 🏷️ Not a bug | dispatch join already excludes inactive-provider playbooks |
+| 22 | AI conversation displayed under the caller | ✅ Fixed | attribute by `source` |
+| 23 | Show date format in DOB/date field | ✅ Fixed | prefer `date_format` over default |
+| 24 | Patient Gender field displays as date | 🛠️ Ops/data | stale `schema_version`; `just compile-schemas && seed-schemas` |
+| 25 | Highlight prerequisite fields distinctly | ✅ Fixed | `prerequisite_fields` DSL key + amber |
+| 26 | Remove prerequisite highlight from Spouse Gender | ✅ Fixed | stays context/green (excluded from prerequisite) |
+| 27 | Diagnostic Testing copay/coinsurance blank | ✅ Fixed | plain-flavor reference values |
+| 28 | Placeholder text instead of uploaded values | ✅ Fixed | intake 422 on unknown paths |
+
+**Totals:** ✅ 18 fixed · ☑️ 3 already on `dev` · ✔️ 1 no-defect · 🏷️ 2 by-design · 🛠️ 1 ops · ⏸️ 3 deferred (#7, #8, #10).
