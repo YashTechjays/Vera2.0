@@ -33,6 +33,9 @@ type AuthState = {
   // `login_absolute_remaining_seconds` at receipt. Null until /me hydrates. The idle
   // window comes straight off `user.login_idle_timeout_seconds`.
   sessionExpiresAt: number | null
+  // Remembers which login page to redirect to after logout. Set from user.account_type
+  // before user is nulled so the destination survives the state reset.
+  logoutPlane: "platform" | "tenant" | null
 }
 
 const initialState: AuthState = {
@@ -44,6 +47,7 @@ const initialState: AuthState = {
   loading: false,
   error: null,
   sessionExpiresAt: null,
+  logoutPlane: null,
 }
 
 // createAsyncThunk serializes thrown errors to plain {name, message} objects,
@@ -180,6 +184,8 @@ const authSlice = createSlice({
     // Hard reset used on 401 and logout.
     forceLogout(state) {
       clearSession()
+      // Capture the plane before nulling user so the redirect path survives the reset.
+      state.logoutPlane = state.user?.account_type === "platform" ? "platform" : "tenant"
       state.status = "anonymous"
       state.user = null
       state.tenantSlug = null
@@ -293,6 +299,8 @@ const authSlice = createSlice({
       })
       .addCase(logoutThunk.fulfilled, (s) => {
         clearSession()
+        // Capture the plane before nulling user so the redirect path survives.
+        s.logoutPlane = s.user?.account_type === "platform" ? "platform" : "tenant"
         s.status = "anonymous"
         s.user = null
         s.tenantSlug = null
@@ -333,3 +341,9 @@ export const selectIsElevated = (s: { auth: AuthState }) => {
   const e = s.auth.user?.active_elevation
   return e != null && Date.parse(e.expires_at) > Date.now()
 }
+// The login page to redirect to after logout. Reads logoutPlane (set before user
+// is nulled) so the correct destination is known even after state is cleared.
+// Falls back to the persisted auth-plane hint (getAuthPlane) when logoutPlane is
+// null (e.g. a page-load 401 before forceLogout was ever called).
+export const selectLogoutRedirectPath = (s: { auth: AuthState }): string =>
+  loginRedirectPath(s.auth.logoutPlane ? { platform: s.auth.logoutPlane === "platform" } : null)

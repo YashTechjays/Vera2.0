@@ -1,8 +1,8 @@
 import { PanelLeft, Search, Bell, LogOut } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
-import { useAppDispatch } from "@/store/hooks"
-import { logoutThunk } from "@/store/authSlice"
+import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { logoutThunk, selectLogoutRedirectPath } from "@/store/authSlice"
 
 type TopbarProps = {
   onToggleSidebar: () => void
@@ -11,10 +11,11 @@ type TopbarProps = {
 export function Topbar({ onToggleSidebar }: TopbarProps) {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
+  const logoutPath = useAppSelector(selectLogoutRedirectPath)
 
   async function onLogout() {
     await dispatch(logoutThunk())
-    navigate("/login", { replace: true })
+    navigate(logoutPath, { replace: true })
   }
 
   return (
