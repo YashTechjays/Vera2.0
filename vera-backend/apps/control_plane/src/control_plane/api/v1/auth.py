@@ -19,6 +19,7 @@ the bearer token alone (`current_identity`); scope is derived from the verified 
 `self_scoped_session`. The caller can only operate on their own session.
 """
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Annotated, Literal
@@ -754,21 +755,25 @@ async def validate_invitation(
     possess the high-entropy secret token, this does not enable enumeration.
     `Cache-Control: no-store` — the result reflects live DB state."""
     response.headers["Cache-Control"] = "no-store"
-    tenant_id = await resolve_tenant_id(sessionmaker, tenant_slug)
-    invite = await invites.get(INVITE_NS, token)
+    tenant_id, invite = await asyncio.gather(
+        resolve_tenant_id(sessionmaker, tenant_slug),
+        invites.get(INVITE_NS, token),
+    )
     if tenant_id is None or invite is None or invite.tenant_id != tenant_id:
         return ok(InviteValidateResponse(state="invalid"))
 
     async with tenant_session(sessionmaker, tenant_id) as session:
-        user = (
-            await session.execute(select(AppUser).where(AppUser.id == invite.app_user_id))
-        ).scalar_one_or_none()
+        row = (
+            await session.execute(
+                select(AppUser.status).where(AppUser.id == invite.app_user_id)
+            )
+        ).one_or_none()
 
-    if user is None:
+    if row is None:
         return ok(InviteValidateResponse(state="invalid"))
-    if user.status == "invited":
+    if row.status == "invited":
         return ok(InviteValidateResponse(state="valid"))
-    if user.status == "deactivated":
+    if row.status == "deactivated":
         return ok(InviteValidateResponse(state="deactivated"))
     # already activated, or any other non-invited, non-deactivated status → invalid
     return ok(InviteValidateResponse(state="invalid"))

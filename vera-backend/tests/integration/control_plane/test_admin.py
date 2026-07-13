@@ -26,6 +26,11 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid4())}
 
 
+def _extract_token(invite_resp: httpx.Response) -> str:
+    """Extract the raw invite token from the invite_url returned by POST /users/invitations."""
+    return invite_resp.json()["data"]["invite_url"].split("token=", 1)[1]
+
+
 # --- auth/me (session hydration, no permission gate) -------------------------
 
 
@@ -154,7 +159,7 @@ async def test_invite_then_accept_activates_user(
     )
     assert invite.status_code == 200, invite.text
     user_id = invite.json()["data"]["user_id"]
-    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    token = _extract_token(invite)
 
     accept = await client.post(
         f"/api/v1/tenants/{tid}/auth/invitations/accept",
@@ -185,7 +190,7 @@ async def test_accept_is_single_use(client: httpx.AsyncClient, rbac_world: RBACW
         headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"email": "once@test.example", "send_email": False},
     )
-    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    token = _extract_token(invite)
     first = await client.post(
         f"/api/v1/tenants/{tid}/auth/invitations/accept",
         json={"token": token, "password": "a-strong-password"},
@@ -235,7 +240,7 @@ async def test_validate_valid_token(
         json={"email": "validate_valid@test.example", "send_email": False},
     )
     assert invite.status_code == 200, invite.text
-    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    token = _extract_token(invite)
 
     resp = await client.get(
         f"/api/v1/tenants/{tid}/auth/invitations/validate",
@@ -264,7 +269,7 @@ async def test_validate_deactivated_user_token(
     )
     assert invite.status_code == 200, invite.text
     user_id = invite.json()["data"]["user_id"]
-    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    token = _extract_token(invite)
 
     # Deactivate the user before they accept
     deactivate = await client.post(
@@ -307,7 +312,7 @@ async def test_validate_used_token_returns_invalid(
         json={"email": "validate_used@test.example", "send_email": False},
     )
     assert invite.status_code == 200, invite.text
-    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    token = _extract_token(invite)
 
     # Consume the token via accept
     accept = await client.post(
