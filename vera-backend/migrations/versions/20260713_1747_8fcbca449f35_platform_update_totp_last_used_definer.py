@@ -54,9 +54,7 @@ $$
 def upgrade() -> None:
     # Grant the definer owner role write access to the new column; all other columns
     # on user_identity are already granted by migration f066c667ddc1.
-    op.execute(
-        f"GRANT UPDATE (totp_last_used_timestep) ON user_identity TO {DEFINER_ROLE}"
-    )
+    op.execute(f"GRANT UPDATE (totp_last_used_timestep) ON user_identity TO {DEFINER_ROLE}")
     op.execute(_UPDATE_TOTP_LAST_USED)
     op.execute(
         f"ALTER FUNCTION platform_update_totp_last_used(uuid, bigint) OWNER TO {DEFINER_ROLE}"
@@ -65,6 +63,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS platform_update_totp_last_used(uuid, bigint)")
-    op.execute(
-        f"REVOKE UPDATE (totp_last_used_timestep) ON user_identity FROM {DEFINER_ROLE}"
-    )
+    op.execute(f"REVOKE UPDATE (totp_last_used_timestep) ON user_identity FROM {DEFINER_ROLE}")

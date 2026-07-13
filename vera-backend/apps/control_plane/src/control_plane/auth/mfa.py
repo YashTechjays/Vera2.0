@@ -150,7 +150,11 @@ async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str
         last = identity.totp_last_used_timestep
         if last is not None and matched_step <= last:
             return None  # replay within the drift window
-        identity.totp_last_used_timestep = matched_step
+        # verify() is a pure detector — it does NOT persist the step. Each caller
+        # persists it under its own privilege: the tenant path writes the ORM
+        # attribute (tenant RLS permits it), while the platform (NULL-tenant) path
+        # calls platform_update_totp_last_used (SECURITY DEFINER), because the
+        # RLS-bound role cannot UPDATE a NULL-tenant user_identity row.
         return matched_step
     hashes: list[str] = identity.recovery_code_hashes or []
     for i, hashed in enumerate(hashes):

@@ -131,6 +131,9 @@ async def test_totp_replay_is_rejected_on_same_step() -> None:
     with patch("control_plane.auth.mfa._current_timestep", return_value=frozen_step):
         code = pyotp.TOTP(secret).at(frozen_step * 30)
         first = await mfa.verify(_KMS, identity=identity, code=code)
+        # verify() is a pure detector; the caller persists the matched step.
+        if first is not None and first >= 0:
+            identity.totp_last_used_timestep = first
         second = await mfa.verify(_KMS, identity=identity, code=code)
 
     assert first is not None  # accepted — returns matched timestep (int)
@@ -150,11 +153,10 @@ async def test_totp_fresh_step_accepted_after_prior_step_consumed() -> None:
     with patch("control_plane.auth.mfa._current_timestep", return_value=1000):
         code1 = pyotp.TOTP(secret).at(frozen_ts_1)
         first = await mfa.verify(_KMS, identity=identity, code=code1)
-    assert first is not None  # accepted
-    assert identity.totp_last_used_timestep == 1000
+    assert first == 1000  # accepted — returns the matched step; caller persists it
+    identity.totp_last_used_timestep = first
 
     with patch("control_plane.auth.mfa._current_timestep", return_value=1001):
         code2 = pyotp.TOTP(secret).at(frozen_ts_2)
         second = await mfa.verify(_KMS, identity=identity, code=code2)
-    assert second is not None  # accepted
-    assert identity.totp_last_used_timestep == 1001
+    assert second == 1001  # accepted — next step's code

@@ -440,6 +440,11 @@ async def mfa_verify(
     async with tenant_session(sessionmaker, tenant_id) as session:
         ident = await _password_identity_row(session, challenge.user_id, for_update=True)
         mfa_result = await mfa.verify(kms, identity=ident, code=body.code) if ident else None
+        # Persist the matched TOTP timestep so the code is single-use (replay guard).
+        # Tenant identities carry a real tenant_id, so the ORM UPDATE passes RLS.
+        # Recovery-code logins (result < 0) have no timestep to record.
+        if ident is not None and mfa_result is not None and mfa_result >= 0:
+            ident.totp_last_used_timestep = mfa_result
         verified = mfa_result is not None
 
     if not verified:

@@ -417,7 +417,10 @@ async def test_unknown_field_paths_returns_422(
     cleanup_forms: None,
 ) -> None:
     """A payload with a key not in the schema's leaf set must be rejected 422."""
-    bad_payload = {**INTAKE_PAYLOAD, "unknown_section": {"mystery_field": "oops"}}
+    bad_payload: dict[str, object] = {
+        **INTAKE_PAYLOAD,
+        "unknown_section": {"mystery_field": "oops"},
+    }
     resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, bad_payload)
 
     assert resp.status_code == 422, resp.text
