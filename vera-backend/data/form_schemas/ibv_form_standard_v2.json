@@ -2968,6 +2968,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_58340.covered",
                 "op": "eq",
@@ -2988,6 +2989,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_58340.covered",
                 "op": "eq",
@@ -3013,6 +3015,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_58340.covered",
                 "op": "eq",
@@ -3067,6 +3070,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_82670.covered",
                 "op": "eq",
@@ -3087,6 +3091,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_82670.covered",
                 "op": "eq",
@@ -3112,6 +3117,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_82670.covered",
                 "op": "eq",
@@ -3166,6 +3172,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_83001.covered",
                 "op": "eq",
@@ -3186,6 +3193,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_83001.covered",
                 "op": "eq",
@@ -3211,6 +3219,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_83001.covered",
                 "op": "eq",
@@ -3265,6 +3274,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_83002.covered",
                 "op": "eq",
@@ -3285,6 +3295,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_83002.covered",
                 "op": "eq",
@@ -3310,6 +3321,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_83002.covered",
                 "op": "eq",
@@ -3364,6 +3376,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84146.covered",
                 "op": "eq",
@@ -3384,6 +3397,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84146.covered",
                 "op": "eq",
@@ -3409,6 +3423,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84146.covered",
                 "op": "eq",
@@ -3463,6 +3478,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84443.covered",
                 "op": "eq",
@@ -3483,6 +3499,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84443.covered",
                 "op": "eq",
@@ -3508,6 +3525,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84443.covered",
                 "op": "eq",
@@ -3562,6 +3580,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84144.covered",
                 "op": "eq",
@@ -3582,6 +3601,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84144.covered",
                 "op": "eq",
@@ -3607,6 +3627,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_84144.covered",
                 "op": "eq",
@@ -3661,6 +3682,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_76830.covered",
                 "op": "eq",
@@ -3681,6 +3703,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_76830.covered",
                 "op": "eq",
@@ -3706,6 +3729,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.diagnostic_testing.cpt_76830.covered",
                 "op": "eq",
@@ -3804,6 +3828,7 @@
                       "min": 0
                     }
                   },
+                  "inapplicable_value": "$0",
                   "applicable_when": {
                     "field": "sections.general_coverage.office_visits.cpt_99211.covered",
                     "op": "eq",
@@ -3824,6 +3849,7 @@
                       "max": 100
                     }
                   },
+                  "inapplicable_value": "0%",
                   "applicable_when": {
                     "field": "sections.general_coverage.office_visits.cpt_99211.covered",
                     "op": "eq",
@@ -3849,6 +3875,7 @@
                   "tags": [
                     "prior_auth"
                   ],
+                  "inapplicable_value": "N/A",
                   "applicable_when": {
                     "field": "sections.general_coverage.office_visits.cpt_99211.covered",
                     "op": "eq",
@@ -3914,6 +3941,7 @@
                       "min": 0
                     }
                   },
+                  "inapplicable_value": "$0",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_professional.cpt_58555.covered",
                     "op": "eq",
@@ -3934,6 +3962,7 @@
                       "max": 100
                     }
                   },
+                  "inapplicable_value": "0%",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_professional.cpt_58555.covered",
                     "op": "eq",
@@ -3959,6 +3988,7 @@
                   "tags": [
                     "prior_auth"
                   ],
+                  "inapplicable_value": "N/A",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_professional.cpt_58555.covered",
                     "op": "eq",
@@ -4024,6 +4054,7 @@
                       "min": 0
                     }
                   },
+                  "inapplicable_value": "$0",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_facility.cpt_58555.covered",
                     "op": "eq",
@@ -4044,6 +4075,7 @@
                       "max": 100
                     }
                   },
+                  "inapplicable_value": "0%",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_facility.cpt_58555.covered",
                     "op": "eq",
@@ -4069,6 +4101,7 @@
                   "tags": [
                     "prior_auth"
                   ],
+                  "inapplicable_value": "N/A",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_facility.cpt_58555.covered",
                     "op": "eq",
