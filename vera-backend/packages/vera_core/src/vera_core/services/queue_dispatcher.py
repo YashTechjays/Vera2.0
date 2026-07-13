@@ -21,18 +21,32 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
+from vera_core.forms.call_plan import CallPlan, PrefillFuser, compile_call_plan
+from vera_core.forms.conditions import is_v2
+from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.prompting import PromptDocument
 from vera_core.integrations.credentials import get_integration_credentials
-from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.models import (
+    Call,
+    CallEvent,
+    InsuranceProvider,
+    PatientForm,
+    PromptVersion,
+    SchemaVersion,
+    Tenant,
+)
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import (
     CallEventType,
     CallMode,
     CallStatus,
     FormStatus,
+    VersionStatus,
 )
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
+from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.ivr_selection import add_active_playbook_metadata
 from vera_core.telephony import OutboundDialError
@@ -42,6 +56,7 @@ if TYPE_CHECKING:
 
     from vera_core.audit import AuditSink
     from vera_core.config.kms import KeyManagementService
+    from vera_core.plan_store import CallPlanService
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +69,10 @@ _ACTIVE_FORM_STATUSES = (
 )
 
 _DISPATCH_LOCK_CLASS = 0x76455241  # "vERA" — namespace for dispatch advisory locks
+
+# Per-pass call-plan template memo: schema_version_id -> (per-form fuser over the
+# compiled template, prompt_version_id) or None (legacy v1 / compile failure).
+type _PlanCache = dict[UUID, tuple[PrefillFuser, UUID | None] | None]
 
 
 def _now_eastern_time() -> time:
@@ -80,6 +99,7 @@ async def try_dispatch(
     *,
     audit: AuditSink | None = None,
     dial_pacing_s: float = 1.0,
+    plan_service: CallPlanService | None = None,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -106,6 +126,13 @@ async def try_dispatch(
         Seconds to sleep between successive dials in one pass, to stay under
         the carrier's calls-per-second limit (Twilio ~1 CPS). Applied between
         dials only — never before the first.
+    plan_service:
+        Optional ``CallPlanService``. When provided and the form's pinned
+        schema is DSL v2, the compiled CallPlan is staged in Redis for the
+        worker, the call's ``prompt_version_id`` lineage is stamped, and the
+        dispatch metadata carries ``use_call_plan``. Fail-open: any staging
+        failure logs, and the call dispatches WITHOUT a plan (the worker then
+        serves it as an apology call — plan-only, no legacy script).
     """
     # Serialize dispatch passes per tenant (consumer refill / sweeper / enqueue
     # tasks race otherwise and can over-allocate concurrency slots): the two-int
@@ -255,6 +282,12 @@ async def try_dispatch(
             )
             candidates = []
 
+    # Per-pass CallPlan TEMPLATE memo: the template is a pure function of the
+    # schema version (+ its published prompt), and one pass typically drains
+    # many same-schema forms — compile once per distinct schema version, then
+    # fuse each form's intake prefill into its own per-form plan.
+    plan_cache: _PlanCache = {}
+
     for form in candidates:
         # 4b. Working-hours re-check at dial time — the SQL gate above used the
         # pass-start clock, and the window can close mid-pass (dial pacing).
@@ -262,6 +295,15 @@ async def try_dispatch(
         provider = await _resolve_provider(session, form)
         if provider is not None and not is_within_working_hours(provider):
             continue
+
+        # Compile (or reuse) the CallPlan OUTSIDE the savepoint below — the
+        # compile is CPU-bound and needs two reads, none of which depend on the
+        # flushed Call row; keeping it out shortens the row-lock hold.
+        staged_plan = (
+            await _resolve_call_plan(session, form, plan_cache)
+            if plan_service is not None
+            else None
+        )
 
         call_mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL
         # Real-call dispatch metadata: the worker must wait for the SIP callee to
@@ -279,6 +321,11 @@ async def try_dispatch(
 
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-dispatched calls earlier in the same pass.
+        # The plan is staged to Redis (non-transactional) BEFORE create_call_room so
+        # it's present when create_call_room dispatches the worker (no read race). If
+        # create_call_room then fails, the savepoint rolls the Call row back but the
+        # Redis key would leak — `staged_plan_room` lets the except handler clear it.
+        staged_plan_room: str | None = None
         try:
             sm.transition(form, FormStatus.IN_CALL, tenant_max_retries=tenant.max_retries)
 
@@ -299,6 +346,22 @@ async def try_dispatch(
                 session.add(call)
                 await session.flush()
                 room_name = room_name_for_call(tenant_id, call.id)
+                if plan_service is not None and staged_plan is not None:
+                    plan, plan_prompt_version_id = staged_plan
+                    try:
+                        await plan_service.put(room_name, plan)
+                    except Exception:
+                        logger.exception(
+                            "dispatch: call plan staging failed for form %s — no plan staged",
+                            form.id,
+                        )
+                    else:
+                        metadata["use_call_plan"] = True
+                        staged_plan_room = room_name  # for orphan cleanup on rollback
+                        # Lineage is stamped only when the plan actually reached
+                        # the store — a legacy-path call must not claim it ran a
+                        # prompt version it never loaded.
+                        call.prompt_version_id = plan_prompt_version_id
                 if form.ivr_navigation_enabled and provider is not None:
                     await add_active_playbook_metadata(session, provider.id, metadata)
                 await livekit.create_call_room(room_name, metadata=metadata)
@@ -314,8 +377,13 @@ async def try_dispatch(
             logger.exception(
                 "dispatch: failed to dispatch form %s — reverting to IN_QUEUE", form.id
             )
-            # The savepoint rolled back the Call; revert the in-memory form to
-            # IN_QUEUE so it will be retried on the next dispatch pass.
+            # The savepoint rolled back the Call; the staged plan (Redis, non-
+            # transactional) did NOT roll back — clear it so a failed dispatch
+            # leaves no orphan plan key behind (best-effort; the TTL is the backstop).
+            if plan_service is not None and staged_plan_room is not None:
+                with contextlib.suppress(Exception):
+                    await plan_service.clear(staged_plan_room)
+            # Revert the in-memory form to IN_QUEUE so it retries next pass.
             form.status = FormStatus.IN_QUEUE.value
             continue
 
@@ -371,6 +439,97 @@ async def try_dispatch(
             )
 
     return dispatched
+
+
+async def _resolve_call_plan(
+    session: AsyncSession,
+    form: PatientForm,
+    cache: _PlanCache,
+) -> tuple[CallPlan, UUID | None] | None:
+    """The form's fused ``(CallPlan, prompt_version_id)``: the per-schema-version
+    TEMPLATE (memoized per pass) + this form's intake-prefilled values hydrated
+    in (`PrefillFuser.fuse` — placeholders, the Known-information block, and the
+    answers seed for gates/rules).
+
+    ``None`` = no plan: the pinned schema is legacy v1, or a stage failed —
+    fail-open (log + dispatch with no plan → apology call), because a broken
+    plan pipeline must
+    never block the call from going out.
+    """
+    template = await _resolve_plan_template(session, form, cache)
+    if template is None:
+        return None
+    fuser, prompt_version_id = template
+    try:
+        values = await current_values_by_path(session, form.id)
+        fused = fuser.fuse(values, current_year=datetime.now(_EASTERN).year)
+        return fused, prompt_version_id
+    except Exception as exc:
+        # field_answer values are PHI — type name only, never the statement/params.
+        logger.error(
+            "dispatch: prefill fuse failed for form %s (%s) — no plan staged",
+            form.id,
+            type(exc).__name__,
+        )
+        return None
+
+
+async def _resolve_plan_template(
+    session: AsyncSession,
+    form: PatientForm,
+    cache: _PlanCache,
+) -> tuple[PrefillFuser, UUID | None] | None:
+    """The compiled ``(per-form fuser, prompt_version_id)`` for the form's
+    pinned schema version, memoized per dispatch pass (pure per schema version —
+    tokens intact until fuse; the fuser precomputes the template-invariant
+    lookups once).
+
+    ``None`` = legacy v1 schema or compile failure (fail-open). No published
+    prompt version is a documented fallback: the template compiles with
+    FACTORY_SESSION and lineage stays NULL.
+    """
+    if form.schema_version_id in cache:
+        return cache[form.schema_version_id]
+    resolved: tuple[PrefillFuser, UUID | None] | None = None
+    try:
+        schema_version = (
+            await session.execute(
+                select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+            )
+        ).scalar_one_or_none()
+        if schema_version is not None and is_v2(schema_version.schema_json):
+            doc = FormSchemaDoc.model_validate(schema_version.schema_json)
+            prompt_version = (
+                await session.execute(
+                    select(PromptVersion)
+                    .where(
+                        PromptVersion.schema_version_id == schema_version.id,
+                        PromptVersion.status == VersionStatus.PUBLISHED.value,
+                    )
+                    # ≤1 published per prompt family (partial unique index); newest
+                    # wins if several families target the same schema version.
+                    .order_by(PromptVersion.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            prompt_doc = (
+                PromptDocument.model_validate(prompt_version.composite_json)
+                if prompt_version is not None
+                else None
+            )
+            prompt_version_id = prompt_version.id if prompt_version is not None else None
+            plan = compile_call_plan(
+                doc,
+                prompt_doc,
+                schema_version_id=schema_version.id,
+                prompt_version_id=prompt_version_id,
+            )
+            resolved = (PrefillFuser(doc, plan), prompt_version_id)
+    except Exception:
+        # Schema/prompt documents are config, not PHI — the traceback is safe.
+        logger.exception("dispatch: call plan compile failed for form %s — no plan staged", form.id)
+    cache[form.schema_version_id] = resolved
+    return resolved
 
 
 async def _resolve_provider(session: AsyncSession, form: PatientForm) -> InsuranceProvider | None:

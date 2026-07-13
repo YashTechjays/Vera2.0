@@ -6,16 +6,10 @@ import pytest
 from livekit.agents.llm import FunctionTool
 
 from agent_worker.agent import VeraAgent
-from vera_core.phi import PassthroughPHIBoundary
 
 
 def _make_agent() -> VeraAgent:
-    return VeraAgent(
-        boundary=PassthroughPHIBoundary(),
-        session_id="test-session",
-        instructions="test",
-        greeting="hello",
-    )
+    return VeraAgent(instructions="test")
 
 
 def _function_tools(agent: VeraAgent) -> list[FunctionTool]:  # type: ignore[type-arg]

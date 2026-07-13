@@ -29,6 +29,12 @@ KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # {{token}} placeholders in task-level text; token = a system_fields key or the
 # root-anchored path of a context-role leaf (2026-07-08 spec §4).
 PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
+# Reserved runtime tokens — exempt from placeholder-resolution validation and
+# handled by the call-plan fuse, not by field lookup: {{value}} is the agent's
+# recorded-value sentinel (kept verbatim in prompt text); {{current_year}} is
+# hydrated at fuse time. Every validator and the resolver consume THIS set so
+# they can never disagree about what counts as reserved.
+RESERVED_PLACEHOLDER_TOKENS: frozenset[str] = frozenset({"value", "current_year"})
 # A complete {{…}} pair whose innards did NOT parse as a token above — e.g.
 # "{{ member_id }}" (inner whitespace) or "{{patient-name}}" (bad chars). These
 # are operator typos that would otherwise reach the spoken prompt as literal
@@ -473,6 +479,12 @@ class FormSchemaDoc(_Model):
         """Root-anchored paths of every group node."""
         return {path for path, field in self._iter_fields() if isinstance(field, Group)}
 
+    def section_to_task(self) -> dict[str, str]:
+        """section key -> owning task_key. Collect sections appear exactly once
+        (validated below); context/ui_only sections are absent. The prompt
+        renderer and the call-plan compiler both route leaves through this map."""
+        return {s: t.task_key for t in self.tasks for s in t.sections}
+
     def collection_paths(self, section_keys: list[str] | None = None) -> list[str]:
         """Voice-agent collection targets: role in (ask, confirm), optionally per section."""
         keys = set(section_keys) if section_keys is not None else None
@@ -601,7 +613,11 @@ class FormSchemaDoc(_Model):
             for attr in ("intro", "outro", "prompt"):
                 text: str | None = getattr(task, attr)
                 for token in PLACEHOLDER_RE.findall(text or ""):
-                    if token not in (self.system_fields or {}) and token not in context_paths:
+                    if (
+                        token not in RESERVED_PLACEHOLDER_TOKENS
+                        and token not in (self.system_fields or {})
+                        and token not in context_paths
+                    ):
                         errors.append(
                             f"task {task.task_key}.{attr}: unknown placeholder "
                             f"{{{{{token}}}}} (not a system_fields key or context-leaf path)"

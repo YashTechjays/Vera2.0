@@ -1,50 +1,49 @@
 """Cascade agents.
 
-VeraAgent: the infertility-verification chat persona; greets on enter and carries the
-inert PHI-wall node overrides (stt_node redact FINAL+PREFLIGHT before the LLM; tts_node
-hydrate the TTS-bound text only — both route through PHIBoundaryProtocol, today
-PassthroughPHIBoundary/no-op).
+The worker is PLAN-ONLY (2026-07-13): the compiled CallPlan is the sole
+verification prompt source. The former monolithic SYSTEM_PROMPT / VeraAgent
+fallback script is gone. VeraAgent is now just the end_call-carrying base for
+the plan runtime's WrapUpAgent and for ApologyAgent.
 
-The generic IVR navigator (IvrNavigatorAgent) lives in `ivr_agent.py`; once it reaches a
-live human rep it hands off to VeraAgent (a one-way swap; from then on the PHI-wall overrides
-apply). build_agent() picks the initial persona from the dispatch metadata.
+PHI tokenization was dropped (2026-07-13): agents are plain LiveKit agents (no
+stt/tts redact/hydrate seam).
+
+`build_agent()` picks the initial persona from dispatch metadata; it requires a
+`PlanRunController` (a real call always has a compiled plan). When no plan can be
+built the entrypoint runs `ApologyAgent` instead — a graceful exit, never a
+generic verification script. The IVR navigator (`ivr_agent.py`) hands off to the
+plan's first task agent once a live rep answers.
 """
 
 import logging
-from collections.abc import AsyncIterable, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-from livekit import rtc
-from livekit.agents import (
-    Agent,
-    ModelSettings,
-    llm,
-    stt,
-)
+from livekit.agents import Agent, llm
 
 from agent_worker.ivr_agent import IvrNavigatorAgent
 from agent_worker.ivr_prompt import parse_ivr_playbook
-from agent_worker.prompt import build_instructions, resolve_greeting
-from agent_worker.seams import hydrate_stream, redact_event
-from vera_core.phi import PHIBoundaryProtocol
+
+if TYPE_CHECKING:
+    # TYPE_CHECKING-only: plan_runtime subclasses VeraAgent from this module,
+    # so a runtime import here would be a cycle.
+    from agent_worker.plan_runtime import PlanRunController
 
 logger = logging.getLogger("agent_worker")
 
+# Spoken when a call reaches a rep but has no usable plan (Redis miss / build
+# failure). One polite line, then hang up — never the verification script.
+APOLOGY_LINE = (
+    "Hi, I'm so sorry — we're having a technical issue on our end and can't "
+    "complete this verification right now. We'll call back. Thanks so much, and "
+    "have a good one."
+)
+
 
 class VeraAgent(Agent):
-    def __init__(
-        self,
-        boundary: PHIBoundaryProtocol,
-        session_id: str,
-        *,
-        instructions: str | None = None,
-        greeting: str | None = None,
-    ) -> None:
-        self._boundary = boundary
-        self._session_id = session_id
-        self._greeting = greeting if greeting is not None else resolve_greeting()
-        super().__init__(
-            instructions=instructions if instructions is not None else build_instructions(),
-        )
+    """Base agent carrying just the end_call tool, for an agent whose LLM ends
+    the call by tool call (the plan runtime's WrapUpAgent). The monolithic Vera
+    persona / greeting is gone — plan agents supply their own instructions."""
 
     @llm.function_tool(
         name="end_call",
@@ -59,60 +58,42 @@ class VeraAgent(Agent):
         self.session.shutdown(drain=True)
         return "Call ended."
 
+
+class ApologyAgent(Agent):
+    """Graceful-exit agent for a call with no usable plan: speaks one fixed
+    apology line, then hangs up. NOT a verification fallback — it collects
+    nothing and runs no script. The LLM is bypassed (on_enter drives it
+    deterministically), so the `instructions` string is inert."""
+
+    def __init__(self) -> None:
+        super().__init__(instructions="Say the apology line exactly once, then end the call.")
+
     async def on_enter(self) -> None:
-        self.session.say(self._greeting)
-
-    async def stt_node(
-        self,
-        audio: AsyncIterable[rtc.AudioFrame],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[stt.SpeechEvent | str]:
-        async for ev in Agent.default.stt_node(self, audio, model_settings):
-            if isinstance(ev, stt.SpeechEvent):
-                ev = await redact_event(self._boundary, self._session_id, ev)
-            yield ev
-
-    def transcription_node(
-        self, text: AsyncIterable[str], model_settings: ModelSettings
-    ) -> AsyncIterable[str]:
-        # Inert seam: pass-through today. Future: tap tokenized assistant
-        # segments here for the live-transcript stream. Kept deliberately so
-        # that integration is a one-line change inside this method.
-        return Agent.default.transcription_node(self, text, model_settings)
-
-    def tts_node(
-        self,
-        text: AsyncIterable[str],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[rtc.AudioFrame]:
-        hydrated = hydrate_stream(self._boundary, self._session_id, text)
-        return Agent.default.tts_node(self, hydrated, model_settings)
+        self.session.say(APOLOGY_LINE)
+        self.session.shutdown(drain=True)
 
 
 def build_agent(
     meta: dict[str, object],
     *,
-    boundary: PHIBoundaryProtocol,
-    session_id: str,
-    instructions: str | None = None,
-    greeting: str | None = None,
+    controller: "PlanRunController",
     on_keypress: Callable[[str], None] | None = None,
 ) -> Agent:
-    """Pick the agent persona from dispatch metadata: the IVR navigator when
-    `enable_ivr_navigation` is set (a plain agent, no phiwall, an optional per-provider
-    `ivr_playbook` overlay specializing its prompt), otherwise the chat persona (with the
-    PHI-wall overrides and any persona-tweak instructions/greeting). The flag is the sole
-    selector — a playbook without it is a producer inconsistency, logged and ignored, so it
-    can never silently override an explicit opt-out."""
+    """Pick the initial persona for a plan-backed call: the IVR navigator when
+    `enable_ivr_navigation` is set (with an optional per-provider `ivr_playbook`
+    overlay), else the plan's first task agent. The navigator hands off to the
+    same first task agent once a live rep answers. The flag is the sole selector
+    — a playbook without it is a producer inconsistency, logged and ignored.
+
+    A `controller` is required: a real call always has a compiled CallPlan. The
+    no-plan case is handled upstream (the entrypoint runs ApologyAgent), so this
+    never falls back to a generic verification script."""
     if meta.get("enable_ivr_navigation"):
         return IvrNavigatorAgent(
-            boundary,
-            session_id,
             playbook=parse_ivr_playbook(meta),
-            verification_instructions=instructions,
-            verification_greeting=greeting,
             on_keypress=on_keypress,
+            verification_agent_factory=controller.first_agent,
         )
     if meta.get("ivr_playbook") is not None:
         logger.warning("ivr_playbook present without enable_ivr_navigation; ignoring playbook")
-    return VeraAgent(boundary, session_id, instructions=instructions, greeting=greeting)
+    return controller.first_agent()

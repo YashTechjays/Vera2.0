@@ -23,6 +23,7 @@ from control_plane.deps import (
     current_tenant_id,
     get_audit,
     get_auth_audit,
+    get_call_plans,
     get_email_sender,
     get_invitation_store,
     get_kms,
@@ -37,6 +38,7 @@ from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.models import Permission, RolePermission, UserRole
 from vera_core.models.enums import AuthEvent
+from vera_core.plan_store import CallPlanService
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
@@ -64,6 +66,7 @@ Email = Annotated[EmailSender, Depends(get_email_sender)]
 Resolver = Annotated[PermissionResolver, Depends(get_resolver)]
 LiveKit = Annotated["LiveKitGateway", Depends(get_livekit)]
 Kms = Annotated[KeyManagementService, Depends(get_kms)]
+CallPlans = Annotated[CallPlanService, Depends(get_call_plans)]
 
 
 async def emit_auth_event(

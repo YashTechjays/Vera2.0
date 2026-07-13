@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from livekit import rtc
 from livekit.agents import (
     NOT_GIVEN,
+    Agent,
     JobContext,
     JobProcess,
     NotGiven,
@@ -25,9 +26,10 @@ from livekit.agents import (
 from opentelemetry import trace
 from redis.asyncio import Redis
 
-from agent_worker.agent import build_agent
+from agent_worker.agent import ApologyAgent, build_agent
 from agent_worker.cascade import _build_vad, build_session
-from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
+from agent_worker.plan_runtime import PlanRunController
+from agent_worker.prompt import parse_persona_tweak
 from agent_worker.transcript_publisher import (
     FanOutTurnPublisher,
     ReorderingEmitter,
@@ -49,7 +51,12 @@ from vera_core.observability.correlation import (
     parse_room_name,
 )
 from vera_core.observability.otel import configure_observability
-from vera_core.phi import build_phi_boundary
+from vera_core.plan_store import (
+    CallPlanService,
+    PlanRunStateService,
+    RedisCallPlanStore,
+    RedisPlanRunStateStore,
+)
 from vera_core.redis import create_redis
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
@@ -303,9 +310,10 @@ async def entrypoint(ctx: JobContext) -> None:
         bus = WorkerEventBus(events_redis, maxlen=settings.worker_events_stream_maxlen)
         lifecycle = CallLifecycleEmitter(bus, room_name)
 
-    # Declared here (not inside try) so the except below can always safely reference it,
-    # even if setup fails before the publish_events block runs.
+    # Declared here (not inside try) so the except below can always safely reference them,
+    # even if setup fails before their blocks run.
     call_stream_redis: Redis | None = None
+    plan_redis: Redis | None = None
 
     try:
         # Attach correlation attributes to the active OTel span so every pipeline
@@ -342,16 +350,51 @@ async def entrypoint(ctx: JobContext) -> None:
             if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
                 await lifecycle.answered(now_ms=int(time.time() * 1000))
 
-        boundary = build_phi_boundary(settings)
-        await boundary.open_session(session_id)
-
         # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
-        # plane). Fail-safe: bad/missing metadata falls back to the base persona.
+        # plane). Fail-safe: bad/missing metadata yields the no-op tweak.
         tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
-        instructions = build_instructions(tweak)
-        greeting = resolve_greeting(tweak)
 
-        session = build_session(vad=ctx.proc.userdata.get("vad"))
+        # Compiled Call Plan (dispatcher opt-in via use_call_plan): the control plane
+        # staged it in Redis at dispatch. PLAN-ONLY — the compiled plan is the sole
+        # verification prompt source. If the plan can't be loaded/built, the call runs
+        # the ApologyAgent (a graceful exit) instead of any generic script; it never
+        # runs a verification without a plan.
+        plan_service: CallPlanService | None = None
+        run_state: PlanRunStateService | None = None
+        controller: PlanRunController | None = None
+        if meta.get("use_call_plan"):
+            plan_redis = create_redis(settings.redis_url)
+            plan_service = CallPlanService(
+                RedisCallPlanStore(plan_redis, ttl_seconds=settings.call_plan_ttl_seconds)
+            )
+            plan = await plan_service.get(room_name)
+            if plan is None:
+                logger.warning("use_call_plan set but no plan for %s — apology path", room_name)
+            else:
+                run_state = PlanRunStateService(
+                    RedisPlanRunStateStore(plan_redis, ttl_seconds=settings.call_plan_ttl_seconds)
+                )
+                try:
+                    controller = PlanRunController(
+                        plan,
+                        room_name=room_name,
+                        run_state=run_state,
+                        # An explicit tenant greeting overrides the plan's first-task
+                        # intro; extra_instructions overlay every plan agent.
+                        greeting=tweak.greeting,
+                        extra_instructions=tweak.extra_instructions,
+                    )
+                except Exception:
+                    logger.exception(
+                        "call plan for %s failed to build a runtime — apology path", room_name
+                    )
+        else:
+            logger.warning("no use_call_plan flag for %s — apology path", room_name)
+
+        session = build_session(
+            vad=ctx.proc.userdata.get("vad"),
+            key_terms=controller.plan.stt_key_terms if controller is not None else None,
+        )
 
         # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
         transcript_redis: Redis | None = None
@@ -429,22 +472,52 @@ async def entrypoint(ctx: JobContext) -> None:
                 except Exception:
                     logger.exception("failed to close call stream redis for %s", room_name)
 
+        async def _end_plan_run() -> None:
+            # Best-effort cleanup of the plan blob + run state; the rolling TTL is
+            # the backstop when this is skipped (hard crash) or Redis is down.
+            if controller is not None:
+                with contextlib.suppress(Exception):
+                    await controller.drain_cursor_writes()
+            if run_state is not None:
+                try:
+                    await run_state.clear(room_name)
+                except Exception:
+                    logger.exception("failed to clear plan run state for %s", room_name)
+            if plan_service is not None:
+                try:
+                    await plan_service.clear(room_name)
+                except Exception:
+                    logger.exception("failed to clear call plan for %s", room_name)
+            if plan_redis is not None:
+                try:
+                    await plan_redis.aclose()
+                except Exception:
+                    logger.exception("failed to close plan redis for %s", room_name)
+
         async def _on_shutdown() -> None:
             # Sequential, spec-pinned order: flush the shared emitter once, then
-            # transcript-stream teardown, then call-stream teardown, then the PHI boundary.
-            # Each step inside the helpers is best-effort (own try/except), so a failure
-            # never skips the rest.
+            # transcript-stream teardown, then call-stream teardown, then the plan
+            # run's Redis keys. Each step inside the helpers is best-effort (own
+            # try/except), so a failure never skips the rest.
             await _flush_turn_emitter()
             await _end_transcript_stream()
             await _end_call_stream()
-            await boundary.close_session(session_id)
+            await _end_plan_run()
 
-            # Last: signal call end (the consumer completes the form and refills the
-            # slot), then release the events client. A hard worker crash skips this —
-            # the control plane's pipeline sweeper reconciles that case (room gone +
-            # call still non-terminal → failed).
-            if lifecycle is not None:
-                await lifecycle.ended(now_ms=int(time.time() * 1000))
+            # Last: signal the terminal event. Normally call.ended (the consumer
+            # completes the form and refills the slot). But when the dispatcher
+            # staged a plan (use_call_plan) yet the worker couldn't build one, the
+            # call ran the ApologyAgent — that's an infra fault (plan missing from
+            # Redis / build failure), not a completed verification. Emit call.failed
+            # instead so the control plane RE-DISPATCHES it (re-staging the plan,
+            # which self-heals) rather than banking a completed-with-no-answers form.
+            # A hard worker crash skips this — the pipeline sweeper reconciles that.
+            now_ms = int(time.time() * 1000)
+            if meta.get("use_call_plan") and controller is None and bus is not None:
+                logger.warning("no usable plan for %s — emitting call.failed", room_name)
+                await _emit_call_failed(bus, room_name, CallFailureReason.FAILED, now_ms=now_ms)
+            elif lifecycle is not None:
+                await lifecycle.ended(now_ms=now_ms)
             if events_redis is not None:
                 try:
                     await events_redis.aclose()
@@ -463,6 +536,9 @@ async def entrypoint(ctx: JobContext) -> None:
         if call_stream_redis is not None:
             with contextlib.suppress(Exception):
                 await call_stream_redis.aclose()
+        if plan_redis is not None:
+            with contextlib.suppress(Exception):
+                await plan_redis.aclose()
         raise
     # record=False disables livekit-agents session recording. Left unset it defers to the
     # server's enable_recording flag, which uploads a session report — including call AUDIO
@@ -471,17 +547,21 @@ async def entrypoint(ctx: JobContext) -> None:
     # observability is the self-hosted Langfuse/OTel pipeline (configure_observability), which
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
-    await session.start(
-        agent=build_agent(
+    # Plan-only: a plan-backed call runs the compiled agent chain; a call with no
+    # usable plan runs the ApologyAgent (one polite line, then hang up) — never a
+    # generic verification script.
+    if controller is not None:
+        agent: Agent = build_agent(
             meta,
-            boundary=boundary,
-            session_id=session_id,
-            instructions=instructions,
-            greeting=greeting,
+            controller=controller,
             # A successful IVR keypad press rides the live transcript as a dtmf turn
             # (evidence of the action); rooms with no stream enabled report nowhere.
             on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
-        ),
+        )
+    else:
+        agent = ApologyAgent()
+    await session.start(
+        agent=agent,
         room=ctx.room,
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
         record=False,

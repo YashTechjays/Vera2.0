@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
     transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
+    # Call Plan blob + plan-run state (vera_core.plan_store). Backstop only — the
+    # worker clears both keys at shutdown; the TTL must outlive the longest call
+    # (call_max_duration_seconds is 3h, plus queue-to-answer lag), not the SSE grace.
+    call_plan_ttl_seconds: int = 4 * 3600  # VERA_CALL_PLAN_TTL_SECONDS
+
     # Worker→control-plane event bus (Redis Streams + consumer group). Stream is
     # MAXLEN-trimmed; the consumer blocks for block_ms, reclaims entries a crashed
     # consumer left pending after reclaim_idle_ms, and waits teardown_grace_ms after

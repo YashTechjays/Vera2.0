@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.api.v1.common import Audit, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import Audit, CallPlans, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
@@ -411,6 +411,7 @@ async def end_call(
     sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
     call_stream: Annotated[CallStreamService, Depends(get_call_stream_service)],
     kms: Annotated[KeyManagementService, Depends(get_kms)],
+    call_plans: CallPlans,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[None]:
     """End a call from Live Monitoring.
@@ -481,7 +482,9 @@ async def end_call(
             await resolve_ai_processing(
                 sessionmaker, audit, ref, trigger="user_end_call", actor_label=actor_label
             )
-            await run_dispatch_pass(sessionmaker, tenant_id, livekit, kms, audit)
+            await run_dispatch_pass(
+                sessionmaker, tenant_id, livekit, kms, audit, plan_service=call_plans
+            )
         return ok(None, message="Call canceled.")
     async with tenant_session(sessionmaker, tenant_id) as stamp_session:
         locked = (
