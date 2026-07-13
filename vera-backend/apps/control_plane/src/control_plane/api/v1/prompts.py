@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -331,12 +331,19 @@ async def preview_prompt(
             )
         ).scalar_one()
         prompt_doc = PromptDocument.model_validate(version.composite_json)
+        try:
+            schema_doc = FormSchemaDoc.model_validate(schema_version.schema_json)
+        except ValidationError as exc:
+            raise ConflictError(
+                message="pinned schema document predates the current schema contract "
+                "and cannot be rendered"
+            ) from exc
     else:
         schema_version = await _published_schema_version(session, prompt.schema_id)
         if schema_version is None:
             raise ConflictError(message="no published schema to render against")
         prompt_doc = None
-    schema_doc = FormSchemaDoc.model_validate(schema_version.schema_json)
+        schema_doc = FormSchemaDoc.model_validate(schema_version.schema_json)
     return ok(render_task_prompts(schema_doc, prompt_doc))
 
 

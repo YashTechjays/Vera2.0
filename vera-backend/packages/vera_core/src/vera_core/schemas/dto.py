@@ -21,16 +21,6 @@ class CallSummary(BaseModel):
     is_owner: bool = False
 
 
-class StartCallRequest(BaseModel):
-    form_id: UUID
-    # When ON, the worker navigates the payer IVR first; the provider's active playbook (if any)
-    # specializes the navigator, else it runs generic. Off preserves the direct-to-VeraAgent flow.
-    enable_ivr_navigation: bool = False
-    # Which insurance provider this call targets — populates Call.insurance_provider_id and drives
-    # playbook selection. Optional until forms carry a provider FK.
-    insurance_provider_id: UUID | None = None
-
-
 class JoinTokenResponse(BaseModel):
     token: str
     url: str

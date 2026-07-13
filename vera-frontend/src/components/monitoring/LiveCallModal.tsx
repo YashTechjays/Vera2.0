@@ -4,7 +4,6 @@ import {
   X,
   Grid3x3,
   MessageSquare,
-  Copy,
   ChevronDown,
   ChevronUp,
 } from "lucide-react"
@@ -26,8 +25,11 @@ import {
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
+import { CallTranscript } from "./CallTranscript"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
+import { useCallStatus } from "./useCallStatus"
+import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
 function confidenceColor(score: number): string {
@@ -42,9 +44,13 @@ function confidenceColor(score: number): string {
  * Intervene. The mode is part of LiveCallRoom's key: LiveKit ignores a token
  * swap while connected, so switching modes remounts the room with a freshly
  * minted token. Intervening is one-way: the modal cannot be closed (and the
- * mode cannot be dropped) until the intervener ends the call.
+ * mode cannot be dropped) until the call ends.
+ *
+ * "Call ended" is driven by the events stream's terminal call_status (the room
+ * can outlive the call while supervisors sit in it) OR by the room dying
+ * (End Call deletes it server-side before the closeout lands).
  *  - left: collapsible "Patient Information Form" summary + call controls
- *  - right: live call panel (connection, participants, audio)
+ *  - right: live call panel (connection, participants, audio) + SSE transcript
  *  - footer: Close / End Call · Intervene
  */
 export function LiveCallModal({
@@ -67,14 +73,23 @@ export function LiveCallModal({
   const [formExpanded, setFormExpanded] = useState(false)
   const progress = call?.formProgress ?? 0
 
-  const callEnded = roomStatus?.phase === "ended"
+  const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
+    call?.id,
+  )
+  const duration = useLiveDuration({
+    open,
+    ended: sseEnded,
+    sseMs: startedAtMs,
+    startedAt: call?.startedAt,
+  })
+  const callEnded = sseEnded || roomStatus?.phase === "ended"
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
 
   // A fresh open always starts listen-only (the call can't change while open —
   // the worklist is behind the modal), so resetting on close covers every path.
   // Radix routes Esc/overlay-click here too, so an intervener can't escape
-  // without ending the call.
+  // without the call ending.
   function handleOpenChange(next: boolean) {
     if (!shouldAllowClose(mode, callEnded, next)) return
     if (!next) {
@@ -90,6 +105,8 @@ export function LiveCallModal({
     setEnding(true)
     try {
       await endCall(call.id)
+      // The room is torn down server-side; the SSE terminal status / room
+      // disconnect flips callEnded and unlocks the modal, which we then close.
       setMode("listen")
       setRoomStatus(null)
       setActionError(null)
@@ -219,11 +236,17 @@ export function LiveCallModal({
               </div>
             )}
 
-            {/* Call status / controls bar */}
+            {/* Call status / controls bar — the timer starts on the SSE "active"
+                event (callee answered) and freezes on a terminal status. */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
               <span className="flex items-center gap-2 text-sm font-semibold tabular-nums">
-                <span className="size-2 rounded-full bg-amber-500" />
-                {call?.callTime ?? "00:00"}
+                <span
+                  className={cn(
+                    "size-2 rounded-full",
+                    duration.running && !callEnded ? "bg-emerald-500" : "bg-amber-500",
+                  )}
+                />
+                {duration.label}
               </span>
               <button
                 type="button"
@@ -236,23 +259,28 @@ export function LiveCallModal({
             </div>
           </div>
 
-          {/* Right — live call panel */}
+          {/* Right — live call panel + transcript */}
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
             <div className="flex items-center justify-between bg-[#f3f5f7] px-4 py-3">
               <h3 className="font-semibold text-foreground">Live Transcripts</h3>
-              <Button variant="outline" size="sm" className="gap-1.5">
-                <Copy className="size-3.5" />
-                Copy
-              </Button>
             </div>
             {call?.id ? (
-              <LiveCallRoom
-                key={`${call.id}:${mode}`}
-                callId={call.id}
-                microphone={mode === "intervene"}
-                onStatus={setRoomStatus}
-                onJoinFailed={handleJoinFailed}
-              />
+              <div className="flex flex-1 flex-col overflow-hidden">
+                <LiveCallRoom
+                  key={`${call.id}:${mode}`}
+                  callId={call.id}
+                  microphone={mode === "intervene"}
+                  ended={sseEnded}
+                  endedStatus={terminalStatus}
+                  onStatus={setRoomStatus}
+                  onJoinFailed={handleJoinFailed}
+                />
+                <CallTranscript
+                  key={`t-${call.id}`}
+                  callId={call.id}
+                  onCallStatus={onCallStatus}
+                />
+              </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
                 <MessageSquare className="size-10 opacity-30" />
@@ -265,7 +293,7 @@ export function LiveCallModal({
         {/* Footer */}
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <div className="flex items-center gap-3">
-            {mode === "intervene" && !callEnded ? (
+            {!callEnded && (
               <Button
                 onClick={() => void handleEndCall()}
                 disabled={ending}
@@ -273,14 +301,15 @@ export function LiveCallModal({
               >
                 {ending ? "Ending…" : "End Call"}
               </Button>
-            ) : (
+            )}
+            {(mode === "listen" || callEnded) && (
               <Button variant="outline" onClick={() => handleOpenChange(false)}>
                 Close
               </Button>
             )}
             {actionError && <span className="text-sm text-destructive">{actionError}</span>}
           </div>
-          {intervene.visible && mode === "listen" && (
+          {intervene.visible && mode === "listen" && !callEnded && (
             <Button
               onClick={() => {
                 setActionError(null)

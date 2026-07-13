@@ -9,10 +9,23 @@
     "patient_dob": "sections.patient_information.patient_dob",
     "patient_gender": "sections.patient_information.patient_gender",
     "member_id": "sections.policy_details.policy_number",
-    "policy_id": "sections.policy_details.policy_number",
+    "appointment_date": "sections.appointment_information.appointment_date",
+    "appointment_type": "sections.appointment_information.appointment_type",
+    "insurance_provider_name": "sections.insurance_reference_information.insurance_provider_name",
+    "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
     "verified_by": "sections.verification_information.verified_by",
     "callback_number": "sections.verification_information.callback_number",
     "form_completed_at": "sections.verification_information.verified_at"
+  },
+  "promoted_fields": {
+    "patient_name": "sections.patient_information.patient_name",
+    "patient_dob": "sections.patient_information.patient_dob",
+    "chart_number": "sections.patient_information.chart_number",
+    "appointment_date": "sections.appointment_information.appointment_date",
+    "appointment_type": "sections.appointment_information.appointment_type",
+    "member_id": "sections.policy_details.policy_number",
+    "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
+    "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number"
   },
   "shared_conditions": {
     "disease_covered": {
@@ -60,6 +73,35 @@
             "Other"
           ],
           "default": "N/A"
+        }
+      }
+    },
+    "appointment_information": {
+      "title": "Appointment Information",
+      "role": "context",
+      "description": "Upcoming appointment details supplied at intake; background for the agent.",
+      "fields": {
+        "appointment_type": {
+          "type": "enum",
+          "title": "Appointment Type",
+          "role": "context",
+          "required": true,
+          "values": [
+            "New Patient",
+            "Reverification",
+            "Follow Up Visit",
+            "N/A"
+          ],
+          "default": "N/A"
+        },
+        "appointment_date": {
+          "type": "date",
+          "title": "Appointment Date",
+          "role": "context",
+          "required": true,
+          "validation": {
+            "date_format": "M/D/YYYY"
+          }
         }
       }
     },
@@ -946,6 +988,28 @@
         }
       }
     },
+    "insurance_reference_information": {
+      "title": "Insurance Reference Information",
+      "description": "Reference details about the insurance provider, collected when available.",
+      "fields": {
+        "insurance_provider_name": {
+          "type": "text",
+          "title": "Insurance Provider Name",
+          "role": "ask",
+          "prompt": {
+            "ask": "Could you provide the full name of the insurance provider?"
+          }
+        },
+        "insurance_phone_number": {
+          "type": "phone",
+          "title": "Insurance Provider Phone",
+          "role": "ask",
+          "prompt": {
+            "ask": "What is the primary phone number for the insurance provider?"
+          }
+        }
+      }
+    },
     "representative_details": {
       "title": "Insurance Representative",
       "fields": {
@@ -1021,6 +1085,7 @@
       "title": "Wrap Up",
       "prompt": "Always run last: capture the representative's name and a call reference number before ending the call politely.",
       "sections": [
+        "insurance_reference_information",
         "representative_details"
       ]
     }

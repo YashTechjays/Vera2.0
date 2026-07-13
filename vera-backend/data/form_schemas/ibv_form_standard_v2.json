@@ -11,7 +11,6 @@
     "appointment_date": "sections.appointment_information.appointment_date",
     "appointment_type": "sections.appointment_information.appointment_type",
     "member_id": "sections.insurance_information.policy_number",
-    "policy_id": "sections.insurance_information.policy_number",
     "insurance_provider_name": "sections.insurance_reference_information.insurance_provider_name",
     "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
     "verified_by": "sections.verification_information.verified_by",
@@ -23,6 +22,16 @@
     "hospital_npi": "sections.hospital_information.npi",
     "doctor_name": "sections.provider_reference_information.provider_name",
     "doctor_npi": "sections.provider_reference_information.npi"
+  },
+  "promoted_fields": {
+    "patient_name": "sections.patient_information.patient_name",
+    "patient_dob": "sections.patient_information.patient_dob",
+    "chart_number": "sections.patient_information.chart_number",
+    "appointment_date": "sections.appointment_information.appointment_date",
+    "appointment_type": "sections.appointment_information.appointment_type",
+    "member_id": "sections.insurance_information.policy_number",
+    "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
+    "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number"
   },
   "stt_key_terms": [
     "intrauterine insemination",
@@ -5017,55 +5026,24 @@
     },
     "insurance_reference_information": {
       "title": "Insurance Reference Information",
-      "description": "Optional reference details about the insurance provider, collected when available.",
+      "role": "context",
+      "description": "Insurance provider contact details supplied at intake. Provided to the agent as background; never asked on the call.",
       "fields": {
         "insurance_provider_name": {
           "type": "text",
           "title": "Insurance Provider Name",
-          "role": "ask",
-          "prompt": {
-            "ask": "Could you provide the full name of the insurance provider?"
-          }
+          "role": "context"
         },
         "insurance_phone_number": {
           "type": "phone",
           "title": "Insurance Provider Phone",
-          "role": "ask",
-          "prompt": {
-            "ask": "What is the primary phone number for the insurance provider?"
-          }
+          "role": "context"
         },
         "web_portal": {
           "type": "text",
           "title": "Web Portal",
-          "role": "ask",
-          "prompt": {
-            "ask": "Is there a provider portal URL or access information available?"
-          }
-        },
-        "web_portal_reference_number": {
-          "type": "text",
-          "title": "Web Portal Reference Number",
-          "role": "ask",
-          "prompt": {
-            "ask": "Is there a web portal reference number for this inquiry?"
-          }
-        },
-        "member_services_pca": {
-          "type": "text",
-          "title": "Member Services PCA Contact",
-          "role": "ask",
-          "prompt": {
-            "ask": "Could you provide the Member Services PCA contact?"
-          }
-        },
-        "employer_name": {
-          "type": "text",
-          "title": "Employer Name",
-          "role": "ask",
-          "prompt": {
-            "ask": "May I also have the patient's employer name?"
-          }
+          "role": "input",
+          "description": "Provider portal URL or access information. Display only; never part of the call."
         }
       }
     },
@@ -5176,8 +5154,7 @@
         "authorization_department",
         "third_party_administrator",
         "pharmacy_benefit_manager",
-        "infertility_specialty_pharmacy",
-        "insurance_reference_information"
+        "infertility_specialty_pharmacy"
       ]
     },
     {

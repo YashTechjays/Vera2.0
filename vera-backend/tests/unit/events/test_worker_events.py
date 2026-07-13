@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from vera_core.events import (
     WORKER_EVENTS_GROUP,
     WORKER_EVENTS_STREAM,
+    CallAnsweredEvent,
+    CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
     WorkerEventBus,
@@ -20,6 +22,22 @@ def test_call_failed_event_round_trips() -> None:
     parsed = parse_worker_event(event.model_dump_json())
     assert parsed == event
     assert parsed.type == "call.failed"
+
+
+def test_parse_call_answered_roundtrip() -> None:
+    ev = CallAnsweredEvent(room_name="call--t--c", ts=123)
+    assert parse_worker_event(ev.model_dump_json()) == ev
+
+
+def test_parse_call_ended_roundtrip() -> None:
+    ev = CallEndedEvent(room_name="call--t--c", ts=456)
+    assert parse_worker_event(ev.model_dump_json()) == ev
+
+
+def test_parse_still_handles_call_failed() -> None:
+    raw = '{"type": "call.failed", "room_name": "r", "reason": "no_answer", "ts": 1}'
+    ev = parse_worker_event(raw)
+    assert isinstance(ev, CallFailedEvent)
 
 
 def test_parse_rejects_unknown_event_type() -> None:

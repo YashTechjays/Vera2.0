@@ -39,6 +39,7 @@ from vera_core.forms.dsl import (
     FormSchemaDoc,
     Group,
     Leaf,
+    PromotedFields,
     RequiredWhen,
     Section,
     Task,
@@ -904,30 +905,26 @@ def _admin_sections() -> dict[str, Section]:
         ),
         "insurance_reference_information": Section(
             title="Insurance Reference Information",
-            description="Optional reference details about the insurance provider, collected when available.",
+            role="context",
+            description=(
+                "Insurance provider contact details supplied at intake. Provided to the "
+                "agent as background; never asked on the call."
+            ),
             fields={
-                "insurance_provider_name": text_ask(
-                    "Insurance Provider Name",
-                    "Could you provide the full name of the insurance provider?",
+                "insurance_provider_name": Leaf(
+                    type="text", title="Insurance Provider Name", role="context"
                 ),
-                "insurance_phone_number": text_ask(
-                    "Insurance Provider Phone",
-                    "What is the primary phone number for the insurance provider?",
-                    type_="phone",
+                "insurance_phone_number": Leaf(
+                    type="phone", title="Insurance Provider Phone", role="context"
                 ),
-                "web_portal": text_ask(
-                    "Web Portal", "Is there a provider portal URL or access information available?"
-                ),
-                "web_portal_reference_number": text_ask(
-                    "Web Portal Reference Number",
-                    "Is there a web portal reference number for this inquiry?",
-                ),
-                "member_services_pca": text_ask(
-                    "Member Services PCA Contact",
-                    "Could you provide the Member Services PCA contact?",
-                ),
-                "employer_name": text_ask(
-                    "Employer Name", "May I also have the patient's employer name?"
+                "web_portal": Leaf(
+                    type="text",
+                    title="Web Portal",
+                    role="input",
+                    description=(
+                        "Provider portal URL or access information. Display only; "
+                        "never part of the call."
+                    ),
                 ),
             },
         ),
@@ -1018,7 +1015,6 @@ def build_ibv_standard() -> FormSchemaDoc:
             "appointment_date": "sections.appointment_information.appointment_date",
             "appointment_type": "sections.appointment_information.appointment_type",
             "member_id": "sections.insurance_information.policy_number",
-            "policy_id": "sections.insurance_information.policy_number",
             "insurance_provider_name": "sections.insurance_reference_information.insurance_provider_name",
             "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
             "verified_by": "sections.verification_information.verified_by",
@@ -1031,6 +1027,21 @@ def build_ibv_standard() -> FormSchemaDoc:
             "doctor_name": "sections.provider_reference_information.provider_name",
             "doctor_npi": "sections.provider_reference_information.npi",
         },
+        # patient_form columns re-derived from the current answer at intake AND
+        # dispute-resolve (2026-07-10 design doc). Every path must also be a
+        # system_fields target (dsl.py validates this).
+        promoted_fields=PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.insurance_information.policy_number",
+            insurance_provider="sections.insurance_reference_information.insurance_provider_name",
+            insurance_provider_phone_number=(
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
+        ),
         stt_key_terms=[
             # treatments
             "intrauterine insemination",
@@ -1230,7 +1241,6 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "third_party_administrator",
                     "pharmacy_benefit_manager",
                     "infertility_specialty_pharmacy",
-                    "insurance_reference_information",
                 ],
             ),
             Task(

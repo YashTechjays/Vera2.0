@@ -22,7 +22,6 @@ import {
   getJoinToken,
   listCalls,
   publishCall,
-  startCall,
   type CallSummary,
   type JoinTokenResponse,
 } from "./calls"
@@ -55,15 +54,6 @@ describe("calls API client", () => {
     expect(apiRequest).toHaveBeenCalledWith("/calls")
   })
 
-  it("starts a call by POSTing the form id", async () => {
-    vi.mocked(apiRequest).mockResolvedValue(call)
-    await startCall("f1")
-    expect(apiRequest).toHaveBeenCalledWith("/calls", {
-      method: "POST",
-      body: { form_id: "f1" },
-    })
-  })
-
   it("publishes a call (POST, no body)", async () => {
     vi.mocked(apiRequest).mockResolvedValue({ ...call, published: true })
     const out = await publishCall("c1")
@@ -85,17 +75,16 @@ describe("calls API client", () => {
   })
 
   it("ends a call (POST, no body)", async () => {
-    vi.mocked(apiRequest).mockResolvedValue({ ...call, status: "completed" })
-    const out = await endCall("c1")
-    expect(out.status).toBe("completed")
+    vi.mocked(apiRequest).mockResolvedValue(null)
+    await endCall("c1")
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/end", { method: "POST" })
   })
 
-  it("propagates ApiError when a non-intervener tries to end (403)", async () => {
+  it("propagates ApiError when intervene hits the single-intervener lock (409)", async () => {
     vi.mocked(apiRequest).mockRejectedValue(
-      new ApiError(403, "FORBIDDEN", "only the active intervener can end the call"),
+      new ApiError(409, "CONFLICT", "another supervisor is currently intervening on this call"),
     )
-    await expect(endCall("c1")).rejects.toBeInstanceOf(ApiError)
+    await expect(getJoinToken("c1", true)).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when a non-owner tries to publish (403)", async () => {
@@ -103,6 +92,11 @@ describe("calls API client", () => {
       new ApiError(403, "FORBIDDEN", "only the owner can publish"),
     )
     await expect(publishCall("c1")).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it("propagates ApiError when ending an unknown call (404)", async () => {
+    vi.mocked(apiRequest).mockRejectedValue(new ApiError(404, "NOT_FOUND", "call not found"))
+    await expect(endCall("c1")).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when joining a private call (404)", async () => {

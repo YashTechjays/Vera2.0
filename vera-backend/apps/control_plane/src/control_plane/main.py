@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
@@ -15,10 +15,12 @@ from control_plane.auth.invitations import InvitationStore, RedisInvitationStore
 from control_plane.auth.permission_cache import PermissionCache, RedisPermissionCache
 from control_plane.auth.rbac import PermissionResolver
 from control_plane.auth.session import RedisSessionStore, SessionStore, SessionVerifier
+from control_plane.dispatch import drain_pending
 from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
+from control_plane.pipeline_sweeper import PipelineSweeper
 from control_plane.request_context import RequestIdMiddleware
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import (
@@ -27,6 +29,7 @@ from vera_core.audit import (
     DatabaseAuditWriter,
     DatabaseAuthAuditWriter,
 )
+from vera_core.call_stream import CallStreamService, RedisCallStreamStore
 from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_settings
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
@@ -37,14 +40,19 @@ from vera_core.transcript import RedisTranscriptStore, TranscriptService
 logger = logging.getLogger("control_plane.main")
 
 
-def _log_consumer_exit(task: asyncio.Task[None]) -> None:
-    """Surface an unexpected exit of the worker-event consumer background task.
+def _log_task_exit(label: str) -> Callable[[asyncio.Task[None]], None]:
+    """Build a done-callback that surfaces an unexpected exit of a lifespan
+    background task (the worker-event consumer, the pipeline sweeper).
 
     `run()` only returns via cancellation (shutdown) or an uncaught exception; without
     this callback the latter would die silently ("Task exception was never retrieved").
     """
-    if not task.cancelled() and task.exception() is not None:
-        logger.error("worker-event consumer exited unexpectedly", exc_info=task.exception())
+
+    def _on_done(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("%s exited unexpectedly", label, exc_info=task.exception())
+
+    return _on_done
 
 
 def create_app(
@@ -62,6 +70,7 @@ def create_app(
     livekit: LiveKitGateway | None = None,
     secrets: SecretProvider | None = None,
     transcript_service: TranscriptService | None = None,
+    call_stream_service: CallStreamService | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -83,6 +92,7 @@ def create_app(
         # handed (tests inject both and never touch Redis).
         redis: Redis | None = None
         transcript_redis: Redis | None = None
+        call_stream_redis: Redis | None = None
 
         def _redis() -> Redis:
             nonlocal redis
@@ -117,6 +127,19 @@ def create_app(
                 )
             )
         app.state.transcript_service = _transcript_service
+        # Same dedicated-client reasoning as the transcript stream above: a tailing
+        # SSE pins a connection, so this must not draw from the shared pool.
+        _call_stream_service = call_stream_service
+        if _call_stream_service is None:
+            call_stream_redis = create_redis(settings.redis_url)
+            _call_stream_service = CallStreamService(
+                RedisCallStreamStore(
+                    call_stream_redis,
+                    ttl_seconds=settings.transcript_stream_ttl_seconds,
+                    end_grace_seconds=settings.transcript_end_grace_seconds,
+                )
+            )
+        app.state.call_stream_service = _call_stream_service
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)
@@ -131,17 +154,41 @@ def create_app(
         # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
         worker_events_redis: Redis | None = None
         worker_event_task: asyncio.Task[None] | None = None
+        sweeper_task: asyncio.Task[None] | None = None
         if settings.livekit_url is not None and app.state.livekit is not None:
             worker_events_redis = create_redis(settings.redis_url)
             consumer = WorkerEventConsumer(
                 worker_events_redis,
                 app.state.livekit,
+                sessionmaker,
+                app.state.kms,
+                app.state.audit,
+                app.state.call_stream_service,
                 block_ms=settings.worker_events_block_ms,
                 reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
+                form_auto_retry_enabled=settings.form_auto_retry_enabled,
             )
             worker_event_task = asyncio.create_task(consumer.run())
-            worker_event_task.add_done_callback(_log_consumer_exit)
+            worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
+
+            # Time-based safety net: reconciles stuck calls (crashed worker, no
+            # call.ended) and wakes the dispatcher on a timer (working-hours
+            # reopen, queue expiry). Same gate as the consumer — needs a real
+            # LiveKit gateway to probe/tear down rooms.
+            sweeper = PipelineSweeper(
+                sessionmaker,
+                app.state.livekit,
+                app.state.kms,
+                app.state.audit,
+                app.state.call_stream_service,
+                interval_s=settings.pipeline_sweep_interval_seconds,
+                stuck_grace_s=settings.call_stuck_grace_seconds,
+                max_call_duration_s=settings.call_max_duration_seconds,
+                form_auto_retry_enabled=settings.form_auto_retry_enabled,
+            )
+            sweeper_task = asyncio.create_task(sweeper.run())
+            sweeper_task.add_done_callback(_log_task_exit("pipeline sweeper"))
 
         configure_observability(settings)
         yield
@@ -149,12 +196,21 @@ def create_app(
             worker_event_task.cancel()
             with suppress(asyncio.CancelledError):
                 await worker_event_task
+        if sweeper_task is not None:
+            sweeper_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper_task
+        # Detached dispatch tasks (post-commit enqueue / consumer refill) must finish
+        # before the engine goes away — they hold their own sessions off this engine.
+        await drain_pending()
         if worker_events_redis is not None:
             await worker_events_redis.aclose()
         if redis is not None:
             await redis.aclose()
         if transcript_redis is not None:
             await transcript_redis.aclose()
+        if call_stream_redis is not None:
+            await call_stream_redis.aclose()
         await engine.dispose()
 
     app = FastAPI(title="Vera Control Plane", version="0.1.0", lifespan=lifespan)

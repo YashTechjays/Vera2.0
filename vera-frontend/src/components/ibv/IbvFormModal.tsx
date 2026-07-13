@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 import { usePermission } from "@/lib/auth/permissions"
 import {
@@ -34,6 +35,8 @@ export function IbvFormModal() {
     patientName,
     status,
     changeStatus,
+    ivrNavigation,
+    setIvrNavigation,
     statusError,
     statusChanging,
     insuranceType,
@@ -79,6 +82,16 @@ export function IbvFormModal() {
             </div>
             {canWrite && transitions.length > 0 && (
               <div className="flex items-center gap-2">
+                {transitions.includes("in_queue") && (
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Switch
+                      checked={ivrNavigation}
+                      onCheckedChange={setIvrNavigation}
+                      disabled={statusChanging}
+                    />
+                    IVR navigation
+                  </label>
+                )}
                 {transitions.map((target) => (
                   <Button
                     key={target}

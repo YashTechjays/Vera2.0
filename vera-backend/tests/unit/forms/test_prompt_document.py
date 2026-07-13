@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.dsl import FormSchemaDoc, PromotedFields
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
     PromptDocument,
@@ -27,6 +27,9 @@ def schema_doc() -> FormSchemaDoc:
             "name": "Test",
             "insurance_type": "infertility_treatment",
             "system_fields": {"member_id": "sections.basics.plan_type"},
+            "promoted_fields": dict.fromkeys(
+                PromotedFields.model_fields, "sections.basics.plan_type"
+            ),
             "sections": {
                 "basics": {
                     "title": "Basics",

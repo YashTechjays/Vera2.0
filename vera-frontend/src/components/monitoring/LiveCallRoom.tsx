@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Loader2, Mic, MicOff, Radio, Volume2, VolumeX } from "lucide-react"
+import { Loader2, Mic, MicOff, PhoneOff, Radio, Volume2, VolumeX } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -14,6 +14,8 @@ import { ConnectionState, ParticipantKind, Track, type Participant } from "livek
 import { Button } from "@/components/ui/button"
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
+import { terminalStatusMessage } from "@/lib/api/callEvents"
+import { LIVE_CALL_ACTIVITY_EVENT, LIVE_CALL_ACTIVITY_INTERVAL_MS } from "@/lib/auth/idle"
 import {
   CONNECTION_PHASE_LABEL,
   PARTICIPANT_MODE_BADGE,
@@ -41,6 +43,22 @@ const MODE_BADGE_CLASS: Record<ParticipantMode, string> = {
   listener: "text-muted-foreground",
   agent: "text-emerald-600",
   callee: "text-muted-foreground",
+}
+
+// While connected to the room, periodically signal the IdleManager that the user
+// is active — listening to a live call needs no mouse/keyboard, and without this
+// the session idle-expires mid-call and the logout tears the supervisor out of
+// the room. Renders nothing; must live inside <LiveKitRoom>.
+function LiveActivityBeacon() {
+  const state = useConnectionState()
+  useEffect(() => {
+    if (state !== ConnectionState.Connected) return
+    const beat = () => window.dispatchEvent(new Event(LIVE_CALL_ACTIVITY_EVENT))
+    beat()
+    const id = window.setInterval(beat, LIVE_CALL_ACTIVITY_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [state])
+  return null
 }
 
 function toParticipantLike(p: Participant): ParticipantLike {
@@ -192,6 +210,8 @@ function RoomView({
 export function LiveCallRoom({
   callId,
   microphone = false,
+  ended = false,
+  endedStatus = null,
   onStatus,
   onJoinFailed,
 }: {
@@ -200,6 +220,14 @@ export function LiveCallRoom({
    *  a viewer must never be audible in the room, and requesting mic access
    *  fails outright where getUserMedia is blocked (e.g. incognito). */
   microphone?: boolean
+  /** The call reached a terminal status (from the events stream). Shows the
+   *  ended banner and leaves/never joins the room — the room can outlive the
+   *  call while a supervisor sits in it, so room connection state alone would
+   *  keep reading "Live" after the callee hung up. */
+  ended?: boolean
+  /** The terminal status itself, for status-specific banner copy — a busy or
+   *  unanswered dial reads "Call failed — …", not "Call ended". */
+  endedStatus?: string | null
   /** Room state lifted to the modal (close blocking, Intervene disabling). */
   onStatus?: (status: RoomStatus) => void
   /** Token fetch failed — e.g. 409 while another supervisor holds the mic.
@@ -212,6 +240,7 @@ export function LiveCallRoom({
   const [micFailed, setMicFailed] = useState(false)
 
   useEffect(() => {
+    if (ended) return
     let cancelled = false
     getJoinToken(callId, microphone)
       .then((res) => {
@@ -231,8 +260,16 @@ export function LiveCallRoom({
     // onJoinFailed is deliberately not a dependency: modals pass a fresh
     // closure each render and a re-fetch on that would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callId, microphone])
+  }, [callId, microphone, ended])
 
+  if (ended) {
+    return (
+      <div className="flex flex-1 items-center gap-2 p-4 text-sm">
+        <PhoneOff className="size-4 text-red-500" />
+        <span className="font-medium text-foreground">{terminalStatusMessage(endedStatus)}</span>
+      </div>
+    )
+  }
   if (error) {
     return <div className="flex flex-1 items-center justify-center p-6 text-sm text-destructive">{error}</div>
   }
@@ -262,6 +299,7 @@ export function LiveCallRoom({
           Microphone unavailable — listening only.
         </p>
       )}
+      <LiveActivityBeacon />
       <RoomView microphone={micActive} onStatus={onStatus} />
     </LiveKitRoom>
   )

@@ -3,6 +3,7 @@
 `POST /api/v1/patient-forms/{id}/disputes:resolve`. Skips without Postgres."""
 
 from collections.abc import AsyncGenerator
+from datetime import date
 from uuid import UUID, uuid4
 
 import httpx
@@ -11,8 +12,11 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.patient_forms import _unresolved_dispute_count
+from control_plane.dispatch import drain_pending
 from scripts.seed import _seed_form_schemas
-from tests.integration.control_plane.conftest import RBACWorld
+from tests.integration.control_plane.conftest import RBACWorld, seed_outbound_trunk
+from vera_core.config.kms import LocalDevKMS
+from vera_core.db.rls import tenant_session
 from vera_core.models import (
     DisputeAction,
     FieldAnswer,
@@ -87,6 +91,9 @@ async def cleanup_forms(
     admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
 ) -> AsyncGenerator[None]:
     yield
+    # Enqueueing schedules a detached dispatch task — let it finish before purging,
+    # or its call insert races the deletes below.
+    await drain_pending()
     async with admin_sessionmaker() as s, s.begin():
         # Enqueueing a form fires the dispatcher, which creates call rows that
         # FK-reference the form — clear them (and their events) first.
@@ -172,6 +179,68 @@ async def dispute_form(
     cleanup_forms: None,
 ) -> UUID:
     return await _make_form_with_dispute(
+        admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+    )
+
+
+INSURANCE_PROVIDER_NAME = "sections.insurance_reference_information.insurance_provider_name"
+
+
+async def _make_form_with_promoted_field(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    schema_version_id: UUID,
+) -> UUID:
+    """A form whose current insurance_provider_name answer disagrees with the
+    already-promoted patient_form.insurance_provider column — the bug this task fixes."""
+    async with sm() as s, s.begin():
+        form = PatientForm(
+            tenant_id=tenant_id,
+            schema_version_id=schema_version_id,
+            status=FormStatus.EXCEPTION_REVIEW.value,
+            intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
+            patient_name="jane doe",
+            insurance_provider="Stale Provider",
+            completion_pct=0,
+            retry_count=0,
+        )
+        s.add(form)
+        await s.flush()
+        s.add(
+            FieldAnswer(
+                tenant_id=tenant_id,
+                form_id=form.id,
+                field_path=INSURANCE_PROVIDER_NAME,
+                value={"value": "Stale Provider"},
+                source=AnswerSource.INTAKE.value,
+                is_current=True,
+            )
+        )
+        # A current answer for the other promoted field (patient_name) — resolve's
+        # promotion re-derives EVERY promoted column from current_values, so without
+        # this a resolve call would silently wipe form.patient_name to None.
+        s.add(
+            FieldAnswer(
+                tenant_id=tenant_id,
+                form_id=form.id,
+                field_path="sections.patient_information.patient_name",
+                value={"value": "Jane Doe"},
+                source=AnswerSource.INTAKE.value,
+                is_current=True,
+            )
+        )
+        return form.id
+
+
+@pytest.fixture
+async def promoted_field_form(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> UUID:
+    return await _make_form_with_promoted_field(
         admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
     )
 
@@ -453,6 +522,92 @@ async def test_resolve_requires_forms_write(
         json={"form_data": {}},
     )
     assert resp.status_code == 403, resp.text
+
+
+async def test_resolve_promotes_the_patient_form_column(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PROVIDER_NAME: "Corrected Provider"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider == "Corrected Provider"
+        # Re-derivation covers every promoted column, not just the one being edited —
+        # the untouched patient_name promoted column must survive intact.
+        assert form.patient_name == "jane doe"
+
+
+async def test_resolve_leaves_promoted_columns_untouched_for_a_non_promoted_field(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_verification.patient_on_plan": "Yes"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider == "Stale Provider"  # unchanged
+        assert form.patient_name == "jane doe"  # unchanged, not wiped
+
+
+async def test_resolve_with_invalid_promoted_date_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    """A date matching neither ISO nor the leaf's declared date_format
+    (ibv_standard's patient_dob is "M/D/YYYY") must surface as a clean 422 from
+    promote_columns's InvalidIntakeValue — not an unhandled 500 — mirroring
+    upload_patient_form's existing handling."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.patient_dob": "not-a-date"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["data"]["fields"] == ["sections.patient_information.patient_dob"]
+
+
+async def test_resolve_accepts_a_date_in_the_leafs_declared_format(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """Regression test for a live bug: the review UI prompts for and submits
+    patient_dob in the schema's declared display format ("M/D/YYYY" for
+    ibv_standard), not ISO — resolve must accept that, not 422."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.patient_dob": "12/4/1999"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.patient_dob == date(1999, 12, 4)
 
 
 # ---- baseline-derived dispute behavior --------------------------------------
@@ -1029,6 +1184,7 @@ async def _make_plain_form(
     tenant_id: UUID,
     schema_version_id: UUID,
     status: FormStatus,
+    phone: str | None = None,
 ) -> UUID:
     """A bare form in `status` with no field answers (so no disputes)."""
     async with sm() as s, s.begin():
@@ -1040,6 +1196,7 @@ async def _make_plain_form(
             patient_name="jane doe",
             completion_pct=0,
             retry_count=0,
+            insurance_provider_phone_number=phone,
         )
         s.add(form)
         await s.flush()
@@ -1059,12 +1216,17 @@ async def test_status_queues_a_ready_form(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     schema_version_id: UUID,
     cleanup_forms: None,
+    trunk_integration_type: None,
 ) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
     form_id = await _make_plain_form(
         admin_sessionmaker,
         tenant_id=rbac_world.tenant_id,
         schema_version_id=schema_version_id,
         status=FormStatus.READY_FOR_PROCESSING,
+        phone="+15551234567",
     )
     resp = await client.put(
         f"/api/v1/patient-forms/{form_id}/status",
@@ -1073,9 +1235,49 @@ async def test_status_queues_a_ready_form(
     )
     assert resp.status_code == 200, resp.text
     # The response acknowledges the manual transition; the dispatcher then fires
-    # synchronously and (with free slots and FakeLiveKit) dispatches the form.
+    # as a detached post-commit task and (with free slots and FakeLiveKit)
+    # dispatches the form — drain it before asserting on its effects.
     assert resp.json()["data"]["status"] == "in_queue"
+    await drain_pending()
     assert await _status(admin_sessionmaker, form_id) == "in_call"
+
+
+async def test_status_manual_requeue_bypasses_exhausted_retry_budget(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    """The retry cap bounds the AUTOMATIC redial loop within one enqueue
+    episode; an operator's manual requeue starts a fresh episode — it must
+    succeed even at the cap, and reset the budget for the new episode."""
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.CALL_FAILED,
+        phone="+15551234567",
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+        form = (await s.execute(select(PatientForm).where(PatientForm.id == form_id))).scalar_one()
+        form.retry_count = 5  # tenant max_retries — auto-retry budget exhausted
+
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+    await drain_pending()
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+        form = (await s.execute(select(PatientForm).where(PatientForm.id == form_id))).scalar_one()
+        assert form.retry_count == 0  # fresh episode: full auto-retry allowance
+        assert form.status in ("in_queue", "in_call")  # dispatcher may already have fired
 
 
 async def test_status_rejects_illegal_transition(

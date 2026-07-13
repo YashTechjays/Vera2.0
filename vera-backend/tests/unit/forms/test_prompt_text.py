@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.dsl import FormSchemaDoc, PromotedFields
 from vera_core.forms.prompt_text import build_condition_renderer
 
 
@@ -12,6 +12,8 @@ def doc_with(conditions: dict[str, Any] | None = None) -> FormSchemaDoc:
             "dsl_version": "2.1",
             "name": "T",
             "insurance_type": "infertility_treatment",
+            "system_fields": {"x": "sections.a.x"},
+            "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.a.x"),
             "shared_conditions": conditions or {},
             "sections": {
                 "a": {
