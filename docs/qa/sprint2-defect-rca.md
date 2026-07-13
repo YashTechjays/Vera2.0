@@ -157,3 +157,40 @@ Legend: ✅ Fixed in PR #83 · ☑️ Already fixed on `dev` (verify QA build) �
 | 28 | Placeholder text instead of uploaded values | ✅ Fixed | intake 422 on unknown paths |
 
 **Totals:** ✅ 18 fixed · ☑️ 3 already on `dev` · ✔️ 1 no-defect · 🏷️ 2 by-design · 🛠️ 1 ops · ⏸️ 3 deferred (#7, #8, #10).
+
+---
+
+# Playwright verification (local, branch `fix/sprint-2-defects`, 2026-07-14)
+
+Ran the real app locally from this branch (vite FE + freshly-restarted API on this branch — the previously-running API was a 2-day-old stale process serving `dev`, so it was restarted; local DB migrated to head + schemas/patient-data re-seeded). Logged in as the seeded tenant admin (`vera-health-example` / `admin@veratechsolutions.example`).
+
+| # | Verified in browser | Result |
+|---|---|---|
+| 2 | Users table — "Actions" header flush with the Deactivate buttons | ✅ PASS |
+| 3 | Single eye icon on password fields (login + accept-invite) — no duplicate native icon | ✅ PASS |
+| 9 | Deactivation notice renders a "× Dismiss" button (click-time snapshot); auto-dismiss still works | ✅ PASS |
+| 13 | Deactivated invitee's link shows "Account deactivated" message, not the Set-Password form (pre-flight validate) | ✅ PASS (end-to-end) |
+| 14 | After activation, browser Back does NOT reopen the completed Set-Password form (replace + fresh re-validate) | ✅ PASS (end-to-end) |
+| 16 | Tenant Sign out → `/login` (platform→`/platform/login` uses the same `logoutPlane`, not exercised live) | ✅ PASS (tenant) |
+| 19 | Insurance-provider picker populates on IVR-navigation toggle (Aetna/Humana/Test IVR Line) | ✅ PASS (functional) |
+| 20 | In-browser session with no agent worker → "The AI agent hasn't connected…" alert after 15s | ✅ PASS (end-to-end) |
+| 23 | Date fields show `M/D/YYYY` hint — incl. Spouse DOB (which has an `N/A` default) | ✅ PASS |
+| 24 | Patient Gender renders as a dropdown (enum), not a date field | ✅ PASS |
+| 25 | Appointment Date/Type + Callback Number render amber; legend shows "Prerequisite (3)" | ✅ PASS |
+| 26 | Spouse Gender renders green (Voice-agent context), not the prerequisite amber | ✅ PASS |
+| 27 | Gated-off Diagnostic Testing CPT rows show Copay `$0` / Coinsurance `0%` reference values | ✅ PASS |
+
+**API-verified (deterministic, not a browser flow):**
+- #11 invalid invite email → **422** ("value is not a valid email address"); valid email → 200. ✅
+- #13 `GET …/auth/invitations/validate` → `valid` / `deactivated` / `invalid` with `Cache-Control: no-store`, enumeration-safe. ✅
+
+**Not exercised in-browser (reason):**
+- #1 copy icon — localhost is a *secure context*, so the copy uses `navigator.clipboard` (works), NOT the `execCommand` fallback the fix targets (that path only runs on HTTP deployments); browser-automation clipboard permissions are also unreliable. Verified by code + the button renders/wires correctly.
+- #17 OTP replay — needs an MFA-enrolled account + live TOTP; covered by the unit/integration suite (incl. the platform-RLS regression fix) — full backend `just check` = 1031 passed.
+- #28 intake path validation — machine-to-machine API-key endpoint; covered by its passing integration test.
+- #7, #8, #10, #22 — voice/AI pipeline; require live telephony/STT/LLM/TTS (and #22 a real call transcript). Not browser-testable.
+- #4/#6/#15 — already on `dev`; incidentally observed working (sidebar shows the real "Dev Admin" user; idle-timeout logout fired and redirected to `/login`).
+
+**Regression watch:** no console errors during navigation across Users, Data Management + IBV modal, Voice Lab, and the invite flow. The one 401 seen (`/auth/logout`) was an expected idle-session timeout during a long pause, which correctly force-logged-out to `/login`.
+
+**Local test-data note:** during testing I deactivated the seeded QA Supervisor + Platform Operator users and created a few test invites (one activated). This is disposable dev-seed data — run `just seed` to reset if needed.
