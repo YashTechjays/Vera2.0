@@ -62,3 +62,31 @@ Note where relevant: several defects are already fixed on `dev` but QA may be te
 2. **High-visibility UX:** #16, #22, #20, #7, #4/#6 (verify build first).
 3. **Product decisions needed:** #5 (VA access to Data Management), #10 (member-ID verification design), #25 (prerequisite color spec).
 4. **Verify-build-first** (may already be fixed on dev): #4, #6, #15, part of #5.
+
+---
+
+# Fix status (branch `fix/sprint-2-defects`, 2026-07-13)
+
+Backend gate `just check` green (1031 passed); frontend `tsc`/`eslint`/`vitest` (199) green.
+
+## Fixed on this branch
+**S (frontend):** #1 copy icon, #2 Action-column align, #3 duplicate eye icons, #9 dismiss button on deactivate notice, #14 back-nav (`replace:true`), #16 platform-vs-tenant logout redirect, #18 duration select-on-focus, #19 Voice Lab provider refetch on IVR toggle, #22 transcript `source` attribution, #23 date-format hint over `N/A` default.
+**S (backend):** #11 invite email → `EmailStr` (+ dep), #27 plain-flavor CPT reference values ($0/0%) recompiled into the schema.
+**M:** #13 token-scoped invite `validate` endpoint (enumeration-safe, `no-store`) + FE pre-flight so ineligible users never see Set-Password; #17 single-use TOTP within the drift window (replay rejected via `totp_last_used_timestep`; tenant path ORM, platform path SECURITY DEFINER — keeps ±30s tolerance, no `valid_window=0` regression); #25/#26 new `prerequisite_fields` DSL key + distinct amber highlight for Appointment Date/Type + Callback Number (Spouse Gender stays context/green); #28 intake upload now 422s on field paths not in the schema (root cause of "placeholder instead of values"); #20 client-side "agent hasn't joined" warning after a 15s timeout (uses LiveKit `isAgent`).
+
+## Verified — no code change needed
+- **#12** invite-link-after-activation: production wiring is `RedisInvitationStore` (persistent, single-use); `InMemoryInvitationStore` is test-only. No defect. (If a specific env resurrects tokens, it's running the in-memory store — a deploy-config check, not code.)
+- **#4 / #6 / #15 / Voice-Lab nav part of #5:** already fixed on `dev` (sidebar from `/auth/me`; login error serialization; backend-driven idle timeout + warning dialog; nav gated on `voice_lab:sandbox`). Confirm QA is testing a build that includes them.
+
+## Not bugs / product decisions (not implemented)
+- **#5** VA → Data Management: **by design** (VIRTUAL_ASSISTANT holds only `voice_lab:sandbox`). Granting it requires adding `forms:read` to the role + a seed migration — product call.
+- **#21** deactivating a provider: **no action needed** — the dispatch join already excludes an inactive provider's playbook, and inactive providers drop off the picker. (Optional: a "provider inactive" badge on the playbook admin screen.)
+- **#24** Patient Gender as date: **environment data**, not code — the catalog/compiled schema is `type=enum`; a stale `schema_version` row is being served. Fix by `just compile-schemas && just seed-schemas` on that env and re-pointing/re-uploading affected forms.
+
+## Deferred — need a decision or live-call validation
+- **#10 (L) — AI can't detect a wrong Member ID from the IVR.** Root cause is deliberate: the real member ID never enters the navigator LLM prompt (PHI wall), so the model has no ground truth to compare the IVR's read-back against. Two PHI-safe designs to choose from:
+  - **(a) Server-resolved verify tool** — add a `verify_member_id(read_back: str) -> bool` function tool to the IVR agent; the control plane compares server-side against the real ID. The LLM only ever passes the *spoken* value out; the real ID never enters the prompt. Smaller blast radius, recommended.
+  - **(b) Token hydration at the audio edge** — inject an opaque token for `{member_id}` into dispatch metadata and resolve it to the real value only at the DTMF/press boundary (`hydrate_raw` seam). More faithful to the tokenization model but larger.
+  Needs product/architecture sign-off before building. Est. L.
+- **#7 / #8 — barge-in re-ask and post-transfer latency.** Concrete recommended config change for #7 (in `agent_worker/cascade.py`): lower interruption `min_duration` to ~0.2–0.3s and set `resume_false_interruption=False` so a detected interruption always takes a fresh LLM turn. For #8: pre-warm the Cartesia TTS connection and mask the agent-swap gap with a short filler/greeting break. Both are voice-pipeline behavior changes that **must be validated on real calls** — not committed blind.
+- **#20 backend half:** optional worker→control-plane `agent.ready` event for a server-authoritative presence signal (the client-side timeout warning already ships here).
