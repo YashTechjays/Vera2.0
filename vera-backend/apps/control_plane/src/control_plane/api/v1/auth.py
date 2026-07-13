@@ -764,9 +764,7 @@ async def validate_invitation(
 
     async with tenant_session(sessionmaker, tenant_id) as session:
         row = (
-            await session.execute(
-                select(AppUser.status).where(AppUser.id == invite.app_user_id)
-            )
+            await session.execute(select(AppUser.status).where(AppUser.id == invite.app_user_id))
         ).one_or_none()
 
     if row is None:

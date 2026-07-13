@@ -28,7 +28,8 @@ def _idem() -> dict[str, str]:
 
 def _extract_token(invite_resp: httpx.Response) -> str:
     """Extract the raw invite token from the invite_url returned by POST /users/invitations."""
-    return invite_resp.json()["data"]["invite_url"].split("token=", 1)[1]
+    invite_url: str = invite_resp.json()["data"]["invite_url"]
+    return invite_url.split("token=", 1)[1]
 
 
 # --- auth/me (session hydration, no permission gate) -------------------------
