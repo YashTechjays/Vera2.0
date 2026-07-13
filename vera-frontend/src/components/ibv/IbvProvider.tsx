@@ -7,8 +7,8 @@ import {
   type ReactNode,
 } from "react"
 
-import { validateAll, type ValidationErrors } from "@/lib/ibv/validation"
-import { parseSchema } from "@/lib/ibv/schema"
+import { validateAll, validateCreate, type ValidationErrors } from "@/lib/ibv/validation"
+import { allLeaves, parseSchema } from "@/lib/ibv/schema"
 import { demoSchema, mockValues } from "@/lib/ibv/mock"
 import {
   activeDisputeValue,
@@ -26,16 +26,22 @@ import {
 import type { FormSchema, FormValues } from "@/lib/ibv/types"
 import { ApiError } from "@/lib/api/client"
 import {
+  createPatientForm,
   getPatientForm,
   getSchemaVersion,
   resolveDisputes,
   updatePatientFormStatus,
 } from "@/lib/patient-forms/api"
-import type { PatientFormDetail, PatientFormStatus } from "@/lib/patient-forms/types"
+import { valuesToIntakePayload } from "@/lib/patient-forms/intake"
+import type {
+  IntakeSchemaOption,
+  PatientFormDetail,
+  PatientFormStatus,
+} from "@/lib/patient-forms/types"
 import { valueToInput } from "@/lib/patient-forms/display"
 
 type SaveState = "idle" | "saving" | "saved"
-type Mode = "mock" | "api"
+type Mode = "mock" | "api" | "create"
 
 type IbvContextValue = {
   /** The form-schema document the open form is pinned to (fetched by its
@@ -80,6 +86,19 @@ type IbvContextValue = {
   /** Open a real patient form by id, loaded from the API. */
   openFormById: (formId: string) => void
   closeForm: () => void
+  /** In-app create flow (Data Management → Add patient form). */
+  createModalOpen: boolean
+  /** Open the create modal at the schema-picker step (also the Back action). */
+  openCreate: () => void
+  closeCreate: () => void
+  /** Bind the picked family: load its published schema, seed leaf defaults. */
+  beginCreate: (option: IntakeSchemaOption) => Promise<void>
+  /** The picked family, or null while still on the picker step. */
+  createSelection: IntakeSchemaOption | null
+  createSubmitting: boolean
+  /** Modal-level create failure (stale published version, network) — a banner. */
+  createError: string | null
+  submitCreate: () => Promise<void>
 }
 
 const IbvContext = createContext<IbvContextValue | null>(null)
@@ -147,11 +166,20 @@ export function IbvProvider({
   const [statusChanging, setStatusChanging] = useState(false)
   const [insuranceType, setInsuranceType] = useState<string | null>(null)
   const [ivrNavigation, setIvrNavigation] = useState(true)
+  const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [createSelection, setCreateSelection] = useState<IntakeSchemaOption | null>(null)
+  const [createAttempted, setCreateAttempted] = useState(false)
+  const [createSubmitting, setCreateSubmitting] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
-  const errors = useMemo(
-    () => (schema ? validateAll(schema, values) : {}),
-    [schema, values],
-  )
+  const errors: ValidationErrors = useMemo(() => {
+    if (!schema) return {}
+    // Create mode: requiredness comes from system_fields; the required errors
+    // only show once a submit was attempted (format errors always show live).
+    if (mode === "create")
+      return validateCreate(schema, values, { includeRequired: createAttempted })
+    return validateAll(schema, values)
+  }, [schema, values, mode, createAttempted])
 
   const seed = useCallback(
     (vals: FormValues, disp: DisputeMap, name: string | null) => {
@@ -224,6 +252,77 @@ export function IbvProvider({
   )
 
   const closeForm = useCallback(() => setModalOpen(false), [])
+
+  // Create path: step 1 (picker) has no schema; beginCreate loads the published
+  // document and seeds declared defaults so what the user sees is what submits.
+  const openCreate = useCallback(() => {
+    setMode("create")
+    setFormId(null)
+    setError(null)
+    setLoading(false)
+    setStatus(null)
+    setStatusError(null)
+    setInsuranceType(null)
+    setSchema(null)
+    setCreateSelection(null)
+    setCreateAttempted(false)
+    setCreateError(null)
+    seed({}, {}, null)
+    setCreateModalOpen(true)
+  }, [seed])
+
+  const closeCreate = useCallback(() => setCreateModalOpen(false), [])
+
+  const beginCreate = useCallback(
+    async (option: IntakeSchemaOption) => {
+      setCreateError(null)
+      setLoading(true)
+      try {
+        const loaded = await loadSchema(option.published_version_id)
+        const defaults: FormValues = {}
+        for (const leaf of allLeaves(loaded)) {
+          if (leaf.field.default !== undefined) defaults[leaf.path] = leaf.field.default
+        }
+        seed(defaults, {}, null)
+        setSchema(loaded)
+        setInsuranceType(option.insurance_type)
+        setCreateSelection(option)
+      } catch (err) {
+        // ApiError and the parseSchema dsl_version guard both carry a
+        // human-readable, non-PHI message.
+        setCreateError(
+          err instanceof Error ? err.message : "Could not load this form schema.",
+        )
+      } finally {
+        setLoading(false)
+      }
+    },
+    [seed],
+  )
+
+  const submitCreate = useCallback(async () => {
+    if (!schema || !createSelection) return
+    setCreateAttempted(true)
+    if (Object.keys(validateCreate(schema, values)).length > 0) {
+      setCreateError("Fill the required fields before submitting.")
+      return
+    }
+    setCreateError(null)
+    setCreateSubmitting(true)
+    try {
+      await createPatientForm(createSelection.schema_id, valuesToIntakePayload(values))
+      setCreateModalOpen(false)
+      setSavedTick((t) => t + 1) // worklist refetches; the new row is the feedback
+    } catch (err) {
+      // e.g. 409 "this form schema has no published version" (demoted mid-flow),
+      // or the backend's authoritative 422 — surfaced as the modal banner.
+      setCreateError(
+        err instanceof ApiError ? err.message : "Could not create the patient form.",
+      )
+    } finally {
+      setCreateSubmitting(false)
+    }
+  }, [schema, createSelection, values])
 
   const setValue = useCallback((path: string, value: string) => {
     setValues((prev) => ({ ...prev, [path]: value }))
@@ -374,6 +473,14 @@ export function IbvProvider({
     openForm,
     openFormById,
     closeForm,
+    createModalOpen,
+    openCreate,
+    closeCreate,
+    beginCreate,
+    createSelection,
+    createSubmitting,
+    createError,
+    submitCreate,
   }
 
   return <IbvContext.Provider value={value}>{children}</IbvContext.Provider>
