@@ -741,9 +741,6 @@ async def _password_identity_row(
 @router.get(
     "/tenants/{tenant_slug}/auth/invitations/validate",
     response_model=ResponseModel[InviteValidateResponse],
-    responses=CustomAPIResponse.custom(
-        DefaultExceptionCode.UNAUTHORIZED,
-    ),
 )
 async def validate_invitation(
     tenant_slug: str,
