@@ -8,7 +8,7 @@ import {
 } from "react"
 
 import { validateAll, type ValidationErrors } from "@/lib/ibv/validation"
-import { parseSchema } from "@/lib/ibv/schema"
+import { allLeaves, isApplicable, isRequired, parseSchema } from "@/lib/ibv/schema"
 import { demoSchema, mockValues } from "@/lib/ibv/mock"
 import {
   activeDisputeValue,
@@ -45,6 +45,8 @@ type IbvContextValue = {
   values: FormValues
   setValue: (path: string, value: string) => void
   errors: ValidationErrors
+  /** Required fields the reviewer emptied this session — saving is blocked on these. */
+  clearedRequired: string[]
   disputes: DisputeMap
   disputeFor: (path: string) => Dispute | undefined
   flagsFor: (path: string) => DisputeFlags
@@ -152,6 +154,25 @@ export function IbvProvider({
     () => (schema ? validateAll(schema, values) : {}),
     [schema, values],
   )
+
+  // Required/applicable fields the reviewer emptied in THIS session (had a value on
+  // load, now blank). Saving is blocked on these — the reported defect is "mandatory
+  // fields cleared after upload". Computed directly (not from `errors`) so it counts
+  // only genuinely-cleared fields, never a field that merely arrived empty or holds
+  // a format-invalid value. A field with a declared default is never "cleared".
+  const clearedRequired = useMemo(() => {
+    if (!schema) return []
+    return allLeaves(schema)
+      .filter(
+        (leaf) =>
+          leaf.field.default === undefined &&
+          String(values[leaf.path] ?? "").trim() === "" &&
+          String(originalValues[leaf.path] ?? "").trim() !== "" &&
+          isApplicable(schema, leaf.gates, values) &&
+          isRequired(schema, leaf.field, values),
+      )
+      .map((leaf) => leaf.path)
+  }, [schema, values, originalValues])
 
   const seed = useCallback(
     (vals: FormValues, disp: DisputeMap, name: string | null) => {
@@ -305,6 +326,14 @@ export function IbvProvider({
   )
 
   const save = useCallback(async () => {
+    // Block save when the reviewer cleared a mandatory field that had a value on
+    // load. The Save button is also disabled in this state — this guards any
+    // programmatic call. Fields that arrived empty don't block (partial save OK).
+    if (clearedRequired.length > 0) {
+      setError("Restore the cleared required fields before saving.")
+      setSaveState("idle")
+      return
+    }
     setSaveState("saving")
     if (mode === "mock" || !formId) {
       await new Promise((r) => setTimeout(r, 400))
@@ -342,13 +371,14 @@ export function IbvProvider({
       setError(err instanceof ApiError ? err.message : "Could not save changes.")
       setSaveState("idle")
     }
-  }, [mode, formId, values, originalValues, disputes, flags, seed])
+  }, [mode, formId, values, originalValues, disputes, flags, seed, clearedRequired])
 
   const value: IbvContextValue = {
     schema,
     values,
     setValue,
     errors,
+    clearedRequired,
     disputes,
     disputeFor,
     flagsFor,

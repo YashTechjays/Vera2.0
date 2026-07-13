@@ -1,0 +1,18 @@
+- generic [ref=f15e4]:
+  - generic [ref=f15e5]:
+    - generic [ref=f15e6]: Sign in to Vera
+    - generic [ref=f15e7]: Enter your workspace and credentials.
+  - generic [ref=f15e9]:
+    - generic [ref=f15e10]:
+      - generic [ref=f15e11]: Workspace
+      - textbox "Workspace" [ref=f15e12]:
+        - /placeholder: your-workspace
+    - generic [ref=f15e13]:
+      - generic [ref=f15e14]: Email
+      - textbox "Email" [ref=f15e15]
+    - generic [ref=f15e16]:
+      - generic [ref=f15e17]: Password
+      - generic [ref=f15e18]:
+        - textbox "Password" [ref=f15e19]
+        - button "Show password" [ref=f15e20]
+    - button "Sign in" [ref=f15e24]

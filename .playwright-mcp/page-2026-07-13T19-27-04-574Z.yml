@@ -1,0 +1,71 @@
+- generic [ref=f15e25]:
+  - complementary [ref=f15e26]:
+    - generic [ref=f15e27]: Vera AI
+    - navigation [ref=f15e32]:
+      - link "Live Monitoring" [ref=f15e33] [cursor=pointer]:
+        - /url: /
+      - link "Data Management" [ref=f15e37] [cursor=pointer]:
+        - /url: /data-management
+      - link "Voice Lab" [ref=f15e43] [cursor=pointer]:
+        - /url: /voice-lab
+      - link "Call History" [ref=f15e48] [cursor=pointer]:
+        - /url: /call-history
+      - link "Analytics" [ref=f15e54] [cursor=pointer]:
+        - /url: /analytics
+      - link "Users" [ref=f15e58] [cursor=pointer]:
+        - /url: /users
+      - link "Settings" [ref=f15e65] [cursor=pointer]:
+        - /url: /settings
+    - generic [ref=f15e71]:
+      - generic [ref=f15e72]: DA
+      - generic [ref=f15e73]:
+        - paragraph [ref=f15e74]: Dev Admin
+        - paragraph [ref=f15e75]: admin@veratechsolutions.example
+  - generic [ref=f15e76]:
+    - banner [ref=f15e77]:
+      - button "Toggle sidebar" [ref=f15e78]
+      - searchbox "Search calls, customers, policies…" [ref=f15e80]
+      - generic [ref=f15e81]:
+        - button "Notifications" [ref=f15e82]
+        - button "Sign out" [ref=f15e83]
+    - main [ref=f15e84]:
+      - generic [ref=f15e85]:
+        - heading "Data Management" [level=1] [ref=f15e86]
+        - generic [ref=f15e87]:
+          - generic [ref=f15e88]:
+            - generic [ref=f15e89]:
+              - button "All Data" [ref=f15e90]
+              - button "Completed" [ref=f15e91]
+            - generic [ref=f15e92]:
+              - textbox "Search patient name" [ref=f15e94]
+              - combobox [ref=f15e97]:
+                - option "All Status" [selected]
+                - option "Ready For Processing"
+                - option "In Queue"
+                - option "In Call"
+                - option "Ai Processing"
+                - option "Exception Review"
+                - option "Completed"
+                - option "Call Failed"
+          - table [ref=f15e99]:
+            - rowgroup [ref=f15e100]:
+              - row [ref=f15e101]:
+                - columnheader [ref=f15e102] [cursor=pointer]
+                - columnheader [ref=f15e106] [cursor=pointer]
+                - columnheader [ref=f15e110] [cursor=pointer]
+                - columnheader [ref=f15e114] [cursor=pointer]
+                - columnheader [ref=f15e118] [cursor=pointer]
+                - columnheader [ref=f15e122] [cursor=pointer]
+            - rowgroup [ref=f15e126]:
+              - row [ref=f15e127] [cursor=pointer]:
+                - cell "3 Aug 2026" [ref=f15e128]
+                - cell "New Patient" [ref=f15e129]
+                - cell "morgan reyes" [ref=f15e130]
+                - cell "POL-661522" [ref=f15e131]
+                - cell "Demo Health Plan" [ref=f15e132]
+                - cell "Ready For Processing" [ref=f15e133]
+          - generic [ref=f15e135]:
+            - generic [ref=f15e136]: 1 form · page 1 of 1
+            - generic [ref=f15e137]:
+              - button "Previous" [disabled]
+              - button "Next" [disabled]

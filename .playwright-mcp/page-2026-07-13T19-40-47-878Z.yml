@@ -1,0 +1,1284 @@
+- generic:
+  - generic:
+    - generic:
+      - complementary:
+        - generic: Vera AI
+        - navigation:
+          - link:
+            - /url: /
+            - generic: Live Monitoring
+          - link:
+            - /url: /data-management
+            - generic: Data Management
+          - link:
+            - /url: /voice-lab
+            - generic: Voice Lab
+          - link:
+            - /url: /call-history
+            - generic: Call History
+          - link:
+            - /url: /analytics
+            - generic: Analytics
+          - link:
+            - /url: /users
+            - generic: Users
+          - link:
+            - /url: /settings
+            - generic: Settings
+        - generic:
+          - generic:
+            - generic: DA
+            - generic:
+              - paragraph: Dev Admin
+              - paragraph: admin@veratechsolutions.example
+      - generic:
+        - banner:
+          - button
+          - generic:
+            - searchbox
+          - generic:
+            - button
+            - button
+        - main:
+          - generic:
+            - heading [level=1]: Data Management
+            - generic:
+              - generic:
+                - generic:
+                  - button: All Data
+                  - button: Completed
+                - generic:
+                  - generic:
+                    - textbox:
+                      - /placeholder: Search patient name
+                  - generic:
+                    - generic:
+                      - combobox
+              - generic:
+                - table:
+                  - rowgroup:
+                    - row:
+                      - columnheader:
+                        - generic: Appointment Date
+                      - columnheader:
+                        - generic: Appointment Type
+                      - columnheader:
+                        - generic: Patient Name
+                      - columnheader:
+                        - generic: Member/Policy ID
+                      - columnheader:
+                        - generic: Insurance Provider
+                      - columnheader:
+                        - generic: Status
+                  - rowgroup:
+                    - row:
+                      - cell: 3 Aug 2026
+                      - cell: New Patient
+                      - cell: morgan reyes
+                      - cell: POL-661522
+                      - cell: Demo Health Plan
+                      - cell:
+                        - generic: Ready For Processing
+              - generic:
+                - generic: 1 form · page 1 of 1
+                - generic:
+                  - button [disabled]: Previous
+                  - button [disabled]: Next
+  - dialog [ref=f17e1531]:
+    - generic [ref=f17e1532]:
+      - paragraph [ref=f17e1533]: Infertility Treatment
+      - heading "Infertility — morgan reyes" [level=2] [ref=f17e1534]
+      - paragraph [ref=f17e1535]: Review captured values and resolve disputes.
+    - generic [ref=f17e1536]:
+      - generic [ref=f17e1537]:
+        - generic [ref=f17e1538]: Status
+        - generic [ref=f17e1539]: Ready For Processing
+      - generic [ref=f17e1540]:
+        - generic [ref=f17e1541]:
+          - switch "IVR navigation" [checked] [ref=f17e1542] [cursor=pointer]
+          - text: IVR navigation
+        - button "Send to queue" [ref=f17e1543]
+    - generic [ref=f17e1545]:
+      - generic [ref=f17e1546]:
+        - generic [ref=f17e1547]:
+          - generic [ref=f17e1548]:
+            - generic [ref=f17e1549]:
+              - button "Patient Information" [expanded] [ref=f17e1550]
+              - generic [ref=f17e1554]:
+                - generic [ref=f17e1555]:
+                  - generic [ref=f17e1556]: Chart Number
+                  - textbox "N/A" [ref=f17e1559]: TEST-SEED-READY
+                - generic [ref=f17e1560]:
+                  - generic [ref=f17e1561]:
+                    - generic [ref=f17e1562]: Patient Name
+                    - generic [ref=f17e1563]: "*"
+                  - textbox [ref=f17e1566]: Morgan Reyes
+                - generic [ref=f17e1567]:
+                  - generic [ref=f17e1568]:
+                    - generic [ref=f17e1569]: Patient Date of Birth
+                    - generic [ref=f17e1570]: "*"
+                  - textbox "M/D/YYYY" [ref=f17e1574]: 1991-04-12
+                - generic [ref=f17e1575]:
+                  - generic [ref=f17e1576]:
+                    - generic [ref=f17e1577]: Patient Gender
+                    - generic [ref=f17e1578]: "*"
+                  - combobox [ref=f17e1581]:
+                    - option "N/A"
+                    - option "Female" [selected]
+                    - option "Male"
+                    - option "Other"
+                - generic [ref=f17e1582]:
+                  - generic [ref=f17e1583]:
+                    - generic [ref=f17e1584]: Spouse / Partner Name
+                    - generic [ref=f17e1585]: "*"
+                  - textbox "N/A" [ref=f17e1588]
+                - generic [ref=f17e1589]:
+                  - generic [ref=f17e1590]:
+                    - generic [ref=f17e1591]: Spouse / Partner Date of Birth
+                    - generic [ref=f17e1592]: "*"
+                  - textbox "M/D/YYYY" [ref=f17e1595]
+                - generic [ref=f17e1596]:
+                  - generic [ref=f17e1597]:
+                    - generic [ref=f17e1598]: Spouse Gender
+                    - generic [ref=f17e1599]: "*"
+                  - combobox [ref=f17e1602]:
+                    - option "N/A" [selected]
+                    - option "Female"
+                    - option "Male"
+                    - option "Other"
+            - generic [ref=f17e1603]:
+              - button "Insurance Information" [expanded] [ref=f17e1604]
+              - generic [ref=f17e1608]:
+                - generic [ref=f17e1609]:
+                  - generic [ref=f17e1610]:
+                    - generic [ref=f17e1611]: Doctor Inside Network
+                    - generic [ref=f17e1612]: "*"
+                  - combobox [ref=f17e1615]:
+                    - option "Select…"
+                    - option "Yes" [selected]
+                    - option "No"
+                - generic [ref=f17e1616]:
+                  - generic [ref=f17e1617]:
+                    - generic [ref=f17e1618]: Facility Inside Network
+                    - generic [ref=f17e1619]: "*"
+                  - combobox [ref=f17e1622]:
+                    - option "Select…"
+                    - option "Yes" [selected]
+                    - option "No"
+                - generic [ref=f17e1623]:
+                  - generic [ref=f17e1624]: Out-of-Network Coverage
+                  - combobox [disabled] [ref=f17e1628]:
+                    - option "Select…"
+                    - option "Yes"
+                    - option "No" [selected]
+                - generic [ref=f17e1629]:
+                  - generic [ref=f17e1630]:
+                    - generic [ref=f17e1631]: Plan Type
+                    - generic [ref=f17e1632]: "*"
+                  - combobox [ref=f17e1635]: PPO
+                - generic [ref=f17e1636]:
+                  - generic [ref=f17e1637]:
+                    - generic [ref=f17e1638]: Coordination of Benefits
+                    - generic [ref=f17e1639]: "*"
+                  - combobox [ref=f17e1642]:
+                    - option "Select…"
+                    - option "Primary" [selected]
+                    - option "Secondary"
+                    - option "Tertiary"
+                - generic [ref=f17e1643]:
+                  - generic [ref=f17e1644]:
+                    - generic [ref=f17e1645]: Policy / Member ID
+                    - generic [ref=f17e1646]: "*"
+                  - textbox [ref=f17e1649]: POL-661522
+                - generic [ref=f17e1650]:
+                  - generic [ref=f17e1651]:
+                    - generic [ref=f17e1652]: Group Name
+                    - generic [ref=f17e1653]: "*"
+                  - textbox "N/A" [ref=f17e1656]: Umbrella Health
+                - generic [ref=f17e1657]:
+                  - generic [ref=f17e1658]:
+                    - generic [ref=f17e1659]: Group Number
+                    - generic [ref=f17e1660]: "*"
+                  - textbox "N/A" [ref=f17e1663]: GRP-3140
+                - generic [ref=f17e1664]:
+                  - generic [ref=f17e1665]:
+                    - generic [ref=f17e1666]: Policy Situs
+                    - generic [ref=f17e1667]: "*"
+                  - textbox "N/A" [ref=f17e1670]: TX
+          - generic [ref=f17e1671]:
+            - generic [ref=f17e1672]:
+              - button "Appointment Information" [expanded] [ref=f17e1673]
+              - generic [ref=f17e1677]:
+                - generic [ref=f17e1678]:
+                  - generic [ref=f17e1679]:
+                    - generic [ref=f17e1680]: Appointment Type
+                    - generic [ref=f17e1681]: "*"
+                  - combobox [ref=f17e1684]:
+                    - option "N/A"
+                    - option "New Patient" [selected]
+                    - option "Reverification"
+                    - option "Follow Up Visit"
+                    - option "N/A"
+                - generic [ref=f17e1685]:
+                  - generic [ref=f17e1686]:
+                    - generic [ref=f17e1687]: Appointment Date
+                    - generic [ref=f17e1688]: "*"
+                  - textbox "M/D/YYYY" [ref=f17e1692]: 2026-08-03
+            - generic [ref=f17e1693]:
+              - button "Verification Information" [expanded] [ref=f17e1694]
+              - generic [ref=f17e1698]:
+                - generic [ref=f17e1699]:
+                  - generic [ref=f17e1700]: Verified By
+                  - textbox [ref=f17e1703]: Dr. Reyes
+                - generic [ref=f17e1704]:
+                  - generic [ref=f17e1705]: Verified At
+                  - textbox "M/D/YYYY" [ref=f17e1708]
+                - generic [ref=f17e1709]:
+                  - generic [ref=f17e1710]: Callback Number
+                  - textbox "N/A" [ref=f17e1713]: +1 555 0199
+            - generic [ref=f17e1714]:
+              - button "Benefit Coverage" [expanded] [ref=f17e1715]
+              - generic [ref=f17e1719]:
+                - generic [ref=f17e1720]:
+                  - generic [ref=f17e1721]:
+                    - generic [ref=f17e1722]: Benefit Year Type
+                    - generic [ref=f17e1723]: "*"
+                  - combobox [ref=f17e1726]:
+                    - option "Select…"
+                    - option "Calendar Year" [selected]
+                    - option "Plan Year"
+                - generic [ref=f17e1727]:
+                  - generic [ref=f17e1728]:
+                    - generic [ref=f17e1729]: Plan Effective Date
+                    - generic [ref=f17e1730]: "*"
+                  - textbox "M/D/YYYY" [ref=f17e1733]: 01/01/2026
+                - generic [ref=f17e1734]:
+                  - generic [ref=f17e1735]:
+                    - generic [ref=f17e1736]: Plan Year Information
+                    - generic [ref=f17e1737]: "*"
+                  - textbox [ref=f17e1740]: 01/01/2026 - 12/31/2026
+                - generic [ref=f17e1741]:
+                  - generic [ref=f17e1742]:
+                    - generic [ref=f17e1743]: Coverage Type
+                    - generic [ref=f17e1744]: "*"
+                  - combobox [ref=f17e1747]:
+                    - option "Select…"
+                    - option "Individual"
+                    - option "Family" [selected]
+                - generic [ref=f17e1748]:
+                  - generic [ref=f17e1749]: PCP Referral Required
+                  - combobox [disabled] [ref=f17e1753]:
+                    - option "N/A"
+                    - option "Yes"
+                    - option "No" [selected]
+                - generic [ref=f17e1754]:
+                  - generic [ref=f17e1755]:
+                    - generic [ref=f17e1756]: Telehealth Covered
+                    - generic [ref=f17e1757]: "*"
+                  - combobox [ref=f17e1760]:
+                    - option "N/A"
+                    - option "Yes" [selected]
+                    - option "No"
+                    - option "Limited"
+                - generic [ref=f17e1761]:
+                  - generic [ref=f17e1762]:
+                    - generic [ref=f17e1763]: Plan Fund Type
+                    - generic [ref=f17e1764]: "*"
+                  - combobox [ref=f17e1767]:
+                    - option "Select…"
+                    - option "Self Insured"
+                    - option "Fully Funded" [selected]
+                - generic [ref=f17e1768]:
+                  - generic [ref=f17e1769]:
+                    - generic [ref=f17e1770]: Employer Support Size
+                    - generic [ref=f17e1771]: "*"
+                  - combobox [ref=f17e1774]:
+                    - option "Select…"
+                    - option "Small Group"
+                    - option "Large Group" [selected]
+                - generic [ref=f17e1775]:
+                  - generic [ref=f17e1776]:
+                    - generic [ref=f17e1777]: Infertility Plan Mandate
+                    - generic [ref=f17e1778]: "*"
+                  - combobox [ref=f17e1781]:
+                    - option "Select…"
+                    - option "Yes" [selected]
+                    - option "No"
+        - complementary [ref=f17e1782]:
+          - generic [ref=f17e1783]:
+            - button "Hospital Information" [expanded] [ref=f17e1784]
+            - generic [ref=f17e1788]:
+              - generic [ref=f17e1789]:
+                - generic [ref=f17e1790]:
+                  - generic [ref=f17e1791]: Hospital Name
+                  - generic [ref=f17e1792]: "*"
+                - textbox [ref=f17e1795]: Demo Health Partners
+              - generic [ref=f17e1796]:
+                - generic [ref=f17e1797]: Hospital Address
+                - textbox [ref=f17e1800]: 123 Demo St, Austin, TX
+              - generic [ref=f17e1801]:
+                - generic [ref=f17e1802]:
+                  - generic [ref=f17e1803]: Tax ID
+                  - generic [ref=f17e1804]: "*"
+                - textbox [ref=f17e1807]: "987654313"
+              - generic [ref=f17e1808]:
+                - generic [ref=f17e1809]:
+                  - generic [ref=f17e1810]: Facility NPI
+                  - generic [ref=f17e1811]: "*"
+                - textbox [ref=f17e1814]: "1234567893"
+          - generic [ref=f17e1815]:
+            - button "Provider Reference Information" [expanded] [ref=f17e1816]
+            - generic [ref=f17e1820]:
+              - generic [ref=f17e1821]:
+                - generic [ref=f17e1822]:
+                  - generic [ref=f17e1823]: Provider Name
+                  - generic [ref=f17e1824]: "*"
+                - textbox [ref=f17e1827]: Dr. Jane Smith
+              - generic [ref=f17e1828]:
+                - generic [ref=f17e1829]: Provider NPI
+                - textbox [ref=f17e1832]: "1982736450"
+              - generic [ref=f17e1833]:
+                - generic [ref=f17e1834]: Office Location
+                - textbox [ref=f17e1837]: Austin Fertility Center
+          - generic [ref=f17e1838]:
+            - button "Insurance Reference Information" [expanded] [ref=f17e1839]
+            - generic [ref=f17e1843]:
+              - generic [ref=f17e1844]:
+                - generic [ref=f17e1845]: Insurance Provider Name
+                - textbox [ref=f17e1848]: Demo Health Plan
+              - generic [ref=f17e1849]:
+                - generic [ref=f17e1850]: Insurance Provider Phone
+                - textbox [ref=f17e1853]: +1 555 0100
+              - generic [ref=f17e1854]:
+                - generic [ref=f17e1855]: Web Portal
+                - textbox [ref=f17e1858]
+      - generic [ref=f17e1861]:
+        - button "Patient Verification" [expanded] [ref=f17e1862]
+        - generic [ref=f17e1867]:
+          - generic [ref=f17e1868]:
+            - generic [ref=f17e1869]: Patient On Plan
+            - generic [ref=f17e1870]: "*"
+          - combobox [ref=f17e1874]:
+            - option "Select…" [selected]
+            - option "Yes"
+            - option "No"
+      - generic [ref=f17e1876]:
+        - button "Infertility Treatment" [expanded] [ref=f17e1877]
+        - generic [ref=f17e1880]:
+          - generic [ref=f17e1883]:
+            - generic [ref=f17e1884]:
+              - generic [ref=f17e1885]: Infertility Treatment Covered
+              - generic [ref=f17e1886]: "*"
+            - combobox [ref=f17e1890]:
+              - option "Select…" [selected]
+              - option "Yes"
+              - option "No"
+          - table [ref=f17e1892]:
+            - rowgroup [ref=f17e1893]:
+              - row [ref=f17e1894]:
+                - columnheader "Service" [ref=f17e1895]
+                - columnheader "ICD-10" [ref=f17e1896]
+                - columnheader "CPT Code" [ref=f17e1897]
+                - columnheader "Covered" [ref=f17e1898]
+                - columnheader "Copay ($)" [ref=f17e1899]
+                - columnheader "Coinsurance (%)" [ref=f17e1900]
+                - columnheader "Prior Authorization Required" [ref=f17e1901]
+                - columnheader "Cycle Limit" [ref=f17e1902]
+                - columnheader "Additional Notes" [ref=f17e1903]
+            - rowgroup [ref=f17e1904]:
+              - row [ref=f17e1905]:
+                - cell "Intrauterine Insemination (IUI)" [ref=f17e1906]
+                - cell "Z31.89" [ref=f17e1907]
+                - cell "CPT 58323" [ref=f17e1908]
+                - cell [ref=f17e1909]:
+                  - combobox [disabled] [ref=f17e1912]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e1913]:
+                  - combobox "$0" [disabled] [ref=f17e1916]
+                - cell [ref=f17e1917]:
+                  - textbox "0%" [disabled] [ref=f17e1920]
+                - cell [ref=f17e1921]:
+                  - combobox [disabled] [ref=f17e1924]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e1925]:
+                  - combobox "N/A" [disabled] [ref=f17e1928]
+                - cell [ref=f17e1929]:
+                  - textbox "N/A" [disabled] [ref=f17e1932]
+              - row [ref=f17e1933]:
+                - cell "CPT 58322" [ref=f17e1934]
+                - cell [ref=f17e1935]:
+                  - combobox [disabled] [ref=f17e1938]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e1939]:
+                  - combobox "$0" [disabled] [ref=f17e1942]
+                - cell [ref=f17e1943]:
+                  - textbox "0%" [disabled] [ref=f17e1946]
+                - cell [ref=f17e1947]:
+                  - combobox [disabled] [ref=f17e1950]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e1951]:
+                - cell "CPT 89261" [ref=f17e1952]
+                - cell [ref=f17e1953]:
+                  - combobox [disabled] [ref=f17e1956]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e1957]:
+                  - combobox "$0" [disabled] [ref=f17e1960]
+                - cell [ref=f17e1961]:
+                  - textbox "0%" [disabled] [ref=f17e1964]
+                - cell [ref=f17e1965]:
+                  - combobox [disabled] [ref=f17e1968]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e1969]:
+                - cell "Ovulation Induction" [ref=f17e1970]
+                - cell "Z31.89" [ref=f17e1971]
+                - cell "—" [ref=f17e1972]
+                - cell [ref=f17e1973]:
+                  - combobox [disabled] [ref=f17e1976]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e1977]:
+                  - combobox "$0" [disabled] [ref=f17e1980]
+                - cell [ref=f17e1981]:
+                  - textbox "0%" [disabled] [ref=f17e1984]
+                - cell [ref=f17e1985]:
+                  - combobox [disabled] [ref=f17e1988]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e1989]:
+                  - combobox "N/A" [disabled] [ref=f17e1992]
+                - cell [ref=f17e1993]:
+                  - textbox "N/A" [disabled] [ref=f17e1996]
+              - row [ref=f17e1997]:
+                - cell "In Vitro Fertilization (IVF)" [ref=f17e1998]
+                - cell "Z31.83" [ref=f17e1999]
+                - cell "CPT 58970" [ref=f17e2000]
+                - cell [ref=f17e2001]:
+                  - combobox [disabled] [ref=f17e2004]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2005]:
+                  - combobox "$0" [disabled] [ref=f17e2008]
+                - cell [ref=f17e2009]:
+                  - textbox "0%" [disabled] [ref=f17e2012]
+                - cell [ref=f17e2013]:
+                  - combobox [disabled] [ref=f17e2016]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e2017]:
+                  - combobox "N/A" [disabled] [ref=f17e2020]
+                - cell [ref=f17e2021]:
+                  - textbox "N/A" [disabled] [ref=f17e2024]
+              - row [ref=f17e2025]:
+                - cell "CPT 89280" [ref=f17e2026]
+                - cell [ref=f17e2027]:
+                  - combobox [disabled] [ref=f17e2030]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2031]:
+                  - combobox "$0" [disabled] [ref=f17e2034]
+                - cell [ref=f17e2035]:
+                  - textbox "0%" [disabled] [ref=f17e2038]
+                - cell [ref=f17e2039]:
+                  - combobox [disabled] [ref=f17e2042]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2043]:
+                - cell "CPT 89253" [ref=f17e2044]
+                - cell [ref=f17e2045]:
+                  - combobox [disabled] [ref=f17e2048]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2049]:
+                  - combobox "$0" [disabled] [ref=f17e2052]
+                - cell [ref=f17e2053]:
+                  - textbox "0%" [disabled] [ref=f17e2056]
+                - cell [ref=f17e2057]:
+                  - combobox [disabled] [ref=f17e2060]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2061]:
+                - cell "Egg Cryopreservation (Elective)" [ref=f17e2062]
+                - cell "Z31.83" [ref=f17e2063]
+                - cell "CPT 89337" [ref=f17e2064]
+                - cell [ref=f17e2065]:
+                  - combobox [disabled] [ref=f17e2068]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2069]:
+                  - combobox "$0" [disabled] [ref=f17e2072]
+                - cell [ref=f17e2073]:
+                  - textbox "0%" [disabled] [ref=f17e2076]
+                - cell [ref=f17e2077]:
+                  - combobox [disabled] [ref=f17e2080]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e2081]:
+                  - combobox "N/A" [disabled] [ref=f17e2084]
+                - cell [ref=f17e2085]:
+                  - textbox "N/A" [disabled] [ref=f17e2088]
+              - row [ref=f17e2089]:
+                - cell "Embryo Cryopreservation" [ref=f17e2090]
+                - cell "Z31.83" [ref=f17e2091]
+                - cell "CPT 89258" [ref=f17e2092]
+                - cell [ref=f17e2093]:
+                  - combobox [disabled] [ref=f17e2096]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2097]:
+                  - combobox "$0" [disabled] [ref=f17e2100]
+                - cell [ref=f17e2101]:
+                  - textbox "0%" [disabled] [ref=f17e2104]
+                - cell [ref=f17e2105]:
+                  - combobox [disabled] [ref=f17e2108]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e2109]:
+                  - combobox "N/A" [disabled] [ref=f17e2112]
+                - cell [ref=f17e2113]:
+                  - textbox "N/A" [disabled] [ref=f17e2116]
+              - row [ref=f17e2117]:
+                - cell "CPT 89342" [ref=f17e2118]
+                - cell [ref=f17e2119]:
+                  - combobox [disabled] [ref=f17e2122]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2123]:
+                  - combobox "$0" [disabled] [ref=f17e2126]
+                - cell [ref=f17e2127]:
+                  - textbox "0%" [disabled] [ref=f17e2130]
+                - cell [ref=f17e2131]:
+                  - combobox [disabled] [ref=f17e2134]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2135]:
+                - cell "Frozen Embryo Transfer (FET)" [ref=f17e2136]
+                - cell "Z31.83" [ref=f17e2137]
+                - cell "CPT 58974" [ref=f17e2138]
+                - cell [ref=f17e2139]:
+                  - combobox [disabled] [ref=f17e2142]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2143]:
+                  - combobox "$0" [disabled] [ref=f17e2146]
+                - cell [ref=f17e2147]:
+                  - textbox "0%" [disabled] [ref=f17e2150]
+                - cell [ref=f17e2151]:
+                  - combobox [disabled] [ref=f17e2154]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e2155]:
+                  - combobox "N/A" [disabled] [ref=f17e2158]
+                - cell [ref=f17e2159]:
+                  - textbox "N/A" [disabled] [ref=f17e2162]
+              - row [ref=f17e2163]:
+                - cell "Egg Cryopreservation (Cancer-Related)" [ref=f17e2164]
+                - cell "Z31.83" [ref=f17e2165]
+                - cell "CPT 89337" [ref=f17e2166]
+                - cell [ref=f17e2167]:
+                  - combobox [disabled] [ref=f17e2170]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2171]:
+                  - combobox "$0" [disabled] [ref=f17e2174]
+                - cell [ref=f17e2175]:
+                  - textbox "0%" [disabled] [ref=f17e2178]
+                - cell [ref=f17e2179]:
+                  - combobox [disabled] [ref=f17e2182]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e2183]:
+                  - combobox "N/A" [disabled] [ref=f17e2186]
+                - cell [ref=f17e2187]:
+                  - textbox "N/A" [disabled] [ref=f17e2190]
+              - row [ref=f17e2191]:
+                - cell "Embryo Biopsy" [ref=f17e2192]
+                - cell "Z31.83" [ref=f17e2193]
+                - cell "CPT 89290" [ref=f17e2194]
+                - cell [ref=f17e2195]:
+                  - combobox [disabled] [ref=f17e2198]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2199]:
+                  - combobox "$0" [disabled] [ref=f17e2202]
+                - cell [ref=f17e2203]:
+                  - textbox "0%" [disabled] [ref=f17e2206]
+                - cell [ref=f17e2207]:
+                  - combobox [disabled] [ref=f17e2210]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+                - cell [ref=f17e2211]:
+                  - combobox "N/A" [disabled] [ref=f17e2214]
+                - cell [ref=f17e2215]:
+                  - textbox "N/A" [disabled] [ref=f17e2218]
+              - row [ref=f17e2219]:
+                - cell "CPT 89291" [ref=f17e2220]
+                - cell [ref=f17e2221]:
+                  - combobox [disabled] [ref=f17e2224]:
+                    - option "No" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2225]:
+                  - combobox "$0" [disabled] [ref=f17e2228]
+                - cell [ref=f17e2229]:
+                  - textbox "0%" [disabled] [ref=f17e2232]
+                - cell [ref=f17e2233]:
+                  - combobox [disabled] [ref=f17e2236]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+      - generic [ref=f17e2237]:
+        - button "Diagnostic Testing (Labs, X-ray & Ultrasound)" [expanded] [ref=f17e2238]
+        - generic [ref=f17e2241]:
+          - generic [ref=f17e2244]:
+            - generic [ref=f17e2245]:
+              - generic [ref=f17e2246]: Diagnostic Testing Covered
+              - generic [ref=f17e2247]: "*"
+            - combobox [ref=f17e2251]:
+              - option "Select…" [selected]
+              - option "Yes"
+              - option "No"
+          - table [ref=f17e2253]:
+            - rowgroup [ref=f17e2254]:
+              - row [ref=f17e2255]:
+                - columnheader "Service" [ref=f17e2256]
+                - columnheader "CPT Code" [ref=f17e2257]
+                - columnheader "Covered" [ref=f17e2258]
+                - columnheader "Copay ($)" [ref=f17e2259]
+                - columnheader "Coinsurance (%)" [ref=f17e2260]
+                - columnheader "Prior Authorization Required" [ref=f17e2261]
+            - rowgroup [ref=f17e2262]:
+              - row [ref=f17e2263]:
+                - cell "CPT 58340" [ref=f17e2264]
+                - cell "58340" [ref=f17e2265]
+                - cell [ref=f17e2266]:
+                  - combobox [disabled] [ref=f17e2269]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2270]:
+                  - combobox "$0" [disabled] [ref=f17e2273]
+                - cell [ref=f17e2274]:
+                  - textbox "0%" [disabled] [ref=f17e2277]
+                - cell [ref=f17e2278]:
+                  - combobox [disabled] [ref=f17e2281]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2282]:
+                - cell "CPT 82670" [ref=f17e2283]
+                - cell "82670" [ref=f17e2284]
+                - cell [ref=f17e2285]:
+                  - combobox [disabled] [ref=f17e2288]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2289]:
+                  - combobox "$0" [disabled] [ref=f17e2292]
+                - cell [ref=f17e2293]:
+                  - textbox "0%" [disabled] [ref=f17e2296]
+                - cell [ref=f17e2297]:
+                  - combobox [disabled] [ref=f17e2300]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2301]:
+                - cell "CPT 83001" [ref=f17e2302]
+                - cell "83001" [ref=f17e2303]
+                - cell [ref=f17e2304]:
+                  - combobox [disabled] [ref=f17e2307]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2308]:
+                  - combobox "$0" [disabled] [ref=f17e2311]
+                - cell [ref=f17e2312]:
+                  - textbox "0%" [disabled] [ref=f17e2315]
+                - cell [ref=f17e2316]:
+                  - combobox [disabled] [ref=f17e2319]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2320]:
+                - cell "CPT 83002" [ref=f17e2321]
+                - cell "83002" [ref=f17e2322]
+                - cell [ref=f17e2323]:
+                  - combobox [disabled] [ref=f17e2326]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2327]:
+                  - combobox "$0" [disabled] [ref=f17e2330]
+                - cell [ref=f17e2331]:
+                  - textbox "0%" [disabled] [ref=f17e2334]
+                - cell [ref=f17e2335]:
+                  - combobox [disabled] [ref=f17e2338]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2339]:
+                - cell "CPT 84146" [ref=f17e2340]
+                - cell "84146" [ref=f17e2341]
+                - cell [ref=f17e2342]:
+                  - combobox [disabled] [ref=f17e2345]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2346]:
+                  - combobox "$0" [disabled] [ref=f17e2349]
+                - cell [ref=f17e2350]:
+                  - textbox "0%" [disabled] [ref=f17e2353]
+                - cell [ref=f17e2354]:
+                  - combobox [disabled] [ref=f17e2357]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2358]:
+                - cell "CPT 84443" [ref=f17e2359]
+                - cell "84443" [ref=f17e2360]
+                - cell [ref=f17e2361]:
+                  - combobox [disabled] [ref=f17e2364]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2365]:
+                  - combobox "$0" [disabled] [ref=f17e2368]
+                - cell [ref=f17e2369]:
+                  - textbox "0%" [disabled] [ref=f17e2372]
+                - cell [ref=f17e2373]:
+                  - combobox [disabled] [ref=f17e2376]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2377]:
+                - cell "CPT 84144" [ref=f17e2378]
+                - cell "84144" [ref=f17e2379]
+                - cell [ref=f17e2380]:
+                  - combobox [disabled] [ref=f17e2383]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2384]:
+                  - combobox "$0" [disabled] [ref=f17e2387]
+                - cell [ref=f17e2388]:
+                  - textbox "0%" [disabled] [ref=f17e2391]
+                - cell [ref=f17e2392]:
+                  - combobox [disabled] [ref=f17e2395]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2396]:
+                - cell "CPT 76830" [ref=f17e2397]
+                - cell "76830" [ref=f17e2398]
+                - cell [ref=f17e2399]:
+                  - combobox [disabled] [ref=f17e2402]:
+                    - option "Select…" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2403]:
+                  - combobox "$0" [disabled] [ref=f17e2406]
+                - cell [ref=f17e2407]:
+                  - textbox "0%" [disabled] [ref=f17e2410]
+                - cell [ref=f17e2411]:
+                  - combobox [disabled] [ref=f17e2414]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+      - generic [ref=f17e2415]:
+        - button "General Coverage" [expanded] [ref=f17e2416]
+        - table [ref=f17e2421]:
+          - rowgroup [ref=f17e2422]:
+            - row [ref=f17e2423]:
+              - columnheader "Service" [ref=f17e2424]
+              - columnheader "ICD-10" [ref=f17e2425]
+              - columnheader "CPT Code" [ref=f17e2426]
+              - columnheader "Covered" [ref=f17e2427]
+              - columnheader "Copay ($)" [ref=f17e2428]
+              - columnheader "Coinsurance (%)" [ref=f17e2429]
+              - columnheader "Prior Authorization Required" [ref=f17e2430]
+          - rowgroup [ref=f17e2431]:
+            - row [ref=f17e2432]:
+              - cell "Office Visits" [ref=f17e2433]
+              - cell "Z31.41" [ref=f17e2434]
+              - cell "CPT 99211" [ref=f17e2435]
+              - cell [ref=f17e2436]:
+                - combobox [ref=f17e2439]:
+                  - option "Select…" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+              - cell [ref=f17e2440]:
+                - combobox "$0" [disabled] [ref=f17e2443]
+              - cell [ref=f17e2444]:
+                - textbox "0%" [disabled] [ref=f17e2447]
+              - cell [ref=f17e2448]:
+                - combobox [disabled] [ref=f17e2451]:
+                  - option "N/A" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+                  - option "Prior auth department"
+            - row [ref=f17e2452]:
+              - cell "ASC Professional Services" [ref=f17e2453]
+              - cell "Z31.41" [ref=f17e2454]
+              - cell "CPT 58555" [ref=f17e2455]
+              - cell [ref=f17e2456]:
+                - combobox [ref=f17e2459]:
+                  - option "Select…" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+              - cell [ref=f17e2460]:
+                - combobox "$0" [disabled] [ref=f17e2463]
+              - cell [ref=f17e2464]:
+                - textbox "0%" [disabled] [ref=f17e2467]
+              - cell [ref=f17e2468]:
+                - combobox [disabled] [ref=f17e2471]:
+                  - option "N/A" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+                  - option "Prior auth department"
+            - row [ref=f17e2472]:
+              - cell "ASC Facility" [ref=f17e2473]
+              - cell "Z31.41" [ref=f17e2474]
+              - cell "CPT 58555" [ref=f17e2475]
+              - cell [ref=f17e2476]:
+                - combobox [ref=f17e2479]:
+                  - option "Select…" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+              - cell [ref=f17e2480]:
+                - combobox "$0" [disabled] [ref=f17e2483]
+              - cell [ref=f17e2484]:
+                - textbox "0%" [disabled] [ref=f17e2487]
+              - cell [ref=f17e2488]:
+                - combobox [disabled] [ref=f17e2491]:
+                  - option "N/A" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+                  - option "Prior auth department"
+      - generic [ref=f17e2492]:
+        - generic [ref=f17e2493]:
+          - generic [ref=f17e2494]:
+            - button "Deductibles" [expanded] [ref=f17e2495]
+            - generic [ref=f17e2499]:
+              - generic [ref=f17e2500]: Individual Deductible
+              - generic [ref=f17e2501]:
+                - generic [ref=f17e2502]:
+                  - generic [ref=f17e2503]: Total
+                  - generic [ref=f17e2504]: "*"
+                - combobox [ref=f17e2508]
+              - generic [ref=f17e2509]:
+                - generic [ref=f17e2510]:
+                  - generic [ref=f17e2511]: Met Amount
+                  - generic [ref=f17e2512]: "*"
+                - textbox [ref=f17e2516]
+              - generic [ref=f17e2517]:
+                - generic [ref=f17e2518]:
+                  - generic [ref=f17e2519]: Remaining
+                  - generic [ref=f17e2520]: "*"
+                - combobox [ref=f17e2524]
+              - generic [ref=f17e2525]: Family Deductible
+              - generic [ref=f17e2526]:
+                - generic [ref=f17e2527]:
+                  - generic [ref=f17e2528]: Total
+                  - generic [ref=f17e2529]: "*"
+                - combobox [ref=f17e2533]
+              - generic [ref=f17e2534]:
+                - generic [ref=f17e2535]:
+                  - generic [ref=f17e2536]: Met Amount
+                  - generic [ref=f17e2537]: "*"
+                - textbox [ref=f17e2541]
+              - generic [ref=f17e2542]:
+                - generic [ref=f17e2543]:
+                  - generic [ref=f17e2544]: Remaining
+                  - generic [ref=f17e2545]: "*"
+                - combobox [ref=f17e2549]
+          - generic [ref=f17e2550]:
+            - button "Infertility Lifetime Maximum" [expanded] [ref=f17e2551]
+            - generic [ref=f17e2555]:
+              - generic [ref=f17e2556]:
+                - generic [ref=f17e2557]:
+                  - generic [ref=f17e2558]: Lifetime Maximum
+                  - generic [ref=f17e2559]: "*"
+                - combobox [ref=f17e2563]
+              - generic [ref=f17e2564]:
+                - generic [ref=f17e2565]:
+                  - generic [ref=f17e2566]: Met Amount
+                  - generic [ref=f17e2567]: "*"
+                - textbox [ref=f17e2571]
+              - generic [ref=f17e2572]:
+                - generic [ref=f17e2573]:
+                  - generic [ref=f17e2574]: Remaining
+                  - generic [ref=f17e2575]: "*"
+                - textbox [ref=f17e2579]
+              - generic [ref=f17e2580]:
+                - generic [ref=f17e2581]:
+                  - generic [ref=f17e2582]: Applicable Area
+                  - generic [ref=f17e2583]: "*"
+                - combobox [ref=f17e2587]:
+                  - option "Select…" [selected]
+                  - option "Infertility Treatment"
+                  - option "Infertility Treatment and Medication"
+                  - option "Diagnostic and Infertility Treatment"
+                  - option "Diagnostic"
+              - generic [ref=f17e2588]:
+                - generic [ref=f17e2589]: Additional Notes
+                - textbox [ref=f17e2592]
+              - generic [ref=f17e2593]:
+                - generic [ref=f17e2594]:
+                  - generic [ref=f17e2595]: Lifetime Cycle Maximum
+                  - generic [ref=f17e2596]: "*"
+                - combobox [ref=f17e2600]
+              - generic [ref=f17e2601]:
+                - generic [ref=f17e2602]:
+                  - generic [ref=f17e2603]: Cycles Used to Date
+                  - generic [ref=f17e2604]: "*"
+                - textbox [ref=f17e2608]
+        - generic [ref=f17e2609]:
+          - generic [ref=f17e2610]:
+            - button "Out-of-Pocket Maximum" [expanded] [ref=f17e2611]
+            - generic [ref=f17e2615]:
+              - generic [ref=f17e2616]: Individual Out-of-Pocket
+              - generic [ref=f17e2617]:
+                - generic [ref=f17e2618]:
+                  - generic [ref=f17e2619]: Total
+                  - generic [ref=f17e2620]: "*"
+                - combobox [ref=f17e2624]
+              - generic [ref=f17e2625]:
+                - generic [ref=f17e2626]:
+                  - generic [ref=f17e2627]: Met Amount
+                  - generic [ref=f17e2628]: "*"
+                - textbox [ref=f17e2632]
+              - generic [ref=f17e2633]:
+                - generic [ref=f17e2634]:
+                  - generic [ref=f17e2635]: Remaining
+                  - generic [ref=f17e2636]: "*"
+                - combobox [ref=f17e2640]
+              - generic [ref=f17e2641]: Family Out-of-Pocket
+              - generic [ref=f17e2642]:
+                - generic [ref=f17e2643]:
+                  - generic [ref=f17e2644]: Total
+                  - generic [ref=f17e2645]: "*"
+                - combobox [ref=f17e2649]
+              - generic [ref=f17e2650]:
+                - generic [ref=f17e2651]:
+                  - generic [ref=f17e2652]: Met Amount
+                  - generic [ref=f17e2653]: "*"
+                - textbox [ref=f17e2657]
+              - generic [ref=f17e2658]:
+                - generic [ref=f17e2659]:
+                  - generic [ref=f17e2660]: Remaining
+                  - generic [ref=f17e2661]: "*"
+                - combobox [ref=f17e2665]
+          - generic [ref=f17e2666]:
+            - button "Embryo Cryo Storage (CPT 89342)" [expanded] [ref=f17e2667]
+            - generic [ref=f17e2672]:
+              - generic [ref=f17e2673]: Storage Time Coverage
+              - textbox [disabled] [ref=f17e2677]
+      - generic [ref=f17e2678]:
+        - button "Male Partner Coverage" [expanded] [ref=f17e2679]
+        - generic [ref=f17e2682]:
+          - generic [ref=f17e2685]:
+            - generic [ref=f17e2686]: Male Partner Services Covered
+            - combobox [disabled] [ref=f17e2690]:
+              - option "Select…" [selected]
+              - option "Yes"
+              - option "No"
+          - table [ref=f17e2692]:
+            - rowgroup [ref=f17e2693]:
+              - row [ref=f17e2694]:
+                - columnheader "Service" [ref=f17e2695]
+                - columnheader "ICD-10" [ref=f17e2696]
+                - columnheader "CPT Code" [ref=f17e2697]
+                - columnheader "Covered" [ref=f17e2698]
+                - columnheader "Copay ($)" [ref=f17e2699]
+                - columnheader "Coinsurance (%)" [ref=f17e2700]
+                - columnheader "Prior Authorization Required" [ref=f17e2701]
+            - rowgroup [ref=f17e2702]:
+              - row [ref=f17e2703]:
+                - cell "Semen Analysis" [ref=f17e2704]
+                - cell "Z31.84" [ref=f17e2705]
+                - cell "CPT 89320" [ref=f17e2706]
+                - cell [ref=f17e2707]:
+                  - combobox [disabled] [ref=f17e2710]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2711]:
+                  - combobox "N/A" [disabled] [ref=f17e2714]
+                - cell [ref=f17e2715]:
+                  - textbox "N/A" [disabled] [ref=f17e2718]
+                - cell [ref=f17e2719]:
+                  - combobox [disabled] [ref=f17e2722]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+              - row [ref=f17e2723]:
+                - cell "Sperm Cryopreservation" [ref=f17e2724]
+                - cell "Z31.84" [ref=f17e2725]
+                - cell "CPT 89259" [ref=f17e2726]
+                - cell [ref=f17e2727]:
+                  - combobox [disabled] [ref=f17e2730]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                - cell [ref=f17e2731]:
+                  - combobox "N/A" [disabled] [ref=f17e2734]
+                - cell [ref=f17e2735]:
+                  - textbox "N/A" [disabled] [ref=f17e2738]
+                - cell [ref=f17e2739]:
+                  - combobox [disabled] [ref=f17e2742]:
+                    - option "N/A" [selected]
+                    - option "Yes"
+                    - option "No"
+                    - option "N/A"
+                    - option "Prior auth department"
+      - generic [ref=f17e2743]:
+        - generic [ref=f17e2744]:
+          - generic [ref=f17e2745]:
+            - button "Enrollment" [expanded] [ref=f17e2746]
+            - generic [ref=f17e2750]:
+              - generic [ref=f17e2751]:
+                - generic [ref=f17e2752]:
+                  - generic [ref=f17e2753]: Enrollment Required
+                  - generic [ref=f17e2754]: "*"
+                - combobox [ref=f17e2757]:
+                  - option "N/A" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+              - generic [ref=f17e2758]:
+                - generic [ref=f17e2759]: Enrollment Provider Name
+                - textbox [disabled] [ref=f17e2763]
+              - generic [ref=f17e2764]:
+                - generic [ref=f17e2765]: Enrollment Provider Phone
+                - textbox [disabled] [ref=f17e2769]
+          - generic [ref=f17e2770]:
+            - button "Third Party Administrator" [expanded] [ref=f17e2771]
+            - generic [ref=f17e2775]:
+              - generic [ref=f17e2776]:
+                - generic [ref=f17e2777]:
+                  - generic [ref=f17e2778]: TPA Exists
+                  - generic [ref=f17e2779]: "*"
+                - combobox [ref=f17e2783]:
+                  - option "Select…" [selected]
+                  - option "Yes"
+                  - option "No"
+              - generic [ref=f17e2784]:
+                - generic [ref=f17e2785]: TPA Name
+                - textbox [disabled] [ref=f17e2789]
+          - generic [ref=f17e2790]:
+            - button "Infertility Specialty Pharmacy" [expanded] [ref=f17e2791]
+            - generic [ref=f17e2795]:
+              - generic [ref=f17e2796]:
+                - generic [ref=f17e2797]:
+                  - generic [ref=f17e2798]: Infertility Specialty Pharmacy Exists
+                  - generic [ref=f17e2799]: "*"
+                - combobox [ref=f17e2803]:
+                  - option "Select…" [selected]
+                  - option "Yes"
+                  - option "No"
+              - generic [ref=f17e2804]:
+                - generic [ref=f17e2805]: Infertility Specialty Pharmacy Name
+                - textbox [disabled] [ref=f17e2809]
+              - generic [ref=f17e2810]:
+                - generic [ref=f17e2811]: Infertility Specialty Pharmacy Phone
+                - textbox [disabled] [ref=f17e2815]
+          - generic [ref=f17e2816]:
+            - button "Additional Form Information" [expanded] [ref=f17e2817]
+            - generic [ref=f17e2821]:
+              - generic [ref=f17e2822]:
+                - generic [ref=f17e2823]: Practice
+                - textbox [ref=f17e2826]
+              - generic [ref=f17e2827]:
+                - generic [ref=f17e2828]: IBV Form Type
+                - textbox [ref=f17e2831]
+        - generic [ref=f17e2832]:
+          - generic [ref=f17e2833]:
+            - button "Authorization Department" [expanded] [ref=f17e2834]
+            - generic [ref=f17e2838]:
+              - generic [ref=f17e2839]:
+                - generic [ref=f17e2840]: Authorization Department Name
+                - textbox [disabled] [ref=f17e2844]
+              - generic [ref=f17e2845]:
+                - generic [ref=f17e2846]: Authorization Department Phone
+                - textbox [disabled] [ref=f17e2850]
+              - generic [ref=f17e2851]:
+                - generic [ref=f17e2852]:
+                  - generic [ref=f17e2853]: Center of Excellence Required
+                  - generic [ref=f17e2854]: "*"
+                - combobox [ref=f17e2858]:
+                  - option "Select…" [selected]
+                  - option "Yes"
+                  - option "No"
+                  - option "N/A"
+          - generic [ref=f17e2859]:
+            - button "Pharmacy Benefit Manager" [expanded] [ref=f17e2860]
+            - generic [ref=f17e2864]:
+              - generic [ref=f17e2865]:
+                - generic [ref=f17e2866]:
+                  - generic [ref=f17e2867]: PBM Exists
+                  - generic [ref=f17e2868]: "*"
+                - combobox [ref=f17e2872]:
+                  - option "Select…" [selected]
+                  - option "Yes"
+                  - option "No"
+              - generic [ref=f17e2873]:
+                - generic [ref=f17e2874]: PBM Name
+                - textbox [disabled] [ref=f17e2878]
+              - generic [ref=f17e2879]:
+                - generic [ref=f17e2880]: PBM Phone
+                - textbox [disabled] [ref=f17e2884]
+          - generic [ref=f17e2885]:
+            - button "Insurance Representative" [expanded] [ref=f17e2886]
+            - generic [ref=f17e2890]:
+              - generic [ref=f17e2891]:
+                - generic [ref=f17e2892]:
+                  - generic [ref=f17e2893]: Representative Name
+                  - generic [ref=f17e2894]: "*"
+                - textbox [ref=f17e2897]: Taylor Reed
+              - generic [ref=f17e2898]:
+                - generic [ref=f17e2899]:
+                  - generic [ref=f17e2900]: Call Reference Number
+                  - generic [ref=f17e2901]: "*"
+                - textbox [ref=f17e2904]: REF-88213
+      - generic [ref=f17e2905]:
+        - paragraph [ref=f17e2906]: Color Legend
+        - generic [ref=f17e2907]:
+          - paragraph [ref=f17e2908]:
+            - generic [ref=f17e2910]:
+              - generic [ref=f17e2911]: Prerequisite (3)
+              - text: — Required before the call begins — the voice agent uses these to set up and route the call (appointment date, appointment type, callback number).
+          - paragraph [ref=f17e2912]:
+            - generic [ref=f17e2914]:
+              - generic [ref=f17e2915]: System field (14)
+              - text: — Required by the platform — worklists, integrations and call setup read these; their values are also given to the voice agent as known context.
+          - paragraph [ref=f17e2916]:
+            - generic [ref=f17e2918]:
+              - generic [ref=f17e2919]: Voice-agent context (2)
+              - text: — Fed to the voice agent as known background — answered if the representative asks, never volunteered, never asked.
+          - paragraph [ref=f17e2920]:
+            - generic [ref=f17e2922]:
+              - generic [ref=f17e2923]: Collected on the call (183)
+              - text: — Asked (or confirmed) by the voice agent during the verification call.
+          - paragraph [ref=f17e2924]:
+            - generic [ref=f17e2926]:
+              - generic [ref=f17e2927]: UI only (4)
+              - text: — Display / data entry only (including UI-only sections) — not asked on the call and not part of the agent's context.
+          - paragraph [ref=f17e2928]:
+            - generic [ref=f17e2930]:
+              - generic [ref=f17e2931]: Context section (6)
+              - text: — green headers mark sections whose values the voice agent knows as background instead of asking for them.
+    - generic [ref=f17e2932]:
+      - generic [ref=f17e2933]:
+        - checkbox "Resolve all disputes" [checked] [disabled] [ref=f17e2934]
+        - text: Resolve all disputes
+      - generic [ref=f17e2935]:
+        - button "Cancel" [active] [ref=f17e2936]
+        - button "Save" [disabled]
+    - button "Close" [ref=f17e2937]
