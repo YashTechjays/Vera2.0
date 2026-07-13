@@ -35,8 +35,8 @@ from control_plane.email import EmailSender
 from vera_core.audit import AuditSink, AuthAuditRecord, AuthAuditSink
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
-from vera_core.models import Permission, RolePermission, UserRole
-from vera_core.models.enums import AuthEvent
+from vera_core.models import Permission, RolePermission, SchemaVersion, UserRole
+from vera_core.models.enums import AuthEvent, VersionStatus
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
@@ -131,3 +131,16 @@ def build_role_grant(
         granted_by=granted_by,
         granted_at=func.now(),
     )
+
+
+async def published_schema_version(session: AsyncSession, schema_id: UUID) -> SchemaVersion | None:
+    """The form family's single published version, or None. At most one exists —
+    the `uq_schema_version_published_per_schema` partial unique index."""
+    return (
+        await session.execute(
+            select(SchemaVersion).where(
+                SchemaVersion.schema_id == schema_id,
+                SchemaVersion.status == VersionStatus.PUBLISHED,
+            )
+        )
+    ).scalar_one_or_none()

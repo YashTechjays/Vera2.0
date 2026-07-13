@@ -25,13 +25,20 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import (
+    Kms,
+    LiveKit,
+    TenantId,
+    TenantSession,
+    published_schema_version,
+)
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit, get_sessionmaker
 from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
+    ConflictError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
@@ -270,6 +277,74 @@ async def upload_patient_form(
         )
     )
     return ok(created.response)
+
+
+class PatientFormCreateRequest(BaseModel):
+    schema_id: UUID  # form_schema.id — the server binds to its published version
+    intake_payload: dict[str, Any]  # nested by section_key
+
+
+@router.post(
+    "/patient-forms:create",
+    response_model=ResponseModel[PatientFormResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def create_patient_form(
+    body: PatientFormCreateRequest,
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    caller: VerifiedIdentity = require("forms:write"),
+) -> ResponseModel[PatientFormResponse]:
+    """In-app patient-form creation (Data Management). Unlike the API-key intake
+    path — which binds to the exact version the sheet was generated from — the
+    caller picks only the form family; the server resolves and binds its single
+    published version, so an in-app form can never be created against a draft."""
+    response.headers["Cache-Control"] = "no-store"
+    form_schema = (
+        await session.execute(select(FormSchema).where(FormSchema.id == body.schema_id))
+    ).scalar_one_or_none()
+    if form_schema is None:
+        raise NotFoundError(message="unknown form schema")
+    version = await published_schema_version(session, body.schema_id)
+    if version is None:
+        # E.g. demoted between the picker fetch and this submit.
+        raise ConflictError(message="this form schema has no published version")
+
+    created = await _create_patient_form(
+        session,
+        tenant_id=tenant_id,
+        version=version,
+        form_schema=form_schema,
+        intake_payload=body.intake_payload,
+    )
+
+    # PHI write by a session user — same FORM_INTAKE event as the sheet path,
+    # attributed to the user. Field names/counts/ids only, never values.
+    await get_audit(request).emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.FORM_INTAKE.value,
+            resource_type="patient_form",
+            resource_id=str(created.response.id),
+            detail={
+                "schema_version_id": str(created.response.schema_version_id),
+                "sections": created.sections,
+                "answer_count": created.answer_count,
+            },
+        )
+    )
+    return ok(created.response, message="Patient form created.")
 
 
 # ---------------------------------------------------------------------------
