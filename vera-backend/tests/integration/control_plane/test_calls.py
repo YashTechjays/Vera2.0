@@ -246,6 +246,30 @@ async def test_supervisor_token_can_list_calls(
 
 
 @pytest.mark.asyncio
+async def test_virtual_assistant_can_list_and_publish_calls(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """VA now holds calls:read/calls:publish (Live Monitoring page access)."""
+    listed = await client.get("/api/v1/calls", headers=_auth(rbac_world.virtual_assistant_token))
+    assert listed.status_code == 200, listed.text
+
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.virtual_assistant_id,
+    )
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish",
+        headers=_auth(rbac_world.virtual_assistant_token),
+    )
+    assert published.status_code == 200, published.text
+
+
+@pytest.mark.asyncio
 async def test_calls_require_auth(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
