@@ -143,21 +143,6 @@ class LiveKitGateway:
                     return  # room already gone — agent's close path deleted it first
                 raise
 
-    async def remove_participant(self, room_name: str, identity: str) -> None:
-        """Eject a participant from a room (owner revoking an intervener's access).
-        Idempotent: revoking a participant who already left / never joined is a
-        no-op instead of raising.
-        """
-        async with self._client() as lk:
-            try:
-                await lk.room.remove_participant(
-                    api.RoomParticipantIdentity(room=room_name, identity=identity)
-                )
-            except TwirpError as exc:
-                if exc.code == "not_found":
-                    return  # participant/room already gone — nothing to revoke
-                raise
-
     async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
         """Set room-level metadata (JSON-encoded). LiveKit pushes it to every
         participant as a RoomMetadataChanged event, so the browser can read
@@ -190,8 +175,8 @@ class LiveKitGateway:
         attributes: dict[str, str] | None = None,
     ) -> str:
         # Short TTL: the token is used immediately; the SDK default (~6h) would
-        # let a revoked user's old token keep working. can_publish=False makes
-        # watch-only viewers server-side mute — the client can't override it.
+        # leave a long replay window. can_publish=False makes watch-only viewers
+        # server-side mute — the client can't override it.
         # `name`/`attributes` ride to every room participant (display name +
         # vera.mode badge) — workforce identifiers only, never patient PHI.
         grants = api.VideoGrants(room_join=True, room=room_name, can_publish=can_publish)

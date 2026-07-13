@@ -57,11 +57,3 @@ export function getJoinToken(callId: string, intervene = false): Promise<JoinTok
 export function endCall(callId: string): Promise<CallSummary> {
   return apiRequest<CallSummary>(`/calls/${encodeURIComponent(callId)}/end`, { method: "POST" })
 }
-
-/** POST /calls/{id}/revoke-access — owner ejects an intervener from the room. */
-export function revokeAccess(callId: string, targetUserId: string): Promise<null> {
-  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/revoke-access`, {
-    method: "POST",
-    body: { target_user_id: targetUserId },
-  })
-}

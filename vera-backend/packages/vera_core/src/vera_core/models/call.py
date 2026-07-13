@@ -98,8 +98,6 @@ class Call(Base, TenantScopedMixin):
     # returns to False (spec §1 decision 4). False = private to initiated_by_id.
     published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # User ids the owner revoked — join_token refuses them even while published.
-    revoked_user_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     # Single-intervener lock: the user currently intervening (NULL = nobody) and
     # the DB-clock claim time driving the stale-lock grace window (join_token).
     intervener_user_id: Mapped[UUID | None] = mapped_column(

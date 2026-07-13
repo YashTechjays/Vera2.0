@@ -45,8 +45,6 @@ class AuditEvent(enum.StrEnum):
     # A non-owner VA minted a join token for a published call — the actual PHI
     # disclosure (they can now hear the live transcript). Ids only.
     CALL_INTERVENE_JOIN = "call.intervene.join"
-    # The owner ejected an intervener from a published call. Ids only.
-    CALL_INTERVENE_REVOKE = "call.intervene.revoke"
     # The active intervener ended a live call: room torn down, call marked
     # completed. Ids only, never PHI.
     CALL_END_SUPERVISOR = "call.end.supervisor"

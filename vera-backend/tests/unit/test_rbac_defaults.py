@@ -38,5 +38,4 @@ def test_form_schemas_read_permission_is_catalogued_and_super_admin_only() -> No
 def test_call_audit_events_exist() -> None:
     assert AuditEvent.CALL_PUBLISH.value == "call.publish"
     assert AuditEvent.CALL_INTERVENE_JOIN.value == "call.intervene.join"
-    assert AuditEvent.CALL_INTERVENE_REVOKE.value == "call.intervene.revoke"
     assert AuditEvent.CALL_END_SUPERVISOR.value == "call.end.supervisor"

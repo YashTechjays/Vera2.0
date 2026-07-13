@@ -31,10 +31,6 @@ class StartCallRequest(BaseModel):
     insurance_provider_id: UUID | None = None
 
 
-class RevokeAccessRequest(BaseModel):
-    target_user_id: UUID
-
-
 class JoinTokenResponse(BaseModel):
     token: str
     url: str

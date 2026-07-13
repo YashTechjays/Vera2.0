@@ -22,7 +22,6 @@ import {
   getJoinToken,
   listCalls,
   publishCall,
-  revokeAccess,
   startCall,
   type CallSummary,
   type JoinTokenResponse,
@@ -83,15 +82,6 @@ describe("calls API client", () => {
     vi.mocked(apiRequest).mockResolvedValue(joinToken)
     await getJoinToken("c1", true)
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token?intervene=true")
-  })
-
-  it("revokes access with the target user id in the body", async () => {
-    vi.mocked(apiRequest).mockResolvedValue(null)
-    await revokeAccess("c1", "u2")
-    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/revoke-access", {
-      method: "POST",
-      body: { target_user_id: "u2" },
-    })
   })
 
   it("ends a call (POST, no body)", async () => {

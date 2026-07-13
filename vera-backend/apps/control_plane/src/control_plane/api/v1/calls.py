@@ -1,14 +1,14 @@
 """Verification-call endpoints: create, join-token, active-list, publish,
-revoke-access, and the agent-worker status callback.
+supervisor end-call, and the agent-worker status callback.
 
 Auth note (acknowledged stopgap): create / join-token / active-list guard
 with `require("calls:read")` for now — the SPA has no real auth yet, and
-the spec flags this. `publish` and `revoke-access` are owner-only actions
-gated on `require("calls:publish")`: the caller must hold the permission
-*and* be the call's `initiated_by_id`, enforced by an explicit 403 check
-in each handler. A publish-capable join token (`?intervene=true`)
-additionally requires `calls:intervene`, checked in-handler after the
-visibility 404s (owners included).
+the spec flags this. `publish` is an owner-only action gated on
+`require("calls:publish")`: the caller must hold the permission *and* be
+the call's `initiated_by_id`, enforced by an explicit 403 check in the
+handler. A publish-capable join token (`?intervene=true`) additionally
+requires `calls:intervene`, checked in-handler after the visibility 404s
+(owners included).
 """
 
 import contextlib
@@ -63,7 +63,6 @@ from vera_core.schemas import (
     CallSummary,
     JoinTokenResponse,
     PersonaTweak,
-    RevokeAccessRequest,
     StartCallRequest,
 )
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
@@ -239,12 +238,11 @@ async def join_token(
     if call is None:
         raise NotFoundError(message="call not found")
     is_owner = call.initiated_by_id == caller.user_id
-    if not is_owner:  # non-owner joining another's call
-        # Ownerless calls are joinable tenant-wide; revoked users get the same
-        # 404 as a private call (no enumeration).
-        revoked = str(caller.user_id) in call.revoked_user_ids
-        if revoked or (call.initiated_by_id is not None and not call.published):
-            raise NotFoundError(message="call not found")  # don't reveal a private call
+    # A non-owner may join another's call only if it is published or ownerless
+    # (pre-ownership dispatcher calls are joinable tenant-wide); a private call
+    # stays a 404 so its existence is never revealed.
+    if not is_owner and call.initiated_by_id is not None and not call.published:
+        raise NotFoundError(message="call not found")
     room_name = room_name_for_call(tenant_id, call.id)
     stolen_from: UUID | None = None
     if intervene:
@@ -469,58 +467,6 @@ async def list_calls(
         )
     )
     return ok([_summary(c, name, caller.user_id) for c, name in rows])
-
-
-@router.post(
-    "/calls/{call_id}/revoke-access",
-    response_model=ResponseModel[None],
-    responses=CustomAPIResponse.custom(
-        DefaultExceptionCode.UNAUTHORIZED,
-        DefaultExceptionCode.FORBIDDEN,
-        DefaultExceptionCode.NOT_FOUND,
-    ),
-)
-async def revoke_access(
-    call_id: UUID,
-    body: RevokeAccessRequest,
-    request: Request,
-    tenant_id: TenantId,
-    session: TenantSession,
-    livekit: LiveKit,
-    audit: Audit,
-    caller: VerifiedIdentity = require("calls:publish"),
-) -> ResponseModel[None]:
-    # Row lock: concurrent revokes must not overwrite each other's list append.
-    call = (
-        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
-    ).scalar_one_or_none()
-    if call is None:
-        raise NotFoundError(message="call not found")
-    if call.initiated_by_id != caller.user_id:
-        raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN, message="only the owner can revoke access"
-        )
-    target = str(body.target_user_id)
-    if target not in call.revoked_user_ids:
-        call.revoked_user_ids = [*call.revoked_user_ids, target]
-    room_name = room_name_for_call(tenant_id, call.id)
-    await livekit.remove_participant(room_name, _supervisor_identity(body.target_user_id))
-    await audit.emit(
-        AuditRecord(
-            tenant_id=tenant_id,
-            actor_type=ActorType.USER,
-            actor_user_id=caller.user_id,
-            actor_label=caller.email or caller.subject,
-            event_type=AuditEvent.CALL_INTERVENE_REVOKE.value,
-            resource_type="call",
-            resource_id=str(call.id),
-            permission_key="calls:publish",
-            decision="allow",
-            request_id=current_request_id(request),
-            detail={"target_user_id": str(body.target_user_id)},
-        )
-    )
-    return ok(None, message="Access revoked.")
 
 
 @router.post(
