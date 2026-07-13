@@ -183,6 +183,10 @@ class ActivateInviteMfaRequest(BaseModel):
     code: str
 
 
+class InviteValidateResponse(BaseModel):
+    state: Literal["valid", "invalid", "deactivated"]
+
+
 # --- helpers -----------------------------------------------------------------
 
 
@@ -734,6 +738,45 @@ async def _password_identity_row(
     return (await session.execute(q)).scalar_one_or_none()
 
 
+@router.get(
+    "/tenants/{tenant_slug}/auth/invitations/validate",
+    response_model=ResponseModel[InviteValidateResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+    ),
+)
+async def validate_invitation(
+    tenant_slug: str,
+    token: str,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    invites: Invites,
+) -> ResponseModel[InviteValidateResponse]:
+    """Token-scoped invite pre-flight: returns the eligibility state without
+    consuming the token or revealing any PHI. Because the caller must already
+    possess the high-entropy secret token, this does not enable enumeration.
+    `Cache-Control: no-store` — the result reflects live DB state."""
+    response.headers["Cache-Control"] = "no-store"
+    tenant_id = await resolve_tenant_id(sessionmaker, tenant_slug)
+    invite = await invites.get(INVITE_NS, token)
+    if tenant_id is None or invite is None or invite.tenant_id != tenant_id:
+        return ok(InviteValidateResponse(state="invalid"))
+
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        user = (
+            await session.execute(select(AppUser).where(AppUser.id == invite.app_user_id))
+        ).scalar_one_or_none()
+
+    if user is None:
+        return ok(InviteValidateResponse(state="invalid"))
+    if user.status == "invited":
+        return ok(InviteValidateResponse(state="valid"))
+    if user.status == "deactivated":
+        return ok(InviteValidateResponse(state="deactivated"))
+    # already activated, or any other non-invited, non-deactivated status → invalid
+    return ok(InviteValidateResponse(state="invalid"))
+
+
 @router.post(
     "/tenants/{tenant_slug}/auth/invitations/accept",
     response_model=ResponseModel[AcceptInviteResponse],
@@ -748,6 +791,7 @@ async def accept_invitation(
     tenant_slug: str,
     body: AcceptInviteRequest,
     request: Request,
+    response: Response,
     sessionmaker: Sessionmaker,
     kms: KMS,
     audit: AuthAudit,
@@ -758,6 +802,7 @@ async def accept_invitation(
     tenant enforces MFA, this returns a provisioning URI + a bridge `mfa_token` and
     leaves the account `invited` until `activate-mfa`; otherwise the account goes
     `active`. The invite token is single-use (consumed here)."""
+    response.headers["Cache-Control"] = "no-store"
     tenant_id = await resolve_tenant_id(sessionmaker, tenant_slug)
     invite = await invites.get(INVITE_NS, body.token)
     if tenant_id is None or invite is None or invite.tenant_id != tenant_id:
