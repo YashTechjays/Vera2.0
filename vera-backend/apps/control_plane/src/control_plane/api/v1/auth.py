@@ -437,11 +437,10 @@ async def mfa_verify(
     if tenant_id is None or challenge is None or challenge.tenant_id != tenant_id:
         raise _unauthorized()
 
-    verified = False
     async with tenant_session(sessionmaker, tenant_id) as session:
-        ident = await _password_identity_row(session, challenge.user_id)
-        if ident is not None:
-            verified = (await mfa.verify(kms, identity=ident, code=body.code)) is not None
+        ident = await _password_identity_row(session, challenge.user_id, for_update=True)
+        mfa_result = await mfa.verify(kms, identity=ident, code=body.code) if ident else None
+        verified = mfa_result is not None
 
     if not verified:
         await _audit(
@@ -718,15 +717,16 @@ async def mfa_activate(
     return ok(RecoveryCodesResponse(recovery_codes=list(codes)))
 
 
-async def _password_identity_row(session: AsyncSession, user_id: UUID) -> UserIdentity | None:
-    return (
-        await session.execute(
-            select(UserIdentity).where(
-                UserIdentity.app_user_id == user_id,
-                UserIdentity.provider_type == ProviderKind.PASSWORD.value,
-            )
-        )
-    ).scalar_one_or_none()
+async def _password_identity_row(
+    session: AsyncSession, user_id: UUID, *, for_update: bool = False
+) -> UserIdentity | None:
+    q = select(UserIdentity).where(
+        UserIdentity.app_user_id == user_id,
+        UserIdentity.provider_type == ProviderKind.PASSWORD.value,
+    )
+    if for_update:
+        q = q.with_for_update()
+    return (await session.execute(q)).scalar_one_or_none()
 
 
 @router.post(
