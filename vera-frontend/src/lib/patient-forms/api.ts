@@ -4,8 +4,10 @@
 
 import { apiRequest } from "@/lib/api/client"
 import type {
+  IntakeSchemaOption,
   ListPatientFormsParams,
   PaginatedPatientForms,
+  PatientFormCreateResult,
   PatientFormDetail,
   PatientFormStatus,
   PatientFormStatusResult,
@@ -73,4 +75,21 @@ export function updatePatientFormStatus(
       },
     },
   )
+}
+
+/** GET /patient-forms/schemas — form families with a published version. */
+export function listIntakeSchemas(): Promise<IntakeSchemaOption[]> {
+  return apiRequest<IntakeSchemaOption[]>("/patient-forms/schemas")
+}
+
+/** POST /patient-forms:create — create a patient form from a family's published
+ *  schema version (resolved server-side; the client never picks a version). */
+export function createPatientForm(
+  schemaId: string,
+  intakePayload: Record<string, unknown>,
+): Promise<PatientFormCreateResult> {
+  return apiRequest<PatientFormCreateResult>("/patient-forms:create", {
+    method: "POST",
+    body: { schema_id: schemaId, intake_payload: intakePayload },
+  })
 }

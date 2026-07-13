@@ -121,3 +121,23 @@ export type SchemaVersionDetail = {
   /** the raw DSL document (schema_version.schema_json); parse with `parseSchema` */
   document: unknown
 }
+
+/** GET /patient-forms/schemas — a form family selectable for in-app intake
+ *  (only families with a published version are returned). Catalog data, not PHI. */
+export type IntakeSchemaOption = {
+  schema_id: string
+  name: string
+  insurance_type: string
+  published_version_id: string
+  published_version: number
+}
+
+/** Non-PHI ack returned by POST /patient-forms:create. */
+export type PatientFormCreateResult = {
+  id: string
+  status: PatientFormStatus
+  insurance_type: string
+  schema_version_id: string
+  completion_pct: number
+  created_at: string
+}
