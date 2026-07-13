@@ -15,11 +15,14 @@ export function valuesToIntakePayload(values: FormValues): Record<string, unknow
     const parts = path.slice(SECTIONS_PREFIX.length).split(".")
     let node = payload
     for (const part of parts.slice(0, -1)) {
-      const next = node[part]
-      node =
-        typeof next === "object" && next !== null
-          ? (next as Record<string, unknown>)
-          : ((node[part] = {}) as Record<string, unknown>)
+      const existing = node[part]
+      if (typeof existing === "object" && existing !== null) {
+        node = existing as Record<string, unknown>
+      } else {
+        const child: Record<string, unknown> = {}
+        node[part] = child
+        node = child
+      }
     }
     node[parts[parts.length - 1]] = value
   }
