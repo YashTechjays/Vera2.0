@@ -185,7 +185,11 @@ const authSlice = createSlice({
     forceLogout(state) {
       clearSession()
       // Capture the plane before nulling user so the redirect path survives the reset.
-      state.logoutPlane = state.user?.account_type === "platform" ? "platform" : "tenant"
+      // Guard on `state.user` so a second forceLogout (burst of 401s) can't overwrite
+      // an already-captured platform plane with the "tenant" fallback.
+      if (state.user) {
+        state.logoutPlane = state.user.account_type === "platform" ? "platform" : "tenant"
+      }
       state.status = "anonymous"
       state.user = null
       state.tenantSlug = null
@@ -300,7 +304,9 @@ const authSlice = createSlice({
       .addCase(logoutThunk.fulfilled, (s) => {
         clearSession()
         // Capture the plane before nulling user so the redirect path survives.
-        s.logoutPlane = s.user?.account_type === "platform" ? "platform" : "tenant"
+        if (s.user) {
+          s.logoutPlane = s.user.account_type === "platform" ? "platform" : "tenant"
+        }
         s.status = "anonymous"
         s.user = null
         s.tenantSlug = null

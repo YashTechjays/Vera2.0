@@ -220,7 +220,10 @@ async def platform_mfa_verify(
 
     result: int | None = None
     async with platform_session(sessionmaker) as session:
-        ident = await _password_identity_row(session, challenge.user_id)
+        # FOR UPDATE serializes concurrent same-window verifications so a replayed
+        # TOTP code can't slip through the read-check-write race (mirrors the tenant
+        # path); the definer's monotonic guard is the second line of defence.
+        ident = await _password_identity_row(session, challenge.user_id, for_update=True)
         if ident is not None:
             result = await mfa.verify(kms, identity=ident, code=body.code)
         # Persist the matched TOTP timestep for platform (NULL-tenant) identities via
