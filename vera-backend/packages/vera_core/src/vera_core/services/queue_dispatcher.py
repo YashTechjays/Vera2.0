@@ -304,8 +304,6 @@ async def try_dispatch(
                 room_name = room_name_for_call(tenant_id, call.id)
                 if form.ivr_navigation_enabled and provider is not None:
                     await add_active_playbook_metadata(session, provider.id, metadata)
-                # Schema-resolved {{token}} -> value context for the navigator prompt: form-only
-                # (no provider gate, unlike the playbook), values from the active field answers.
                 if form.ivr_navigation_enabled:
                     await add_agent_context_metadata(session, form, metadata)
                 await livekit.create_call_room(room_name, metadata=metadata)

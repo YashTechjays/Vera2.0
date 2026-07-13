@@ -74,8 +74,8 @@ def _to_date(text: str, leaf: Leaf | None) -> date | None:
 
 def _spoken_value(raw: Any, leaf: Leaf | None) -> str | None:
     """Trim a resolved value to a form fit to speak, or None. Drops blank / the intake `"N/A"`
-    default (so a placeholder never becomes a spoken identifier — the prompt falls back to its
-    neutral default), and normalizes a date leaf to `MM/DD/YYYY` for a clean spoken readout."""
+    default (so an unfilled placeholder resolves to empty rather than speaking a stray value), and
+    normalizes a date leaf to `MM/DD/YYYY` for a clean spoken readout."""
     if raw is None:
         return None
     text = str(raw).strip()
@@ -97,7 +97,7 @@ def build_agent_context(doc: FormSchemaDoc, values_by_path: dict[str, Any]) -> d
     context: dict[str, str] = {}
     for token in placeholder_tokens(doc):
         path = resolve_field_path(doc, token)
-        value = _spoken_value(values_by_path.get(path), leaves.get(path)) if path else None
+        value = _spoken_value(values_by_path.get(path), leaves.get(path))
         if value is not None:
             context[token] = value
     return context
@@ -109,8 +109,8 @@ async def add_agent_context_metadata(
     """Attach the resolved `{{token}}` -> value context an agent's prompt reads to dispatch
     `metadata` under `agent_context`. Schema-driven, NO hardcoded paths: the values come from the
     active (`is_current`) `field_answer` rows keyed by the form's pinned schema. Nothing is attached
-    for a legacy (v1) schema or when the form carries no resolvable values, so the agent falls back
-    to its built-in placeholder defaults."""
+    for a legacy (v1) schema or when the form carries no resolvable values, so the prompt's unfilled
+    placeholders resolve to empty."""
     schema_json = (
         await session.execute(
             select(SchemaVersion.schema_json).where(SchemaVersion.id == form.schema_version_id)

@@ -1,7 +1,10 @@
 """Tests for the schema-driven {{token}} resolvers (vera_core.forms.placeholders)."""
 
+import pytest
+
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.placeholders import (
+    UnknownPlaceholderError,
     placeholder_tokens,
     resolve_field_path,
     resolve_prompt,
@@ -23,10 +26,13 @@ def test_resolve_field_path_falls_back_to_context_leaf_path() -> None:
     assert resolve_field_path(_DOC, path) == path
 
 
-def test_resolve_field_path_unknown_token_is_none() -> None:
-    # group_number is a collected `ask` leaf — neither a system_field nor context → not resolvable.
-    assert resolve_field_path(_DOC, "group_number") is None
-    assert resolve_field_path(_DOC, "not_a_real_token") is None
+def test_resolve_field_path_unknown_token_raises() -> None:
+    # An unknown token (misauthored / not defined by the schema) fails early instead of silently
+    # resolving to nothing — group_number is a collected `ask` leaf, not a system_field/context.
+    with pytest.raises(UnknownPlaceholderError):
+        resolve_field_path(_DOC, "group_number")
+    with pytest.raises(UnknownPlaceholderError):
+        resolve_field_path(_DOC, "not_a_real_token")
 
 
 def test_placeholder_tokens_covers_handles_and_context_paths() -> None:

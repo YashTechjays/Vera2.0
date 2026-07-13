@@ -15,17 +15,24 @@ from collections.abc import Callable
 from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc
 
 
-def resolve_field_path(doc: FormSchemaDoc, token: str) -> str | None:
+class UnknownPlaceholderError(ValueError):
+
+    def __init__(self, token: str) -> None:
+        super().__init__(f"unknown schema placeholder {{{{{token}}}}}")
+        self.token = token
+
+
+def resolve_field_path(doc: FormSchemaDoc, token: str) -> str:
     """Map a ``{{token}}`` to its root-anchored schema path: a ``system_fields`` handle first,
-    then a ``context``-role leaf whose path IS the token. ``None`` when the token is not a
-    placeholder this schema defines."""
+    then a ``context``-role leaf whose path IS the token. Raises :class:`UnknownPlaceholderError`
+    when the token is not a placeholder this schema defines — fail early, never silently drop it."""
     system_fields = doc.system_fields or {}
     if token in system_fields:
         return system_fields[token]
     for path, leaf in doc.leaf_items():
         if path == token and leaf.role == "context":
             return path
-    return None
+    raise UnknownPlaceholderError(token)
 
 
 def placeholder_tokens(doc: FormSchemaDoc) -> set[str]:
