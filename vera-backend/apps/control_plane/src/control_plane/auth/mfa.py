@@ -182,7 +182,7 @@ async def _call_definer_bool(session: AsyncSession, sql: str, **params: object) 
         if getattr(getattr(exc, "orig", None), "sqlstate", None) == _UNDEFINED_FUNCTION:
             raise RuntimeError(
                 "platform MFA definer functions missing — apply migrations "
-                "f066c667ddc1 and 3f7a9c2e8b41"
+                "f066c667ddc1, 3f7a9c2e8b41, and 8fcbca449f35"
             ) from exc
         raise
     return bool(result.scalar_one())
@@ -197,7 +197,7 @@ async def _call_definer_void(session: AsyncSession, sql: str, **params: object) 
         if getattr(getattr(exc, "orig", None), "sqlstate", None) == _UNDEFINED_FUNCTION:
             raise RuntimeError(
                 "platform MFA definer functions missing — apply migrations "
-                "f066c667ddc1 and 3f7a9c2e8b41"
+                "f066c667ddc1, 3f7a9c2e8b41, and 8fcbca449f35"
             ) from exc
         raise
 
