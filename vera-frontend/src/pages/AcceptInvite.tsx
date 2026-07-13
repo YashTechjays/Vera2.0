@@ -74,14 +74,14 @@ export function AcceptInvite() {
   if (phase.kind === "recovery") {
     return (
       <CenteredCard title="Account ready" desc="Save your recovery codes, then sign in.">
-        <RecoveryCodes codes={phase.codes} onContinue={() => navigate(loginHref)} />
+        <RecoveryCodes codes={phase.codes} onContinue={() => navigate(loginHref, { replace: true })} />
       </CenteredCard>
     )
   }
   if (phase.kind === "done") {
     return (
       <CenteredCard title="Account active" desc="Your account is ready.">
-        <Button className="w-full" onClick={() => navigate(loginHref)}>Sign in</Button>
+        <Button className="w-full" onClick={() => navigate(loginHref, { replace: true })}>Sign in</Button>
       </CenteredCard>
     )
   }
