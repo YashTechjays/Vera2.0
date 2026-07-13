@@ -76,6 +76,9 @@ def _spell_id_tokens(text: str) -> str:
         token = match.group(0)
         chars = [c for c in token if c.isalnum()]  # drop the hyphens; spell only alnum
         has_letter = any(c.isalpha() for c in chars)
+        # A mixed letters+digits token is an ID; a purely-alphabetic token is NOT spelled (read as a
+        # word) — we can't tell a pure-alpha ID from a menu word like "Medical". Holds while payer
+        # IDs are numeric or alphanumeric-with-digits; revisit if a payer uses purely-alpha IDs.
         is_alnum_id = has_letter and any(c.isdigit() for c in chars) and len(chars) >= _MIN_ALNUM_ID
         is_long_number = not has_letter and len(chars) >= _MIN_SPELL_DIGITS
         if not (is_alnum_id or is_long_number):

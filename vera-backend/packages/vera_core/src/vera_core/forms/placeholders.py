@@ -16,7 +16,6 @@ from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc
 
 
 class UnknownPlaceholderError(ValueError):
-
     def __init__(self, token: str) -> None:
         super().__init__(f"unknown schema placeholder {{{{{token}}}}}")
         self.token = token

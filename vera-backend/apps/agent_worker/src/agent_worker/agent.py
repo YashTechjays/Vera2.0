@@ -116,4 +116,6 @@ def build_agent(
         )
     if meta.get("ivr_playbook") is not None:
         logger.warning("ivr_playbook present without enable_ivr_navigation; ignoring playbook")
+    if meta.get("agent_context") is not None:
+        logger.warning("agent_context present without enable_ivr_navigation; ignoring")
     return VeraAgent(boundary, session_id, instructions=instructions, greeting=greeting)

@@ -1,6 +1,7 @@
 """Tests for the cascade agents — the chat persona (with PHI-wall node overrides) and
 the IVR navigator (a plain agent, no phiwall), plus the metadata-driven selector."""
 
+import logging
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
@@ -413,6 +414,22 @@ def test_build_agent_selects_by_ivr_navigation_flag() -> None:
         build_agent({"enable_ivr_navigation": False}, boundary=boundary, session_id="s1"),
         VeraAgent,
     )
+
+
+def test_build_agent_warns_on_agent_context_without_ivr_flag(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Symmetric with the ivr_playbook warning: agent_context without the flag is ignored (the chat
+    # persona doesn't read it), and we log that it was dropped — never the values themselves.
+    with caplog.at_level(logging.WARNING):
+        agent = build_agent(
+            {"agent_context": {"member_id": "M1"}},
+            boundary=PassthroughPHIBoundary(),
+            session_id="s1",
+        )
+    assert isinstance(agent, VeraAgent)
+    assert "agent_context present without enable_ivr_navigation" in caplog.text
+    assert "M1" not in caplog.text  # never log the values
 
 
 def test_build_agent_playbook_specializes_but_never_selects() -> None:
