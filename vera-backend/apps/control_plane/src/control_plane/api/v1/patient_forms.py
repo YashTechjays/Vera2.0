@@ -73,6 +73,7 @@ from vera_core.models.enums import (
     AnswerSource,
     DisputeActionType,
     FormStatus,
+    VersionStatus,
 )
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
@@ -527,6 +528,58 @@ async def list_patient_forms(
         )
     )
     return ok(PaginatedForms(items=items, page=page, page_size=page_size, total=total))
+
+
+class IntakeSchemaOption(BaseModel):
+    """One form family selectable for in-app intake — global catalog data only
+    (the form template, never patient values)."""
+
+    schema_id: UUID
+    name: str
+    insurance_type: str
+    published_version_id: UUID
+    published_version: int
+
+
+# NOTE: declared before GET /patient-forms/{form_id} — FastAPI matches routes in
+# declaration order, and the parameterized route would otherwise swallow "schemas".
+@router.get(
+    "/patient-forms/schemas",
+    response_model=ResponseModel[list[IntakeSchemaOption]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_intake_schemas(
+    response: Response,
+    session: TenantSession,
+    caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[list[IntakeSchemaOption]]:
+    """The form families a tenant user can create a patient form from — only
+    families with a published version (the in-app create path binds to it).
+    Reads the global catalog only (no patient data), so no PHI-access audit —
+    same stance as GET /schema-versions/{version_id}."""
+    response.headers["Cache-Control"] = "no-store"
+    rows = (
+        await session.execute(
+            select(FormSchema, SchemaVersion)
+            .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
+            .where(SchemaVersion.status == VersionStatus.PUBLISHED.value)
+            .order_by(FormSchema.name)
+        )
+    ).all()
+    return ok(
+        [
+            IntakeSchemaOption(
+                schema_id=form_schema.id,
+                name=form_schema.name,
+                insurance_type=form_schema.insurance_type,
+                published_version_id=version.id,
+                published_version=version.version,
+            )
+            for form_schema, version in rows
+        ]
+    )
 
 
 @router.get(
