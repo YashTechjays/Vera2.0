@@ -319,12 +319,12 @@ async def entrypoint(ctx: JobContext) -> None:
         speaker: rtc.RemoteParticipant | None = None
         meta = json.loads(ctx.job.metadata or "{}")
         if meta.get("wait_for_speaker"):
-            # Log the metadata WITHOUT ivr_call_data — that key carries raw patient/provider
+            # Log the metadata WITHOUT agent_context — that key carries raw patient/provider
             # identifiers (PHI) that must never reach a log. The rest of meta is non-PHI config.
             logger.info(
                 "wait_for_speaker: entering for room %s (meta=%s)",
                 room_name,
-                {k: v for k, v in meta.items() if k != "ivr_call_data"},
+                {k: v for k, v in meta.items() if k != "agent_context"},
             )
             outcome = await wait_for_speaker(ctx)
             logger.info(

@@ -36,7 +36,7 @@ from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.ivr_selection import (
     add_active_playbook_metadata,
-    add_ivr_call_data_metadata,
+    add_agent_context_metadata,
 )
 from vera_core.telephony import OutboundDialError
 
@@ -304,10 +304,10 @@ async def try_dispatch(
                 room_name = room_name_for_call(tenant_id, call.id)
                 if form.ivr_navigation_enabled and provider is not None:
                     await add_active_playbook_metadata(session, provider.id, metadata)
-                # Patient/provider identifiers for the navigator: form-only (no provider
-                # gate, unlike the playbook), read off the already-loaded form (no queries).
+                # Schema-resolved {{token}} -> value context for the navigator prompt: form-only
+                # (no provider gate, unlike the playbook), values from the active field answers.
                 if form.ivr_navigation_enabled:
-                    add_ivr_call_data_metadata(form, metadata)
+                    await add_agent_context_metadata(session, form, metadata)
                 await livekit.create_call_room(room_name, metadata=metadata)
                 session.add(
                     CallEvent(

@@ -21,7 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
-from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.models import (
+    Call,
+    CallEvent,
+    FieldAnswer,
+    InsuranceProvider,
+    PatientForm,
+    SchemaVersion,
+    Tenant,
+)
 from vera_core.models.enums import CallStatus, FormStatus
 from vera_core.services import queue_dispatcher
 from vera_core.services.queue_dispatcher import is_within_working_hours, try_dispatch
@@ -152,6 +160,12 @@ class FakeSession:
         if entity is PatientForm:
             rows = self.candidates if stmt._limit_clause is not None else self.expired
             return _Result(rows=rows)
+        # add_agent_context_metadata's schema load: None schema_json → it attaches no context
+        # (these tests don't exercise the agent-context path), so the field-answer read never runs.
+        if entity is SchemaVersion:
+            return _Result(scalar=None)
+        if entity is FieldAnswer:
+            return _Result(rows=[])
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
 
