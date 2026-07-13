@@ -27,7 +27,7 @@ from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
 from vera_core.phi import PHIBoundaryProtocol
-from vera_core.schemas import IvrPlaybookConfig
+from vera_core.schemas import IvrCallData, IvrPlaybookConfig
 
 logger = logging.getLogger("agent_worker")
 
@@ -104,6 +104,7 @@ class IvrNavigatorAgent(Agent):
         session_id: str,
         *,
         playbook: IvrPlaybookConfig | None = None,
+        call_data: IvrCallData | None = None,
         verification_instructions: str | None = None,
         verification_greeting: str | None = None,
         on_keypress: Callable[[str], None] | None = None,
@@ -131,7 +132,7 @@ class IvrNavigatorAgent(Agent):
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
         # A per-provider playbook (when present) specializes the generic navigator prompt.
         super().__init__(
-            instructions=build_ivr_instructions(playbook),
+            instructions=build_ivr_instructions(playbook, call_data),
             tools=[],
             turn_handling=ivr_turn_handling(),
         )

@@ -22,7 +22,7 @@ from livekit.agents import (
 )
 
 from agent_worker.ivr_agent import IvrNavigatorAgent
-from agent_worker.ivr_prompt import parse_ivr_playbook
+from agent_worker.ivr_prompt import parse_ivr_call_data, parse_ivr_playbook
 from agent_worker.prompt import build_instructions, resolve_greeting
 from agent_worker.seams import hydrate_stream, redact_event
 from vera_core.phi import PHIBoundaryProtocol
@@ -109,6 +109,7 @@ def build_agent(
             boundary,
             session_id,
             playbook=parse_ivr_playbook(meta),
+            call_data=parse_ivr_call_data(meta),
             verification_instructions=instructions,
             verification_greeting=greeting,
             on_keypress=on_keypress,

@@ -4,10 +4,11 @@ from agent_worker.ivr_prompt import (
     IVR_NAVIGATOR_SYSTEM_PROMPT,
     SILENCE_TOKEN,
     build_ivr_instructions,
+    parse_ivr_call_data,
     parse_ivr_playbook,
 )
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
-from vera_core.schemas import IvrPlaybookConfig
+from vera_core.schemas import IvrCallData, IvrPlaybookConfig
 
 
 def test_silence_token_matches_the_prompt_sentinel() -> None:
@@ -57,11 +58,13 @@ def test_base_prompt_declares_the_provider_override_contract() -> None:
     assert "role_lock and silence_contract always hold" in prompt
 
 
-def test_build_ivr_instructions_omits_the_cartesia_guide() -> None:
+def test_build_ivr_instructions_substitutes_defaults_and_omits_cartesia_guide() -> None:
     # Unlike the chat persona, the navigator drives TTS with plain words and needs no
-    # Cartesia readback markup — the instructions are just the navigator prompt.
+    # Cartesia readback markup. With no call_data, every %% identifier token is replaced by
+    # its built-in default — no raw token ever reaches the model.
     combined = build_ivr_instructions()
-    assert combined == IVR_NAVIGATOR_SYSTEM_PROMPT
+    assert "%%" not in combined
+    assert "200236789" in combined  # synthetic member-ID default stands in
     assert CARTESIA_MARKUP_GUIDE not in combined
 
 
@@ -71,6 +74,38 @@ def test_empty_playbook_is_no_op() -> None:
     assert build_ivr_instructions(IvrPlaybookConfig()) == build_ivr_instructions()
 
 
+def test_call_data_fills_identifier_tokens() -> None:
+    out = build_ivr_instructions(
+        call_data=IvrCallData(
+            patient_name="jane roe",
+            member_id="ZZZ123",
+            date_of_birth="03/07/1990",
+            group_number="GRP42",
+            provider_npi="9998887776",
+            provider_id="9998887776",
+            tax_id="112223333",
+        )
+    )
+    assert "%%" not in out  # no token leaks
+    for value in ("ZZZ123", "03/07/1990", "jane roe", "GRP42", "9998887776", "112223333"):
+        assert value in out
+    # the read-back rule now carries the real name to verify against
+    assert "matches jane roe" in out
+    # supplying real values displaces the synthetic defaults
+    assert "200236789" not in out
+
+
+def test_call_data_missing_fields_fall_back_to_neutral_phrasing() -> None:
+    # Only member_id known → patient tokens with no value use neutral phrases, never a fake
+    # DOB/name and never the "N/A" default that a bare form column might carry.
+    out = build_ivr_instructions(call_data=IvrCallData(member_id="M1"))
+    assert "%%" not in out
+    assert "M1" in out
+    assert "the patient's date of birth" in out
+    assert "the patient on file" in out
+    assert "the group number on file" in out
+
+
 def test_playbook_overrides_and_rules_appended_after_base_prompt() -> None:
     out = build_ivr_instructions(
         IvrPlaybookConfig(
@@ -78,7 +113,8 @@ def test_playbook_overrides_and_rules_appended_after_base_prompt() -> None:
             extra_rules="Reach a human by saying 'Advocate'; answer Yes to the survey.",
         )
     )
-    assert out.startswith(IVR_NAVIGATOR_SYSTEM_PROMPT)
+    # the base (token-substituted) navigator prompt is the prefix; the overlay is appended
+    assert out.startswith(build_ivr_instructions())
     # a set config field is restated as an override line
     assert "<provider_subflows>After IDs, press 3 for provider services.</provider_subflows>" in out
     # extra_rules land as a separate provider-specific section, after the base navigator prompt
@@ -105,6 +141,17 @@ def test_parse_ivr_playbook_fail_safe() -> None:
     assert parse_ivr_playbook(
         {"ivr_playbook": {"extra_rules": "Say Advocate"}}
     ) == IvrPlaybookConfig(extra_rules="Say Advocate")
+
+
+def test_parse_ivr_call_data_fail_safe() -> None:
+    # Takes the whole dispatch metadata and extracts the `ivr_call_data` blob itself.
+    assert parse_ivr_call_data({}) is None  # no key → navigator uses default tokens
+    assert parse_ivr_call_data({"ivr_call_data": {}}) is None  # empty → defaults
+    # extra="forbid": an unknown key rejects the whole blob → None (fall back to defaults)
+    assert parse_ivr_call_data({"ivr_call_data": {"unknown": "x"}}) is None
+    assert parse_ivr_call_data({"ivr_call_data": {"member_id": "M1"}}) == IvrCallData(
+        member_id="M1"
+    )
 
 
 def test_playbook_config_values_are_xml_escaped() -> None:

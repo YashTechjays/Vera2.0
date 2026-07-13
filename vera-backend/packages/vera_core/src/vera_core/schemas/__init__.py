@@ -6,6 +6,7 @@ from .dto import (
     VoiceSessionResponse,
 )
 from .form_template import FieldType, FormField, FormTemplate
+from .ivr_call_data import IvrCallData
 from .ivr_playbook import IvrPlaybookConfig
 from .persona import PersonaTweak
 
@@ -14,6 +15,7 @@ __all__ = [
     "FieldType",
     "FormField",
     "FormTemplate",
+    "IvrCallData",
     "IvrPlaybookConfig",
     "JoinTokenResponse",
     "PersonaTweak",

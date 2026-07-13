@@ -3,10 +3,17 @@
 A reactive navigator: it models the IVR as a two-mode state machine (ANNOUNCEMENT
 MODE → PROMPT MODE), stays silent for everything that is not a direct prompt, and
 answers from a response-rule table — by SPEAKING for "say" prompts and by calling
-the `press_keypad` DTMF tool for "press"/"enter" prompts. The `{member_id}` / `{npi}`
-/ `{tax_id}` / `{date_of_birth}` / `{group_number}` placeholders and
-`[transition trigger phrase]` markers are LITERAL text — the cascade injects no
-call_data, so no raw PHI enters the prompt (PHI wall).
+the `press_keypad` DTMF tool for "press"/"enter" prompts.
+
+The response-rule table carries `%%…%%` substitution tokens (member ID, DOB, patient name,
+group number, provider NPI/Tax ID) that `build_ivr_instructions` fills from the call's
+`IvrCallData` — the real patient/provider identifiers read off the DB `patient_form` and
+delivered via dispatch metadata. With no call_data every token falls back to a built-in
+default (synthetic ID or neutral phrase), so the generic prompt still stands alone.
+
+PHI wall deliberately bypassed (test phase): these identifiers are raw PHI templated straight
+into the prompt rather than tokenized/hydrated. The `[transition trigger phrase]` markers
+stay LITERAL. Keep this confined to synthetic/test data; never log/trace the substituted values.
 """
 
 from __future__ import annotations
@@ -15,7 +22,7 @@ import html
 from collections.abc import Mapping
 from typing import Any
 
-from vera_core.schemas import IvrPlaybookConfig
+from vera_core.schemas import IvrCallData, IvrPlaybookConfig
 
 # The sentinel the model emits when the correct action is silence. It must never be spoken,
 # so the navigator's tts/transcription nodes strip it (see agent_worker.ivr_agent). Keep this
@@ -135,12 +142,13 @@ Match on INTENT; "e.g." phrasings are examples, not exact strings. Wording and k
 <rule intent="Department/topic menu (claims, eligibility, covered services, benefits, pre-cert, authorizations, accumulations)" say="Eligibility and Benefits / Covered services — matching the menu's wording"/>
 <rule intent="Confirms menu choice — 'you said covered services, right?'" say="Yes"/>
 <rule intent="Coverage LINE — options are insurance PRODUCTS (medical / dental / vision / pharmacy / behavioral health), whenever asked, before OR after IDs" say="Medical"/>
-<rule intent="Provider identifier — NPI, provider ID, or Tax ID (or 'NPI or Tax ID')" say="1234567890 / 1234567890 / 1234567890 per what is asked (NPI if either offered)"/>
-<rule intent="Patient member ID (per ID-entry rule)" say="200236789"/>
+<rule intent="Provider identifier — NPI, provider ID, or Tax ID (or 'NPI or Tax ID')" say="%%PROVIDER_NPI%% / %%PROVIDER_ID%% / %%TAX_ID%% per what is asked (NPI if either offered)"/>
+<rule intent="Patient member ID (per ID-entry rule)" say="%%MEMBER_ID%%"/>
+<rule intent="Group / policy number" say="%%GROUP_NUMBER%%"/>
 <rule intent="Member-ID letter sub-flow / 'does it start with [letter]?'" say="Per provider_subflows"/>
 <rule intent="First characters of member ID / last name (often phonetic)" say="{requested chars, phonetic if asked}"/>
-<rule intent="Patient date of birth (often '4-digit year'/'8 digits')" say="{date_of_birth}"/>
-<rule intent="Reads patient name back — 'calling about [name], right?'" say="Yes (No if wrong)"/>
+<rule intent="Patient date of birth (often '4-digit year'/'8 digits')" say="%%DATE_OF_BIRTH%%"/>
+<rule intent="Reads patient name back — 'calling about [name], right?'" say="Yes if the read-back matches %%PATIENT_NAME%% (No if wrong)"/>
 <rule intent="Reads a value back (speech or 'press 1 if correct')" say="Yes/1 (No/2 if the VALUE is wrong or mismatched)"/>
 <rule intent="'As of today, or a past date?'" say="Today/1 (per date_scope)"/>
 <rule intent="Pre-cert vs benefits-and-eligibility vs both" say="Benefits and eligibility"/>
@@ -174,7 +182,7 @@ THIS HANDOFF IS FINAL: there is no way back to IVR navigation once you call tran
 - PRODUCT vs DETAIL MENU: post-ID "medical, vision, pharmacy, mental health — which?" → "Medical" (products). Post-ID "copay, deductible, plan details, PCP…" → {rep_keyword} (figures, self-service).
 - CONFIRM MISMATCH: you spelled member ID, IVR reads back "I heard medical. Correct?" → "No" (wrong field = capture failure), re-enter the ID.
 - CONFIRM ON VALUE: "That was T as in Tango, 8, S as in Sierra, correct?" (you said S as in Sam) → "Yes" (letter is S).
-- GLUED PREAMBLE: "One moment, please. And the patient's date of birth?" → "{date_of_birth}" (ignore the preamble; silence here is WRONG). Also: a payment disclaimer that ENDS in "now what type of benefit are you calling about? for example co pay, coinsurance..." → "Plan details" (answer the topic gate; the example list is illustrative, so do NOT echo a narrow example, and do NOT stay silent).
+- GLUED PREAMBLE: "One moment, please. And the patient's date of birth?" → "%%DATE_OF_BIRTH%%" (ignore the preamble; silence here is WRONG). Also: a payment disclaimer that ENDS in "now what type of benefit are you calling about? for example co pay, coinsurance..." → "Plan details" (answer the topic gate; the example list is illustrative, so do NOT echo a narrow example, and do NOT stay silent).
 - ROUTE TO HUMAN: "Eligibility status or something else?" → "Something else" (forces a rep).
 - SELF-SERVICE LOOP: "hear it / fax it…" → {rep_keyword} → re-offered with no progress → press 0 → still looping → "Agent" → still looping → give_up (end the call; the menu has no human path).
 - CHAINED IVR: "...connected to the appropriate Blue Cross plan." → new "Thank you for calling…" with its own menus → treat as NEW IVR, re-enter announcement mode, navigate from scratch.
@@ -226,15 +234,47 @@ def _render_playbook_overrides(playbook: IvrPlaybookConfig) -> str | None:
     return "\n\n".join(sections) if sections else None
 
 
-def build_ivr_instructions(playbook: IvrPlaybookConfig | None = None) -> str:
-    """Generic IVR-navigator instructions, optionally specialized by a per-provider playbook
-    overlay. The navigator reasons over plain transcript text and drives TTS with plain words,
-    so — unlike the chat persona — it needs no Cartesia readback markup guide. With no playbook
-    (or an empty one) the output is the generic navigator, unchanged."""
+# `%%TOKEN%%` in the prompt -> (IvrCallData field, default when call_data lacks it). `%%`
+# appears nowhere else in the prompt, so each replace is surgical (a blanket str.format would
+# choke on the prompt's many literal `{…}`). Keeping the synthetic member/provider IDs as
+# defaults preserves the standalone generic prompt byte-for-byte; the patient tokens with no
+# synthetic form fall back to neutral phrasing — never a fake DOB/name, never the literal "N/A".
+_IVR_TOKENS: tuple[tuple[str, str, str], ...] = (
+    ("%%MEMBER_ID%%", "member_id", "200236789"),
+    ("%%GROUP_NUMBER%%", "group_number", "the group number on file"),
+    ("%%DATE_OF_BIRTH%%", "date_of_birth", "the patient's date of birth"),
+    ("%%PATIENT_NAME%%", "patient_name", "the patient on file"),
+    ("%%PROVIDER_NPI%%", "provider_npi", "1234567890"),
+    ("%%PROVIDER_ID%%", "provider_id", "1234567890"),
+    ("%%TAX_ID%%", "tax_id", "1234567890"),
+)
+
+
+def _substitute_call_data(prompt: str, call_data: IvrCallData | None) -> str:
+    """Fill every `%%…%%` token from `call_data`, or its default when the field is unset — so
+    no raw token ever reaches the model. An empty value (missing/blank/"N/A"-cleaned) uses the
+    default too."""
+    for token, field, default in _IVR_TOKENS:
+        value = getattr(call_data, field, None) if call_data is not None else None
+        prompt = prompt.replace(token, value or default)
+    return prompt
+
+
+def build_ivr_instructions(
+    playbook: IvrPlaybookConfig | None = None,
+    call_data: IvrCallData | None = None,
+) -> str:
+    """Generic IVR-navigator instructions, with the `%%…%%` identifier tokens filled from
+    `call_data` (the call's patient/provider values) and optionally specialized by a per-provider
+    playbook overlay. The navigator reasons over plain transcript text and drives TTS with plain
+    words, so — unlike the chat persona — it needs no Cartesia readback markup guide. With no
+    call_data the tokens fall back to built-in defaults, and with no playbook the output is the
+    generic navigator."""
+    prompt = _substitute_call_data(IVR_NAVIGATOR_SYSTEM_PROMPT, call_data)
     overrides = _render_playbook_overrides(playbook) if playbook is not None else None
     if not overrides:
-        return IVR_NAVIGATOR_SYSTEM_PROMPT
-    return f"{IVR_NAVIGATOR_SYSTEM_PROMPT}\n\n{overrides}"
+        return prompt
+    return f"{prompt}\n\n{overrides}"
 
 
 def parse_ivr_playbook(meta: Mapping[str, Any]) -> IvrPlaybookConfig | None:
@@ -247,5 +287,19 @@ def parse_ivr_playbook(meta: Mapping[str, Any]) -> IvrPlaybookConfig | None:
         return None
     try:
         return IvrPlaybookConfig.model_validate(value)
+    except ValueError:
+        return None
+
+
+def parse_ivr_call_data(meta: Mapping[str, Any]) -> IvrCallData | None:
+    """Extract and parse the `ivr_call_data` identifiers from dispatch metadata into an
+    IvrCallData. Fail-safe: a missing, empty, or malformed blob yields None so the navigator
+    falls back to its built-in placeholder tokens instead of killing a live call (mirrors
+    parse_ivr_playbook's posture)."""
+    value = meta.get("ivr_call_data")
+    if not value:
+        return None
+    try:
+        return IvrCallData.model_validate(value)
     except ValueError:
         return None
