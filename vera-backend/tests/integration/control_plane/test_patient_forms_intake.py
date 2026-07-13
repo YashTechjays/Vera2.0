@@ -388,6 +388,61 @@ async def test_wrong_scope_returns_403(
     assert resp.status_code == 403, resp.text
 
 
+async def _post_intake(
+    client: httpx.AsyncClient,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    ibv_schema: tuple[UUID, UUID],
+    payload: dict[str, object],
+) -> httpx.Response:
+    """POST a patient-form intake request; shared by the unknown-path 422 tests."""
+    form_type_id, version_id = ibv_schema
+    token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
+    return await client.post(
+        "/api/v1/patient-forms",
+        json={
+            "form_type_id": str(form_type_id),
+            "schema_version_id": str(version_id),
+            "intake_payload": payload,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+async def test_unknown_field_paths_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """A payload with a key not in the schema's leaf set must be rejected 422."""
+    bad_payload = {**INTAKE_PAYLOAD, "unknown_section": {"mystery_field": "oops"}}
+    resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, bad_payload)
+
+    assert resp.status_code == 422, resp.text
+    assert "sections.unknown_section.mystery_field" in resp.json()["data"]["fields"]
+
+
+async def test_doubly_nested_field_path_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """A mis-nested payload (extra 'sections' wrapper inside a section) is rejected."""
+    bad_payload = {
+        **INTAKE_PAYLOAD,
+        "sections": {"patient_information": {"patient_name": "Re-wrapped"}},
+    }
+    resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, bad_payload)
+
+    assert resp.status_code == 422, resp.text
+    offending = resp.json()["data"]["fields"]
+    assert any("sections.sections" in p for p in offending)
+
+
 async def test_rls_isolation_other_tenant_cannot_see_row(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

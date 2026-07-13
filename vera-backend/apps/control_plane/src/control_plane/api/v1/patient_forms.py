@@ -48,6 +48,7 @@ from vera_core.forms.intake import (
     missing_required,
     promote_columns,
     resolve_path,
+    unknown_payload_paths,
 )
 from vera_core.forms.review import (
     AnswerRow,
@@ -184,8 +185,21 @@ async def upload_patient_form(
         # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
         # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
         # payload (nested by section_key) is flattened under a `sections` root.
-        payload_root = {"sections": body.intake_payload} if doc is not None else body.intake_payload
-        answers = list(iter_leaf_answers(payload_root))
+        # v1 schemas have no leaf set to validate against, so the unknown-path check
+        # is v2-only (doc is not None); the ternary and the guard share one branch.
+        if doc is not None:
+            payload_root: dict[str, Any] = {"sections": body.intake_payload}
+            answers = list(iter_leaf_answers(payload_root))
+            unrecognized = unknown_payload_paths(answers, doc)
+            if unrecognized:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="intake payload contains unknown field paths",
+                    data={"fields": unrecognized},
+                )
+        else:
+            payload_root = body.intake_payload
+            answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(
                 tenant_id=principal.tenant_id,
