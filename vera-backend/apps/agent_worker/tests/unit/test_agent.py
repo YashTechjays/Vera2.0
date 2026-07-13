@@ -14,7 +14,6 @@ from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, build_agent
 from agent_worker.ivr_agent import (
-    _DIGIT_BREAK,
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
     _spell_id_tokens,
@@ -343,19 +342,21 @@ async def test_strip_silence_token_label_is_word_boundaried() -> None:
 
 
 def _spelled(token: str) -> str:
-    """The expected per-character spelled-and-paced rendering of an ID token (hyphens dropped)."""
-    return _DIGIT_BREAK.join(f"<spell>{char}</spell>" for char in token if char.isalnum())
+    """The expected rendering of an ID token: one <spell> around the whole token, hyphens dropped.
+
+    Cartesia's documented usage — Sonic paces the characters itself; per-character tags with
+    hard <break>s between them make the readout robotic.
+    """
+    return f"<spell>{''.join(char for char in token if char.isalnum())}</spell>"
 
 
-def test_spell_id_tokens_spells_each_digit_of_a_numeric_member_id() -> None:
-    # A bare ID would be number-normalized by Cartesia (mis-heard by the payer IVR); each digit is
-    # spelled individually and paced by a break AFTER every digit for a slow, separated readout.
+def test_spell_id_tokens_spells_a_numeric_member_id() -> None:
+    # A bare ID would be number-normalized by Cartesia (mis-heard by the payer IVR); the whole
+    # token is wrapped in a single <spell> so Sonic reads it digit by digit at natural pace.
     assert _spell_id_tokens("200236789") == _spelled("200236789")
-    # a break separates every adjacent digit pair (n digits -> n-1 breaks)
-    assert _spell_id_tokens("200236789").count(_DIGIT_BREAK) == len("200236789") - 1
 
 
-def test_spell_id_tokens_spells_an_alphanumeric_member_id_char_by_char() -> None:
+def test_spell_id_tokens_spells_an_alphanumeric_member_id() -> None:
     # "POL-661522" must be read "P O L 6 6 1 5 2 2" (per character), never voiced as the word "POL".
     assert _spell_id_tokens("POL-661522") == _spelled("POL-661522")
     # the hyphen is dropped (not spoken as "dash")

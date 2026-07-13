@@ -61,8 +61,6 @@ async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
 
 _MIN_SPELL_DIGITS = 7  # a pure-number ID (member ID, NPI, Tax ID) is spelled only when this long
 _MIN_ALNUM_ID = 5  # a mixed letters+digits ID (e.g. "POL-661522") is spelled when this long
-# Pause after each character. Bigger = slower/more separated (tune here if the IVR still mis-hears).
-_DIGIT_BREAK = '<break time="300ms"/>'
 # A candidate identifier token: a run of letters/digits with internal hyphens ("POL-661522",
 # "200-236-789") but NO spaces, so it never spans words — whitespace splits a sentence into words
 # that are each tested independently, and only an ID-like token is spelled.
@@ -70,7 +68,12 @@ _ID_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 
 
 def _spell_id_tokens(text: str) -> str:
-    """Rewrite each identifier token in `text` to per-character spelled, paced output for TTS."""
+    """Wrap each identifier token in `text` in a single Cartesia <spell> tag.
+
+    One tag around the whole token is Cartesia's documented usage — Sonic reads it character by
+    character at natural pace. Per-character tags with hard <break>s between them sound robotic.
+    Hyphens are dropped so they're never voiced as "dash".
+    """
 
     def _spell(match: re.Match[str]) -> str:
         token = match.group(0)
@@ -83,7 +86,7 @@ def _spell_id_tokens(text: str) -> str:
         is_long_number = not has_letter and len(chars) >= _MIN_SPELL_DIGITS
         if not (is_alnum_id or is_long_number):
             return token
-        return _DIGIT_BREAK.join(f"<spell>{char}</spell>" for char in chars)
+        return f"<spell>{''.join(chars)}</spell>"
 
     return _ID_TOKEN_RE.sub(_spell, text)
 
