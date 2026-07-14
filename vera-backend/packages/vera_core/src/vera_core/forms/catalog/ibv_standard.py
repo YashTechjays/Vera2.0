@@ -1344,5 +1344,50 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "infertility treatment is covered under this plan?"
                 ),
             ),
+            Contradiction(
+                rule_key="coverage_without_mandate_check",
+                when=AllCondition(
+                    all=[
+                        eq("sections.benefit_coverage.infertility_plan_mandate", "No"),
+                        eq("sections.infertility_treatment.infertility_tx_covered", "Yes"),
+                    ]
+                ),
+                fields=[
+                    "sections.infertility_treatment.infertility_tx_covered",
+                    "sections.benefit_coverage.infertility_plan_mandate",
+                ],
+                reason=(
+                    "Infertility treatment is covered but no plan mandate was reported — "
+                    "verify whether a mandate applies or the coverage is voluntary."
+                ),
+                clarify=(
+                    "I have infertility treatment as covered but no infertility plan mandate "
+                    "on this policy. Could you double-check whether the plan carries an "
+                    "infertility mandate, or the coverage is offered without one?"
+                ),
+            ),
+            Contradiction(
+                rule_key="fully_funded_large_group_check",
+                when=AllCondition(
+                    all=[
+                        eq("sections.benefit_coverage.plan_fund_type", "Fully Funded"),
+                        eq("sections.benefit_coverage.employer_support_size", "Large Group"),
+                    ]
+                ),
+                fields=[
+                    "sections.benefit_coverage.plan_fund_type",
+                    "sections.benefit_coverage.employer_support_size",
+                ],
+                reason=(
+                    "Large group plans are typically self-funded, not fully insured — "
+                    "verify the plan fund type and employer group size."
+                ),
+                clarify=(
+                    "I want to make sure I have this right — I have the plan as fully funded "
+                    "and the employer as a large group, but large group plans are typically "
+                    "self-funded. Could you double-check whether the plan is self insured or "
+                    "fully funded, and whether the employer group is small or large?"
+                ),
+            ),
         ],
     )
