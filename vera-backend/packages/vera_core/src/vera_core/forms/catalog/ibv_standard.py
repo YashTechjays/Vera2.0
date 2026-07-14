@@ -777,6 +777,11 @@ def _admin_sections() -> dict[str, Section]:
                     required=True,
                     applicable_when=eq("sections.enrollment.enrollment_required", "Yes"),
                 ),
+                "center_of_excellence_required": enum_ask(
+                    "Center of Excellence Required",
+                    "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A.",
+                    YES_NO_NA,
+                ),
             },
         ),
         "authorization_department": Section(
@@ -803,11 +808,6 @@ def _admin_sections() -> dict[str, Section]:
                     type_="phone",
                     required=True,
                     applicable_when=ref("any_service_requires_prior_auth"),
-                ),
-                "center_of_excellence_required": enum_ask(
-                    "Center of Excellence Required",
-                    "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A.",
-                    YES_NO_NA,
                 ),
             },
         ),
