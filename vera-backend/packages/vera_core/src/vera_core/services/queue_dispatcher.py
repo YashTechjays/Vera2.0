@@ -4,8 +4,10 @@ Pulls admitted forms from the tenant's queue, checks concurrency limits and
 insurance-provider working hours, and initiates calls. Invoked on two events:
 (1) a form is enqueued, (2) a call ends and a concurrency slot frees up.
 
-No PHI flows through this module — it operates on form IDs, statuses, and
-tenant/provider config only.
+Mostly PHI-free — it operates on form IDs, statuses, and tenant/provider config. The one
+exception is the dispatch `metadata`, which carries `agent_context` (raw patient/provider
+identifiers) into LiveKit; never log the `metadata` dict, and the `create_call_room` failure is
+re-raised PHI-free so the exception handler can't leak it.
 """
 
 from __future__ import annotations
@@ -34,8 +36,11 @@ from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
-from vera_core.services.ivr_selection import add_active_playbook_metadata
-from vera_core.telephony import OutboundDialError
+from vera_core.services.ivr_selection import (
+    add_active_playbook_metadata,
+    add_agent_context_metadata,
+)
+from vera_core.telephony import LiveKitUnavailable, OutboundDialError
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -301,7 +306,17 @@ async def try_dispatch(
                 room_name = room_name_for_call(tenant_id, call.id)
                 if form.ivr_navigation_enabled and provider is not None:
                     await add_active_playbook_metadata(session, provider.id, metadata)
-                await livekit.create_call_room(room_name, metadata=metadata)
+                if form.ivr_navigation_enabled:
+                    await add_agent_context_metadata(session, form, metadata)
+                try:
+                    await livekit.create_call_room(room_name, metadata=metadata)
+                except Exception as exc:
+                    # metadata carries agent_context (raw PHI); a raised SDK/Twirp error could embed
+                    # the request body, and the outer handler logs the traceback — re-raise PHI-free
+                    # (chain suppressed) so no PHI can leak into logs.
+                    raise LiveKitUnavailable(
+                        f"create_call_room failed: {type(exc).__name__}"
+                    ) from None
                 session.add(
                     CallEvent(
                         tenant_id=tenant_id,

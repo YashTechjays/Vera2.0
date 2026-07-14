@@ -11,6 +11,7 @@ PatientForm-without / InsuranceProvider) rather than assuming a fixed call
 order — this survives try_dispatch's queries being reordered.
 """
 
+import logging
 from collections import deque
 from datetime import time
 from typing import Any, cast
@@ -21,7 +22,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
-from vera_core.models import Call, CallEvent, InsuranceProvider, PatientForm, Tenant
+from vera_core.models import (
+    Call,
+    CallEvent,
+    FieldAnswer,
+    InsuranceProvider,
+    PatientForm,
+    SchemaVersion,
+    Tenant,
+)
 from vera_core.models.enums import CallStatus, FormStatus
 from vera_core.services import queue_dispatcher
 from vera_core.services.queue_dispatcher import is_within_working_hours, try_dispatch
@@ -152,6 +161,12 @@ class FakeSession:
         if entity is PatientForm:
             rows = self.candidates if stmt._limit_clause is not None else self.expired
             return _Result(rows=rows)
+        # add_agent_context_metadata's schema load: None schema_json → it attaches no context
+        # (these tests don't exercise the agent-context path), so the field-answer read never runs.
+        if entity is SchemaVersion:
+            return _Result(scalar=None)
+        if entity is FieldAnswer:
+            return _Result(rows=[])
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
 
@@ -182,10 +197,13 @@ class FakeLiveKit:
         self.sip_dials: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
         self.dial_error = False
+        self.room_error: str | None = None  # when set, create_call_room raises with this message
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
     ) -> None:
+        if self.room_error is not None:
+            raise RuntimeError(self.room_error)
         self.created.append(room_name)
         self.dispatch_metadata.append(metadata)
 
@@ -282,6 +300,27 @@ async def test_dispatch_dials_the_forms_payer_number(
     assert metadata["publish_events"] is True
     assert metadata["enable_ivr_navigation"] is True
     assert metadata["persona_tweak"] == {"greeting": "Custom greeting"}
+
+
+async def test_create_call_room_failure_scrubs_phi_from_logs(
+    caplog: pytest.LogCaptureFixture,
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    # metadata carries agent_context (raw PHI). If create_call_room raises with an error that
+    # embeds the request body, the dispatch failure handler must not log it — the raw exception is
+    # re-raised PHI-free (chain suppressed), so no PHI reaches the logs.
+    tenant = _tenant()
+    form = _form(tenant.id, ivr_navigation_enabled=True)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.room_error = "twirp invalid_argument: bad metadata SECRET_PHI_200236789"
+
+    with caplog.at_level(logging.ERROR):
+        dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 0  # the dispatch failed
+    assert form.status == FormStatus.IN_QUEUE.value  # ...and the form was reverted for retry
+    assert "SECRET_PHI_200236789" not in caplog.text  # the raw error / request body never logged
 
 
 async def test_ivr_navigation_key_absent_when_form_opts_out(
