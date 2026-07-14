@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import { parseSchema } from "./schema"
-import { validateAll, validateSection } from "./validation"
+import { isoToDateFormat, validateAll, validateSection } from "./validation"
 
 const schema = parseSchema(rawSchema)
 
@@ -92,6 +92,25 @@ describe("validateAll — date format", () => {
   it("flags values in another date shape", () => {
     expect(validateAll(schema, { [DOB]: "1990-02-15" })[DOB]).toMatch(/M\/D\/YYYY/)
     expect(validateAll(schema, { [DOB]: "Feb 15 1990" })[DOB]).toMatch(/M\/D\/YYYY/)
+  })
+})
+
+describe("isoToDateFormat", () => {
+  it("reformats ISO into M/D/YYYY without zero padding", () => {
+    expect(isoToDateFormat("1982-02-23", "M/D/YYYY")).toBe("2/23/1982")
+    expect(isoToDateFormat("2026-11-05", "M/D/YYYY")).toBe("11/5/2026")
+  })
+
+  it("honors padded and two-digit-year token variants", () => {
+    expect(isoToDateFormat("1982-02-23", "MM/DD/YYYY")).toBe("02/23/1982")
+    expect(isoToDateFormat("1982-02-23", "D.M.YY")).toBe("23.2.82")
+  })
+
+  it("passes through anything that is not a bare ISO date", () => {
+    expect(isoToDateFormat("2/23/1982", "M/D/YYYY")).toBe("2/23/1982")
+    expect(isoToDateFormat("N/A", "M/D/YYYY")).toBe("N/A")
+    expect(isoToDateFormat("", "M/D/YYYY")).toBe("")
+    expect(isoToDateFormat("1982-02-23T00:00:00", "M/D/YYYY")).toBe("1982-02-23T00:00:00")
   })
 })
 
