@@ -185,6 +185,13 @@ class FakeSession:
         # load: the defaults (schema_version=None, field_answers={}) mean tests that
         # exercise neither path attach no plan and no context.
         if entity is SchemaVersion:
+            # Two query shapes share this entity: the plan-template read selects the
+            # full row (name == "SchemaVersion"); the agent-context read selects only
+            # the schema_json column (name == "schema_json").
+            if stmt.column_descriptions[0].get("name") == "schema_json":
+                return _Result(
+                    scalar=self.schema_version.schema_json if self.schema_version else None
+                )
             return _Result(scalar=self.schema_version)
         if entity is PromptVersion:
             return _Result(scalar=self.prompt_version)
