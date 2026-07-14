@@ -23,6 +23,7 @@ from livekit.agents import (
 )
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
+from agent_worker.handoff import carry_chat_ctx
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
 from vera_core.schemas import IvrPlaybookConfig
@@ -212,7 +213,11 @@ class IvrNavigatorAgent(Agent):
         representative has clearly greeted you — a personal name paired with an open request
         for your info (e.g. "Hi, this is Martha, who am I speaking with?")."""
         logger.info("handoff: IVR navigator -> verification agent")
-        return self._make_verification_agent()
+        verifier = self._make_verification_agent()
+        # Carry the IVR conversation (incl. the member ID already spoken) into the
+        # plan agent so it doesn't re-ask what the navigator already established.
+        await carry_chat_ctx(self, verifier)
+        return verifier
 
     @function_tool
     async def press_keypad(self, digits: str) -> str:

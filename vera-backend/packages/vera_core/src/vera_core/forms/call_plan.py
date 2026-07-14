@@ -30,6 +30,7 @@ form's raw intake values — the same Redis posture as ``vera:transcript:*`` key
 import logging
 import re
 from collections.abc import Mapping
+from datetime import date
 from typing import Any, Literal
 from uuid import UUID
 
@@ -110,6 +111,7 @@ class CallPlan(_Model):
     # Per-form stage (fuse_prefill) — empty/None on the compile_call_plan template:
     prefilled: dict[str, Any] = Field(default_factory=dict)  # {path: raw intake value}
     known_information: str | None = None  # "Title: value" lines, context-role leaves only
+    on_file_values: str | None = None  # "Title: value" lines, confirm-role prefills (to confirm)
 
 
 def compile_call_plan(
@@ -185,16 +187,39 @@ def compile_call_plan(
     )
 
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# "Dr. Dr. Jane" → "Dr. Jane": a title on both the template ("Dr. {{doctor_name}}")
+# and the prefilled value ("Dr. Jane Smith") collapses to a single spoken title.
+_DOUBLED_HONORIFIC_RE = re.compile(r"\b(Dr|Mr|Mrs|Ms|Prof)\.(?:\s+\1\.)+", re.IGNORECASE)
+
+
 def _render_value(raw: Any) -> str | None:
     """Prompt-text rendering of a prefilled raw value; None = not renderable
     (absent, or a shape with no sensible spoken form — dict/None)."""
     if isinstance(raw, str):
-        return raw
+        return _speak_iso_date(raw)
     if isinstance(raw, bool | int | float):
         return str(raw)
     if isinstance(raw, list):
         return ", ".join(str(item) for item in raw)
     return None
+
+
+def _speak_iso_date(text: str) -> str:
+    """An ISO ``YYYY-MM-DD`` renders TTS-friendly ("April 12, 1991"); any other
+    string (or a non-calendar date) passes through untouched."""
+    if not _ISO_DATE_RE.match(text):
+        return text
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return text
+    return f"{parsed:%B} {parsed.day}, {parsed.year}"
+
+
+def _dedupe_honorifics(text: str) -> str:
+    return _DOUBLED_HONORIFIC_RE.sub(lambda m: f"{m.group(1)}.", text)
 
 
 class PrefillFuser:
@@ -211,6 +236,12 @@ class PrefillFuser:
         # The Known-information source set: context-role leaves, document order.
         self._context_leaves = [
             (path, leaf.title) for path, leaf in doc.leaf_items() if leaf.role == "context"
+        ]
+        # Confirm-role leaves: prefilled values the agent must READ BACK to confirm
+        # (their prompt is a {{value}} confirmation). Without this block the agent has
+        # no value to confirm and degrades to an open ask (risking a conflicting answer).
+        self._confirm_leaves = [
+            (path, leaf.title) for path, leaf in doc.leaf_items() if leaf.role == "confirm"
         ]
 
     def fuse(self, values: Mapping[str, Any], *, current_year: int) -> CallPlan:
@@ -251,13 +282,17 @@ class PrefillFuser:
                 unresolved += 1
                 return match.group(0)
 
-            return PLACEHOLDER_RE.sub(repl, text)
+            return _dedupe_honorifics(PLACEHOLDER_RE.sub(repl, text))
 
-        known_lines = [
-            f"{title}: {rendered}"
-            for path, title in self._context_leaves
-            if (rendered := _render_value(values.get(path))) is not None
-        ]
+        def value_lines(leaves: list[tuple[str, str]]) -> list[str]:
+            return [
+                f"{title}: {rendered}"
+                for path, title in leaves
+                if (rendered := _render_value(values.get(path))) is not None
+            ]
+
+        known_lines = value_lines(self._context_leaves)
+        on_file_lines = value_lines(self._confirm_leaves)
 
         plan = self._plan
         fused = plan.model_copy(
@@ -279,6 +314,7 @@ class PrefillFuser:
                 ],
                 "prefilled": dict(values),
                 "known_information": "\n".join(known_lines) if known_lines else None,
+                "on_file_values": "\n".join(on_file_lines) if on_file_lines else None,
             }
         )
         if unresolved:

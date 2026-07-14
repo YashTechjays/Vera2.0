@@ -4,7 +4,13 @@ render_task_prompts, field descriptors from leaf_gates; nothing is recompiled he
 
 import uuid
 
-from vera_core.forms.call_plan import CallPlan, PlanTask, compile_call_plan, fuse_prefill
+from vera_core.forms.call_plan import (
+    CallPlan,
+    PlanTask,
+    _render_value,
+    compile_call_plan,
+    fuse_prefill,
+)
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc, Leaf, load_document
 from vera_core.forms.prompting import (
@@ -187,12 +193,55 @@ class TestFusePrefill:
         fused = fuse_prefill(IBV, PLAN, {SYSTEM["member_id"]: "ABC123"}, current_year=2026)
         assert fused.known_information is None
 
+    def test_on_file_values_lists_confirm_role_prefills(self) -> None:
+        # member_id -> policy_number is a CONFIRM leaf; its prefill must reach the agent
+        # so the {{value}} confirm prompt can be spoken (else it degrades to an open ask).
+        on_file = FUSED.on_file_values
+        assert on_file is not None
+        assert "Policy / Member ID: ABC123" in on_file
+        # context-role stays in known_information, not here
+        assert "Jane Doe" not in on_file
+        # input-role (chart_number) is never voice-touched → excluded from both blocks
+        assert "CH-77" not in on_file
+
+    def test_no_confirm_values_means_no_on_file_block(self) -> None:
+        fused = fuse_prefill(IBV, PLAN, {SYSTEM["patient_name"]: "Jane Doe"}, current_year=2026)
+        assert fused.on_file_values is None
+
     def test_fuse_is_pure_template_not_mutated(self) -> None:
         intro = plan_task(PLAN, "introduction").intro
         assert intro is not None and "{{patient_name}}" in intro
 
     def test_fused_plan_round_trips(self) -> None:
         assert CallPlan.model_validate_json(FUSED.model_dump_json()) == FUSED
+
+
+class TestRenderCosmetics:
+    def test_render_value_formats_iso_dates_for_speech(self) -> None:
+        assert _render_value("1991-04-12") == "April 12, 1991"
+        assert _render_value("2026-08-03") == "August 3, 2026"
+        # non-ISO strings pass through untouched
+        assert _render_value("8/2/2026") == "8/2/2026"
+        assert _render_value("not-a-date") == "not-a-date"
+        # not a real calendar date → left as-is (never raises)
+        assert _render_value("1991-13-99") == "1991-13-99"
+
+    def test_hydration_dedupes_doubled_honorific(self) -> None:
+        # template says "Dr. {{doctor_name}}" and the value already carries "Dr." →
+        # must collapse to a single "Dr." (the "Dr. Dr. Jane Smith" transcript bug).
+        fused = fuse_prefill(
+            IBV, PLAN, {SYSTEM["doctor_name"]: "Dr. Jane Smith"}, current_year=2026
+        )
+        intro = plan_task(fused, "introduction").intro
+        assert intro is not None
+        assert "Dr. Jane Smith" in intro
+        assert "Dr. Dr." not in intro
+
+    def test_iso_dob_renders_friendly_in_known_information(self) -> None:
+        fused = fuse_prefill(IBV, PLAN, {SYSTEM["patient_dob"]: "1991-04-12"}, current_year=2026)
+        assert fused.known_information is not None
+        assert "April 12, 1991" in fused.known_information
+        assert "1991-04-12" not in fused.known_information
 
 
 class TestFieldDescriptors:

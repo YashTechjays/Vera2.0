@@ -9,11 +9,13 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from conftest import chat_ctx_texts
 from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
 from agent_worker.agent import APOLOGY_LINE, ApologyAgent, VeraAgent, build_agent
+from agent_worker.handoff import carry_chat_ctx
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
@@ -76,6 +78,26 @@ def _navigator(**kwargs: Any) -> IvrNavigatorAgent:
     controller = _plan_controller()
     kwargs.setdefault("verification_agent_factory", controller.first_agent)
     return IvrNavigatorAgent(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_carry_chat_ctx_copies_spoken_turns_not_instructions() -> None:
+    # A tool-returned agent starts with an empty chat_ctx and LiveKit does not auto-carry
+    # history for that handoff shape, so carry_chat_ctx must copy the source's spoken turns
+    # into the target — dropping the source's own instructions and tool-call bookkeeping.
+    source = VeraAgent(instructions="SOURCE INSTRUCTIONS")
+    source._chat_ctx.add_message(role="assistant", content="Hello, this is VERA.")
+    source._chat_ctx.add_message(role="user", content="The member ID is POL-661522.")
+    source._chat_ctx.add_message(role="system", content="SOURCE INSTRUCTIONS")
+
+    target = VeraAgent(instructions="TARGET INSTRUCTIONS")
+    await carry_chat_ctx(source, target)
+
+    texts = chat_ctx_texts(target)
+    assert "Hello, this is VERA." in texts  # prior assistant turn carried
+    assert "The member ID is POL-661522." in texts  # prior user turn carried
+    assert "SOURCE INSTRUCTIONS" not in texts  # source's own instructions excluded
+    assert target.instructions == "TARGET INSTRUCTIONS"  # target keeps its own
 
 
 def test_vera_agent_carries_only_the_end_call_tool() -> None:
@@ -464,3 +486,15 @@ async def test_ivr_hands_off_to_the_first_plan_task_when_a_plan_is_active() -> N
     handoff = await call()
     assert isinstance(handoff, PlanTaskAgent)
     assert handoff is controller.agents[0]
+
+
+@pytest.mark.asyncio
+async def test_ivr_handoff_carries_the_navigation_conversation() -> None:
+    # The IVR already spoke the member ID; the plan agent must inherit that history so it
+    # doesn't re-ask it (the transcript's re-ask bug).
+    controller = _plan_controller()
+    nav = build_agent({"enable_ivr_navigation": True}, controller=controller)
+    nav._chat_ctx.add_message(role="assistant", content="The member ID is POL-661522.")
+    call = cast("Callable[[], Awaitable[Agent]]", nav.transfer_to_verification)
+    handoff = await call()
+    assert "The member ID is POL-661522." in chat_ctx_texts(handoff)

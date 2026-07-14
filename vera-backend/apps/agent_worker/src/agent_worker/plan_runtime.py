@@ -28,6 +28,7 @@ from typing import Any
 from livekit.agents import Agent, llm
 
 from agent_worker.agent import VeraAgent
+from agent_worker.handoff import carry_chat_ctx
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.conditions import evaluate
@@ -59,6 +60,13 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
     ]
     if plan.known_information:
         parts.append(f"# Known information\n{plan.known_information}")
+    if plan.on_file_values:
+        # Confirm-role prefills the agent should READ BACK to confirm (not ask openly),
+        # so a rep correction surfaces as an explicit mismatch instead of a silent swap.
+        parts.append(
+            "# Values already on file (confirm these; do not ask for them open-endedly)\n"
+            f"{plan.on_file_values}"
+        )
     if extra_instructions:
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
@@ -101,7 +109,11 @@ class PlanTaskAgent(Agent):
         if self._task.outro:
             # Exit speech first; LiveKit drains queued speech through the swap.
             self.session.say(self._task.outro)
-        return await self._controller.advance_from(self._task_index)
+        successor = await self._controller.advance_from(self._task_index)
+        # Carry the call so far into the successor — LiveKit doesn't for a
+        # tool-returned agent, so without this it re-greets and re-asks.
+        await carry_chat_ctx(self, successor)
+        return successor
 
 
 class WrapUpAgent(VeraAgent):

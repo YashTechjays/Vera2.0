@@ -7,6 +7,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from conftest import chat_ctx_texts
 from livekit.agents import Agent
 from livekit.agents.llm import FunctionTool
 
@@ -118,6 +119,17 @@ class TestConstruction:
         controller, _ = _controller()
         assert "Additional instructions" not in controller.agents[0].instructions
 
+    def test_on_file_values_rendered_into_instructions(self) -> None:
+        plan = _plan().model_copy(update={"on_file_values": "Policy / Member ID: ABC123"})
+        controller, _ = _controller(plan)
+        for agent in [*controller.agents, controller.wrap_up_agent]:
+            assert "already on file" in agent.instructions.lower()
+            assert "Policy / Member ID: ABC123" in agent.instructions
+
+    def test_no_on_file_values_means_no_block(self) -> None:
+        controller, _ = _controller()
+        assert "already on file" not in controller.agents[0].instructions.lower()
+
     def test_task_agent_is_dialogue_only(self) -> None:
         controller, _ = _controller()
         names = [t.info.name for t in controller.agents[0].tools if isinstance(t, FunctionTool)]
@@ -161,6 +173,20 @@ class TestHandoff:
         with _session_patch(agent, MagicMock()):
             handoff = await _tool(agent, "task_complete")()
         assert handoff is controller.wrap_up_agent
+
+    @pytest.mark.asyncio
+    async def test_task_complete_carries_conversation_into_the_successor(self) -> None:
+        # The successor must remember the call so far — otherwise it re-greets and
+        # re-asks answered questions (the transcript's re-introduction bug).
+        controller, _ = _controller()
+        agent = controller.agents[0]
+        agent._chat_ctx.add_message(role="assistant", content="Hello, this is VERA.")
+        agent._chat_ctx.add_message(role="user", content="The plan is PPO.")
+        with _session_patch(agent, MagicMock()):
+            successor = await _tool(agent, "task_complete")()
+        texts = chat_ctx_texts(successor)
+        assert "Hello, this is VERA." in texts
+        assert "The plan is PPO." in texts
 
 
 class TestOnEnter:
