@@ -14,6 +14,7 @@ Two caller classes share this router:
 Every PHI response audits field **names** only (never values).
 """
 
+import asyncio
 from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
@@ -440,21 +441,43 @@ async def list_patient_forms(
     if q:
         conds.append(PatientForm.patient_name.ilike(f"%{q.lower()}%"))
 
-    total = (
-        await session.execute(select(func.count()).select_from(PatientForm).where(*conds))
-    ).scalar_one()
-    rows = (
-        (
+    async def _fetch_page() -> tuple[list[PatientForm], int]:
+        """One round trip: the page rows with the filtered total as a window
+        column. An out-of-range page returns no rows (so no total); fall back
+        to a bare count for it."""
+        result = (
             await session.execute(
-                select(PatientForm)
+                select(PatientForm, func.count().over())
                 .where(*conds)
                 .order_by(PatientForm.created_at.desc())
                 .offset((page - 1) * page_size)
                 .limit(page_size)
             )
-        )
-        .scalars()
-        .all()
+        ).all()
+        if result:
+            return [form for form, _total in result], result[0][1]
+        total = (
+            await session.execute(select(func.count()).select_from(PatientForm).where(*conds))
+        ).scalar_one()
+        return [], total
+
+    audited_fields = [
+        "patient_name",
+        "chart_number",
+        "appointment_date",
+        "appointment_type",
+        "member_id",
+        "insurance_provider",
+        "insurance_provider_phone_number",
+    ]
+    # The PHI-access audit writes in its own session/transaction, so it can
+    # overlap the page query instead of serializing after it; it is still
+    # awaited before any data leaves (audit-before-disclosure).
+    (rows, total), _ = await asyncio.gather(
+        _fetch_page(),
+        get_audit(request).emit(
+            _audit_phi_read(request, tenant_id, caller, "list", audited_fields)
+        ),
     )
     items = [
         PatientFormSummary(
@@ -473,23 +496,6 @@ async def list_patient_forms(
         )
         for r in rows
     ]
-    await get_audit(request).emit(
-        _audit_phi_read(
-            request,
-            tenant_id,
-            caller,
-            "list",
-            [
-                "patient_name",
-                "chart_number",
-                "appointment_date",
-                "appointment_type",
-                "member_id",
-                "insurance_provider",
-                "insurance_provider_phone_number",
-            ],
-        )
-    )
     return ok(PaginatedForms(items=items, page=page, page_size=page_size, total=total))
 
 

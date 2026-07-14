@@ -57,7 +57,17 @@ class PermissionResolver:
         user's grants, a platform session (`tenant_id is None`) resolves a
         SUPER_ADMIN's global grants. RLS does the scoping, so a mismatched id
         resolves to no row. The cache keys on `tenant_id` directly — None is the
-        platform scope."""
+        platform scope.
+
+        A cache hit vouches for the active-status check too (entries are written
+        only after an RLS-scoped resolution of an active user), so it skips the DB
+        entirely. The staleness window is the cache TTL, same as for revoked roles;
+        the deactivate path calls `invalidate` to close it immediately."""
+        cache_key = str(user_id)
+        cached = await self._cache.get(tenant_id, cache_key)
+        if cached is not None:
+            return user_id, cached
+
         user = (
             await session.execute(
                 select(AppUser).where(AppUser.id == user_id, AppUser.status == "active")
@@ -65,11 +75,6 @@ class PermissionResolver:
         ).scalar_one_or_none()
         if user is None:
             return None, frozenset()
-
-        cache_key = str(user_id)
-        cached = await self._cache.get(tenant_id, cache_key)
-        if cached is not None:
-            return user.id, cached
 
         rows = await session.execute(
             select(Permission.code)
