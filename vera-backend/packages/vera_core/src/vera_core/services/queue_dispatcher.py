@@ -396,10 +396,14 @@ async def _resolve_provider(session: AsyncSession, form: PatientForm) -> Insuran
     """
     if not form.insurance_provider:
         return None
+    # Case-insensitive/trimmed match (uses the lower(name) unique index): the send-to-queue
+    # picker canonicalizes the string to the exact catalog name, but a form queued without a
+    # pick still resolves despite casing/whitespace drift from intake.
     return (
         await session.execute(
             select(InsuranceProvider).where(
-                InsuranceProvider.name == form.insurance_provider,
+                func.lower(InsuranceProvider.name)
+                == func.lower(func.trim(form.insurance_provider)),
                 InsuranceProvider.status == "active",
             )
         )

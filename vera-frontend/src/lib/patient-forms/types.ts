@@ -75,9 +75,19 @@ export type PatientFormDetail = {
   patient_name: string | null
   chart_number: string | null
   appointment_date: string | null
+  /** The form's current insurance provider — the send-to-queue picker pre-selects
+   *  the matching catalog provider from this string. */
+  insurance_provider: string | null
   fields: PatientFormField[]
   /** Stored queue-time choice: run the IVR navigator on this form's calls. */
   ivr_navigation_enabled: boolean
+}
+
+/** Active insurance-provider option for the send-to-queue picker
+ *  (GET /patient-forms/insurance-providers). Non-PHI catalog reference. */
+export type ProviderOption = {
+  id: string
+  name: string
 }
 
 /** Paginated worklist envelope `data`. */

@@ -21,10 +21,12 @@ from vera_core.models import (
     DisputeAction,
     FieldAnswer,
     FormSchema,
+    InsuranceProvider,
     PatientForm,
     SchemaVersion,
 )
 from vera_core.models.enums import AnswerSource, FormStatus, InsuranceType, VersionStatus
+from vera_core.services.queue_dispatcher import _resolve_provider
 
 HEALTH_PLAN = "insurance_information.health_plan"
 
@@ -1237,6 +1239,7 @@ async def _make_plain_form(
     schema_version_id: UUID,
     status: FormStatus,
     phone: str | None = None,
+    insurance_provider: str | None = None,
 ) -> UUID:
     """A bare form in `status` with no field answers (so no disputes)."""
     async with sm() as s, s.begin():
@@ -1249,6 +1252,7 @@ async def _make_plain_form(
             completion_pct=0,
             retry_count=0,
             insurance_provider_phone_number=phone,
+            insurance_provider=insurance_provider,
         )
         s.add(form)
         await s.flush()
@@ -1469,3 +1473,184 @@ async def test_status_same_status_is_idempotent_noop(
     )
     assert resp.status_code == 200, resp.text
     assert await _status(admin_sessionmaker, form_id) == "in_call"
+
+
+# ---- send-to-queue provider selection ---------------------------------------
+# The picker canonicalizes the form's insurance_provider string to the chosen
+# catalog name so the async dispatcher resolves the right provider + IVR playbook.
+
+
+async def _seed_provider(
+    sm: async_sessionmaker[AsyncSession], *, name: str, status: str = "active"
+) -> UUID:
+    """A GLOBAL insurance_provider row (the caller deletes it in a finally)."""
+    provider_id = uuid4()
+    async with sm() as s, s.begin():
+        s.add(InsuranceProvider(id=provider_id, name=name, status=status))
+    return provider_id
+
+
+async def _delete_provider(sm: async_sessionmaker[AsyncSession], provider_id: UUID) -> None:
+    async with sm() as s, s.begin():
+        # A dispatched call FK-references the provider (cleanup_forms deletes the call
+        # later); detach it first so the provider row is deletable now.
+        await s.execute(
+            text(
+                "UPDATE call SET insurance_provider_id = NULL WHERE insurance_provider_id = :i"
+            ).bindparams(i=provider_id)
+        )
+        await s.execute(
+            text("DELETE FROM insurance_provider WHERE id = :i").bindparams(i=provider_id)
+        )
+
+
+async def _provider_string(sm: async_sessionmaker[AsyncSession], form_id: UUID) -> str | None:
+    async with sm() as s:
+        return (
+            await s.execute(select(PatientForm.insurance_provider).where(PatientForm.id == form_id))
+        ).scalar_one()
+
+
+async def test_status_canonicalizes_provider_from_picked_id(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    name = f"Cigna {uuid4().hex[:8]}"
+    provider_id = await _seed_provider(admin_sessionmaker, name=name)
+    try:
+        # Intake string deliberately disagrees with the catalog name.
+        form_id = await _make_plain_form(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            schema_version_id=schema_version_id,
+            status=FormStatus.READY_FOR_PROCESSING,
+            phone="+15551234567",
+            insurance_provider="Stale Provider",
+        )
+        resp = await client.put(
+            f"/api/v1/patient-forms/{form_id}/status",
+            headers=_auth(rbac_world.admin_token),
+            json={"status": "in_queue", "insurance_provider_id": str(provider_id)},
+        )
+        assert resp.status_code == 200, resp.text
+        await drain_pending()
+        # The string is now the exact catalog name — dispatch resolves the provider.
+        assert await _provider_string(admin_sessionmaker, form_id) == name
+    finally:
+        await _delete_provider(admin_sessionmaker, provider_id)
+
+
+async def test_status_rejects_unknown_provider_id(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+        phone="+15551234567",
+        insurance_provider="Original",
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue", "insurance_provider_id": str(uuid4())},
+    )
+    assert resp.status_code == 422, resp.text
+    # Rejected before the transition: status and the string both stand.
+    assert await _status(admin_sessionmaker, form_id) == "ready_for_processing"
+    assert await _provider_string(admin_sessionmaker, form_id) == "Original"
+
+
+async def test_status_without_provider_id_leaves_string_untouched(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+        phone="+15551234567",
+        insurance_provider="Original",
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+    await drain_pending()
+    assert await _provider_string(admin_sessionmaker, form_id) == "Original"
+
+
+async def test_list_form_insurance_providers_returns_active_only(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    active_id = await _seed_provider(admin_sessionmaker, name=f"Active {uuid4().hex[:8]}")
+    inactive_id = await _seed_provider(
+        admin_sessionmaker, name=f"Inactive {uuid4().hex[:8]}", status="inactive"
+    )
+    try:
+        # Literal path is matched (not captured as a {form_id} UUID param).
+        resp = await client.get(
+            "/api/v1/patient-forms/insurance-providers",
+            headers=_auth(rbac_world.admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        ids = {p["id"] for p in resp.json()["data"]}
+        assert str(active_id) in ids
+        assert str(inactive_id) not in ids
+    finally:
+        await _delete_provider(admin_sessionmaker, active_id)
+        await _delete_provider(admin_sessionmaker, inactive_id)
+
+
+async def test_list_form_insurance_providers_requires_forms_read(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        "/api/v1/patient-forms/insurance-providers",
+        headers=_auth(rbac_world.norole_token),
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_resolve_provider_matches_case_insensitively(
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    name = f"CignaCase{uuid4().hex[:8]}"
+    provider_id = await _seed_provider(admin_sessionmaker, name=name)
+    try:
+        form = PatientForm(insurance_provider=f"  {name.lower()}  ")  # cased + padded
+        async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+            provider = await _resolve_provider(s, form)
+        assert provider is not None
+        assert provider.id == provider_id
+    finally:
+        await _delete_provider(admin_sessionmaker, provider_id)
