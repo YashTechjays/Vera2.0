@@ -17,8 +17,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vera_core.db import tenant_session
-from vera_core.models import AuditLog, AuthAuditLog
+from vera_core.db import tenant_session, uuid7
+from vera_core.models import AuthAuditLog
 from vera_core.models.audit_log import ActorType
 
 logger = logging.getLogger("vera.audit")
@@ -47,20 +47,35 @@ class AuditSink(Protocol):
     async def emit(self, record: AuditRecord) -> None: ...
 
 
+_LOG_AUDIT_EVENT = text(
+    "SELECT log_audit_event(:id, :tenant_id, :actor_type, :actor_user_id,"
+    " :actor_label, :event_type, :resource_type, :resource_id, :permission_key,"
+    " :decision, :request_id, CAST(:detail AS jsonb), :reason,"
+    " :elevation_session_id)"
+)
+
+
 class DatabaseAuditWriter:
     """Inserts into audit_log in its OWN short transaction, so the audit record
     survives even when the request that produced it rolls back (a denied or
-    failed request still leaves its trail)."""
+    failed request still leaves its trail).
+
+    The insert goes through the `log_audit_event` SECURITY DEFINER function —
+    one statement + commit instead of GUC set_config + INSERT + COMMIT. Every
+    audit emit in the system pays this cost inline on the request path, so it
+    is the one place round trips are worth shaving. tenant_id still comes only
+    from the server-side AuditRecord, same trust as the GUC path."""
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
     async def emit(self, record: AuditRecord) -> None:
-        async with tenant_session(self._sessionmaker, record.tenant_id) as session:
-            session.add(
-                AuditLog(
+        async with self._sessionmaker() as session, session.begin():
+            await session.execute(
+                _LOG_AUDIT_EVENT.bindparams(
+                    id=uuid7(),
                     tenant_id=record.tenant_id,
-                    actor_type=record.actor_type,
+                    actor_type=record.actor_type.value,
                     actor_user_id=record.actor_user_id,
                     actor_label=record.actor_label,
                     event_type=record.event_type,
@@ -69,7 +84,7 @@ class DatabaseAuditWriter:
                     permission_key=record.permission_key,
                     decision=record.decision,
                     request_id=record.request_id,
-                    detail=record.detail,
+                    detail=json.dumps(record.detail),
                     reason=record.reason,
                     elevation_session_id=record.elevation_session_id,
                 )
