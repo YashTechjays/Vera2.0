@@ -693,19 +693,6 @@ def _financial_sections() -> dict[str, Section]:
                         "Are there any additional notes regarding the lifetime maximum coverage?"
                     ),
                 ),
-                "lifetime_cycle_max": text_ask(
-                    "Lifetime Cycle Maximum",
-                    "What is the infertility lifetime cycle maximum for this patient?",
-                    type_="integer",
-                    required=True,
-                    special_values=["No Limit"],
-                ),
-                "cycles_used": text_ask(
-                    "Cycles Used to Date",
-                    "How many treatment cycles have been used to date?",
-                    type_="integer",
-                    required=True,
-                ),
             },
         ),
         "embryo_cryo_storage": Section(
