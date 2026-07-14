@@ -13,7 +13,7 @@ import {
   selectLogoutRedirectPath,
   selectSessionExpiresAt,
 } from "@/store/authSlice"
-import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { useAppDispatch, useAppSelector, useAppStore } from "@/store/hooks"
 
 // User input plus the live-call beacon: an open live-call connection counts as
 // activity (the supervisor is actively listening even without touching the page).
@@ -34,7 +34,7 @@ export function IdleManager() {
   // Timeout config is backend-driven (from /me), never hardcoded here.
   const idleTimeoutMs = useAppSelector(selectIdleTimeoutMs)
   const sessionExpiresAt = useAppSelector(selectSessionExpiresAt)
-  const logoutPath = useAppSelector(selectLogoutRedirectPath)
+  const store = useAppStore()
 
   const lastActivity = useRef(0)
   const lastKeepalive = useRef(0)
@@ -48,9 +48,12 @@ export function IdleManager() {
     if (loggingOut.current) return
     loggingOut.current = true
     void dispatch(logoutThunk()).finally(() => {
-      navigate(logoutPath, { replace: true })
+      // Read the path AFTER the logout reducers run — `logoutPlane` is only
+      // captured then; a value captured when the callback was created would
+      // send a platform operator to the tenant /login.
+      navigate(selectLogoutRedirectPath(store.getState()), { replace: true })
     })
-  }, [dispatch, navigate, logoutPath])
+  }, [dispatch, navigate, store])
 
   const staySignedIn = useCallback(() => {
     const now = Date.now()
