@@ -441,6 +441,11 @@ class FormSchemaDoc(_Model):
     # own `default` is still allowed to be absent from the payload (it counts as
     # filled either way).
     promoted_fields: PromotedFields
+    # Root-anchored leaf paths (sections.<key>…) that the platform treats as
+    # prerequisite fields for a call (e.g. appointment_date/type, callback_number).
+    # Empty list → omitted from the compiled artifact (exclude_defaults=True).
+    # Drives distinct UI color coding in the IBV renderer.
+    prerequisite_fields: list[str] = Field(default_factory=list)
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.
     stt_key_terms: list[str] | None = None
@@ -672,6 +677,11 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
+
+        # prerequisite fields — every path must resolve to a defined leaf
+        for i, path in enumerate(self.prerequisite_fields):
+            if path not in leaves:
+                errors.append(f"prerequisite_fields[{i}]: {path!r} does not resolve to a leaf")
 
         # promoted fields — patient_form columns re-derived from the current answer at
         # dispute-resolve time too (not just intake). Column names are enforced by the

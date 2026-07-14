@@ -10,6 +10,7 @@ import {
   keepaliveThunk,
   logoutThunk,
   selectIdleTimeoutMs,
+  selectLogoutRedirectPath,
   selectSessionExpiresAt,
 } from "@/store/authSlice"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
@@ -33,6 +34,7 @@ export function IdleManager() {
   // Timeout config is backend-driven (from /me), never hardcoded here.
   const idleTimeoutMs = useAppSelector(selectIdleTimeoutMs)
   const sessionExpiresAt = useAppSelector(selectSessionExpiresAt)
+  const logoutPath = useAppSelector(selectLogoutRedirectPath)
 
   const lastActivity = useRef(0)
   const lastKeepalive = useRef(0)
@@ -46,9 +48,9 @@ export function IdleManager() {
     if (loggingOut.current) return
     loggingOut.current = true
     void dispatch(logoutThunk()).finally(() => {
-      navigate("/login", { replace: true })
+      navigate(logoutPath, { replace: true })
     })
-  }, [dispatch, navigate])
+  }, [dispatch, navigate, logoutPath])
 
   const staySignedIn = useCallback(() => {
     const now = Date.now()

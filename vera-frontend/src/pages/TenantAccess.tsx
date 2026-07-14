@@ -252,6 +252,7 @@ export function TenantAccess() {
                 max={MAX_ELEVATION_MINUTES}
                 value={duration}
                 onChange={(ev) => setDuration(Number(ev.target.value))}
+                onFocus={(e) => e.target.select()}
                 className="max-w-32"
               />
             </div>

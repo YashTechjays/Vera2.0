@@ -111,7 +111,11 @@ export function FieldRenderer({
     : undefined
   // `default` is the value the form assumes when nothing is recorded — surface
   // it (or the skip value for inapplicable fields) without writing a value.
-  const hint = placeholder ?? field.default
+  // For date fields, prefer the date_format pattern over a generic default like
+  // "N/A" so the user sees the expected input shape (e.g. "MM/DD/YYYY").
+  const hint =
+    placeholder ??
+    (field.type === "date" ? (field.validation?.date_format ?? field.default) : field.default)
 
   if (field.role === "readonly") {
     return (
@@ -181,9 +185,7 @@ export function FieldRenderer({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        placeholder={
-          hint ?? (field.type === "date" ? field.validation?.date_format : undefined)
-        }
+        placeholder={hint}
         list={listId}
         style={padStyle}
         className={cn("truncate", CELL_BASE, look)}

@@ -9,6 +9,16 @@ export const USAGE_META: Record<
   FieldUsage,
   { label: string; description: string; labelCellClass: string; swatchClass: string }
 > = {
+  // Amber: distinct from violet (system), green (context), and the dispute red.
+  // Color is easily adjustable — change labelCellClass/swatchClass here if product
+  // requests a different hue.
+  prerequisite: {
+    label: "Prerequisite",
+    description:
+      "Required before the call begins — the voice agent uses these to set up and route the call (appointment date, appointment type, callback number).",
+    labelCellClass: "bg-amber-100",
+    swatchClass: "border-amber-400 bg-amber-100",
+  },
   // Violet, not red: the dispute highlight already uses red for low-confidence
   // captures, so a red system tint would read as a dispute.
   system: {
@@ -45,4 +55,4 @@ export const USAGE_META: Record<
 }
 
 /** Legend display order. */
-export const USAGE_ORDER: FieldUsage[] = ["system", "context", "asked", "noop"]
+export const USAGE_ORDER: FieldUsage[] = ["prerequisite", "system", "context", "asked", "noop"]

@@ -32,6 +32,7 @@ export function IbvFormModal() {
     pendingDisputeCount,
     loading,
     error,
+    clearedRequired,
     patientName,
     status,
     changeStatus,
@@ -155,7 +156,12 @@ export function IbvFormModal() {
             </Button>
             <Button
               onClick={save}
-              disabled={!dirty || saveState === "saving"}
+              disabled={!dirty || saveState === "saving" || clearedRequired.length > 0}
+              title={
+                clearedRequired.length > 0
+                  ? "Restore the cleared required fields before saving."
+                  : undefined
+              }
               className="min-w-[140px]"
             >
               {saveState === "saving" ? "Saving…" : "Save"}
