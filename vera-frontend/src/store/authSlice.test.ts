@@ -160,7 +160,7 @@ describe("authSlice", () => {
 
   it("captures the platform plane on logout so the redirect path is /platform/login", async () => {
     vi.mocked(api.getMe).mockResolvedValue(platformMe)
-    vi.mocked(api.logout).mockResolvedValue(undefined)
+    vi.mocked(api.logout).mockResolvedValue(null)
     const store = makeStore()
     await store.dispatch(fetchMe())
     // Pre-logout the selector still answers /login (logoutPlane unset, persisted
