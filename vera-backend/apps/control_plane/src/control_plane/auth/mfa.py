@@ -19,7 +19,6 @@ recovery code on use.
 
 import secrets
 import time
-from uuid import UUID
 
 import pyotp
 from sqlalchemy import text
@@ -165,14 +164,19 @@ async def verify(kms: KeyManagementService, *, identity: UserIdentity, code: str
 
 
 async def platform_update_totp_last_used(
-    session: AsyncSession, *, identity_id: UUID, step: int
+    session: AsyncSession, *, identity: UserIdentity, step: int
 ) -> None:
     """Persist the matched TOTP timestep for a NULL-tenant platform identity via
-    SECURITY DEFINER (RLS-bound role cannot UPDATE NULL-tenant rows directly)."""
+    SECURITY DEFINER (RLS-bound role cannot UPDATE NULL-tenant rows directly).
+
+    Takes the identity object like its sibling helpers (`enroll_platform`,
+    `activate_platform`) — the definer matches on the `user_identity` PK, and a raw
+    UUID parameter invited passing the app_user id by mistake (a silent 0-row no-op
+    that disabled replay protection)."""
     await _call_definer_void(
         session,
         "SELECT platform_update_totp_last_used(CAST(:id AS uuid), :step)",
-        id=identity_id,
+        id=identity.id,
         step=step,
     )
 
