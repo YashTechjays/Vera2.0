@@ -514,7 +514,7 @@ def _infertility_treatment() -> Section:
 
 
 def _diagnostic_testing() -> Section:
-    base = "sections.diagnostic_testing"
+    group_base = "sections.diagnostic_testing.labs_xray_ultrasound"
     panel_asks = {
         "covered": (
             "Are diagnostic labs, X-ray and ultrasound services covered under this plan? "
@@ -524,27 +524,37 @@ def _diagnostic_testing() -> Section:
         "coinsurance": "What is the coinsurance percentage for diagnostic testing?",
         "prior_auth": "Is prior authorization required for diagnostic testing? Please answer Yes, No, or N/A.",
     }
-    fields: dict[str, FormField] = {
-        "diagnostic_testing_covered": enum_ask(
-            "Diagnostic Testing Covered",
-            "Is diagnostic testing covered under this plan?",
-            YES_NO,
-        )
-    }
-    for c in _DIAG_CODES:
-        fields[f"cpt_{c}"] = cpt_group(
-            base, c, "plain", applicable_when=ref("diagnostic_testing_covered")
-        )
     return Section(
         title="Diagnostic Testing (Labs, X-ray & Ultrasound)",
         ui=Ui(layout="table"),
         codes=Codes(icd10=["Z31.41"], speak_cpt=True),
         ask_groups=[
-            AskGroup(fields=[f"{base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
+            AskGroup(fields=[f"{group_base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
             for sub, panel_ask in panel_asks.items()
         ],
-        alternatives=[cost_pair(f"{base}.cpt_{c}") for c in _DIAG_CODES],
-        fields=fields,
+        alternatives=[cost_pair(f"{group_base}.cpt_{c}") for c in _DIAG_CODES],
+        fields={
+            "diagnostic_testing_covered": enum_ask(
+                "Diagnostic Testing Covered",
+                "Is diagnostic testing covered under this plan?",
+                YES_NO,
+            ),
+            "labs_xray_ultrasound": Group(
+                type="group",
+                title="Labs, Xray/Ultrasound",
+                codes=Codes(icd10=["Z31.41"]),
+                prompt=ask(
+                    "Can you provide coverage and benefit details for diagnostic labs, "
+                    "X-ray and ultrasound services?"
+                ),
+                fields={
+                    f"cpt_{c}": cpt_group(
+                        group_base, c, "plain", applicable_when=ref("diagnostic_testing_covered")
+                    )
+                    for c in _DIAG_CODES
+                },
+            ),
+        },
     )
 
 
