@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from livekit.agents import Agent, llm
 
 from agent_worker.ivr_agent import IvrNavigatorAgent
-from agent_worker.ivr_prompt import parse_ivr_playbook
+from agent_worker.ivr_prompt import parse_agent_context, parse_ivr_playbook
 
 if TYPE_CHECKING:
     # TYPE_CHECKING-only: plan_runtime subclasses VeraAgent from this module,
@@ -91,9 +91,12 @@ def build_agent(
     if meta.get("enable_ivr_navigation"):
         return IvrNavigatorAgent(
             playbook=parse_ivr_playbook(meta),
+            context=parse_agent_context(meta),
             on_keypress=on_keypress,
             verification_agent_factory=controller.first_agent,
         )
     if meta.get("ivr_playbook") is not None:
         logger.warning("ivr_playbook present without enable_ivr_navigation; ignoring playbook")
+    if meta.get("agent_context") is not None:
+        logger.warning("agent_context present without enable_ivr_navigation; ignoring")
     return controller.first_agent()

@@ -57,6 +57,43 @@ async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
         yield cleaned
 
 
+_MIN_SPELL_DIGITS = 7  # a pure-number ID (member ID, NPI, Tax ID) is spelled only when this long
+_MIN_ALNUM_ID = 5  # a mixed letters+digits ID (e.g. "POL-661522") is spelled when this long
+# A candidate identifier token: a run of letters/digits with internal hyphens ("POL-661522",
+# "200-236-789") but NO spaces, so it never spans words — whitespace splits a sentence into words
+# that are each tested independently, and only an ID-like token is spelled.
+_ID_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+
+
+def _spell_id_tokens(text: str) -> str:
+    """Wrap each identifier token in `text` in a single Cartesia <spell> tag.
+
+    One tag around the whole token is Cartesia's documented usage — Sonic reads it character by
+    character at natural pace. Per-character tags with hard <break>s between them sound robotic.
+    Hyphens are dropped so they're never voiced as "dash".
+    """
+
+    def _spell(match: re.Match[str]) -> str:
+        token = match.group(0)
+        chars = [c for c in token if c.isalnum()]  # drop the hyphens; spell only alnum
+        has_letter = any(c.isalpha() for c in chars)
+        # A mixed letters+digits token is an ID; a purely-alphabetic token is NOT spelled (read as a
+        # word) — we can't tell a pure-alpha ID from a menu word like "Medical". Holds while payer
+        # IDs are numeric or alphanumeric-with-digits; revisit if a payer uses purely-alpha IDs.
+        is_alnum_id = has_letter and any(c.isdigit() for c in chars) and len(chars) >= _MIN_ALNUM_ID
+        is_long_number = not has_letter and len(chars) >= _MIN_SPELL_DIGITS
+        if not (is_alnum_id or is_long_number):
+            return token
+        return f"<spell>{''.join(chars)}</spell>"
+
+    return _ID_TOKEN_RE.sub(_spell, text)
+
+
+async def _tts_spoken_text(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    async for chunk in _strip_silence_token(text):
+        yield _spell_id_tokens(chunk)
+
+
 def ivr_turn_handling() -> TurnHandlingOptions:
     """Fresh `turn_handling` for the IVR navigator (pass as `Agent(turn_handling=...)`).
 
@@ -101,6 +138,7 @@ class IvrNavigatorAgent(Agent):
         *,
         verification_agent_factory: Callable[[], Agent],
         playbook: IvrPlaybookConfig | None = None,
+        context: dict[str, str] | None = None,
         on_keypress: Callable[[str], None] | None = None,
     ) -> None:
         # The navigator keeps only a factory for the agent it hands off to once a human
@@ -117,7 +155,7 @@ class IvrNavigatorAgent(Agent):
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
         # A per-provider playbook (when present) specializes the generic navigator prompt.
         super().__init__(
-            instructions=build_ivr_instructions(playbook),
+            instructions=build_ivr_instructions(playbook, context),
             tools=[],
             turn_handling=ivr_turn_handling(),
         )
@@ -125,8 +163,8 @@ class IvrNavigatorAgent(Agent):
     def tts_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
     ) -> AsyncIterable[rtc.AudioFrame]:
-        # Strips the silence sentinel so a "stay silent" turn makes no sound.
-        return Agent.default.tts_node(self, _strip_silence_token(text), model_settings)
+        # Strips the silence sentinel and <spell>-wraps ID tokens for Cartesia.
+        return Agent.default.tts_node(self, _tts_spoken_text(text), model_settings)
 
     def transcription_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings

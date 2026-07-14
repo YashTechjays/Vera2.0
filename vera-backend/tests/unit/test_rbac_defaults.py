@@ -27,6 +27,11 @@ def test_form_schemas_read_permission_is_catalogued_and_super_admin_only() -> No
     assert "platform:form_schemas:read" not in SYSTEM_ROLES["TENANT_ADMIN"]
 
 
+def test_virtual_assistant_has_live_monitoring_and_data_management_access() -> None:
+    for code in ("calls:read", "calls:publish", "forms:read", "forms:write"):
+        assert code in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
+
+
 def test_call_audit_events_exist() -> None:
     assert AuditEvent.CALL_PUBLISH.value == "call.publish"
     assert AuditEvent.CALL_LISTEN_ONLY_JOIN.value == "call.listen-only.join"
