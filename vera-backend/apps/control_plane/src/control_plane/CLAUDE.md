@@ -29,8 +29,14 @@ path. Do not write `if identity.tenant_id is None:` to mean "is a platform opera
    RLS applied).
 4. **Query** — fetch rows (CMEK decrypts transparently at the storage layer; the app receives
    plaintext).
-5. **Audit the disclosure** — write the PHI-access record (field **names**, not values)
-   before returning.
+5. **Audit the disclosure** — call `emit_phi_read_audit()` (`api/v1/common.py`) with the
+   field **names** (never values), before returning. **Never construct `AuditRecord(...)`
+   inline at a new call site** — hand-rolled construction is exactly how `request_id` and
+   `elevation_session_id` (the link back to a superadmin's active elevation grant) went
+   missing at several endpoints before `emit_phi_read_audit` existed. If a shape doesn't
+   fit the helper (e.g. an SSE endpoint folding an authz decision into the same record,
+   like `calls.py::stream_call_events`), that's a signal to extend the helper or add a
+   sibling one — not to reach for `AuditRecord(...)` directly.
 6. **Serialize minimized plaintext** — only the fields the purpose needs, with
    `Cache-Control: no-store`.
 
