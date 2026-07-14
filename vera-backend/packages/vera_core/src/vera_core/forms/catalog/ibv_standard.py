@@ -55,7 +55,7 @@ _DEDUCTIBLE_NOOPS = ["$0", "None", "No Deductible", "Unlimited", "No Limit"]
 _OOP_NOOPS = ["$0", "None", "Unlimited", "No Limit"]
 _NO_LIMIT = ["No Limit", "Unlimited"]
 
-_TREATMENTS: list[tuple[str, str, str, list[str], str]] = [
+_TREATMENTS: list[tuple[str, str, str | None, list[str], str]] = [
     # key, title, icd10, cpt codes, group ask
     (
         "intrauterine_insemination",
@@ -72,13 +72,6 @@ _TREATMENTS: list[tuple[str, str, str, list[str], str]] = [
         "Can you provide coverage and benefit details for in vitro fertilization, or IVF?",
     ),
     (
-        "egg_cryopreservation_elective",
-        "Egg Cryopreservation (Elective)",
-        "Z31.83",
-        ["89337"],
-        "Can you provide coverage and benefit details for elective egg cryopreservation?",
-    ),
-    (
         "embryo_cryopreservation",
         "Embryo Cryopreservation",
         "Z31.83",
@@ -86,18 +79,25 @@ _TREATMENTS: list[tuple[str, str, str, list[str], str]] = [
         "Can you provide coverage and benefit details for embryo cryopreservation?",
     ),
     (
+        "egg_cryopreservation_elective",
+        "Egg Cryopreservation Elective",
+        "Z31.83",
+        ["89337"],
+        "Can you provide coverage and benefit details for elective egg cryopreservation?",
+    ),
+    (
+        "egg_cryopreservation_cancer",
+        "Egg Cryopreservation Cancer",
+        None,
+        ["89337"],
+        "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?",
+    ),
+    (
         "frozen_embryo_transfer",
         "Frozen Embryo Transfer (FET)",
         "Z31.83",
         ["58974"],
         "Can you provide coverage and benefit details for frozen embryo transfer, or FET?",
-    ),
-    (
-        "egg_cryopreservation_cancer",
-        "Egg Cryopreservation (Cancer-Related)",
-        "Z31.83",
-        ["89337"],
-        "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?",
     ),
     (
         "embryo_biopsy",
@@ -475,19 +475,17 @@ def _infertility_treatment() -> Section:
             "Infertility Treatment Covered",
             "Is infertility treatment covered under this plan?",
             YES_NO,
-        )
+        ),
+        "ovulation_induction": Group(
+            type="group",
+            title="Ovulation Induction/Timed Intercourse (OI/TI)",
+            applicable_when=ref("infertility_covered"),
+            codes=Codes(icd10=["Z31.89"]),
+            prompt=ask("Can you provide coverage and benefit details for ovulation induction?"),
+            fields=oi_fields,
+        ),
     }
-    for key, title, icd10, codes, group_ask in _TREATMENTS[:1]:
-        fields[key] = treatment_group("infertility_treatment", key, title, icd10, codes, group_ask)
-    fields["ovulation_induction"] = Group(
-        type="group",
-        title="Ovulation Induction",
-        applicable_when=ref("infertility_covered"),
-        codes=Codes(icd10=["Z31.89"]),
-        prompt=ask("Can you provide coverage and benefit details for ovulation induction?"),
-        fields=oi_fields,
-    )
-    for key, title, icd10, codes, group_ask in _TREATMENTS[1:]:
+    for key, title, icd10, codes, group_ask in _TREATMENTS:
         fields[key] = treatment_group("infertility_treatment", key, title, icd10, codes, group_ask)
 
     alternatives = [
