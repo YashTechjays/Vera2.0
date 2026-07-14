@@ -351,7 +351,7 @@ def _insurance_information() -> Section:
                 ),
             ),
             "plan_type": text_ask(
-                "Plan Type",
+                "Health Plan Type",
                 "What type of plan is this — PPO, HMO, EPO, or something else?",
                 required=True,
                 special_values=["PPO", "HMO", "EPO", "POS"],
@@ -377,11 +377,15 @@ def _insurance_information() -> Section:
                 "Group Number", "What is the group number?", required=True, default="N/A"
             ),
             "policy_situs": text_ask(
-                "Policy Situs",
+                "Home Plan / Policy Situs",
                 "What is the policy state or contract state?",
                 required=True,
                 default="N/A",
                 description="The state whose law governs the policy (contract state).",
+                hints=[
+                    "If the representative doesn't understand the question, clarify: "
+                    "In which state was this policy written?"
+                ],
             ),
         },
     )
