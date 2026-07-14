@@ -39,7 +39,7 @@ from control_plane.api.v1.auth import (
     _unauthorized,
     raise_for_inactive,
 )
-from control_plane.api.v1.common import AppSettings, AuthAudit, emit_auth_event
+from control_plane.api.v1.common import AppSettings, AuthAudit
 from control_plane.auth import mfa
 from control_plane.auth.password import MAX_PASSWORD_BYTES, verify_password_or_dummy
 from control_plane.auth.providers import resolve_platform_login_provider
@@ -47,6 +47,7 @@ from control_plane.auth.session import MFA_ENROLL_NS, MFA_NS, SessionData, Sessi
 from control_plane.deps import client_ip, get_kms, get_session_store, get_sessionmaker
 from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import emit_auth_event
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import platform_session
 from vera_core.models.enums import AccountType, AuthEvent, ProviderKind

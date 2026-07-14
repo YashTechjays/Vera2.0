@@ -1,25 +1,30 @@
-"""Shared FastAPI dependency aliases + the auth-audit emit seam for the v1
-tenant-admin routers (users, roles, providers, api_keys).
+"""Shared FastAPI dependency aliases + the PHI-read audit emit seam for the v1
+tenant-admin routers (users, roles, providers, api_keys). `emit_auth_event` (the
+analogous seam for `AuthAuditRecord`) lives in `vera_core.audit` — it has no
+control_plane dependency, and control_plane.auth.rbac needs it too, which would
+otherwise circularly import this module.
 
-Centralizing the `Annotated[..., Depends(...)]` aliases and the `AuthAuditRecord`
-construction keeps the routers thin and gives the auth-audit shape a single home —
-so adding a field or changing the metadata contract is one edit, not many.
+Centralizing the `Annotated[..., Depends(...)]` aliases and the `AuditRecord`
+construction keeps the routers thin and gives the PHI-read audit shape a single
+home — so adding a field or changing the contract is one edit, not many.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
+from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import InvitationStore
 from control_plane.auth.rbac import PermissionResolver, get_resolver
 from control_plane.deps import (
+    current_elevation,
     current_tenant_id,
     get_audit,
     get_auth_audit,
@@ -32,11 +37,12 @@ from control_plane.deps import (
     tenant_scoped_session,
 )
 from control_plane.email import EmailSender
-from vera_core.audit import AuditSink, AuthAuditRecord, AuthAuditSink
+from control_plane.request_context import current_request_id
+from vera_core.audit import AuditRecord, AuditSink, AuthAuditSink
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.models import Permission, RolePermission, UserRole
-from vera_core.models.enums import AuthEvent
+from vera_core.models.audit_log import ActorType, AuditEvent
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
@@ -66,24 +72,33 @@ LiveKit = Annotated["LiveKitGateway", Depends(get_livekit)]
 Kms = Annotated[KeyManagementService, Depends(get_kms)]
 
 
-async def emit_auth_event(
-    sink: AuthAuditSink,
+async def emit_phi_read_audit(
+    sink: AuditSink,
+    request: Request,
     *,
-    tenant_id: UUID | None,
-    event: AuthEvent,
-    ip: str | None,
-    user_id: UUID | None = None,
-    meta: dict[str, Any] | None = None,
+    tenant_id: UUID,
+    caller: VerifiedIdentity,
+    resource_type: str,
+    resource_id: str,
+    fields: list[str],
 ) -> None:
-    """Write one authN/Z event to the auth audit log. The single construction
-    point for `AuthAuditRecord` across the auth + admin routers."""
+    """Write one PHI-disclosure event to the audit log. The single construction
+    point for a PHI-read `AuditRecord` across every display-path endpoint, so a
+    new call site can't forget `request_id` or `elevation_session_id` (an
+    elevated SUPER_ADMIN's link back to its grant) the way hand-rolled
+    `AuditRecord(...)` construction has in the past."""
     await sink.emit(
-        AuthAuditRecord(
+        AuditRecord(
             tenant_id=tenant_id,
-            app_user_id=user_id,
-            event_type=event.value,
-            ip_address=ip,
-            meta=meta or {},
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            request_id=current_request_id(request),
+            elevation_session_id=current_elevation(request),
+            detail={"fields": fields},
         )
     )
 

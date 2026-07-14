@@ -19,6 +19,7 @@ from .writer import (
     DatabaseAuthAuditWriter,
     LoggingAuditSink,
     LoggingAuthAuditSink,
+    emit_auth_event,
 )
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "anchor_key",
     "build_anchor_object",
     "build_anchor_sink",
+    "emit_auth_event",
     "read_chain_heads",
     "run_anchor",
     "verify_against_anchor",

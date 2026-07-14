@@ -88,18 +88,17 @@ async def test_effective_permissions_queries_and_caches_on_miss() -> None:
     assert await cache.get(TENANT, str(USER_ID)) == frozenset({"calls:read", "phi:read"})
 
 
-async def test_effective_permissions_uses_cache_and_skips_grant_query() -> None:
+async def test_effective_permissions_uses_cache_and_skips_db() -> None:
     cache = InMemoryPermissionCache(ttl_seconds=60)
     await cache.set(TENANT, str(USER_ID), frozenset({"calls:read"}))
     resolver = PermissionResolver(cache)
-    user = SimpleNamespace(id=USER_ID)
-    fake = FakeSession([FakeResult(scalar=user)])  # only the user lookup is queued
+    fake = FakeSession([])  # a cache hit must not touch the session at all
 
     user_id, perms = await resolver.effective_permissions(cast(AsyncSession, fake), TENANT, USER_ID)
 
     assert user_id == USER_ID
     assert perms == frozenset({"calls:read"})
-    assert fake.execute_calls == 1  # cache hit -> grant query never runs
+    assert fake.execute_calls == 0  # cache hit -> no user lookup, no grant query
 
 
 async def test_invalidate_clears_cache_entry() -> None:

@@ -38,7 +38,6 @@ from control_plane.api.v1.common import (
     Resolver,
     SelfScopedSession,
     TenantId,
-    emit_auth_event,
 )
 from control_plane.auth import elevation, mfa
 from control_plane.auth.identity import VerifiedIdentity
@@ -66,7 +65,7 @@ from control_plane.exceptions import (
     UnauthorizedError,
 )
 from control_plane.responses import ResponseModel, ok
-from vera_core.audit import AuthAuditSink
+from vera_core.audit import AuthAuditSink, emit_auth_event
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import tenant_session
 from vera_core.models import AppUser, Role, SsoProvider, UserIdentity, UserRole
