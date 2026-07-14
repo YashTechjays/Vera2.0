@@ -26,7 +26,6 @@ from control_plane.api.v1.common import (
     TenantId,
     TenantSession,
     build_role_grant,
-    emit_auth_event,
     is_platform_permission,
     roles_grant_platform_permission,
 )
@@ -43,6 +42,7 @@ from control_plane.exceptions import (
 )
 from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import emit_auth_event
 from vera_core.models import AppUser, Permission, Role, RolePermission, UserRole
 from vera_core.models.enums import AuthEvent
 

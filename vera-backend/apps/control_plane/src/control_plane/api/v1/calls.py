@@ -21,7 +21,14 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.api.v1.common import Audit, CallPlans, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import (
+    Audit,
+    CallPlans,
+    LiveKit,
+    TenantId,
+    TenantSession,
+    emit_phi_read_audit,
+)
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
@@ -376,18 +383,14 @@ async def publish_call(
             select(PatientForm.patient_name).where(PatientForm.id == call.form_id)
         )
     ).scalar_one_or_none()
-    await audit.emit(
-        AuditRecord(
-            tenant_id=tenant_id,
-            actor_type=ActorType.USER,
-            actor_user_id=caller.user_id,
-            actor_label=caller.email or caller.subject,
-            event_type=AuditEvent.PHI_ACCESS.value,
-            resource_type="call",
-            resource_id=str(call.id),
-            request_id=current_request_id(request),
-            detail={"fields": ["patient_name"]},
-        )
+    await emit_phi_read_audit(
+        audit,
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="call",
+        resource_id=str(call.id),
+        fields=["patient_name"],
     )
     return ok(_summary(call, patient_name, caller.user_id))
 
@@ -533,18 +536,14 @@ async def list_calls(
         )
     ).all()
     # PHI disclosure (patient_name) — audit field names, mirroring list_patient_forms.
-    await audit.emit(
-        AuditRecord(
-            tenant_id=tenant_id,
-            actor_type=ActorType.USER,
-            actor_user_id=caller.user_id,
-            actor_label=caller.email or caller.subject,
-            event_type=AuditEvent.PHI_ACCESS.value,
-            resource_type="call",
-            resource_id="list",
-            request_id=current_request_id(request),
-            detail={"fields": ["patient_name"]},
-        )
+    await emit_phi_read_audit(
+        audit,
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="call",
+        resource_id="list",
+        fields=["patient_name"],
     )
     return ok([_summary(c, name, caller.user_id) for c, name in rows])
 

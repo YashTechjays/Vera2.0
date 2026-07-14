@@ -12,12 +12,13 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from control_plane.api.v1.common import AuthAudit, TenantId, TenantSession, emit_auth_event
+from control_plane.api.v1.common import AuthAudit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import client_ip
 from control_plane.exceptions import BadRequestError, CustomAPIResponse, DefaultExceptionCode
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import emit_auth_event
 from vera_core.models import SsoProvider
 from vera_core.models.enums import AuthEvent, ProviderKind, values_of
 

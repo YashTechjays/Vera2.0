@@ -162,6 +162,19 @@ def _parse_date(value: Any, field_path: str, date_format: str | None = None) -> 
     raise InvalidIntakeValue(field_path, "expected an ISO date or the field's configured format")
 
 
+def unknown_payload_paths(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> list[str]:
+    """Paths in `answers` that are not in `doc`'s leaf set — used to reject intake
+    payloads containing keys the schema does not define. Returns a sorted, deduplicated
+    list of offending root-anchored paths. Only meaningful for v2 documents (the caller
+    must hold `doc` from `_v2_doc`; v1 schemas have no leaf set to validate against
+    and skip this check entirely).
+
+    Names only — never the values (PHI)."""
+    known = {path for path, _ in doc.leaf_items()}
+    answer_paths = {path for path, _ in answers}
+    return sorted(answer_paths - known)
+
+
 def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
     """Extract + normalize the `patient_form` columns `doc.promoted_fields` maps to
     (ADR §5 rule 3 — stable input for a future blind index). `get_value(path)` resolves

@@ -1,5 +1,6 @@
 """Form-schema DSL: compiler freshness, round-trip, and document validation."""
 
+import json
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -469,3 +470,52 @@ class TestPromotedColumnParity:
         from vera_core.models.patient_form import PatientForm
 
         assert {c.name for c in PatientForm.__table__.columns} >= self.EXPECTED
+
+
+class TestPrerequisiteFields:
+    def test_prerequisite_fields_omitted_when_empty(self) -> None:
+        """Empty list must not appear in the compiled artifact."""
+        doc = FormSchemaDoc.model_validate(minimal_doc())
+        assert doc.prerequisite_fields == []
+        artifact = compile_document(doc)
+        data = json.loads(artifact)
+        assert "prerequisite_fields" not in data
+
+    def test_prerequisite_fields_present_when_set(self) -> None:
+        """Non-empty list appears in compiled artifact."""
+        base = minimal_doc()
+        base["prerequisite_fields"] = ["sections.basics.plan_type"]
+        doc = FormSchemaDoc.model_validate(base)
+        assert doc.prerequisite_fields == ["sections.basics.plan_type"]
+        artifact = compile_document(doc)
+        data = json.loads(artifact)
+        assert data["prerequisite_fields"] == ["sections.basics.plan_type"]
+
+    def test_prerequisite_fields_bad_path_raises(self) -> None:
+        """A path that doesn't resolve to a leaf must raise ValidationError."""
+        base = minimal_doc()
+        base["prerequisite_fields"] = ["sections.basics.nonexistent"]
+        with pytest.raises(ValidationError, match="does not resolve to a leaf"):
+            FormSchemaDoc.model_validate(base)
+
+    def test_prerequisite_fields_group_path_raises(self) -> None:
+        """A path that resolves to a GROUP (not a leaf) must also raise."""
+        doc = SCHEMAS["infertility_treatment"][1]()
+        group_paths = list(doc.group_paths())
+        if group_paths:
+            with pytest.raises(ValidationError, match="does not resolve to a leaf"):
+                FormSchemaDoc.model_validate(
+                    {
+                        **json.loads(compile_document(doc)),
+                        "prerequisite_fields": [group_paths[0]],
+                    }
+                )
+
+    def test_ibv_standard_has_three_prerequisite_fields(self) -> None:
+        """The IBV standard schema declares exactly the 3 prerequisite fields."""
+        doc = SCHEMAS["infertility_treatment"][1]()
+        assert set(doc.prerequisite_fields) == {
+            "sections.appointment_information.appointment_date",
+            "sections.appointment_information.appointment_type",
+            "sections.verification_information.callback_number",
+        }
