@@ -27,7 +27,6 @@ from control_plane.api.v1.common import (
     TenantId,
     TenantSession,
     build_role_grant,
-    emit_auth_event,
     roles_grant_platform_permission,
 )
 from control_plane.auth.identity import VerifiedIdentity
@@ -44,6 +43,7 @@ from control_plane.exceptions import (
 )
 from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import emit_auth_event
 from vera_core.models import AppUser, Role
 from vera_core.models.enums import AccountType, AuthEvent
 
@@ -254,8 +254,13 @@ async def deactivate_user(
         raise NotFoundError(message="no such user in this tenant")
     user.status = "deactivated"
 
-    # Effective permissions are resolved only for active users, but invalidate the
-    # cache so any in-flight grant is dropped immediately.
+    # PermissionResolver.effective_permissions checks the cache BEFORE the
+    # active-status query — a cache hit skips the DB (and the active check)
+    # entirely. This invalidate() is therefore the only thing that closes the
+    # window promptly; without it, a deactivated user stays authorized for up
+    # to the cache TTL (see the docstring on effective_permissions,
+    # control_plane/auth/rbac.py). Any future path that flips AppUser.status
+    # away from "active" must call this too.
     await resolver.invalidate(tenant_id, user_id)
     await emit_auth_event(
         audit,

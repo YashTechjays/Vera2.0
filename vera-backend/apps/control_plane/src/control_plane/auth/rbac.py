@@ -30,7 +30,7 @@ from control_plane.deps import (
     tenant_scoped_session,
 )
 from control_plane.request_context import current_request_id
-from vera_core.audit import AuditRecord, AuthAuditRecord, AuthAuditSink
+from vera_core.audit import AuditRecord, AuthAuditSink, emit_auth_event
 from vera_core.models import AppUser, Permission, RolePermission, UserRole
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AuthEvent
@@ -159,21 +159,20 @@ def platform_require(permission: str) -> Any:
             session, None, identity.user_id
         )
         allowed = permission in permissions
-        await auth_audit.emit(
-            AuthAuditRecord(
-                tenant_id=None,
-                # The caller per the verified token — recorded even when they hold no
-                # platform grant (a tenant user is invisible to the platform session).
-                app_user_id=identity.user_id,
-                event_type=(AuthEvent.AUTHZ_ALLOW.value if allowed else AuthEvent.AUTHZ_DENY.value),
-                ip_address=client_ip(request),
-                meta={
-                    "permission": permission,
-                    "path": request.url.path,
-                    "decision": "allow" if allowed else "deny",
-                    **({} if allowed else {"reason": "not granted"}),
-                },
-            )
+        await emit_auth_event(
+            auth_audit,
+            tenant_id=None,
+            event=AuthEvent.AUTHZ_ALLOW if allowed else AuthEvent.AUTHZ_DENY,
+            ip=client_ip(request),
+            # The caller per the verified token — recorded even when they hold no
+            # platform grant (a tenant user is invisible to the platform session).
+            user_id=identity.user_id,
+            meta={
+                "permission": permission,
+                "path": request.url.path,
+                "decision": "allow" if allowed else "deny",
+                **({} if allowed else {"reason": "not granted"}),
+            },
         )
         if not allowed:
             raise HTTPException(

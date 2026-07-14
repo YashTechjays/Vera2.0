@@ -24,7 +24,7 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession, emit_phi_read_audit
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -305,21 +305,6 @@ class ResolveRequest(BaseModel):
     reasked_fields: list[str] = []  # paths to re-verify on the next call
 
 
-def _audit_phi_read(
-    request: Request, tenant_id: UUID, caller: VerifiedIdentity, resource_id: str, fields: list[str]
-) -> AuditRecord:
-    return AuditRecord(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=caller.user_id,
-        actor_label=caller.email or caller.subject,
-        event_type=AuditEvent.PHI_ACCESS.value,
-        resource_type="patient_form",
-        resource_id=resource_id,
-        detail={"fields": fields},
-    )
-
-
 def _baseline_query(form_id: UUID) -> Any:
     """`(field_path, value)` of the most recent `intake`/`human` answer per `field_path`
     for one form — the dispute baseline `B`. `created_at` is the transaction time, so
@@ -473,12 +458,29 @@ async def list_patient_forms(
     # The PHI-access audit writes in its own session/transaction, so it can
     # overlap the page query instead of serializing after it; it is still
     # awaited before any data leaves (audit-before-disclosure).
-    (rows, total), _ = await asyncio.gather(
+    # return_exceptions=True: a plain gather() would, on one coroutine raising,
+    # propagate immediately while leaving the other running in the background —
+    # here that would mean _fetch_page still executing against `session` after
+    # this request's teardown starts closing it. Collecting both results first
+    # and raising explicitly keeps them from outliving this function.
+    fetch_result, audit_result = await asyncio.gather(
         _fetch_page(),
-        get_audit(request).emit(
-            _audit_phi_read(request, tenant_id, caller, "list", audited_fields)
+        emit_phi_read_audit(
+            get_audit(request),
+            request,
+            tenant_id=tenant_id,
+            caller=caller,
+            resource_type="patient_form",
+            resource_id="list",
+            fields=audited_fields,
         ),
+        return_exceptions=True,
     )
+    if isinstance(audit_result, BaseException):
+        raise audit_result
+    if isinstance(fetch_result, BaseException):
+        raise fetch_result
+    rows, total = fetch_result
     items = [
         PatientFormSummary(
             id=r.id,
@@ -523,10 +525,14 @@ async def get_patient_form(
     if form is None:
         raise NotFoundError(message="patient form not found")
     detail = await _build_detail(session, form)
-    await get_audit(request).emit(
-        _audit_phi_read(
-            request, tenant_id, caller, str(form_id), [f.field_path for f in detail.fields]
-        )
+    await emit_phi_read_audit(
+        get_audit(request),
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="patient_form",
+        resource_id=str(form_id),
+        fields=[f.field_path for f in detail.fields],
     )
     return ok(detail)
 
@@ -700,10 +706,14 @@ async def resolve_disputes(
     detail = await _build_detail(session, form)
     audit = get_audit(request)
     # The response discloses every field value (PHI) — audit the disclosure, then the action.
-    await audit.emit(
-        _audit_phi_read(
-            request, tenant_id, caller, str(form_id), [f.field_path for f in detail.fields]
-        )
+    await emit_phi_read_audit(
+        audit,
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="patient_form",
+        resource_id=str(form_id),
+        fields=[f.field_path for f in detail.fields],
     )
     await audit.emit(
         AuditRecord(

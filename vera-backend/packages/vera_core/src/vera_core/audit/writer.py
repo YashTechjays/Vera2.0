@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vera_core.db import tenant_session, uuid7
 from vera_core.models import AuthAuditLog
 from vera_core.models.audit_log import ActorType
+from vera_core.models.enums import AuthEvent
 
 logger = logging.getLogger("vera.audit")
 
@@ -112,6 +113,29 @@ class AuthAuditRecord:
 
 class AuthAuditSink(Protocol):
     async def emit(self, record: AuthAuditRecord) -> None: ...
+
+
+async def emit_auth_event(
+    sink: AuthAuditSink,
+    *,
+    tenant_id: UUID | None,
+    event: AuthEvent,
+    ip: str | None,
+    user_id: UUID | None = None,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    """Write one authN/Z event to the auth audit log. The single construction
+    point for `AuthAuditRecord` across every caller — auth, admin, and platform
+    routes — so a new call site can't hand-roll the record and drift on shape."""
+    await sink.emit(
+        AuthAuditRecord(
+            tenant_id=tenant_id,
+            app_user_id=user_id,
+            event_type=event.value,
+            ip_address=ip,
+            meta=meta or {},
+        )
+    )
 
 
 class DatabaseAuthAuditWriter:

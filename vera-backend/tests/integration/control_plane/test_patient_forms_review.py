@@ -262,6 +262,48 @@ async def test_list_returns_paginated_summaries(
     assert "dispute_count" not in row
 
 
+async def test_list_out_of_range_page_returns_empty_items_and_correct_total(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, dispute_form: UUID
+) -> None:
+    """The merged count+page query reads `total` off a `count(*) OVER()` window
+    column on the page rows; an out-of-range page has no rows to read it from,
+    so it falls back to a bare count. `total` must still be correct."""
+    resp = await client.get(
+        "/api/v1/patient-forms",
+        params={"page": 2, "page_size": 20},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert body["items"] == []
+    assert body["total"] == 1
+
+
+async def test_list_total_reflects_full_filtered_count_not_just_the_page(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """`total` must reflect every row matching the filter, not the page_size-limited
+    slice actually returned — this is what the window function replaces two
+    round trips (bare count + page select) with."""
+    for _ in range(2):
+        await _make_form_with_dispute(
+            admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+        )
+    resp = await client.get(
+        "/api/v1/patient-forms",
+        params={"page": 1, "page_size": 1},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert len(body["items"]) == 1
+    assert body["total"] == 2
+
+
 async def test_list_requires_forms_read(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
     resp = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.norole_token))
     assert resp.status_code == 403, resp.text

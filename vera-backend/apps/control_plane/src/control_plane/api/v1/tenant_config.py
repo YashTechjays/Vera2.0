@@ -6,12 +6,13 @@ mutation is recorded in the auth audit log (field names only)."""
 from fastapi import APIRouter, Request
 from sqlalchemy import select
 
-from control_plane.api.v1.common import AuthAudit, TenantId, TenantSession, emit_auth_event
+from control_plane.api.v1.common import AuthAudit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import client_ip
 from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode, NotFoundError
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import emit_auth_event
 from vera_core.models import Tenant
 from vera_core.models.enums import AuthEvent
 from vera_core.schemas import PersonaTweak
