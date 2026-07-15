@@ -106,20 +106,26 @@ No new shape. Reuses `InvalidIntakeValue` → `_promote_or_422` → existing 422
 `VALIDATION_ERROR` with `data={"fields": [path]}`, identical to how a bad date is already
 reported.
 
-## Consequence: existing test expectation changes
+## Correction found during planning
 
-`tests/unit/forms/test_intake.py` currently asserts `promote_columns` on
-`" +1 555 0100 "` returns `"+1 555 0100"` unchanged (spaces preserved). Under this design
-that value already has `+` (not reprefixed) but fails `E164_RE` (spaces aren't valid E.164)
-— it becomes a rejection case. This is an intentional tightening, not a regression: today
-that value silently reaches storage and only fails later at enqueue time; after this change
-it fails fast at intake with an actionable 422 instead.
+The existing `tests/unit/forms/test_intake.py` case asserting `promote_columns` on
+`" +1 555 0100 "` returns `"+1 555 0100"` unchanged does **not** need to change: its
+fixture (`_doc_with_promoted_fields`) types every promoted leaf `"text"`, including the
+phone column, so the new `leaf.type == "phone"` branch never fires for it — it keeps
+exercising the old generic `_clean_str`-only path on purpose, proving the new branch is
+genuinely keyed on leaf type and not on column name. The behavior tightening (numbers
+that fail E.164 now get rejected at intake instead of only failing later at enqueue
+time) is real, but it only surfaces where a leaf is actually typed `"phone"` — which is
+the case for the **integration** test fixtures (`test_patient_forms_intake.py`, seeded
+from the real `ibv_standard` catalog where `insurance_phone_number` is genuinely
+`type="phone"`). Those fixtures' phone value does need to change from `"+1 555 0100"`
+to a clean, valid E.164 string.
 
 ## Testing
 
-- `tests/unit/forms/test_intake.py` — update the space-preserving case to expect
-  `InvalidIntakeValue`; add cases: missing `+` + otherwise-valid digits → prefixed and
-  accepted; missing `+` + invalid digits → rejected; already-`+`-prefixed valid value →
+- `tests/unit/forms/test_intake.py` — add a dedicated phone-typed test doc (via a new
+  `leaf_types` param on `_doc_with_promoted_fields`) and cases: missing `+` + otherwise-valid
+  digits → prefixed and accepted; missing `+` + invalid digits → rejected; already-`+`-prefixed valid value →
   untouched; non-phone promoted columns unaffected.
 - `tests/integration/control_plane/test_patient_forms_intake.py` — new case asserting both
   `field_answer.value` (for the insurance-phone path) and
