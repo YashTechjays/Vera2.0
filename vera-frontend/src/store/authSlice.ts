@@ -2,8 +2,8 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 
 import * as authApi from "@/lib/auth/api"
 import type { MeResponse } from "@/lib/auth/api"
-import { ApiError } from "@/lib/api/client"
-import { clearSession, getToken, setSession } from "@/lib/auth/storage"
+import { apiErrorMessage, serializeApiError } from "@/lib/api/client"
+import { clearSession, getAuthPlane, getToken, setAuthPlane, setSession } from "@/lib/auth/storage"
 
 type Status = "loading" | "anonymous" | "authenticated"
 // `platform` marks a super-admin (platform-operator) challenge, so the verify step
@@ -13,6 +13,13 @@ type MfaState = {
   step: "verify" | "enroll"
   provisioningUri?: string
   platform?: boolean
+}
+
+// Login page an MFA page bounces to: in-memory plane when known, else the persisted
+// hint so a refresh mid-enrollment still lands a platform operator on /platform/login.
+export function loginRedirectPath(mfa: Pick<MfaState, "platform"> | null): string {
+  const platform = mfa ? mfa.platform === true : getAuthPlane() === "platform"
+  return platform ? "/platform/login" : "/login"
 }
 
 type AuthState = {
@@ -26,6 +33,9 @@ type AuthState = {
   // `login_absolute_remaining_seconds` at receipt. Null until /me hydrates. The idle
   // window comes straight off `user.login_idle_timeout_seconds`.
   sessionExpiresAt: number | null
+  // Remembers which login page to redirect to after logout. Set from user.account_type
+  // before user is nulled so the destination survives the state reset.
+  logoutPlane: "platform" | "tenant" | null
 }
 
 const initialState: AuthState = {
@@ -37,11 +47,15 @@ const initialState: AuthState = {
   loading: false,
   error: null,
   sessionExpiresAt: null,
+  logoutPlane: null,
 }
 
-function message(err: unknown, fallback: string): string {
-  return err instanceof ApiError ? err.message : fallback
-}
+// createAsyncThunk serializes thrown errors to plain {name, message} objects,
+// so ApiError instances (and their httpStatus) don't survive to `unwrap()`
+// callers or `rejected` reducers. Every thunk whose error surfaces in the UI
+// passes `serializeApiError` to keep the backend's message and status readable
+// via apiErrorMessage/apiErrorHttpStatus.
+const keepApiError = { serializeError: serializeApiError }
 
 export const fetchMe = createAsyncThunk("auth/fetchMe", async () => {
   const me = await authApi.getMe()
@@ -60,6 +74,7 @@ export const loginThunk = createAsyncThunk(
     // Remember the workspace so the MFA step (which runs before a session exists)
     // can read it from the store instead of the URL.
     dispatch(setTenantSlug(arg.slug))
+    setAuthPlane("tenant")
     const res = await authApi.login(arg.slug, arg.email, arg.password)
     if (res.mfa === "none") {
       setSession(res.session_token ?? "", arg.slug)
@@ -71,6 +86,7 @@ export const loginThunk = createAsyncThunk(
     }
     return res.mfa
   },
+  keepApiError,
 )
 
 export const verifyMfaThunk = createAsyncThunk(
@@ -80,16 +96,47 @@ export const verifyMfaThunk = createAsyncThunk(
     setSession(res.session_token, arg.slug)
     await dispatch(fetchMe()).unwrap()
   },
+  keepApiError,
 )
 
-// --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory,
-// so login never mints a session — it always hands back a verify challenge. ---
+// --- Platform operator (super admin) sign-in. No tenant slug; MFA is mandatory, so login
+// never mints a session — it hands back a verify challenge, or an enroll challenge (the
+// first-login enrollment wall) when the operator hasn't set up MFA yet. ---
 export const platformLoginThunk = createAsyncThunk(
   "auth/platformLogin",
-  async (arg: { email: string; password: string }, { dispatch }) => {
+  async (
+    arg: { email: string; password: string },
+    { dispatch },
+  ): Promise<authApi.LoginResult["mfa"]> => {
     const res = await authApi.platformLogin(arg.email, arg.password)
-    dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
+    // Persist the plane so a refresh mid-enrollment returns to /platform/login.
+    setAuthPlane("platform")
+    if (res.mfa === "enroll") {
+      dispatch(
+        setMfa({
+          token: res.mfa_token ?? "",
+          step: "enroll",
+          platform: true,
+          provisioningUri: res.provisioning_uri ?? undefined,
+        }),
+      )
+    } else {
+      dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify", platform: true }))
+    }
+    return res.mfa
   },
+  keepApiError,
+)
+
+export const platformEnrollActivateThunk = createAsyncThunk(
+  "auth/platformEnrollActivate",
+  async (arg: { mfaToken: string; code: string }, { dispatch }) => {
+    const res = await authApi.platformEnrollActivate(arg.mfaToken, arg.code)
+    // Platform session belongs to no tenant — store with an empty slug.
+    setSession(res.session_token, "")
+    await dispatch(fetchMe()).unwrap()
+  },
+  keepApiError,
 )
 
 export const platformVerifyMfaThunk = createAsyncThunk(
@@ -101,6 +148,7 @@ export const platformVerifyMfaThunk = createAsyncThunk(
     setSession(res.session_token, "")
     await dispatch(fetchMe()).unwrap()
   },
+  keepApiError,
 )
 
 export const enrollActivateThunk = createAsyncThunk(
@@ -114,6 +162,7 @@ export const enrollActivateThunk = createAsyncThunk(
     await dispatch(fetchMe()).unwrap()
     return res.recovery_codes
   },
+  keepApiError,
 )
 
 export const keepaliveThunk = createAsyncThunk("auth/keepalive", async () => {
@@ -135,6 +184,12 @@ const authSlice = createSlice({
     // Hard reset used on 401 and logout.
     forceLogout(state) {
       clearSession()
+      // Capture the plane before nulling user so the redirect path survives the reset.
+      // Guard on `state.user` so a second forceLogout (burst of 401s) can't overwrite
+      // an already-captured platform plane with the "tenant" fallback.
+      if (state.user) {
+        state.logoutPlane = state.user.account_type === "platform" ? "platform" : "tenant"
+      }
       state.status = "anonymous"
       state.user = null
       state.tenantSlug = null
@@ -167,7 +222,7 @@ const authSlice = createSlice({
       })
       .addCase(loginThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Invalid credentials.")
+        s.error = apiErrorMessage(a.error, "Invalid credentials.")
       })
       .addCase(fetchMe.pending, (s) => {
         if (s.status !== "authenticated") s.status = "loading"
@@ -197,7 +252,7 @@ const authSlice = createSlice({
       })
       .addCase(verifyMfaThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Verification failed.")
+        s.error = apiErrorMessage(a.error, "Verification failed.")
       })
       .addCase(platformLoginThunk.pending, (s) => {
         s.loading = true
@@ -208,7 +263,7 @@ const authSlice = createSlice({
       })
       .addCase(platformLoginThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Invalid credentials.")
+        s.error = apiErrorMessage(a.error, "Invalid credentials.")
       })
       .addCase(platformVerifyMfaThunk.pending, (s) => {
         s.loading = true
@@ -220,7 +275,7 @@ const authSlice = createSlice({
       })
       .addCase(platformVerifyMfaThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Verification failed.")
+        s.error = apiErrorMessage(a.error, "Verification failed.")
       })
       .addCase(enrollActivateThunk.pending, (s) => {
         s.loading = true
@@ -232,10 +287,26 @@ const authSlice = createSlice({
       })
       .addCase(enrollActivateThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = message(a.error, "Enrollment failed.")
+        s.error = apiErrorMessage(a.error, "Enrollment failed.")
+      })
+      .addCase(platformEnrollActivateThunk.pending, (s) => {
+        s.loading = true
+        s.error = null
+      })
+      .addCase(platformEnrollActivateThunk.fulfilled, (s) => {
+        s.loading = false
+        s.mfa = null
+      })
+      .addCase(platformEnrollActivateThunk.rejected, (s, a) => {
+        s.loading = false
+        s.error = apiErrorMessage(a.error, "Enrollment failed.")
       })
       .addCase(logoutThunk.fulfilled, (s) => {
         clearSession()
+        // Capture the plane before nulling user so the redirect path survives.
+        if (s.user) {
+          s.logoutPlane = s.user.account_type === "platform" ? "platform" : "tenant"
+        }
         s.status = "anonymous"
         s.user = null
         s.tenantSlug = null
@@ -276,3 +347,9 @@ export const selectIsElevated = (s: { auth: AuthState }) => {
   const e = s.auth.user?.active_elevation
   return e != null && Date.parse(e.expires_at) > Date.now()
 }
+// The login page to redirect to after logout. Reads logoutPlane (set before user
+// is nulled) so the correct destination is known even after state is cleared.
+// Falls back to the persisted auth-plane hint (getAuthPlane) when logoutPlane is
+// null (e.g. a page-load 401 before forceLogout was ever called).
+export const selectLogoutRedirectPath = (s: { auth: AuthState }): string =>
+  loginRedirectPath(s.auth.logoutPlane ? { platform: s.auth.logoutPlane === "platform" } : null)

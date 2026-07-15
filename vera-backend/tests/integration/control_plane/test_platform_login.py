@@ -14,7 +14,7 @@ import httpx
 import pyotp
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.auth import mfa
 from control_plane.auth.password import hash_password
@@ -26,7 +26,7 @@ from vera_core.config import Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.models import AppUser, UserIdentity, UserRole
-from vera_core.models.enums import ProviderKind
+from vera_core.models.enums import AuthEvent, ProviderKind
 
 PASSWORD = "correct horse battery staple"
 _MASTER_KEY = b"a" * 32
@@ -37,6 +37,7 @@ class PlatformWorld:
     user_id: UUID
     email: str
     totp_secret: str
+    admin_sessionmaker: async_sessionmaker[AsyncSession]
 
 
 @pytest.fixture
@@ -97,7 +98,15 @@ async def platform_world(
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            yield client, PlatformWorld(user_id=user_id, email=email, totp_secret=totp_secret)
+            yield (
+                client,
+                PlatformWorld(
+                    user_id=user_id,
+                    email=email,
+                    totp_secret=totp_secret,
+                    admin_sessionmaker=sessionmaker,
+                ),
+            )
 
     async with sessionmaker() as session, session.begin():
         await session.execute(
@@ -202,6 +211,48 @@ async def test_mfa_verify_rejects_wrong_code(
     assert bad.status_code == 401
 
 
+async def test_mfa_verify_rejects_replayed_code(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    """A TOTP code is single-use: once it mints a session, replaying it within its
+    drift window is rejected. Also pins the mechanism — the matched timestep must be
+    persisted on the identity row (regression: the endpoint passed the app_user id
+    where the SECURITY DEFINER expects the user_identity PK, so the UPDATE matched
+    0 rows, the step was never recorded, and replays minted fresh sessions)."""
+    client, world = platform_world
+    code = pyotp.TOTP(world.totp_secret).now()
+
+    mfa_token = (
+        await client.post(
+            "/api/v1/platform/auth/login", json={"email": world.email, "password": PASSWORD}
+        )
+    ).json()["data"]["mfa_token"]
+    first = await client.post(
+        "/api/v1/platform/auth/mfa/verify", json={"mfa_token": mfa_token, "code": code}
+    )
+    assert first.status_code == 200, first.text
+
+    async with world.admin_sessionmaker() as session:
+        step = (
+            await session.execute(
+                text(
+                    "SELECT totp_last_used_timestep FROM user_identity WHERE app_user_id = :u"
+                ).bindparams(u=world.user_id)
+            )
+        ).scalar_one()
+    assert step is not None, "matched TOTP timestep was not persisted (definer no-op)"
+
+    replay_token = (
+        await client.post(
+            "/api/v1/platform/auth/login", json={"email": world.email, "password": PASSWORD}
+        )
+    ).json()["data"]["mfa_token"]
+    replay = await client.post(
+        "/api/v1/platform/auth/mfa/verify", json={"mfa_token": replay_token, "code": code}
+    )
+    assert replay.status_code == 401, "replayed TOTP code must be rejected"
+
+
 async def test_logout_invalidates_platform_session(
     platform_world: tuple[httpx.AsyncClient, PlatformWorld],
 ) -> None:
@@ -214,6 +265,31 @@ async def test_logout_invalidates_platform_session(
     assert (await client.post("/api/v1/auth/logout", headers=auth)).status_code == 200
     # Session is gone — the operator's token no longer authenticates.
     assert (await client.get("/api/v1/auth/me", headers=auth)).status_code == 401
+
+
+async def test_platform_logout_is_audited(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    client, world = platform_world
+    token = await _authenticate(client, world)
+
+    resp = await client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+
+    # A platform operator has no tenant, so the logout row is written to the null-tenant
+    # chain via the log_auth_event SECURITY DEFINER path. Read as superuser (WORM RLS is
+    # SELECT-only for the app role).
+    async with world.admin_sessionmaker() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT tenant_id, ip_address FROM auth_audit_log"
+                    " WHERE app_user_id = :u AND event_type = :e"
+                ).bindparams(u=world.user_id, e=AuthEvent.LOGOUT.value)
+            )
+        ).one()
+    assert row.tenant_id is None
+    assert row.ip_address is not None
 
 
 async def test_keepalive_extends_platform_session(

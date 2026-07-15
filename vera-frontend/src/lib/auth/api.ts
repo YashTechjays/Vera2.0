@@ -94,6 +94,15 @@ export function enrollActivate(slug: string, mfaToken: string, code: string) {
   })
 }
 
+// Platform enrollment is TOTP-only — activation mints the session, no recovery codes.
+export function platformEnrollActivate(mfaToken: string, code: string) {
+  return apiRequest<SessionResult>(`/platform/auth/mfa/enroll-activate`, {
+    method: "POST",
+    body: { mfa_token: mfaToken, code },
+    auth: false,
+  })
+}
+
 export function acceptInvite(slug: string, token: string, password: string) {
   return apiRequest<AcceptInviteResult>(`${tenantAuth(slug)}/invitations/accept`, {
     method: "POST",
@@ -108,6 +117,17 @@ export function activateInviteMfa(slug: string, mfaToken: string, code: string) 
     body: { mfa_token: mfaToken, code },
     auth: false,
   })
+}
+
+export type InviteValidateResult = {
+  state: "valid" | "invalid" | "deactivated"
+}
+
+export function validateInvite(slug: string, token: string) {
+  return apiRequest<InviteValidateResult>(
+    `${tenantAuth(slug)}/invitations/validate?token=${encodeURIComponent(token)}`,
+    { method: "GET", auth: false },
+  )
 }
 
 export function getMe() {

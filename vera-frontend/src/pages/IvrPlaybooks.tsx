@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react"
-import { ListTree, Loader2, Plus, Trash2 } from "lucide-react"
+import { Loader2, Trash2 } from "lucide-react"
 
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -13,16 +13,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api/client"
-import {
-  createProvider,
-  listProviders,
-  type ProviderSummary,
-} from "@/lib/api/insuranceProviders"
+import { listProviders, type ProviderSummary } from "@/lib/api/insuranceProviders"
 import {
   createPlaybook,
   deletePlaybook,
@@ -35,22 +30,24 @@ import {
 import { useAppSelector } from "@/store/hooks"
 import { selectIsSuperAdmin } from "@/store/authSlice"
 
-/** The playbook config knobs, in editor display order. Each specializes the generic IVR
- *  navigator; an empty field falls back to the navigator's built-in default. */
+/** The playbook config fields, in editor display order. Each is a free-text override that
+ *  specializes the generic IVR navigator; an empty field falls back to its built-in defaults. */
 const INSTRUCTION_FIELDS: {
   key: keyof IvrPlaybookInstructions
   label: string
   placeholder: string
-  multiline?: boolean
 }[] = [
-  { key: "rep_keyword", label: "Rep keyword", placeholder: "e.g. Advocate (default: Representative)" },
-  { key: "survey_answer", label: "Survey answer", placeholder: "e.g. Yes" },
-  { key: "transition_trigger", label: "Transition trigger", placeholder: "Phrase that exits announcement mode" },
-  { key: "callback_vs_hold", label: "Callback vs hold", placeholder: "e.g. Remain on hold" },
-  { key: "multiple_patients_answer", label: "Multiple patients answer", placeholder: "e.g. No" },
-  { key: "date_scope", label: "Date scope", placeholder: "e.g. Today" },
-  { key: "provider_subflows", label: "Provider subflows", placeholder: "Provider-specific ID/menu sub-flows", multiline: true },
-  { key: "extra_rules", label: "Extra rules", placeholder: "Free-text provider-specific guidance", multiline: true },
+  {
+    key: "provider_subflows",
+    label: "Provider subflows",
+    placeholder: "Provider-specific ID/menu sub-flows (e.g. Cigna ID-letter flow)",
+  },
+  {
+    key: "extra_rules",
+    label: "Provider-specific rules",
+    placeholder:
+      "Free-text overrides for this provider — e.g. reach-a-human keyword (UHC: “Advocate”), survey answer, date scope",
+  },
 ]
 
 /** Keep only non-empty (trimmed) fields so unset knobs stay unset server-side. */
@@ -88,11 +85,6 @@ export function IvrPlaybooks() {
   const [providers, setProviders] = useState<ProviderSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-
-  // Create-provider form.
-  const [providerName, setProviderName] = useState("")
-  const [providerBusy, setProviderBusy] = useState(false)
-  const [providerError, setProviderError] = useState<string | null>(null)
 
   // Selected provider + its playbooks.
   const [selectedProviderId, setSelectedProviderId] = useState("")
@@ -193,27 +185,6 @@ export function IvrPlaybooks() {
     )
   }
 
-  async function onCreateProvider(e: FormEvent) {
-    e.preventDefault()
-    setProviderError(null)
-    const name = providerName.trim()
-    if (name === "") {
-      setProviderError("A provider name is required.")
-      return
-    }
-    setProviderBusy(true)
-    try {
-      const created = await createProvider({ name })
-      setProviders((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)))
-      setProviderName("")
-      selectProvider(created.id)
-    } catch (err) {
-      setProviderError(err instanceof ApiError ? err.message : "Could not create the provider.")
-    } finally {
-      setProviderBusy(false)
-    }
-  }
-
   function setField(key: keyof IvrPlaybookInstructions, value: string) {
     setInstructions((prev) => ({ ...prev, [key]: value }))
   }
@@ -285,57 +256,29 @@ export function IvrPlaybooks() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <ListTree className="size-4 text-muted-foreground" />
-            Insurance providers
-          </CardTitle>
-          <CardDescription>Payers that playbooks attach to (global reference data).</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <ErrorAlert error={loadError} />
-          {loading ? (
-            <LoadingLine />
-          ) : (
-            <form onSubmit={onCreateProvider} className="flex items-end gap-2">
-              <div className="flex-1 space-y-1.5">
-                <Label htmlFor="provider-name">New provider name</Label>
-                <Input
-                  id="provider-name"
-                  placeholder="e.g. UnitedHealthcare"
-                  value={providerName}
-                  onChange={(ev) => setProviderName(ev.target.value)}
-                />
-              </div>
-              <Button type="submit" disabled={providerBusy}>
-                {providerBusy ? <Loader2 className="animate-spin" /> : <Plus />}
-                Add
-              </Button>
-            </form>
-          )}
-          <ErrorAlert error={providerError} />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
           <CardTitle className="text-base">Playbooks</CardTitle>
           <CardDescription>Select a provider to manage its playbooks.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <ErrorAlert error={loadError} />
           <div className="space-y-1.5">
             <Label htmlFor="provider-select">Provider</Label>
-            <Select
-              id="provider-select"
-              value={selectedProviderId}
-              onChange={(ev) => selectProvider(ev.target.value)}
-            >
-              <option value="">Select a provider…</option>
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </Select>
+            {loading ? (
+              <LoadingLine />
+            ) : (
+              <Select
+                id="provider-select"
+                value={selectedProviderId}
+                onChange={(ev) => selectProvider(ev.target.value)}
+              >
+                <option value="">Select a provider…</option>
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </Select>
+            )}
           </div>
 
           {selectedProviderId && (
@@ -393,26 +336,14 @@ export function IvrPlaybooks() {
                 </div>
                 <div className="grid gap-4 sm:grid-cols-2">
                   {INSTRUCTION_FIELDS.map((field) => (
-                    <div
-                      key={field.key}
-                      className={field.multiline ? "space-y-1.5 sm:col-span-2" : "space-y-1.5"}
-                    >
+                    <div key={field.key} className="space-y-1.5 sm:col-span-2">
                       <Label htmlFor={`pb-${field.key}`}>{field.label}</Label>
-                      {field.multiline ? (
-                        <Textarea
-                          id={`pb-${field.key}`}
-                          placeholder={field.placeholder}
-                          value={instructions[field.key] ?? ""}
-                          onChange={(ev) => setField(field.key, ev.target.value)}
-                        />
-                      ) : (
-                        <Input
-                          id={`pb-${field.key}`}
-                          placeholder={field.placeholder}
-                          value={instructions[field.key] ?? ""}
-                          onChange={(ev) => setField(field.key, ev.target.value)}
-                        />
-                      )}
+                      <Textarea
+                        id={`pb-${field.key}`}
+                        placeholder={field.placeholder}
+                        value={instructions[field.key] ?? ""}
+                        onChange={(ev) => setField(field.key, ev.target.value)}
+                      />
                     </div>
                   ))}
                   <div className="space-y-1.5">

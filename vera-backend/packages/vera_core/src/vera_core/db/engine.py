@@ -14,7 +14,11 @@ def create_engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(
         settings.database_url,
         echo=settings.db_echo,
-        pool_pre_ping=True,
+        # Recycle idle connections instead of pre-pinging: pre_ping costs a
+        # SELECT 1 on every pool checkout (three checkouts per authenticated
+        # request: request session + two audit sessions), while stale
+        # connections only appear after long idle periods.
+        pool_recycle=300,
     )
 
 

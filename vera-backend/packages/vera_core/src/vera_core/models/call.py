@@ -10,7 +10,16 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,12 +35,13 @@ from vera_core.db.base import (
 from vera_core.models.enums import CallEventType, CallMode, CallStatus, check_in
 
 # Terminal call statuses — a call in one of these will never become live again.
-# Keep in sync with the callback's accepted statuses (api/v1/calls.py).
+# Keep in sync with the consumer's accepted statuses (control_plane/call_closeout.py).
 TERMINAL_CALL_STATUSES = (
     CallStatus.COMPLETED,
     CallStatus.FAILED,
     CallStatus.NO_ANSWER,
     CallStatus.BUSY,
+    CallStatus.CANCELED,
 )
 _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in TERMINAL_CALL_STATUSES)
 
@@ -53,6 +63,7 @@ class Call(Base, TenantScopedMixin):
         ),
         Index("ix_call_initiated_by", "initiated_by_id", "created_at"),
         Index("ix_call_provider_status", "insurance_provider_id", "current_status"),
+        Index("ix_call_tenant_published", "tenant_id", "published"),
     )
 
     form_id: Mapped[UUID] = mapped_column(
@@ -70,6 +81,12 @@ class Call(Base, TenantScopedMixin):
     initiated_by_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
+    # Stamped by POST /calls/{id}/end BEFORE the room is torn down: durable "a user
+    # asked to end this" signal. The sweeper closes such a call as CANCELED (no
+    # auto-redial) if the worker's call.ended never arrives.
+    end_requested_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
 
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default=CallMode.FULL)
     current_status: Mapped[str] = mapped_column(
@@ -84,6 +101,12 @@ class Call(Base, TenantScopedMixin):
     completion_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Visibility axis — orthogonal to current_status. One-way: once True it never
+    # returns to False (spec §1 decision 4). False = private to initiated_by_id.
+    published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # User ids the owner revoked — join_token refuses them even while published.
+    revoked_user_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
 
 
 class CallLineage(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):

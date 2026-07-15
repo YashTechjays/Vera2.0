@@ -45,6 +45,23 @@ class Settings(BaseSettings):
     worker_events_reclaim_idle_ms: int = 60_000  # VERA_WORKER_EVENTS_RECLAIM_IDLE_MS
     call_failed_teardown_grace_ms: int = 1_500  # VERA_CALL_FAILED_TEARDOWN_GRACE_MS
 
+    # Pipeline sweeper: reconciles stuck calls (worker crash / lost event) and
+    # wakes the dispatcher on a timer (working-hours reopen, queue expiry).
+    pipeline_sweep_interval_seconds: int = 60  # VERA_PIPELINE_SWEEP_INTERVAL_SECONDS
+    # A non-terminal call younger than the grace window is never touched — protects
+    # the create→dial gap and normal-end races with the consumer.
+    call_stuck_grace_seconds: int = 300  # VERA_CALL_STUCK_GRACE_SECONDS
+    # Hard cap: a non-terminal call older than this gets its room deleted and is
+    # failed even if the room is still alive (wedged worker session). Payer calls
+    # with long holds run long — keep this generous.
+    call_max_duration_seconds: int = 3 * 3600  # VERA_CALL_MAX_DURATION_SECONDS
+    # Feature gate for the lifecycle's "system auto-retry: low completion" edge
+    # (AI_PROCESSING → IN_QUEUE). OFF until post-call answer extraction exists:
+    # nothing raises completion_pct between calls today, so a retry would redial
+    # up to max_retries times to no benefit. When off, every completed call goes
+    # to EXCEPTION_REVIEW.
+    form_auto_retry_enabled: bool = False  # VERA_FORM_AUTO_RETRY_ENABLED
+
     gcp_project: str | None = None
 
     # --- KMS ------------------------------------------------------------------
@@ -64,6 +81,10 @@ class Settings(BaseSettings):
     # default 15 min, overridable via VERA_SESSION_TTL_SECONDS.
     session_ttl_seconds: int = 15 * 60
     mfa_challenge_ttl_seconds: int = 300
+    # First-login enrollment window for a platform operator: unenrolled login only issues
+    # a QR within this many seconds of the operator's creation, so a leaked bootstrap
+    # password can't bind a second factor long after setup (ADR-0006 §D).
+    platform_enroll_window_seconds: int = 30 * 60
     # Hard ceiling on total session lifetime regardless of activity. `session_ttl_seconds`
     # is the idle window (slid by /auth/session/keepalive); this is the absolute max set
     # once at login and never extended. Subject to compliance sign-off.

@@ -12,7 +12,9 @@ WORKDIR /app
 
 # Install against the lockfile first so the layer caches across source changes.
 COPY package.json package-lock.json ./
-RUN npm ci
+# Enforces the npm version pinned in package.json's `packageManager` field, so an npm
+# bundled with a future node:22 base image can't silently drift from the lock file.
+RUN corepack enable && npm ci
 
 COPY . .
 

@@ -19,6 +19,7 @@ the bearer token alone (`current_identity`); scope is derived from the verified 
 `self_scoped_session`. The caller can only operate on their own session.
 """
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Annotated, Literal
@@ -37,12 +38,15 @@ from control_plane.api.v1.common import (
     Resolver,
     SelfScopedSession,
     TenantId,
-    emit_auth_event,
 )
 from control_plane.auth import elevation, mfa
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import INVITE_MFA_NS, INVITE_NS
-from control_plane.auth.password import MAX_PASSWORD_BYTES, hash_password, verify_password
+from control_plane.auth.password import (
+    MAX_PASSWORD_BYTES,
+    hash_password,
+    verify_password_or_dummy,
+)
 from control_plane.auth.providers import resolve_login_provider
 from control_plane.auth.session import MFA_ENROLL_NS, MFA_NS, SessionData, SessionStore
 from control_plane.auth.tenant_slug import normalize_slug, resolve_tenant_id
@@ -61,7 +65,7 @@ from control_plane.exceptions import (
     UnauthorizedError,
 )
 from control_plane.responses import ResponseModel, ok
-from vera_core.audit import AuthAuditSink
+from vera_core.audit import AuthAuditSink, emit_auth_event
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import tenant_session
 from vera_core.models import AppUser, Role, SsoProvider, UserIdentity, UserRole
@@ -179,6 +183,10 @@ class ActivateInviteMfaRequest(BaseModel):
     code: str
 
 
+class InviteValidateResponse(BaseModel):
+    state: Literal["valid", "invalid", "deactivated"]
+
+
 # --- helpers -----------------------------------------------------------------
 
 
@@ -213,13 +221,33 @@ class _PasswordCreds:
     hashed_password: str | None
     mfa_enabled: bool
     account_type: str
+    status: str
+
+
+DEACTIVATED_MESSAGE = "Your account has been deactivated. Please contact your administrator."
+
+
+def raise_for_inactive(creds: _PasswordCreds) -> None:
+    """403 for a deactivated account, uniform 401 for any other non-active status.
+
+    MUST be called only AFTER the password has verified: the caller proved
+    credential ownership, so naming the reason discloses nothing to outsiders.
+    Wrong passwords must keep the uniform 401 (no account-status enumeration).
+    """
+    if creds.status == "active":
+        return
+    if creds.status == "deactivated":
+        raise CustomAPIException(DefaultExceptionCode.FORBIDDEN, message=DEACTIVATED_MESSAGE)
+    raise _unauthorized()
 
 
 async def _load_password_creds(
     session: AsyncSession, email: str, *, account_type: str | None = None
 ) -> _PasswordCreds | None:
-    """Resolve an active user's password credentials within the current session.
+    """Resolve a user's password credentials within the current session.
     Returns plain values (no lazy ORM attributes) so they survive the session.
+    Includes `status` unfiltered — callers gate on it AFTER verifying the
+    password (see `raise_for_inactive`).
     `account_type` pins the plane (e.g. 'platform') so a stray row from the other
     plane can never authenticate here; left unset for tenant login (RLS already
     confines the session to one tenant)."""
@@ -229,6 +257,7 @@ async def _load_password_creds(
                 AppUser.id,
                 AppUser.email,
                 AppUser.account_type,
+                AppUser.status,
                 UserIdentity.hashed_password,
                 UserIdentity.mfa_enabled,
             )
@@ -236,7 +265,6 @@ async def _load_password_creds(
             .where(
                 UserIdentity.provider_type == ProviderKind.PASSWORD.value,
                 UserIdentity.email == email,
-                AppUser.status == "active",
                 *([AppUser.account_type == account_type] if account_type is not None else []),
             )
         )
@@ -249,6 +277,7 @@ async def _load_password_creds(
         hashed_password=row.hashed_password,
         mfa_enabled=row.mfa_enabled,
         account_type=row.account_type,
+        status=row.status,
     )
 
 
@@ -271,6 +300,7 @@ async def _stamp_last_login(
     response_model=ResponseModel[LoginResponse],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.VALIDATION_ERROR,
     ),
 )
@@ -314,16 +344,28 @@ async def login(
         # exist; that FK would fail), so this 401 is intentionally un-audited.
         # Every failure past this point has a confirmed-real tenant + provider.
         raise _unauthorized()
-    if (
-        creds is None
-        or creds.hashed_password is None
-        or not verify_password(body.password, creds.hashed_password)
-    ):
+    # Constant-time: always run one bcrypt verify, even for an unknown email or a
+    # user with no password hash (dummy verify → False). Every failure branch below
+    # costs the same, so response time can't reveal whether the email is registered.
+    password_ok = verify_password_or_dummy(
+        body.password, creds.hashed_password if creds is not None else None
+    )
+    if creds is None or not password_ok:
         user_id = creds.user_id if creds is not None else None
         await _audit(
             audit, tenant_id=tenant_id, event=AuthEvent.LOGIN_FAILURE, ip=ip, user_id=user_id
         )
         raise _unauthorized()
+    if creds.status != "active":
+        await _audit(
+            audit,
+            tenant_id=tenant_id,
+            event=AuthEvent.LOGIN_FAILURE,
+            ip=ip,
+            user_id=creds.user_id,
+            reason=f"account_{creds.status}",
+        )
+        raise_for_inactive(creds)
 
     base = SessionData(
         user_id=creds.user_id,
@@ -399,11 +441,15 @@ async def mfa_verify(
     if tenant_id is None or challenge is None or challenge.tenant_id != tenant_id:
         raise _unauthorized()
 
-    verified = False
     async with tenant_session(sessionmaker, tenant_id) as session:
-        ident = await _password_identity_row(session, challenge.user_id)
-        if ident is not None:
-            verified = await mfa.verify(kms, identity=ident, code=body.code)
+        ident = await _password_identity_row(session, challenge.user_id, for_update=True)
+        mfa_result = await mfa.verify(kms, identity=ident, code=body.code) if ident else None
+        # Persist the matched TOTP timestep so the code is single-use (replay guard).
+        # Tenant identities carry a real tenant_id, so the ORM UPDATE passes RLS.
+        # Recovery-code logins (result < 0) have no timestep to record.
+        if ident is not None and mfa_result is not None and mfa_result >= 0:
+            ident.totp_last_used_timestep = mfa_result
+        verified = mfa_result is not None
 
     if not verified:
         await _audit(
@@ -490,14 +536,26 @@ async def mfa_enroll_activate(
     ),
 )
 async def logout(
-    _identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    identity: Annotated[VerifiedIdentity, Depends(current_identity)],
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    request: Request,
     store: Store,
+    audit: AuthAudit,
 ) -> ResponseModel[None]:
-    # Token-scoped self-op: `current_identity` proves a live session (expired → 401);
-    # the slug is irrelevant. delete_session reaps both the `sess` and `sess_abs` keys.
+    # Token-scoped self-op: `current_identity` proves a live session (expired → 401),
+    # so only real logouts are audited; the slug is irrelevant. delete_session reaps
+    # both the `sess` and `sess_abs` keys. A platform operator's tenant_id is None, so
+    # emit via emit_auth_event (accepts None → the log_auth_event definer path), not the
+    # UUID-only _audit helper.
     if credentials is not None:
         await store.delete_session(credentials.credentials)
+    await emit_auth_event(
+        audit,
+        tenant_id=identity.tenant_id,
+        event=AuthEvent.LOGOUT,
+        ip=client_ip(request),
+        user_id=identity.user_id,
+    )
     return ok(None, message="Logged out.")
 
 
@@ -668,15 +726,54 @@ async def mfa_activate(
     return ok(RecoveryCodesResponse(recovery_codes=list(codes)))
 
 
-async def _password_identity_row(session: AsyncSession, user_id: UUID) -> UserIdentity | None:
-    return (
-        await session.execute(
-            select(UserIdentity).where(
-                UserIdentity.app_user_id == user_id,
-                UserIdentity.provider_type == ProviderKind.PASSWORD.value,
-            )
-        )
-    ).scalar_one_or_none()
+async def _password_identity_row(
+    session: AsyncSession, user_id: UUID, *, for_update: bool = False
+) -> UserIdentity | None:
+    q = select(UserIdentity).where(
+        UserIdentity.app_user_id == user_id,
+        UserIdentity.provider_type == ProviderKind.PASSWORD.value,
+    )
+    if for_update:
+        q = q.with_for_update()
+    return (await session.execute(q)).scalar_one_or_none()
+
+
+@router.get(
+    "/tenants/{tenant_slug}/auth/invitations/validate",
+    response_model=ResponseModel[InviteValidateResponse],
+)
+async def validate_invitation(
+    tenant_slug: str,
+    token: str,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    invites: Invites,
+) -> ResponseModel[InviteValidateResponse]:
+    """Token-scoped invite pre-flight: returns the eligibility state without
+    consuming the token or revealing any PHI. Because the caller must already
+    possess the high-entropy secret token, this does not enable enumeration.
+    `Cache-Control: no-store` — the result reflects live DB state."""
+    response.headers["Cache-Control"] = "no-store"
+    tenant_id, invite = await asyncio.gather(
+        resolve_tenant_id(sessionmaker, tenant_slug),
+        invites.get(INVITE_NS, token),
+    )
+    if tenant_id is None or invite is None or invite.tenant_id != tenant_id:
+        return ok(InviteValidateResponse(state="invalid"))
+
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        row = (
+            await session.execute(select(AppUser.status).where(AppUser.id == invite.app_user_id))
+        ).one_or_none()
+
+    if row is None:
+        return ok(InviteValidateResponse(state="invalid"))
+    if row.status == "invited":
+        return ok(InviteValidateResponse(state="valid"))
+    if row.status == "deactivated":
+        return ok(InviteValidateResponse(state="deactivated"))
+    # already activated, or any other non-invited, non-deactivated status → invalid
+    return ok(InviteValidateResponse(state="invalid"))
 
 
 @router.post(
@@ -693,6 +790,7 @@ async def accept_invitation(
     tenant_slug: str,
     body: AcceptInviteRequest,
     request: Request,
+    response: Response,
     sessionmaker: Sessionmaker,
     kms: KMS,
     audit: AuthAudit,
@@ -703,6 +801,7 @@ async def accept_invitation(
     tenant enforces MFA, this returns a provisioning URI + a bridge `mfa_token` and
     leaves the account `invited` until `activate-mfa`; otherwise the account goes
     `active`. The invite token is single-use (consumed here)."""
+    response.headers["Cache-Control"] = "no-store"
     tenant_id = await resolve_tenant_id(sessionmaker, tenant_slug)
     invite = await invites.get(INVITE_NS, body.token)
     if tenant_id is None or invite is None or invite.tenant_id != tenant_id:

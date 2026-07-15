@@ -30,7 +30,7 @@ from control_plane.deps import (
     tenant_scoped_session,
 )
 from control_plane.request_context import current_request_id
-from vera_core.audit import AuditRecord, AuthAuditRecord, AuthAuditSink
+from vera_core.audit import AuditRecord, AuthAuditSink, emit_auth_event
 from vera_core.models import AppUser, Permission, RolePermission, UserRole
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AuthEvent
@@ -57,7 +57,17 @@ class PermissionResolver:
         user's grants, a platform session (`tenant_id is None`) resolves a
         SUPER_ADMIN's global grants. RLS does the scoping, so a mismatched id
         resolves to no row. The cache keys on `tenant_id` directly — None is the
-        platform scope."""
+        platform scope.
+
+        A cache hit vouches for the active-status check too (entries are written
+        only after an RLS-scoped resolution of an active user), so it skips the DB
+        entirely. The staleness window is the cache TTL, same as for revoked roles;
+        the deactivate path calls `invalidate` to close it immediately."""
+        cache_key = str(user_id)
+        cached = await self._cache.get(tenant_id, cache_key)
+        if cached is not None:
+            return user_id, cached
+
         user = (
             await session.execute(
                 select(AppUser).where(AppUser.id == user_id, AppUser.status == "active")
@@ -65,11 +75,6 @@ class PermissionResolver:
         ).scalar_one_or_none()
         if user is None:
             return None, frozenset()
-
-        cache_key = str(user_id)
-        cached = await self._cache.get(tenant_id, cache_key)
-        if cached is not None:
-            return user.id, cached
 
         rows = await session.execute(
             select(Permission.code)
@@ -154,21 +159,20 @@ def platform_require(permission: str) -> Any:
             session, None, identity.user_id
         )
         allowed = permission in permissions
-        await auth_audit.emit(
-            AuthAuditRecord(
-                tenant_id=None,
-                # The caller per the verified token — recorded even when they hold no
-                # platform grant (a tenant user is invisible to the platform session).
-                app_user_id=identity.user_id,
-                event_type=(AuthEvent.AUTHZ_ALLOW.value if allowed else AuthEvent.AUTHZ_DENY.value),
-                ip_address=client_ip(request),
-                meta={
-                    "permission": permission,
-                    "path": request.url.path,
-                    "decision": "allow" if allowed else "deny",
-                    **({} if allowed else {"reason": "not granted"}),
-                },
-            )
+        await emit_auth_event(
+            auth_audit,
+            tenant_id=None,
+            event=AuthEvent.AUTHZ_ALLOW if allowed else AuthEvent.AUTHZ_DENY,
+            ip=client_ip(request),
+            # The caller per the verified token — recorded even when they hold no
+            # platform grant (a tenant user is invisible to the platform session).
+            user_id=identity.user_id,
+            meta={
+                "permission": permission,
+                "path": request.url.path,
+                "decision": "allow" if allowed else "deny",
+                **({} if allowed else {"reason": "not granted"}),
+            },
         )
         if not allowed:
             raise HTTPException(

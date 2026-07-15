@@ -1,26 +1,24 @@
 """Idempotency of the platform-operator bootstrap (ADR-0006 §D) against live
-Postgres. Runs as superuser (like the real script) so the NULL-tenant inserts and
-the envelope-encrypted MFA seed bypass FORCE RLS. The first call seeds operator #1
-and returns its otpauth:// URI; a second call is a no-op (None), leaving exactly one
-platform operator. SUPER_ADMIN is seeded first via the same helpers the script needs.
+Postgres. Runs as superuser (like the real script) so the NULL-tenant inserts
+bypass FORCE RLS. The first call seeds operator #1 and returns True; a second call
+is a no-op (False), leaving exactly one platform operator. MFA is left unenrolled
+(browser enrollment wall, time-boxed after bootstrap). SUPER_ADMIN is seeded first
+via the same helpers the script needs.
 """
 
 from collections.abc import AsyncGenerator
 from uuid import UUID
 
-import pyotp
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from scripts.bootstrap_platform_admin import bootstrap
 from scripts.seed import _seed_permissions, _seed_system_roles
-from vera_core.config.kms import LocalDevKMS
 from vera_core.models import AppUser
 from vera_core.models.enums import AccountType
 
 PASSWORD = "correct horse battery staple"
-_MASTER_KEY = b"a" * 32
 
 
 async def _platform_count(session: AsyncSession) -> int:
@@ -55,7 +53,7 @@ async def _delete_platform_operators(session: AsyncSession) -> None:
 @pytest.fixture
 async def bootstrap_world(
     database_url: str,
-) -> AsyncGenerator[tuple[async_sessionmaker[AsyncSession], LocalDevKMS, str]]:
+) -> AsyncGenerator[tuple[async_sessionmaker[AsyncSession], str]]:
     from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine(database_url)
@@ -68,7 +66,7 @@ async def bootstrap_world(
         # Start from a clean slate so the first bootstrap is guaranteed to create #1.
         await _delete_platform_operators(session)
 
-    yield sessionmaker, LocalDevKMS(master_key=_MASTER_KEY), email
+    yield sessionmaker, email
 
     async with sessionmaker() as session, session.begin():
         await _delete_platform_operators(session)
@@ -76,32 +74,40 @@ async def bootstrap_world(
 
 
 async def test_bootstrap_is_idempotent(
-    bootstrap_world: tuple[async_sessionmaker[AsyncSession], LocalDevKMS, str],
+    bootstrap_world: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    sessionmaker, kms, email = bootstrap_world
+    sessionmaker, email = bootstrap_world
 
-    uri = await bootstrap(sessionmaker, kms, email=email, password=PASSWORD)
-    assert uri is not None
-    assert uri.startswith("otpauth://")
-    # A scannable TOTP seed was enrolled.
-    assert pyotp.parse_uri(uri).secret
+    created = await bootstrap(sessionmaker, email=email, password=PASSWORD)
+    assert created is True
 
     async with sessionmaker() as session:
         assert await _platform_count(session) == 1
+        # MFA is left unenrolled — the operator sets it up in the browser.
+        mfa_enabled = (
+            await session.execute(
+                text(
+                    "SELECT mfa_enabled FROM user_identity ui "
+                    "JOIN app_user u ON u.id = ui.app_user_id "
+                    "WHERE u.email = :e"
+                ).bindparams(e=email)
+            )
+        ).scalar_one()
+        assert mfa_enabled is False
 
-    # Second run is a no-op: no new operator, returns None.
-    again = await bootstrap(sessionmaker, kms, email=email, password=PASSWORD)
-    assert again is None
+    # Second run is a no-op: no new operator, returns False.
+    again = await bootstrap(sessionmaker, email=email, password=PASSWORD)
+    assert again is False
 
     async with sessionmaker() as session:
         assert await _platform_count(session) == 1
 
 
 async def test_bootstrap_grants_super_admin(
-    bootstrap_world: tuple[async_sessionmaker[AsyncSession], LocalDevKMS, str],
+    bootstrap_world: tuple[async_sessionmaker[AsyncSession], str],
 ) -> None:
-    sessionmaker, kms, email = bootstrap_world
-    await bootstrap(sessionmaker, kms, email=email, password=PASSWORD)
+    sessionmaker, email = bootstrap_world
+    await bootstrap(sessionmaker, email=email, password=PASSWORD)
 
     async with sessionmaker() as session:
         user_id: UUID = (

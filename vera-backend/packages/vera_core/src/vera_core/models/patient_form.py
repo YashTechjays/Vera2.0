@@ -14,7 +14,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -63,7 +63,6 @@ class PatientForm(Base, TenantScopedMixin):
     # (lowercase/trim name, canonical member-id) so a future blind index has a
     # stable input — ADR §5 rule 3.
     patient_name: Mapped[str | None] = mapped_column(String(255), nullable=True, info=PHI_INFO)
-    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
     patient_dob: Mapped[date | None] = mapped_column(Date, nullable=True, info=PHI_INFO)
     appointment_date: Mapped[date | None] = mapped_column(Date, nullable=True, info=PHI_INFO)
     chart_number: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
@@ -73,7 +72,7 @@ class PatientForm(Base, TenantScopedMixin):
     # over them yet, so no index — they're projection-only). Treated as PHI and
     # carried under CMEK like the identifiers above.
     appointment_type: Mapped[str | None] = mapped_column(String(64), nullable=True, info=PHI_INFO)
-    member_policy_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
+    member_id: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
     insurance_provider: Mapped[str | None] = mapped_column(
         String(255), nullable=True, info=PHI_INFO
     )
@@ -83,5 +82,20 @@ class PatientForm(Base, TenantScopedMixin):
 
     completion_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The user who queued this form — persisted so the dispatcher can attribute
+    # ownership (`call.initiated_by_id`) to the queuer even when the call is
+    # actually created later by a different actor (retry-at-callback, freed-slot
+    # dispatch). Never overwritten on retry, so ownership survives re-enqueue.
+    enqueued_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    # Operator's per-form choice at queue time (voice-lab-style toggle): should the
+    # dispatched worker boot the IVR navigator for this call? Defaults TRUE — every
+    # real payer call must navigate the IVR; turning it off is a test-phase escape
+    # hatch (to be hidden behind a feature flag later). Persisted on the row because
+    # dispatch runs later (freed slot / sweeper / auto-retry) and retries keep the
+    # choice. Non-PHI config.
+    ivr_navigation_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )

@@ -43,14 +43,14 @@ type SortKey =
   | "appointment_date"
   | "appointment_type"
   | "patient_name"
-  | "member_policy_id"
+  | "member_id"
   | "insurance_provider"
   | "status"
 const COLUMNS: { key: SortKey; label: string }[] = [
   { key: "appointment_date", label: "Appointment Date" },
   { key: "appointment_type", label: "Appointment Type" },
   { key: "patient_name", label: "Patient Name" },
-  { key: "member_policy_id", label: "Member/Policy ID" },
+  { key: "member_id", label: "Member/Policy ID" },
   { key: "insurance_provider", label: "Insurance Provider" },
   { key: "status", label: "Status" },
 ]
@@ -70,9 +70,18 @@ export function DataManagement() {
     dir: "asc",
   })
   const [error, setError] = useState<string | null>(null)
+  // Periodic tick so the worklist reflects server-side status changes (a call
+  // ending → post-call eval → completed/exception_review) without the user having
+  // to reload. Without this the list is a frozen snapshot from page load.
+  const [autoTick, setAutoTick] = useState(0)
 
   // Tab "Completed" forces a status filter; otherwise the Select drives it.
   const effectiveStatus = tab === "completed" ? "completed" : status || undefined
+
+  useEffect(() => {
+    const id = setInterval(() => setAutoTick((n) => n + 1), 30_000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     if (!canRead) return
@@ -98,7 +107,7 @@ export function DataManagement() {
     return () => {
       cancelled = true
     }
-  }, [canRead, page, effectiveStatus, query, savedTick])
+  }, [canRead, page, effectiveStatus, query, savedTick, autoTick])
 
   const toggleSort = useCallback(
     (key: SortKey) =>
@@ -258,7 +267,7 @@ export function DataManagement() {
                 </TableCell>
                 <TableCell className="font-medium capitalize">{f.patient_name || "—"}</TableCell>
                 <TableCell className="text-muted-foreground">
-                  {f.member_policy_id || "—"}
+                  {f.member_id || "—"}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {f.insurance_provider || "—"}

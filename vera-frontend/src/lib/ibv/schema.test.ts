@@ -12,11 +12,12 @@ import {
   isRequired,
   optionsOf,
   parseSchema,
+  prerequisiteFieldPaths,
   sectionEntriesOf,
   suggestionsOf,
   systemFieldPaths,
 } from "./schema"
-import type { FormValues } from "./types"
+import type { FormSchema, FormValues } from "./types"
 
 // The backend's compiled artifact (imported from its source of truth) is the
 // test fixture — the same document the backend serves per schema_version_id.
@@ -40,10 +41,11 @@ describe("parseSchema", () => {
 })
 
 describe("sectionEntriesOf", () => {
-  it("returns all 23 sections in document order, including the formerly hidden ones", () => {
+  it("returns all 24 sections in document order, including the formerly hidden ones", () => {
     const keys = sectionEntriesOf(schema).map(([k]) => k)
-    expect(keys).toHaveLength(23)
+    expect(keys).toHaveLength(24)
     expect(keys[0]).toBe("patient_information")
+    expect(keys).toContain("patient_verification")
     expect(keys).toContain("insurance_representative")
     expect(keys).toContain("insurance_reference_information")
   })
@@ -319,5 +321,42 @@ describe("contradictionWarnings", () => {
       "mandate_requires_infertility_coverage",
     ])
     expect(warnings[0].reason).toBeTruthy()
+  })
+})
+
+describe("prerequisiteFieldPaths", () => {
+  it("returns a Set of paths from prerequisite_fields", () => {
+    const paths = prerequisiteFieldPaths(schema)
+    expect(paths.has("sections.appointment_information.appointment_date")).toBe(true)
+    expect(paths.has("sections.appointment_information.appointment_type")).toBe(true)
+    expect(paths.has("sections.verification_information.callback_number")).toBe(true)
+  })
+
+  it("returns empty Set when prerequisite_fields is absent", () => {
+    const schemaWithout: FormSchema = { ...schema, prerequisite_fields: undefined }
+    expect(prerequisiteFieldPaths(schemaWithout).size).toBe(0)
+  })
+
+  it("spouse_gender is NOT in prerequisiteFieldPaths — stays context (defect #26)", () => {
+    expect(prerequisiteFieldPaths(schema).has(SPOUSE_GENDER)).toBe(false)
+  })
+})
+
+describe("fieldUsageOf — prerequisite vs system", () => {
+  const usage = (path: string) => fieldUsageOf(schema, path, leaf(path).field)
+
+  it("prerequisite wins over system for the 3 call-prerequisite fields", () => {
+    expect(usage("sections.appointment_information.appointment_date")).toBe("prerequisite")
+    expect(usage("sections.appointment_information.appointment_type")).toBe("prerequisite")
+    expect(usage("sections.verification_information.callback_number")).toBe("prerequisite")
+  })
+
+  it("spouse_gender stays context — not prerequisite", () => {
+    expect(usage(SPOUSE_GENDER)).toBe("context")
+  })
+
+  it("other system fields (not in prerequisite_fields) stay system", () => {
+    expect(usage("sections.patient_information.chart_number")).toBe("system")
+    expect(usage("sections.patient_information.patient_name")).toBe("system")
   })
 })

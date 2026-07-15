@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { PasswordInput } from "@/components/ui/password-input"
 import { Label } from "@/components/ui/label"
-import { ApiError } from "@/lib/api/client"
+import { apiErrorHttpStatus, apiErrorMessage } from "@/lib/api/client"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { platformLoginThunk, selectStatus } from "@/store/authSlice"
 
@@ -58,15 +58,13 @@ export function PlatformLogin() {
     }
     setBusy(true)
     try {
-      await dispatch(platformLoginThunk({ email, password })).unwrap()
-      navigate("/mfa")
+      const step = await dispatch(platformLoginThunk({ email, password })).unwrap()
+      navigate(step === "enroll" ? "/mfa-enroll" : "/mfa")
     } catch (err) {
       setError(
-        err instanceof ApiError && err.httpStatus === 401
+        apiErrorHttpStatus(err) === 401
           ? "Invalid credentials."
-          : err instanceof ApiError
-            ? err.message
-            : "Something went wrong.",
+          : apiErrorMessage(err, "Something went wrong."),
       )
     } finally {
       setBusy(false)

@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
 import { configureIntegration, listIntegrations, type Integration } from "@/lib/integrations"
 import { formatDate } from "@/lib/patient-forms/display"
+import { SettingsCard } from "./SettingsCard"
 
 // The single integration this tenant configures. The integration-type catalog is
 // not exposed over the API, so the frontend names the slug + its one credential
@@ -73,15 +74,10 @@ export function IntegrationsSection() {
   const configured = integration?.configured ?? false
 
   return (
-    <section className="space-y-3">
-      <div>
-        <h2 className="text-sm font-medium">Integrations</h2>
-        <p className="text-sm text-muted-foreground">
-          Outbound credential Vera uses to reach a third party. The value is stored encrypted and
-          never shown again after you save it.
-        </p>
-      </div>
-
+    <SettingsCard
+      title="Integrations"
+      description="Outbound credential Vera uses to reach a third party. The value is stored encrypted and never shown again after you save it."
+    >
       <div className="space-y-3 rounded-lg border p-4">
         <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium">{DISPLAY_NAME}</span>
@@ -136,6 +132,6 @@ export function IntegrationsSection() {
           </p>
         )}
       </div>
-    </section>
+    </SettingsCard>
   )
 }

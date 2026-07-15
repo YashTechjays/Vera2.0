@@ -43,6 +43,8 @@ class CallStatus(enum.StrEnum):
     FAILED = "failed"
     NO_ANSWER = "no_answer"
     BUSY = "busy"
+    # User-requested end (End Call in Live Monitoring); never auto-retried.
+    CANCELED = "canceled"
 
 
 class CallEventType(enum.StrEnum):
@@ -162,6 +164,8 @@ class AuthEvent(enum.StrEnum):
     INVITE_ACCEPTED = "invite_accepted"
     USER_DEACTIVATED = "user_deactivated"
     ROLE_CREATED = "role_created"
+    ROLE_UPDATED = "role_updated"
+    ROLE_DELETED = "role_deleted"
     ROLE_GRANT = "role_grant"
     ROLE_REVOKE = "role_revoke"
     API_KEY_CREATED = "api_key_created"
@@ -176,6 +180,9 @@ class AuthEvent(enum.StrEnum):
     # recorded here instead (ADR-0006). Tenant-route authz stays in audit_log.
     AUTHZ_ALLOW = "authz_allow"
     AUTHZ_DENY = "authz_deny"
+    # Token-scoped self-logout (/auth/logout). Tenant users write a tenant-scoped
+    # row; platform operators (tenant_id IS NULL) go through log_auth_event.
+    LOGOUT = "logout"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

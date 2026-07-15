@@ -15,7 +15,14 @@ function PasswordInput({
     <div className="relative">
       <Input
         type={visible ? "text" : "password"}
-        className={cn("pr-9", className)}
+        // [&::-ms-reveal]:hidden suppresses Edge's built-in reveal eye.
+        // [&::-webkit-credentials-auto-fill-button]:hidden and the strong-password
+        // variant suppress Chrome/Safari's native password affordance icons so they
+        // don't appear alongside our own custom toggle.
+        className={cn(
+          "pr-9 [&::-ms-reveal]:hidden [&::-webkit-credentials-auto-fill-button]:hidden [&::-webkit-strong-password-auto-fill-button]:hidden",
+          className,
+        )}
         {...props}
       />
       <button

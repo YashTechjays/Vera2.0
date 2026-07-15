@@ -11,7 +11,7 @@ apply). build_agent() picks the initial persona from the dispatch metadata.
 """
 
 import logging
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Callable
 
 from livekit import rtc
 from livekit.agents import (
@@ -22,7 +22,7 @@ from livekit.agents import (
 )
 
 from agent_worker.ivr_agent import IvrNavigatorAgent
-from agent_worker.ivr_prompt import parse_ivr_playbook
+from agent_worker.ivr_prompt import parse_agent_context, parse_ivr_playbook
 from agent_worker.prompt import build_instructions, resolve_greeting
 from agent_worker.seams import hydrate_stream, redact_event
 from vera_core.phi import PHIBoundaryProtocol
@@ -96,6 +96,7 @@ def build_agent(
     session_id: str,
     instructions: str | None = None,
     greeting: str | None = None,
+    on_keypress: Callable[[str], None] | None = None,
 ) -> Agent:
     """Pick the agent persona from dispatch metadata: the IVR navigator when
     `enable_ivr_navigation` is set (a plain agent, no phiwall, an optional per-provider
@@ -108,9 +109,13 @@ def build_agent(
             boundary,
             session_id,
             playbook=parse_ivr_playbook(meta),
+            context=parse_agent_context(meta),
             verification_instructions=instructions,
             verification_greeting=greeting,
+            on_keypress=on_keypress,
         )
     if meta.get("ivr_playbook") is not None:
         logger.warning("ivr_playbook present without enable_ivr_navigation; ignoring playbook")
+    if meta.get("agent_context") is not None:
+        logger.warning("agent_context present without enable_ivr_navigation; ignoring")
     return VeraAgent(boundary, session_id, instructions=instructions, greeting=greeting)

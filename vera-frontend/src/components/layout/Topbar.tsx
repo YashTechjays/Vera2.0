@@ -1,8 +1,8 @@
 import { PanelLeft, Search, Bell, LogOut } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
-import { useAppDispatch } from "@/store/hooks"
-import { logoutThunk } from "@/store/authSlice"
+import { useAppDispatch, useAppStore } from "@/store/hooks"
+import { logoutThunk, selectLogoutRedirectPath } from "@/store/authSlice"
 
 type TopbarProps = {
   onToggleSidebar: () => void
@@ -11,10 +11,15 @@ type TopbarProps = {
 export function Topbar({ onToggleSidebar }: TopbarProps) {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
+  const store = useAppStore()
 
   async function onLogout() {
     await dispatch(logoutThunk())
-    navigate("/login", { replace: true })
+    // Read the path AFTER the logout reducers run: `logoutPlane` is only captured
+    // then, so a render-time selector value predates it (and the persisted plane
+    // hint is cleared once login completes) — a platform operator would be
+    // bounced to the tenant /login.
+    navigate(selectLogoutRedirectPath(store.getState()), { replace: true })
   }
 
   return (

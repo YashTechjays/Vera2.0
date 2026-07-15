@@ -28,6 +28,7 @@ from control_plane.auth.session import SessionStore
 from control_plane.email import EmailSender
 from control_plane.idempotency import IdempotencyStore
 from vera_core.audit import AuditSink, AuthAuditSink
+from vera_core.call_stream import CallStreamService
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
@@ -90,6 +91,11 @@ def get_livekit(request: Request) -> LiveKitGateway:
 
 def get_transcript_service(request: Request) -> TranscriptService:
     service: TranscriptService = request.app.state.transcript_service
+    return service
+
+
+def get_call_stream_service(request: Request) -> CallStreamService:
+    service: CallStreamService = request.app.state.call_stream_service
     return service
 
 
@@ -215,7 +221,9 @@ async def platform_scoped_session(
     identity: Annotated[VerifiedIdentity, Depends(current_identity)],
     sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
 ) -> AsyncGenerator[AsyncSession]:
-    """A no-tenant session for /platform routes: app.platform='on', no tenant GUC,
+    """A no-tenant session for /platform routes: app.platform='on', tenant GUC pinned
+    to NIL_TENANT_ID (never left unset — see that sentinel's docstring for why a
+    previously-tenant-touched pooled connection can't be trusted to read back NULL),
     so only global (NULL-tenant) catalog/identity rows resolve. A tenant user's
     grants never match here, so platform RBAC naturally denies them."""
     async with platform_session(sessionmaker) as session:
@@ -227,9 +235,10 @@ async def self_scoped_session(
     sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
 ) -> AsyncGenerator[AsyncSession]:
     """RLS scope for a caller reading their OWN data (no tenant in the URL): a tenant
-    user pins their own verified tenant; a platform operator gets the no-GUC platform
-    session that resolves global/SUPER_ADMIN rows. No elevation, no slug — the scope
-    comes from the verified identity, not request input."""
+    user pins their own verified tenant; a platform operator gets the platform session
+    (tenant GUC pinned to NIL_TENANT_ID, not left unset) that resolves global/SUPER_ADMIN
+    rows. No elevation, no slug — the scope comes from the verified identity, not request
+    input."""
     if identity.account_type is AccountType.TENANT:
         if identity.tenant_id is None:
             raise HTTPException(

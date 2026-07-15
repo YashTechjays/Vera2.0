@@ -33,6 +33,7 @@ import {
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
 import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
 import { parseCallFailure } from "@/lib/voice-lab/callFailure"
+import { hasAgentParticipant, useAgentJoinTimeout } from "@/lib/voice-lab/agentPresence"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
@@ -47,13 +48,8 @@ const SHOW_IN_BROWSER_SESSION_DEFAULT: boolean = false
 const SHOW_IN_BROWSER_SESSION =
   SHOW_IN_BROWSER_SESSION_DEFAULT || localStorage.getItem("vera.showBrowserSession") === "1"
 
-/** Visibility of the "IVR navigation" toggle; same hide/unhide pattern as
- *  SHOW_IN_BROWSER_SESSION above (localStorage key: "vera.showIvrNavigation").
- *  While hidden the toggle stays off, so sessions start with
- *  `enable_ivr_navigation: false`. */
-const SHOW_IVR_NAVIGATION_DEFAULT: boolean = false
-const SHOW_IVR_NAVIGATION =
-  SHOW_IVR_NAVIGATION_DEFAULT || localStorage.getItem("vera.showIvrNavigation") === "1"
+/** How long (ms) after connecting before we warn that no agent has joined. */
+const AGENT_JOIN_TIMEOUT_MS = 15_000
 
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.Disconnected]: "Disconnected",
@@ -95,6 +91,16 @@ function SessionPanel({
   const state = useConnectionState()
   const participants = useParticipants()
   const wasConnected = useRef(false)
+
+  // Derived: true when at least one remote agent participant has joined.
+  // Note: `p.isAgent` (LiveKit room-level kind) is a different signal from the
+  // `source`/`role` fields on transcript events (which identify the speaker in
+  // a conversation turn, not the room participant kind).
+  const agentPresent = hasAgentParticipant(participants)
+
+  // True once AGENT_JOIN_TIMEOUT_MS has elapsed post-connect with no agent,
+  // auto-clears when the agent joins or the room disconnects.
+  const showAgentWarning = useAgentJoinTimeout(state, agentPresent, AGENT_JOIN_TIMEOUT_MS)
 
   useEffect(() => {
     if (state === ConnectionState.Connected) {
@@ -142,6 +148,15 @@ function SessionPanel({
             </ul>
           )}
         </div>
+        {showAgentWarning && (
+          <Alert variant="destructive">
+            <AlertTriangle />
+            <AlertDescription>
+              The AI agent hasn&apos;t connected. The voice worker may not be running — end the
+              session and try again, or contact support.
+            </AlertDescription>
+          </Alert>
+        )}
       </CardContent>
     </Card>
   )
@@ -196,20 +211,21 @@ function TranscriptPanel({ roomName }: { roomName: string }) {
         {turns.length === 0 && !error && (
           <p className="text-muted-foreground">Waiting for the conversation…</p>
         )}
-        {turns.map((t, i) => (
-          <div key={i}>
-            <span
-              className={
-                t.role === "agent"
-                  ? "font-medium text-emerald-700"
-                  : "font-medium text-foreground"
-              }
-            >
-              {t.role === "agent" ? "Agent" : "Caller"}:
-            </span>{" "}
-            <span className="text-muted-foreground">{t.text}</span>
-          </div>
-        ))}
+        {turns.map((t, i) => {
+          // Use `source` ("bot"/"rep") when present — it's the authoritative
+          // actor field; fall back to `role` for older events without it.
+          const isAgent = t.source != null ? t.source === "bot" : t.role === "agent"
+          return (
+            <div key={i}>
+              <span
+                className={isAgent ? "font-medium text-emerald-700" : "font-medium text-foreground"}
+              >
+                {isAgent ? "Agent" : "Caller"}:
+              </span>{" "}
+              <span className="text-muted-foreground">{t.text}</span>
+            </div>
+          )
+        })}
         {error && <p className="text-destructive">{error}</p>}
       </CardContent>
     </Card>
@@ -248,9 +264,10 @@ export function VoiceLab() {
   const phoneValid = !!phone && isValidPhoneNumber(phone)
   const showPhoneError = touched && !phoneValid
 
-  // Load selectable providers once; a failed load just leaves the picker with the generic
-  // option, so errors are non-fatal here.
-  useEffect(() => {
+  // Load the selectable provider list. Fetched once on mount and again whenever
+  // ivrNavigation turns on (so the picker always shows fresh data after a toggle).
+  // A failed load is non-fatal — the picker falls back to the generic option.
+  const fetchProviders = useCallback(() => {
     let cancelled = false
     listCallProviders()
       .then((rows) => {
@@ -261,6 +278,12 @@ export function VoiceLab() {
       cancelled = true
     }
   }, [])
+
+  useEffect(fetchProviders, [fetchProviders])
+
+  useEffect(() => {
+    if (ivrNavigation) return fetchProviders()
+  }, [ivrNavigation, fetchProviders])
 
   async function start(mode: VoiceSessionMode) {
     setError(null)
@@ -428,36 +451,34 @@ export function VoiceLab() {
               )}
             </div>
 
-            {SHOW_IVR_NAVIGATION && (
-              <div
-                className={cn(
-                  "flex items-center justify-between gap-4 rounded-lg border p-3 transition-colors",
-                  ivrNavigation && "border-primary/40 bg-primary/5",
-                )}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
-                    <ListTree className="size-4 text-muted-foreground" />
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="ivr-navigation" className="leading-none">
-                      IVR navigation
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Let the agent navigate the payer's phone menu automatically before reaching
-                      a rep.
-                    </p>
-                  </div>
+            <div
+              className={cn(
+                "flex items-center justify-between gap-4 rounded-lg border p-3 transition-colors",
+                ivrNavigation && "border-primary/40 bg-primary/5",
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                  <ListTree className="size-4 text-muted-foreground" />
                 </div>
-                <Switch
-                  id="ivr-navigation"
-                  checked={ivrNavigation}
-                  onCheckedChange={setIvrNavigation}
-                />
+                <div className="space-y-1">
+                  <Label htmlFor="ivr-navigation" className="leading-none">
+                    IVR navigation
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    Let the agent navigate the payer's phone menu automatically before reaching
+                    a rep.
+                  </p>
+                </div>
               </div>
-            )}
+              <Switch
+                id="ivr-navigation"
+                checked={ivrNavigation}
+                onCheckedChange={setIvrNavigation}
+              />
+            </div>
 
-            {SHOW_IVR_NAVIGATION && ivrNavigation && (
+            {ivrNavigation && (
               <div className="space-y-1.5 rounded-lg border p-3">
                 <Label htmlFor="ivr-provider">Insurance provider</Label>
                 <Select

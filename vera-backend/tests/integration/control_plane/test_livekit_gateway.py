@@ -79,6 +79,61 @@ def test_set_room_metadata_serializes_json(monkeypatch: pytest.MonkeyPatch) -> N
     assert json.loads(str(captured["metadata"])) == {"status": "call_failed", "reason": "no_answer"}
 
 
+def test_set_room_metadata_tolerates_missing_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mirrors delete_room's not_found tolerance: a teardown race (crash after
+    delete_room but before ack, or a sweeper that already deleted the room) can
+    redeliver call.failed after the room is gone — set_room_metadata must be a
+    no-op instead of raising and permanently wedging the PEL entry."""
+    from livekit import api
+    from livekit.api.twirp_client import TwirpError
+
+    from control_plane.livekit_gateway import LiveKitGateway
+
+    class _FakeRoomService:
+        async def update_room_metadata(self, req: object) -> None:
+            raise TwirpError(code="not_found", msg="room not found", status=404)
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    # Must not raise.
+    asyncio.run(gw.set_room_metadata("call--t--c", {"status": "call_failed"}))
+
+
+def test_set_room_metadata_reraises_other_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-not_found TwirpError is a real failure and must still propagate."""
+    from livekit import api
+    from livekit.api.twirp_client import TwirpError
+
+    from control_plane.livekit_gateway import LiveKitGateway
+
+    class _FakeRoomService:
+        async def update_room_metadata(self, req: object) -> None:
+            raise TwirpError(code="internal", msg="boom", status=500)
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    with pytest.raises(TwirpError):
+        asyncio.run(gw.set_room_metadata("call--t--c", {"status": "call_failed"}))
+
+
 def test_configured_agent_name_flows_to_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """VERA_LIVEKIT_AGENT_NAME threads through build_livekit_gateway → create_dispatch,
     so a laptop sharing a LiveKit project can isolate its dispatch pool from a deployed worker."""
@@ -112,8 +167,48 @@ def test_configured_agent_name_flows_to_dispatch(monkeypatch: pytest.MonkeyPatch
     assert captured["agent_name"] == "vera-agent-local"
 
 
-def test_default_agent_name_stays_vera_agent() -> None:
-    """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected."""
-    settings = Settings(livekit_url="ws://x")
+def test_create_call_room_sets_room_lifetimes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rooms carry explicit empty/departure timeouts (belt-and-suspenders under
+    the sweeper): a never-joined room self-deletes, and a room lingers only
+    briefly once its last participant leaves."""
+    from livekit import api
+
+    captured: dict[str, object] = {}
+
+    class _FakeRoomService:
+        async def create_room(self, req: api.CreateRoomRequest) -> None:
+            captured["empty_timeout"] = req.empty_timeout
+            captured["departure_timeout"] = req.departure_timeout
+
+    class _FakeDispatchService:
+        async def create_dispatch(self, req: api.CreateAgentDispatchRequest) -> None:
+            return None
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+        agent_dispatch = _FakeDispatchService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    asyncio.run(gw.create_call_room("call--t--c"))
+    assert captured["empty_timeout"] == 300
+    assert captured["departure_timeout"] == 120
+
+
+def test_default_agent_name_stays_vera_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected.
+
+    Settings reads VERA_* env vars and the local .env — a dev box overriding
+    VERA_LIVEKIT_AGENT_NAME (e.g. "vera-agent-local") must not fail this test,
+    which asserts the *shipped* default.
+    """
+    monkeypatch.delenv("VERA_LIVEKIT_AGENT_NAME", raising=False)
+    settings = Settings(livekit_url="ws://x", _env_file=None)
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})
     assert build_livekit_gateway(settings, secrets)._agent_name == "vera-agent"

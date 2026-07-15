@@ -39,6 +39,22 @@ class AuditEvent(enum.StrEnum):
     # A human changed a patient_form's lifecycle status by hand (the dedicated
     # status endpoint). Records from/to status only — statuses are not PHI.
     FORM_STATUS_CHANGE = "form.status_change"
+    # A VA published a call so other tenant VAs can view it (visibility
+    # widening — a disclosure-enabling decision). Ids only, never PHI.
+    CALL_PUBLISH = "call.publish"
+    # A VA (owner or not) minted a listen-only join token for a call — the
+    # actual PHI disclosure (they can now hear the live transcript). Ids only.
+    CALL_LISTEN_ONLY_JOIN = "call.listen-only.join"
+    # A publish-capable (speaking) join (?intervene=true). Distinct from
+    # listen-only from day one; the full intervention feature (agent takeover
+    # behavior) is still TODO.
+    CALL_INTERVENE_JOIN = "call.intervene.join"
+    # The owner revoked a user's access to a published call (they can no longer
+    # see or join it). Ids only.
+    CALL_ACCESS_REVOKE = "call.access.revoke"
+    # A VA ended a live call (LiveKit room torn down; the worker's call.ended
+    # event drives the actual closeout). Ids only, never PHI.
+    CALL_END = "call.end"
     # Queue dispatch: the dispatcher picked a form off the queue and initiated a
     # call. Records form id + tenant — no PHI field values.
     QUEUE_DISPATCH = "queue.dispatch"

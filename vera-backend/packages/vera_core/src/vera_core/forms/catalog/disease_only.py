@@ -29,6 +29,7 @@ from vera_core.forms.dsl import (
     FormSchemaDoc,
     Group,
     Leaf,
+    PromotedFields,
     Range,
     RequiredWhen,
     Section,
@@ -98,6 +99,30 @@ def _context_sections() -> dict[str, Section]:
                     values=["Female", "Male", "Other"],
                     default="N/A",
                     required=True,
+                ),
+            },
+        ),
+        "appointment_information": Section(
+            title="Appointment Information",
+            role="context",
+            description=(
+                "Upcoming appointment details supplied at intake; background for the agent."
+            ),
+            fields={
+                "appointment_type": Leaf(
+                    type="enum",
+                    title="Appointment Type",
+                    role="context",
+                    values=["New Patient", "Reverification", "Follow Up Visit", "N/A"],
+                    default="N/A",
+                    required=True,
+                ),
+                "appointment_date": Leaf(
+                    type="date",
+                    title="Appointment Date",
+                    role="context",
+                    required=True,
+                    validation=DATE_VALIDATION,
                 ),
             },
         ),
@@ -309,6 +334,24 @@ def _exclusions_limitations() -> Section:
     )
 
 
+def _insurance_reference() -> Section:
+    return Section(
+        title="Insurance Reference Information",
+        description=("Reference details about the insurance provider, collected when available."),
+        fields={
+            "insurance_provider_name": text_ask(
+                "Insurance Provider Name",
+                "Could you provide the full name of the insurance provider?",
+            ),
+            "insurance_phone_number": text_ask(
+                "Insurance Provider Phone",
+                "What is the primary phone number for the insurance provider?",
+                type_="phone",
+            ),
+        },
+    )
+
+
 def _wrap_up_sections() -> dict[str, Section]:
     return {
         "representative_details": Section(
@@ -352,11 +395,30 @@ def build_disease_only() -> FormSchemaDoc:
             "patient_dob": "sections.patient_information.patient_dob",
             "patient_gender": "sections.patient_information.patient_gender",
             "member_id": "sections.policy_details.policy_number",
-            "policy_id": "sections.policy_details.policy_number",
+            "appointment_date": "sections.appointment_information.appointment_date",
+            "appointment_type": "sections.appointment_information.appointment_type",
+            "insurance_provider_name": (
+                "sections.insurance_reference_information.insurance_provider_name"
+            ),
+            "insurance_provider_phone_number": (
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
             "verified_by": "sections.verification_information.verified_by",
             "callback_number": "sections.verification_information.callback_number",
             "form_completed_at": "sections.verification_information.verified_at",
         },
+        promoted_fields=PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.policy_details.policy_number",
+            insurance_provider="sections.insurance_reference_information.insurance_provider_name",
+            insurance_provider_phone_number=(
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
+        ),
         shared_conditions={
             "disease_covered": eq("sections.coverage_summary.disease_coverage_active", "Yes"),
         },
@@ -366,6 +428,7 @@ def build_disease_only() -> FormSchemaDoc:
             "coverage_summary": _coverage_summary(),
             "covered_diseases": _covered_diseases(),
             "exclusions_limitations": _exclusions_limitations(),
+            "insurance_reference_information": _insurance_reference(),
             **_wrap_up_sections(),
         },
         tasks=[
@@ -408,7 +471,7 @@ def build_disease_only() -> FormSchemaDoc:
                     "Always run last: capture the representative's name and a call "
                     "reference number before ending the call politely."
                 ),
-                sections=["representative_details"],
+                sections=["insurance_reference_information", "representative_details"],
             ),
         ],
         contradictions=[

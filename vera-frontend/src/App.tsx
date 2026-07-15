@@ -17,7 +17,9 @@ import { Users } from "@/pages/Users"
 import { Settings } from "@/pages/Settings"
 import { TenantAccess } from "@/pages/TenantAccess"
 import { AgentPrompt } from "@/pages/AgentPrompt"
+import { InsuranceProviders } from "@/pages/InsuranceProviders"
 import { IvrPlaybooks } from "@/pages/IvrPlaybooks"
+import { FormSchemas } from "@/pages/FormSchemas"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -75,8 +77,12 @@ function App() {
             <Route path="tenant-access" element={<TenantAccess />} />
             {/* Super-admin-only prompt editor. */}
             <Route path="agent-prompt" element={<AgentPrompt />} />
+            {/* Super-admin-only insurance-provider catalog CRUD. */}
+            <Route path="insurance-providers" element={<InsuranceProviders />} />
             {/* Super-admin-only per-provider IVR playbook editor. */}
             <Route path="ivr-playbooks" element={<IvrPlaybooks />} />
+            {/* Super-admin-only read-only form-schema catalog. */}
+            <Route path="form-schemas" element={<FormSchemas />} />
             <Route path="settings" element={<Settings />} />
             <Route path="*" element={<Placeholder title="Not Found" />} />
           </Route>

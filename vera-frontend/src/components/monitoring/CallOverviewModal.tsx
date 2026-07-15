@@ -4,6 +4,7 @@ import {
   X,
   Volume2,
   Grid3x3,
+  Loader2,
   MessageSquare,
   Copy,
   ChevronDown,
@@ -19,6 +20,10 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
+import { LiveCallRoom } from "./LiveCallRoom"
+import { CallTranscript } from "./CallTranscript"
+import { useCallStatus } from "./useCallStatus"
+import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
 function confidenceColor(score: number): string {
@@ -41,6 +46,8 @@ export function CallOverviewModal({
   onOpenChange,
   onExpand,
   onIntervene,
+  onEndCall,
+  ending,
   onShowSummary,
 }: {
   call: LiveCall | null
@@ -48,11 +55,23 @@ export function CallOverviewModal({
   onOpenChange: (open: boolean) => void
   onExpand: () => void
   onIntervene: () => void
+  /** Ends the call for real (backend room teardown), not just closes the modal. */
+  onEndCall: () => void
+  /** True while the end-call request is in flight — disables the button. */
+  ending: boolean
   onShowSummary?: () => void
 }) {
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
+  const { startedAtMs, callEnded, terminalStatus, onCallStatus } = useCallStatus(call?.id)
   const progress = call?.formProgress ?? 0
+
+  const { label: duration, running } = useLiveDuration({
+    open,
+    ended: callEnded,
+    sseMs: startedAtMs,
+    startedAt: call?.startedAt,
+  })
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -63,7 +82,12 @@ export function CallOverviewModal({
         {/* Header */}
         <div className="border-b border-border p-4">
           <div className="flex items-start justify-between gap-4">
-            <DialogTitle className="text-lg font-semibold">Overview</DialogTitle>
+            <div>
+              <DialogTitle className="text-lg font-semibold">Overview</DialogTitle>
+              {call?.id && (
+                <p className="mt-0.5 font-mono text-xs text-muted-foreground">Call {call.id}</p>
+              )}
+            </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -160,8 +184,13 @@ export function CallOverviewModal({
             {/* Call status / controls bar */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
               <span className="flex items-center gap-2 text-sm font-semibold tabular-nums">
-                <span className="size-2 rounded-full bg-amber-500" />
-                {call?.callTime ?? "00:00"}
+                <span
+                  className={cn(
+                    "size-2 rounded-full",
+                    running ? "bg-emerald-500" : "bg-amber-500",
+                  )}
+                />
+                {duration}
               </span>
               <div className="flex items-center gap-1">
                 <button
@@ -192,24 +221,36 @@ export function CallOverviewModal({
                 Copy
               </Button>
             </div>
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
-              <MessageSquare className="size-10 opacity-30" />
-              <span className="text-sm">Connecting to call…</span>
-            </div>
+            {call?.id ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="shrink-0 border-b border-border">
+                  <LiveCallRoom key={call.id} callId={call.id} ended={callEnded} endedStatus={terminalStatus} />
+                </div>
+                <CallTranscript key={`t-${call.id}`} callId={call.id} onCallStatus={onCallStatus} />
+              </div>
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
+                <MessageSquare className="size-10 opacity-30" />
+                <span className="text-sm">No call selected</span>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <Button
-            onClick={() => onOpenChange(false)}
+            onClick={onEndCall}
+            disabled={ending || callEnded}
             className="bg-red-500 text-white hover:bg-red-600"
           >
-            End Call
+            {ending && <Loader2 className="size-4 animate-spin" />}
+            {callEnded ? "Call Ended" : ending ? "Ending…" : "End Call"}
           </Button>
           <div className="flex items-center gap-3">
             <Button
               onClick={onIntervene}
+              disabled={callEnded}
               className="bg-orange-500 text-white hover:bg-orange-600"
             >
               Intervene
