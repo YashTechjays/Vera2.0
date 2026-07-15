@@ -21,8 +21,9 @@ from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, parse_date_format
 # Legacy v1 section the required-fields fallback reads structurally.
 _PATIENT_INFO = "patient_information"
 
-# E.164: a leading + and 1-15 digits, first digit non-zero. Single source of truth —
-# control_plane.queueability re-imports this rather than defining its own copy.
+# E.164: a leading + and 1-15 digits, first digit non-zero. Intended single source of
+# truth — control_plane.queueability is slated to re-import this instead of defining
+# its own copy (see the insurance-phone-auto-format plan's de-duplication task).
 E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 
 

@@ -309,6 +309,10 @@ def _doc_with_promoted_fields(
             "system_fields": dict(promoted_fields),
             "promoted_fields": promoted_fields,
             "sections": sections,
+            # All fixture sections are role="context" (no voice collection needed for
+            # these tests), so none may be assigned to a task (dsl.py: "only collect
+            # sections belong to tasks") — an empty task list is the valid v2 shape
+            # for a document with zero collect sections.
             "tasks": [],
         }
     )
