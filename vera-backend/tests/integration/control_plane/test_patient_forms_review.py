@@ -186,6 +186,7 @@ async def dispute_form(
 
 
 INSURANCE_PROVIDER_NAME = "sections.insurance_reference_information.insurance_provider_name"
+INSURANCE_PHONE = "sections.insurance_reference_information.insurance_phone_number"
 
 
 async def _make_form_with_promoted_field(
@@ -662,6 +663,52 @@ async def test_resolve_accepts_a_date_in_the_leafs_declared_format(
             await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
         ).scalar_one()
         assert form.patient_dob == date(1999, 12, 4)
+
+
+async def test_resolve_auto_formats_missing_plus_on_insurance_phone(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "15550100"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15550100"
+
+        answer = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == INSURANCE_PHONE,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15550100"}
+        assert answer.source == "human"
+
+
+async def test_resolve_with_invalid_promoted_phone_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "555 000 1234"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["data"]["fields"] == [INSURANCE_PHONE]
 
 
 # ---- baseline-derived dispute behavior --------------------------------------

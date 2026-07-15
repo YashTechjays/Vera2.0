@@ -48,6 +48,8 @@ from vera_core.forms.intake import (
     iter_leaf_answers,
     missing_required,
     normalize_phone_answers,
+    normalize_phone_prefix,
+    phone_promoted_paths,
     promote_columns,
     unknown_payload_paths,
 )
@@ -624,6 +626,16 @@ async def resolve_disputes(
     if form is None:
         raise NotFoundError(message="patient form not found")
 
+    # Fetched here (not after the edit loop, as before) so phone-typed promoted paths
+    # are known before normalizing incoming edits below (2026-07-15 design doc).
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    doc = _v2_doc(version.schema_json)
+    phone_paths = phone_promoted_paths(doc) if doc is not None else set()
+
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
     open_paths = await _open_dispute_paths(session, form_id)
@@ -685,6 +697,8 @@ async def resolve_disputes(
         session.add(_human_answer(cur.field_path, raw))
 
     for path, new_value in body.form_data.items():
+        if path in phone_paths:
+            new_value = normalize_phone_prefix(new_value)
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).
@@ -729,15 +743,10 @@ async def resolve_disputes(
             )
         ).all()
     }
-    version = (
-        await session.execute(
-            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one()
-    doc = _v2_doc(version.schema_json)
-    # Re-derive promoted patient_form columns from the post-write current answers —
-    # any resolve call that changes a promoted field's value (dispute or plain edit)
-    # keeps the worklist columns in sync, not just intake (2026-07-10 design doc).
+    # doc/phone_paths already resolved above. Re-derive promoted patient_form columns
+    # from the post-write current answers — any resolve call that changes a promoted
+    # field's value (dispute or plain edit) keeps the worklist columns in sync, not
+    # just intake (2026-07-10 design doc).
     if doc is not None:
         promoted = _promote_or_422(current_values.get, doc)
         for column, _path in doc.promoted_fields.items():
