@@ -3,10 +3,13 @@
 A reactive navigator: it models the IVR as a two-mode state machine (ANNOUNCEMENT
 MODE → PROMPT MODE), stays silent for everything that is not a direct prompt, and
 answers from a response-rule table — by SPEAKING for "say" prompts and by calling
-the `press_keypad` DTMF tool for "press"/"enter" prompts. The `{member_id}` / `{npi}`
-/ `{tax_id}` / `{date_of_birth}` / `{group_number}` placeholders and
-`[transition trigger phrase]` markers are LITERAL text — the cascade injects no
-call_data, so no raw PHI enters the prompt (PHI wall).
+the `press_keypad` DTMF tool for "press"/"enter" prompts.
+
+The response-rule table carries schema `{{token}}` placeholders (member ID, DOB, patient name,
+provider NPI/Tax ID) keyed by the pinned schema's `system_fields` handles. `build_ivr_instructions`
+fills them from the call's `agent_context` — the real patient/provider values the control plane
+resolved from `field_answer` and shipped in dispatch metadata (see `services.ivr_selection`). A
+token the context doesn't provide resolves to empty; no raw `{{…}}` ever reaches the model.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import html
 from collections.abc import Mapping
 from typing import Any
 
+from vera_core.forms.placeholders import resolve_prompt
 from vera_core.schemas import IvrPlaybookConfig
 
 # The sentinel the model emits when the correct action is silence. It must never be spoken,
@@ -114,6 +118,7 @@ Silent (press nothing) for anything not a direct prompt matching a rule:
 - CONFIRM: a confirmation / yes-no prompt ("Is that correct?", "Did you say...?", "say yes or no", "press 1 for yes, 2 for no") is ALWAYS a direct prompt — NEVER answer it with silence. Compare the read-back value against the value YOU last provided for THIS field. Match → Yes/1 ("S as in Sierra" vs your "S as in Sam" is a match, letter is S). Mismatch → No/2, then re-enter when re-prompted. A read-back that names a DIFFERENT field, is empty, or is garbled ("I heard medical" right after you spelled a member ID) is a capture FAILURE → No/2, never Yes. If the same wrong read-back repeats after your No, keep answering No; do not accept a wrong value to break the loop.
 - RETRY: re-ask after an error → repeat the exact same value/format, nothing appended. Same value failing three times → reach a human.
 - CALLBACK vs HOLD: "callback press 1, remain on hold press 3" → answer per callback_vs_hold.
+- NEVER REPLY WITH JUST NO: never reply with just "No". If you need to reply with No, say something appropriate with it. For example: "Would you like to hear those details again?" → "No, thank you."
 </answering_rules>
 
 <response_rules>
@@ -135,19 +140,20 @@ Match on INTENT; "e.g." phrasings are examples, not exact strings. Wording and k
 <rule intent="Department/topic menu (claims, eligibility, covered services, benefits, pre-cert, authorizations, accumulations)" say="Eligibility and Benefits / Covered services — matching the menu's wording"/>
 <rule intent="Confirms menu choice — 'you said covered services, right?'" say="Yes"/>
 <rule intent="Coverage LINE — options are insurance PRODUCTS (medical / dental / vision / pharmacy / behavioral health), whenever asked, before OR after IDs" say="Medical"/>
-<rule intent="Provider identifier — NPI, provider ID, or Tax ID (or 'NPI or Tax ID')" say="1234567890 / 1234567890 / 1234567890 per what is asked (NPI if either offered)"/>
-<rule intent="Patient member ID (per ID-entry rule)" say="200236789"/>
+<rule intent="Provider identifier — NPI, provider ID, or Tax ID (or 'NPI or Tax ID')" say="{{doctor_npi}} / {{doctor_npi}} / {{hospital_tax_id}} per what is asked (NPI if either offered)"/>
+<rule intent="Patient member ID (per ID-entry rule)" say="{{member_id}}"/>
+<rule intent="Group / policy number" say="{{group_number}}"/>
 <rule intent="Member-ID letter sub-flow / 'does it start with [letter]?'" say="Per provider_subflows"/>
 <rule intent="First characters of member ID / last name (often phonetic)" say="{requested chars, phonetic if asked}"/>
-<rule intent="Patient date of birth (often '4-digit year'/'8 digits')" say="{date_of_birth}"/>
-<rule intent="Reads patient name back — 'calling about [name], right?'" say="Yes (No if wrong)"/>
+<rule intent="Patient date of birth (often '4-digit year'/'8 digits')" say="{{patient_dob}}"/>
+<rule intent="Reads patient name back — 'calling about [name], right?'" say="Yes if the read-back matches {{patient_name}} (No if wrong)"/>
 <rule intent="Reads a value back (speech or 'press 1 if correct')" say="Yes/1 (No/2 if the VALUE is wrong or mismatched)"/>
 <rule intent="'As of today, or a past date?'" say="Today/1 (per date_scope)"/>
 <rule intent="Pre-cert vs benefits-and-eligibility vs both" say="Benefits and eligibility"/>
 <rule intent="'Eligibility status, or something else?'" say="Something else"/>
 <rule intent="'What type of benefit are you calling about?' — a topic/purpose gate the IVR needs answered to route the call, often glued after a payment disclaimer, listing narrow examples ('for example co pay, coinsurance, therapy limits, coordination of benefits'). The 'for example' list is illustrative, NOT exhaustive; distinct from the self-service benefit-DETAIL menu below (which offers to read figures out)." say="Plan details (a broad category that yields a general benefit readout — never a narrow listed example like 'co pay'). Stay silent through the readout, then escape to a human at the next prompt."/>
 <rule intent="Self-service benefit-DETAIL menu — a 'to hear X say/press X, to fax say fax it' readout menu whose options are figures to read out (copay, coinsurance, deductible, out-of-pocket, plan details, PCP, 'hear it', 'fax it', 'want benefit details?'); NOT the 'what are you calling about?' topic gate above" say="{rep_keyword}; if it loops, switch token per reach_a_human"/>
-<rule intent="'Hear those details/that again?' repeat-readout prompt" say="No"/>
+<rule intent="'Hear those details/that again?' repeat-readout prompt" say="No, thank you"/>
 <rule intent="Confirms you want a representative" say="Yes"/>
 <rule intent="Callback vs hold" say="Per callback_vs_hold"/>
 <rule intent="'Continue to provider services?' / coverage gate ('no medical press 1, all others press 2')" say="Yes / remain (press 2)"/>
@@ -174,7 +180,7 @@ THIS HANDOFF IS FINAL: there is no way back to IVR navigation once you call tran
 - PRODUCT vs DETAIL MENU: post-ID "medical, vision, pharmacy, mental health — which?" → "Medical" (products). Post-ID "copay, deductible, plan details, PCP…" → {rep_keyword} (figures, self-service).
 - CONFIRM MISMATCH: you spelled member ID, IVR reads back "I heard medical. Correct?" → "No" (wrong field = capture failure), re-enter the ID.
 - CONFIRM ON VALUE: "That was T as in Tango, 8, S as in Sierra, correct?" (you said S as in Sam) → "Yes" (letter is S).
-- GLUED PREAMBLE: "One moment, please. And the patient's date of birth?" → "{date_of_birth}" (ignore the preamble; silence here is WRONG). Also: a payment disclaimer that ENDS in "now what type of benefit are you calling about? for example co pay, coinsurance..." → "Plan details" (answer the topic gate; the example list is illustrative, so do NOT echo a narrow example, and do NOT stay silent).
+- GLUED PREAMBLE: "One moment, please. And the patient's date of birth?" → "{{patient_dob}}" (ignore the preamble; silence here is WRONG). Also: a payment disclaimer that ENDS in "now what type of benefit are you calling about? for example co pay, coinsurance..." → "Plan details" (answer the topic gate; the example list is illustrative, so do NOT echo a narrow example, and do NOT stay silent).
 - ROUTE TO HUMAN: "Eligibility status or something else?" → "Something else" (forces a rep).
 - SELF-SERVICE LOOP: "hear it / fax it…" → {rep_keyword} → re-offered with no progress → press 0 → still looping → "Agent" → still looping → give_up (end the call; the menu has no human path).
 - CHAINED IVR: "...connected to the appropriate Blue Cross plan." → new "Thank you for calling…" with its own menus → treat as NEW IVR, re-enter announcement mode, navigate from scratch.
@@ -226,15 +232,28 @@ def _render_playbook_overrides(playbook: IvrPlaybookConfig) -> str | None:
     return "\n\n".join(sections) if sections else None
 
 
-def build_ivr_instructions(playbook: IvrPlaybookConfig | None = None) -> str:
-    """Generic IVR-navigator instructions, optionally specialized by a per-provider playbook
-    overlay. The navigator reasons over plain transcript text and drives TTS with plain words,
-    so — unlike the chat persona — it needs no Cartesia readback markup guide. With no playbook
-    (or an empty one) the output is the generic navigator, unchanged."""
+def _fill_context(prompt: str, context: dict[str, str] | None) -> str:
+    """Resolve every `{{token}}` in the prompt from `context` (the call's schema-resolved
+    patient/provider values). A token with no value collapses to empty — so no raw `{{…}}` ever
+    reaches the model."""
+    return resolve_prompt(prompt, (context or {}).get)
+
+
+def build_ivr_instructions(
+    playbook: IvrPlaybookConfig | None = None,
+    context: dict[str, str] | None = None,
+) -> str:
+    """Generic IVR-navigator instructions, with the `{{token}}` identifier placeholders filled from
+    `context` (the call's schema-resolved patient/provider values) and optionally specialized by a
+    per-provider playbook overlay. The navigator reasons over plain transcript text and drives TTS
+    with plain words, so — unlike the chat persona — it needs no Cartesia readback markup guide. A
+    token with no context value resolves to empty; with no playbook the output is the generic
+    navigator."""
+    prompt = _fill_context(IVR_NAVIGATOR_SYSTEM_PROMPT, context)
     overrides = _render_playbook_overrides(playbook) if playbook is not None else None
     if not overrides:
-        return IVR_NAVIGATOR_SYSTEM_PROMPT
-    return f"{IVR_NAVIGATOR_SYSTEM_PROMPT}\n\n{overrides}"
+        return prompt
+    return f"{prompt}\n\n{overrides}"
 
 
 def parse_ivr_playbook(meta: Mapping[str, Any]) -> IvrPlaybookConfig | None:
@@ -249,3 +268,15 @@ def parse_ivr_playbook(meta: Mapping[str, Any]) -> IvrPlaybookConfig | None:
         return IvrPlaybookConfig.model_validate(value)
     except ValueError:
         return None
+
+
+def parse_agent_context(meta: Mapping[str, Any]) -> dict[str, str] | None:
+    """Extract the schema-resolved `agent_context` (`{{token}}` -> value) from dispatch metadata.
+    Fail-safe: a missing/empty/malformed blob, or any non-`str`->`str` entry, yields None so the
+    navigator falls back to its built-in placeholder defaults instead of killing a live call
+    (mirrors parse_ivr_playbook's posture)."""
+    value = meta.get("agent_context")
+    if not isinstance(value, dict):
+        return None
+    context = {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+    return context or None

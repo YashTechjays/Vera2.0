@@ -1042,6 +1042,11 @@ def build_ibv_standard() -> FormSchemaDoc:
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
         ),
+        prerequisite_fields=[
+            "sections.appointment_information.appointment_date",
+            "sections.appointment_information.appointment_type",
+            "sections.verification_information.callback_number",
+        ],
         stt_key_terms=[
             # treatments
             "intrauterine insemination",

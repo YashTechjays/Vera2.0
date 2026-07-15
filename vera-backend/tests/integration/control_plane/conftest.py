@@ -213,6 +213,7 @@ class RBACWorld:
         # Filled once the admin/supervisor AppUser rows are created (see rbac_world).
         self.admin_id: UUID = UUID(int=0)
         self.supervisor_id: UUID = UUID(int=0)
+        self.virtual_assistant_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
@@ -325,6 +326,7 @@ async def rbac_world(
         )
         admin_id, norole_id, virtual_assistant_id = admin.id, norole.id, virtual_assistant.id
         world.admin_id = admin_id
+        world.virtual_assistant_id = virtual_assistant_id
 
         supervisor_role = (
             await session.execute(

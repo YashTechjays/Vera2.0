@@ -29,7 +29,7 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.responses import ResponseModel, ok
-from vera_core.audit import AuthAuditRecord, AuthAuditSink
+from vera_core.audit import AuthAuditSink, emit_auth_event
 from vera_core.models import Tenant
 from vera_core.models.enums import AuthEvent
 
@@ -99,14 +99,13 @@ async def create_elevation(
     except IntegrityError as exc:
         raise _map_create_error(exc) from exc
 
-    await audit.emit(
-        AuthAuditRecord(
-            tenant_id=None,
-            app_user_id=caller.user_id,
-            event_type=AuthEvent.TENANT_ELEVATION_GRANTED.value,
-            ip_address=client_ip(request),
-            meta={"elevation_id": str(grant_id), "target_tenant": str(body.target_tenant_id)},
-        )
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_ELEVATION_GRANTED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"elevation_id": str(grant_id), "target_tenant": str(body.target_tenant_id)},
     )
     grant = await elevation.active_grant_for(
         session, super_admin_user_id=caller.user_id, target_tenant_id=body.target_tenant_id
@@ -135,14 +134,13 @@ async def end_elevation(
     ended = await elevation.end_grant(session, elevation_id)
     if not ended:
         raise NotFoundError(message="no active elevation with that id")
-    await audit.emit(
-        AuthAuditRecord(
-            tenant_id=None,
-            app_user_id=caller.user_id,
-            event_type=AuthEvent.TENANT_ELEVATION_ENDED.value,
-            ip_address=client_ip(request),
-            meta={"elevation_id": str(elevation_id)},
-        )
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_ELEVATION_ENDED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"elevation_id": str(elevation_id)},
     )
     return ok(None, message="Elevation ended.")
 

@@ -43,7 +43,7 @@ Flavor = Literal["treatment", "male", "plain"]
 _INAPPLICABLE: dict[Flavor, dict[str, str]] = {
     "treatment": {"covered": "No", "copay": "$0", "coinsurance": "0%", "prior_auth": "N/A"},
     "male": {"covered": "N/A", "copay": "N/A", "coinsurance": "N/A", "prior_auth": "N/A"},
-    "plain": {},
+    "plain": {"copay": "$0", "coinsurance": "0%", "prior_auth": "N/A"},
 }
 
 
@@ -76,6 +76,11 @@ def service_fields(
 
     ``base`` is the root-anchored path of the containing group; sub-field gates are
     wired to ``{base}.covered``. ``flavor`` picks the skip-fill defaults.
+
+    ``"plain"`` flavor omits a ``covered`` inapplicable default because plain sections
+    may have no ancestor ``applicable_when`` gate — a DSL invariant enforced by
+    ``dsl.py``'s document validator. The copay/coinsurance/prior_auth sub-fields are
+    always self-gated (``applicable_when=gate``) and therefore carry their defaults safely.
     """
     inapplicable = _INAPPLICABLE[flavor]
     gate = eq(f"{base}.covered", "Yes")

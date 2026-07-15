@@ -70,9 +70,18 @@ export function DataManagement() {
     dir: "asc",
   })
   const [error, setError] = useState<string | null>(null)
+  // Periodic tick so the worklist reflects server-side status changes (a call
+  // ending → post-call eval → completed/exception_review) without the user having
+  // to reload. Without this the list is a frozen snapshot from page load.
+  const [autoTick, setAutoTick] = useState(0)
 
   // Tab "Completed" forces a status filter; otherwise the Select drives it.
   const effectiveStatus = tab === "completed" ? "completed" : status || undefined
+
+  useEffect(() => {
+    const id = setInterval(() => setAutoTick((n) => n + 1), 30_000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     if (!canRead) return
@@ -98,7 +107,7 @@ export function DataManagement() {
     return () => {
       cancelled = true
     }
-  }, [canRead, page, effectiveStatus, query, savedTick])
+  }, [canRead, page, effectiveStatus, query, savedTick, autoTick])
 
   const toggleSort = useCallback(
     (key: SortKey) =>

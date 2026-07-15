@@ -6,6 +6,7 @@ function stubDom({ execCommandResult }: { execCommandResult: boolean }) {
   const textarea = {
     value: "",
     setAttribute: vi.fn(),
+    focus: vi.fn(),
     select: vi.fn(),
     remove: vi.fn(),
     style: {} as Record<string, string>,
@@ -13,6 +14,8 @@ function stubDom({ execCommandResult }: { execCommandResult: boolean }) {
   const execCommand = vi.fn().mockReturnValue(execCommandResult)
   vi.stubGlobal("document", {
     createElement: vi.fn().mockReturnValue(textarea),
+    // querySelector returns null (no dialog present) — copyText falls back to body.
+    querySelector: vi.fn().mockReturnValue(null),
     body: { appendChild: vi.fn() },
     execCommand,
   })

@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Select } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 import { usePermission } from "@/lib/auth/permissions"
@@ -32,11 +33,15 @@ export function IbvFormModal() {
     pendingDisputeCount,
     loading,
     error,
+    clearedRequired,
     patientName,
     status,
     changeStatus,
     ivrNavigation,
     setIvrNavigation,
+    providers,
+    providerId,
+    setProviderId,
     statusError,
     statusChanging,
     insuranceType,
@@ -83,14 +88,37 @@ export function IbvFormModal() {
             {canWrite && transitions.length > 0 && (
               <div className="flex items-center gap-2">
                 {transitions.includes("in_queue") && (
-                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Switch
-                      checked={ivrNavigation}
-                      onCheckedChange={setIvrNavigation}
-                      disabled={statusChanging}
-                    />
-                    IVR navigation
-                  </label>
+                  <>
+                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Switch
+                        checked={ivrNavigation}
+                        onCheckedChange={setIvrNavigation}
+                        disabled={statusChanging}
+                      />
+                      IVR navigation
+                    </label>
+                    {/* Canonicalizes the form's provider so dispatch applies the
+                        right IVR playbook; pre-selected from the intake string. */}
+                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      Provider
+                      <div className="w-44">
+                        <Select
+                          value={providerId}
+                          onChange={(e) => setProviderId(e.target.value)}
+                          disabled={statusChanging}
+                          className="text-xs"
+                          aria-label="Insurance provider"
+                        >
+                          <option value="">Auto-detect from intake</option>
+                          {providers.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                    </label>
+                  </>
                 )}
                 {transitions.map((target) => (
                   <Button
@@ -155,7 +183,12 @@ export function IbvFormModal() {
             </Button>
             <Button
               onClick={save}
-              disabled={!dirty || saveState === "saving"}
+              disabled={!dirty || saveState === "saving" || clearedRequired.length > 0}
+              title={
+                clearedRequired.length > 0
+                  ? "Restore the cleared required fields before saving."
+                  : undefined
+              }
               className="min-w-[140px]"
             >
               {saveState === "saving" ? "Saving…" : "Save"}

@@ -59,6 +59,16 @@ Every PHI access and every authz allow/deny writes an `AuditRecord`:
 migration makes it INSERT/SELECT-only, FORCE RLS) — never `UPDATE` or `DELETE` it, and never
 add a code path that mutates a past record.
 
+**Never construct `AuditRecord(...)` or `AuthAuditRecord(...)` directly at a call site —
+go through the shared emit helper.** `AuthAuditRecord` → `emit_auth_event()` (`vera_core.audit`,
+no `control_plane` dependency by design, so `auth/rbac.py` can call it without circularly
+importing `api/v1/common`); a PHI-read `AuditRecord` → `emit_phi_read_audit()`
+(`control_plane/api/v1/common.py`). Both exist because hand-rolled construction at each
+call site silently drifted on shape — several endpoints forgot `request_id` or
+`elevation_session_id` (the field linking a PHI read back to an active superadmin elevation
+grant) before these helpers existed. A new event shape that doesn't fit either helper is a
+signal to extend it or add a sibling — not license to hand-roll the record again.
+
 **Timestamps come from the DB clock, never the app clock.** Every `created_at`/`updated_at`
 and every audit/elevation time is minted by Postgres `now()` / `func.now()` (the `db/base.py`
 mixins; the SECURITY DEFINER fns) — never Python `datetime.now()`. A single NTP-synced clock

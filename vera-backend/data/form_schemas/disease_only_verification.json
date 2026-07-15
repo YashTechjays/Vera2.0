@@ -875,6 +875,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.covered_diseases.kidney_failure.covered",
                 "op": "eq",
@@ -895,6 +896,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.covered_diseases.kidney_failure.covered",
                 "op": "eq",
@@ -920,6 +922,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.covered_diseases.kidney_failure.covered",
                 "op": "eq",
