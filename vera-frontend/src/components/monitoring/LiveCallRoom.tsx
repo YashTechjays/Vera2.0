@@ -21,6 +21,7 @@ import {
   PARTICIPANT_MODE_BADGE,
   connectionPhase,
   isWaitingForCall,
+  intervenerLabel,
   otherIntervenerPresent,
   participantLabel,
   participantMode,
@@ -155,10 +156,11 @@ function RoomView({
   const likes = participants.map(toParticipantLike)
   const phase = connectionPhase(state, everConnected)
   const otherIntervener = otherIntervenerPresent(likes)
+  const supervisorLabel = intervenerLabel(likes)
 
   useEffect(() => {
-    onStatus?.({ phase, otherIntervener })
-  }, [onStatus, phase, otherIntervener])
+    onStatus?.({ phase, otherIntervener, intervenerLabel: supervisorLabel })
+  }, [onStatus, phase, otherIntervener, supervisorLabel])
 
   return (
     <div className="flex flex-1 flex-col gap-3 p-4 text-sm">

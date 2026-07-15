@@ -7,7 +7,23 @@ import {
   asTranscriptTurn,
   streamCallEvents,
   type TranscriptTurn,
+  type TranscriptTurnSource,
 } from "@/lib/api/callEvents"
+
+type TurnStyle = { onRight: boolean; label: string; bubble: string }
+
+/** `source` (the actor) sets the side, label, and colour: the caller (rep) on the
+ *  left, our side (Vera + supervisor) on the right. */
+function turnStyle(source: TranscriptTurnSource, supervisorLabel: string): TurnStyle {
+  switch (source) {
+    case "bot":
+      return { onRight: true, label: "Vera", bubble: "bg-muted text-foreground" }
+    case "supervisor":
+      return { onRight: true, label: supervisorLabel, bubble: "bg-blue-500/10 text-foreground" }
+    case "rep":
+      return { onRight: false, label: "Rep", bubble: "bg-primary/10 text-foreground" }
+  }
+}
 
 /**
  * Live transcript feed for a call, from the /calls/{id}/events SSE.
@@ -19,12 +35,15 @@ import {
 export function CallTranscript({
   callId,
   onCallStatus,
+  supervisorLabel = "Supervisor",
 }: {
   callId: string
   /** Fires for every call_status envelope on the stream ("active", "ended", or a
    *  terminal CallStatus value on DB replay) with the event's timestamp — the
    *  modal lifts this into its call-started timer and call-ended indication. */
   onCallStatus?: (status: string, ts: number) => void
+  /** Label for supervisor (takeover) turns — the intervener's email when known. */
+  supervisorLabel?: string
 }) {
   const [turns, setTurns] = useState<TranscriptTurn[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -75,12 +94,10 @@ export function CallTranscript({
   return (
     <div className="flex-1 space-y-2 overflow-y-auto p-4">
       {turns.map((t, i) => {
-        // `source` (the actor) decides the side and label; `role` decides the shape —
-        // speech renders as a bubble, a keypad press as an action chip.
-        const isBot = t.source === "bot"
-        const label = isBot ? "Vera" : "Rep"
+        // `role` decides the shape — speech renders as a bubble, a keypad press as an action chip.
+        const { onRight, label, bubble } = turnStyle(t.source, supervisorLabel)
         return (
-          <div key={`${t.ts}-${i}`} className={cn("flex", isBot ? "justify-start" : "justify-end")}>
+          <div key={`${t.ts}-${i}`} className={cn("flex", onRight ? "justify-end" : "justify-start")}>
             {t.role === "dtmf" ? (
               <div className="flex items-center gap-1.5 rounded-full border border-dashed border-muted-foreground/40 px-3 py-1 text-xs text-muted-foreground">
                 <Hash className="size-3" aria-hidden />
@@ -89,12 +106,7 @@ export function CallTranscript({
                 </span>
               </div>
             ) : (
-              <div
-                className={cn(
-                  "max-w-[85%] rounded-lg px-3 py-2 text-sm",
-                  isBot ? "bg-muted text-foreground" : "bg-primary/10 text-foreground",
-                )}
-              >
+              <div className={cn("max-w-[85%] rounded-lg px-3 py-2 text-sm", bubble)}>
                 <span className="mb-0.5 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   {label}
                 </span>

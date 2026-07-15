@@ -61,3 +61,13 @@ def test_untouched_until_a_supervisor_takes_over() -> None:
     assert session.interrupts == 0
     assert session.input.calls == []
     assert session.output.calls == []
+
+
+def test_on_engage_fires_once() -> None:
+    session = _FakeSession()
+    calls: list[int] = []
+    ctl = AgentTakeoverController(session, on_engage=lambda: calls.append(1))
+
+    ctl.engage()
+    ctl.engage()
+    assert calls == [1]

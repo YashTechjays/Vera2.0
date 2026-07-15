@@ -5,7 +5,7 @@ never un-muted (leaving it un-mutable would revive the bot if the supervisor's t
 """
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Protocol
 
 from vera_core.observability.correlation import PARTICIPANT_MODE_INTERVENER
@@ -37,8 +37,11 @@ class AgentTakeoverController:
     Idempotent: repeated room events after the first takeover are no-ops.
     """
 
-    def __init__(self, session: _SilenceableSession) -> None:
+    def __init__(
+        self, session: _SilenceableSession, *, on_engage: Callable[[], None] | None = None
+    ) -> None:
         self._session = session
+        self._on_engage = on_engage
         self._engaged = False
 
     @property
@@ -54,3 +57,5 @@ class AgentTakeoverController:
         self._session.input.set_audio_enabled(False)
         self._session.output.set_audio_enabled(False)
         logger.info("agent silenced for supervisor takeover (permanent)")
+        if self._on_engage is not None:
+            self._on_engage()

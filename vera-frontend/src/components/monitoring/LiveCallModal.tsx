@@ -261,6 +261,7 @@ export function LiveCallModal({
                   key={`t-${call.id}`}
                   callId={call.id}
                   onCallStatus={onCallStatus}
+                  supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                 />
               </div>
             ) : (

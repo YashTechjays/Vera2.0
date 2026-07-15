@@ -7,6 +7,7 @@ import {
   connectionPhase,
   interveneButtonState,
   isWaitingForCall,
+  intervenerLabel,
   otherIntervenerPresent,
   participantLabel,
   participantMode,
@@ -111,6 +112,14 @@ describe("otherIntervenerPresent", () => {
   })
 })
 
+describe("intervenerLabel", () => {
+  it("returns the intervener's email, or null when none", () => {
+    const intervening = supervisor({ attributes: { "vera.mode": "intervener" } })
+    expect(intervenerLabel([intervening])).toBe("va@tenant.example")
+    expect(intervenerLabel([supervisor()])).toBeNull()
+  })
+})
+
 describe("isWaitingForCall", () => {
   const agent: ParticipantLike = { identity: "x", isAgent: true }
 
@@ -143,7 +152,7 @@ describe("shouldAllowClose", () => {
 })
 
 describe("interveneButtonState", () => {
-  const live: RoomStatus = { phase: "live", otherIntervener: false }
+  const live: RoomStatus = { phase: "live", otherIntervener: false, intervenerLabel: null }
 
   it("hides the button without the permission", () => {
     expect(interveneButtonState(false, live).visible).toBe(false)

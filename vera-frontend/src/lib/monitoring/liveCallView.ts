@@ -39,10 +39,12 @@ export type ParticipantLike = {
   attributes?: Readonly<Record<string, string>>
 }
 
-/** Room state the modal needs from inside LiveKit: call-over (gates closing) and other-intervener (disables Intervene). */
+/** Room state the modal needs from inside LiveKit: call-over (gates closing),
+ *  other-intervener (disables Intervene), and the intervener's label for the transcript. */
 export type RoomStatus = {
   phase: ConnectionPhase
   otherIntervener: boolean
+  intervenerLabel: string | null
 }
 
 export const PARTICIPANT_MODE_BADGE: Record<ParticipantMode, string> = {
@@ -77,6 +79,12 @@ export function agentJoined(participants: ParticipantLike[]): boolean {
 /** Someone ELSE holds the mic — the local user's Intervene action must disable. */
 export function otherIntervenerPresent(participants: ParticipantLike[]): boolean {
   return participants.some((p) => !p.isLocal && participantMode(p) === "intervener")
+}
+
+/** The intervening supervisor's label (their email) for the transcript, or null. */
+export function intervenerLabel(participants: ParticipantLike[]): string | null {
+  const intervener = participants.find((p) => participantMode(p) === "intervener")
+  return intervener ? participantLabel(intervener) : null
 }
 
 /** Connected but the AI agent hasn't entered the room yet. */
