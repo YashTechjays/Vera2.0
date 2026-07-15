@@ -516,6 +516,45 @@ async def test_upload_auto_formats_missing_plus_on_insurance_phone(
         assert answer.value == {"value": "+15550100"}
 
 
+async def test_upload_leaves_already_prefixed_phone_unchanged(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """A number that already has a leading '+' is left exactly as submitted — no
+    reformatting is applied beyond adding a missing '+' (2026-07-15 design doc)."""
+    payload: dict[str, object] = {
+        **INTAKE_PAYLOAD,
+        "insurance_reference_information": {
+            "insurance_provider_name": "Demo Health Plan",
+            "insurance_phone_number": "+15559990000",
+        },
+    }
+    resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, payload)
+    assert resp.status_code == 200, resp.text
+    form_id = UUID(resp.json()["data"]["id"])
+
+    async with tenant_session(rls_sessionmaker, rbac_world.tenant_id) as session:
+        form = (
+            await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15559990000"
+
+        answer = (
+            await session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == form_id,
+                    FieldAnswer.field_path
+                    == "sections.insurance_reference_information.insurance_phone_number",
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15559990000"}
+
+
 async def test_upload_rejects_invalid_phone_even_after_adding_plus(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

@@ -697,6 +697,40 @@ async def test_resolve_auto_formats_missing_plus_on_insurance_phone(
         assert answer.source == "human"
 
 
+async def test_resolve_leaves_already_prefixed_phone_unchanged(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """A number that already has a leading '+' is left exactly as submitted — no
+    reformatting is applied beyond adding a missing '+' (2026-07-15 design doc)."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "+15559990000"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15559990000"
+
+        answer = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == INSURANCE_PHONE,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15559990000"}
+        assert answer.source == "human"
+
+
 async def test_resolve_with_invalid_promoted_phone_returns_422(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
