@@ -1,6 +1,6 @@
-"""The agent pauses on a supervisor takeover and resumes when it ends."""
+"""A supervisor takeover silences the agent permanently — it never resumes."""
 
-from agent_worker.intervention import AgentPauseController, intervener_present
+from agent_worker.intervention import AgentTakeoverController, intervener_present
 
 
 class _FakeAudio:
@@ -30,45 +30,35 @@ def test_intervener_present_detection() -> None:
     assert intervener_present(["intervener"]) is True
 
 
-def test_pause_fires_once_on_rising_edge() -> None:
+def test_engage_silences_the_agent_once() -> None:
     session = _FakeSession()
-    ctl = AgentPauseController(session)
+    ctl = AgentTakeoverController(session)
 
-    ctl.apply(True)
-    assert ctl.paused is True
-    assert session.interrupts == 1
-    assert session.input.calls == [False]
-    assert session.output.calls == [False]
-
-    # Repeated "present" events (a listener joins, an attribute refresh) are no-ops.
-    ctl.apply(True)
+    ctl.engage()
+    assert ctl.engaged is True
     assert session.interrupts == 1
     assert session.input.calls == [False]
     assert session.output.calls == [False]
 
 
-def test_resume_fires_once_on_falling_edge() -> None:
+def test_engage_is_idempotent_and_never_resumes() -> None:
     session = _FakeSession()
-    ctl = AgentPauseController(session)
-    ctl.apply(True)
+    ctl = AgentTakeoverController(session)
 
-    ctl.apply(False)
-    assert ctl.paused is False
-    assert session.input.calls == [False, True]
-    assert session.output.calls == [False, True]
-
-    # A second "absent" event does nothing more.
-    ctl.apply(False)
-    assert session.input.calls == [False, True]
-    assert session.output.calls == [False, True]
-    assert session.interrupts == 1  # never interrupts on resume
+    ctl.engage()
+    # Repeated room events (a listener joins, the supervisor leaves, an attribute
+    # refresh) must never re-interrupt and must never re-enable the agent's audio.
+    ctl.engage()
+    ctl.engage()
+    assert session.interrupts == 1
+    assert session.input.calls == [False]  # never toggled back to True
+    assert session.output.calls == [False]
 
 
-def test_no_action_when_never_intervened() -> None:
+def test_untouched_until_a_supervisor_takes_over() -> None:
     session = _FakeSession()
-    ctl = AgentPauseController(session)
-    ctl.apply(False)
-    assert ctl.paused is False
+    ctl = AgentTakeoverController(session)
+    assert ctl.engaged is False
     assert session.interrupts == 0
     assert session.input.calls == []
     assert session.output.calls == []

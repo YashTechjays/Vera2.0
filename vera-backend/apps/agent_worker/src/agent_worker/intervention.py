@@ -1,10 +1,15 @@
-"""Silence the agent while a supervisor is intervening (a "takeover").
+"""Silence the agent for the rest of the call once a supervisor takes over.
 
 The agent's audio input is pinned to the SIP callee (see main.build_room_input_options),
 so it never hears — and never yields to — a supervisor who intervenes. This watches the
-room for a participant carrying the intervene mode attribute and, on the rising edge,
-cuts the agent off and mutes it; on the falling edge it resumes. Detection is pure and
-unit-tested; the session controls are the framework's own interrupt / audio toggles.
+room for a participant carrying the intervene mode attribute and, the first time one
+appears, cuts the agent off and mutes it.
+
+A takeover is **one-way**: from that point the call continues human-to-human (supervisor
+↔ caller), so the agent never speaks again — it is deliberately NOT un-muted if the
+supervisor later leaves, which would otherwise revive the bot mid-conversation (e.g. on a
+dropped supervisor tab). Detection is pure and unit-tested; the session controls are the
+framework's own interrupt / audio toggles.
 """
 
 import logging
@@ -25,7 +30,7 @@ class _AudioToggle(Protocol):
     def set_audio_enabled(self, enable: bool) -> None: ...
 
 
-class _PausableSession(Protocol):
+class _SilenceableSession(Protocol):
     """The slice of AgentSession this controller drives."""
 
     def interrupt(self, *, force: bool = ...) -> object: ...
@@ -37,30 +42,27 @@ class _PausableSession(Protocol):
     def output(self) -> _AudioToggle: ...
 
 
-class AgentPauseController:
-    """Pause the agent while a supervisor intervenes, resume when they leave.
+class AgentTakeoverController:
+    """Silence the agent permanently the first time a supervisor intervenes.
 
-    Idempotent by design: pause/resume fire only on the transition, so repeated
-    room events (a listener joining, an attribute refresh) never re-trigger them.
+    Idempotent — repeated room events after the first takeover are no-ops, so the
+    agent is silenced (and interrupted) exactly once and never un-muted.
     """
 
-    def __init__(self, session: _PausableSession) -> None:
+    def __init__(self, session: _SilenceableSession) -> None:
         self._session = session
-        self._paused = False
+        self._engaged = False
 
     @property
-    def paused(self) -> bool:
-        return self._paused
+    def engaged(self) -> bool:
+        return self._engaged
 
-    def apply(self, intervener_active: bool) -> None:
-        if intervener_active and not self._paused:
-            self._paused = True
-            self._session.interrupt(force=True)  # cut off any current utterance
-            self._session.input.set_audio_enabled(False)  # stop hearing the call
-            self._session.output.set_audio_enabled(False)  # stop speaking
-            logger.info("agent paused for supervisor intervention")
-        elif not intervener_active and self._paused:
-            self._paused = False
-            self._session.input.set_audio_enabled(True)
-            self._session.output.set_audio_enabled(True)
-            logger.info("agent resumed after supervisor intervention ended")
+    def engage(self) -> None:
+        """Silence the agent, once. Safe to call on every room event."""
+        if self._engaged:
+            return
+        self._engaged = True
+        self._session.interrupt(force=True)  # cut off any current utterance
+        self._session.input.set_audio_enabled(False)  # stop hearing the call
+        self._session.output.set_audio_enabled(False)  # stop speaking
+        logger.info("agent silenced for supervisor takeover (permanent)")
