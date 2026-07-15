@@ -512,7 +512,10 @@ function sendDataToExternalSystem() {
   checkRequiredCellsPresent(sheet);
 
   const finalJsonString = JSON.stringify(finalpayload);
-  Logger.log("Generated Final JSON Payload:\n" + finalJsonString);
+  // PHI-safe: log which sections are populated, never the patient values inside them.
+  Logger.log(
+    "Submitting intake payload — sections: " + Object.keys(dataToSend).join(", "),
+  );
 
   const HOST = props.getProperty(getEnvWiseHost(sheet));
   if (!HOST) {
@@ -615,7 +618,6 @@ function readCellFields(sheet, timeZone, fieldsMap) {
 
   // coverage type based validation
   const cellValue = sheet.getRange("AD19").getValue().toString().trim();
-  console.log("cell value is" + cellValue);
   if (cellValue.toLowerCase() === "pt/spouse".toLowerCase()) {
     let spouse_name = sheet.getRange("J12").getValue();
     let spouse_dob = sheet.getRange("J13").getValue();
@@ -630,7 +632,6 @@ function readCellFields(sheet, timeZone, fieldsMap) {
     if (!spouse_gender) {
       value = value + "(Cell J14) Spouse Partner Gender ";
     }
-    console.log("value is " + value);
     if (value) {
       SpreadsheetApp.getUi().alert(
         `🚨 Required fields are missing! Please fill in the following cells:\n\n${value}`,
@@ -707,7 +708,8 @@ function validateCellValues(jsonKey, value) {
   }
 
   // 2. Perform validation and throw error if it fails
-  Logger.log("json Key & value" + jsonKey + " : " + value);
+  // PHI-safe: log the field being validated, never its value.
+  Logger.log("Validating field: " + jsonKey);
   if (!rule.validator(value)) {
     SpreadsheetApp.getUi().alert(
       `🚨 ${rule.displayName}: ${value} is not valid. Please put the valid information!`,
@@ -1035,15 +1037,16 @@ function initializeProperties() {
       const propertiesJson = tempSheet.getRange("A1").getValue();
 
       if (propertiesJson) {
-        Logger.log(
-          "STEP 2: Found properties JSON. Raw data: " + propertiesJson,
-        );
+        // Credential-safe: this JSON carries real secrets (EXTERNAL_*_API_KEY
+        // bearer tokens) — never log its raw contents or the parsed object,
+        // only that it was found and which property names it carries.
+        Logger.log("STEP 2: Found properties JSON.");
 
         // 2. READ & Parse the properties
         const propertiesToSet = JSON.parse(propertiesJson);
         Logger.log(
-          "STEP 3: Successfully parsed object: " +
-            JSON.stringify(propertiesToSet),
+          "STEP 3: Successfully parsed object with keys: " +
+            Object.keys(propertiesToSet).join(", "),
         );
 
         // 3. SET the properties in the *new* script's Properties Service
