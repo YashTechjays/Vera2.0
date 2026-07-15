@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Loader2, Radio } from "lucide-react"
+import { Loader2, PhoneOff, Radio } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -10,6 +10,11 @@ import { ConnectionState } from "livekit-client"
 
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
+import { terminalStatusMessage } from "@/lib/api/callEvents"
+import {
+  LIVE_CALL_ACTIVITY_EVENT,
+  LIVE_CALL_ACTIVITY_INTERVAL_MS,
+} from "@/lib/auth/idle"
 
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.Disconnected]: "Disconnected",
@@ -17,6 +22,22 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   [ConnectionState.Connected]: "Connected",
   [ConnectionState.Reconnecting]: "Reconnecting…",
   [ConnectionState.SignalReconnecting]: "Reconnecting…",
+}
+
+// While connected to the room, periodically signal the IdleManager that the user
+// is active — listening to a live call needs no mouse/keyboard, and without this
+// the session idle-expires mid-call and the logout tears the supervisor out of
+// the room. Renders nothing; must live inside <LiveKitRoom>.
+function LiveActivityBeacon() {
+  const state = useConnectionState()
+  useEffect(() => {
+    if (state !== ConnectionState.Connected) return
+    const beat = () => window.dispatchEvent(new Event(LIVE_CALL_ACTIVITY_EVENT))
+    beat()
+    const id = window.setInterval(beat, LIVE_CALL_ACTIVITY_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [state])
+  return null
 }
 
 function RoomState() {
@@ -57,12 +78,22 @@ function RoomState() {
 export function LiveCallRoom({
   callId,
   microphone = false,
+  ended = false,
+  endedStatus = null,
 }: {
   callId: string
   /** Enable the local mic (intervene only). Watch views must leave this off —
    *  a viewer must never be audible in the room, and requesting mic access
    *  fails outright where getUserMedia is blocked (e.g. incognito). */
   microphone?: boolean
+  /** The call reached a terminal status (from the events stream). Shows the
+   *  ended banner and leaves/never joins the room — the room can outlive the
+   *  call while a supervisor sits in it, so room connection state alone would
+   *  keep reading "Connected" after the callee hung up. */
+  ended?: boolean
+  /** The terminal status itself, for status-specific banner copy — a busy or
+   *  unanswered dial reads "Call failed — …", not "Call ended". */
+  endedStatus?: string | null
 }) {
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -70,6 +101,7 @@ export function LiveCallRoom({
   const [micFailed, setMicFailed] = useState(false)
 
   useEffect(() => {
+    if (ended) return
     let cancelled = false
     getJoinToken(callId, microphone)
       .then((res) => {
@@ -84,8 +116,16 @@ export function LiveCallRoom({
     return () => {
       cancelled = true
     }
-  }, [callId, microphone])
+  }, [callId, microphone, ended])
 
+  if (ended) {
+    return (
+      <div className="flex flex-1 items-center gap-2 p-4 text-sm">
+        <PhoneOff className="size-4 text-red-500" />
+        <span className="font-medium text-foreground">{terminalStatusMessage(endedStatus)}</span>
+      </div>
+    )
+  }
   if (error) {
     return <div className="flex flex-1 items-center justify-center p-6 text-sm text-destructive">{error}</div>
   }
@@ -113,6 +153,7 @@ export function LiveCallRoom({
           Microphone unavailable — listening only.
         </p>
       )}
+      <LiveActivityBeacon />
       <RoomState />
       <RoomAudioRenderer />
     </LiveKitRoom>

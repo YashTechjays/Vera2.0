@@ -43,6 +43,8 @@ class CallStatus(enum.StrEnum):
     FAILED = "failed"
     NO_ANSWER = "no_answer"
     BUSY = "busy"
+    # User-requested end (End Call in Live Monitoring); never auto-retried.
+    CANCELED = "canceled"
 
 
 class CallEventType(enum.StrEnum):

@@ -1,6 +1,7 @@
 """Tests for the cascade agents — the chat persona (with PHI-wall node overrides) and
 the IVR navigator (a plain agent, no phiwall), plus the metadata-driven selector."""
 
+import logging
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
@@ -15,7 +16,9 @@ from agent_worker.agent import VeraAgent, build_agent
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
+    _spell_id_tokens,
     _strip_silence_token,
+    _tts_spoken_text,
     ivr_turn_handling,
 )
 from agent_worker.ivr_prompt import SILENCE_TOKEN
@@ -243,6 +246,56 @@ async def test_press_keypad_rejects_invalid_keys_without_echoing_them() -> None:
         assert ch not in result
 
 
+@pytest.mark.asyncio
+async def test_press_keypad_reports_a_successful_press_to_on_keypress() -> None:
+    # The transcript needs evidence of the action: a successful press reports the digits
+    # actually sent (normalized) to the injected callback, which feeds the live transcript.
+    pressed: list[str] = []
+    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    participant = _FakeParticipant()
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        await _press(agent, " 3 ")
+    assert pressed == ["3"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("digits", ["", "   ", "17x4"])
+async def test_press_keypad_does_not_report_a_press_that_sent_nothing(digits: str) -> None:
+    # Empty and invalid sequences emit no tones — nothing to evidence in the transcript.
+    pressed: list[str] = []
+    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    participant = _FakeParticipant()
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        await _press(agent, digits)
+    assert pressed == []
+
+
+@pytest.mark.asyncio
+async def test_press_keypad_does_not_report_a_failed_press() -> None:
+    # A transport failure means no tones reached the line — reporting it would fabricate
+    # evidence of an action that never happened.
+    pressed: list[str] = []
+    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    participant = _FakeParticipant(raise_on_publish=True)
+    with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
+        await _press(agent, "3")
+    assert pressed == []
+
+
+def test_build_agent_passes_on_keypress_to_the_navigator() -> None:
+    def _cb(digits: str) -> None:  # pragma: no cover - never fired here
+        pass
+
+    agent = build_agent(
+        {"enable_ivr_navigation": True},
+        boundary=PassthroughPHIBoundary(),
+        session_id="s1",
+        on_keypress=_cb,
+    )
+    assert isinstance(agent, IvrNavigatorAgent)
+    assert agent._on_keypress is _cb
+
+
 async def _astream(*chunks: str) -> AsyncIterator[str]:
     for chunk in chunks:
         yield chunk
@@ -288,6 +341,70 @@ async def test_strip_silence_token_label_is_word_boundaried() -> None:
     )
 
 
+def _spelled(token: str) -> str:
+    """The expected rendering of an ID token: one <spell> around the whole token, hyphens dropped.
+
+    Cartesia's documented usage — Sonic paces the characters itself; per-character tags with
+    hard <break>s between them make the readout robotic.
+    """
+    return f"<spell>{''.join(char for char in token if char.isalnum())}</spell>"
+
+
+def test_spell_id_tokens_spells_a_numeric_member_id() -> None:
+    # A bare ID would be number-normalized by Cartesia (mis-heard by the payer IVR); the whole
+    # token is wrapped in a single <spell> so Sonic reads it digit by digit at natural pace.
+    assert _spell_id_tokens("200236789") == _spelled("200236789")
+
+
+def test_spell_id_tokens_spells_an_alphanumeric_member_id() -> None:
+    # "POL-661522" must be read "P O L 6 6 1 5 2 2" (per character), never voiced as the word "POL".
+    assert _spell_id_tokens("POL-661522") == _spelled("POL-661522")
+    # the hyphen is dropped (not spoken as "dash")
+    assert "-" not in _spell_id_tokens("POL-661522")
+
+
+def test_spell_id_tokens_spells_a_ten_digit_npi() -> None:
+    assert _spell_id_tokens("1234567890") == _spelled("1234567890")
+
+
+def test_spell_id_tokens_handles_hyphenated_digit_groups() -> None:
+    assert _spell_id_tokens("200-236-789") == _spelled("200236789")
+
+
+def test_spell_id_tokens_leaves_short_runs_and_words_untouched() -> None:
+    # Menu choices, 2-digit answers, a 4-digit year in a spoken DOB, and plain words (even a lone
+    # capitalized word) stay natural speech — only ID-like tokens are spelled.
+    for text in ("press 2", "Medical", "Provider", "Yes", "June 20, 1965", "option 22"):
+        assert _spell_id_tokens(text) == text
+
+
+def test_spell_id_tokens_leaves_already_spaced_digits_alone() -> None:
+    # If the model emits the ID already spaced, each digit is its own short token — left as-is
+    # (Cartesia reads space-separated digits individually anyway).
+    assert _spell_id_tokens("2 0 0 2 3 6 7 8 9") == "2 0 0 2 3 6 7 8 9"
+
+
+def test_spell_id_tokens_rewrites_only_the_id_inside_a_sentence() -> None:
+    assert (
+        _spell_id_tokens("the member ID is POL-661522 okay")
+        == f"the member ID is {_spelled('POL-661522')} okay"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tts_spoken_text_strips_silence_then_spells_ids() -> None:
+    # The TTS path composes both transforms: sentinel gone, ID spelled.
+    assert await _drain(_tts_spoken_text(_astream("POL-661522"))) == _spelled("POL-661522")
+    assert await _drain(_tts_spoken_text(_astream(SILENCE_TOKEN))) == ""  # silent turn: no sound
+
+
+@pytest.mark.asyncio
+async def test_transcription_path_keeps_plain_digits() -> None:
+    # transcription_node uses _strip_silence_token only, so the live transcript shows the plain
+    # digits — never the <spell>/<break> markup the TTS path injects.
+    assert await _drain(_strip_silence_token(_astream("200236789"))) == "200236789"
+
+
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     boundary = PassthroughPHIBoundary()
     nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")
@@ -300,21 +417,37 @@ def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     )
 
 
+def test_build_agent_warns_on_agent_context_without_ivr_flag(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Symmetric with the ivr_playbook warning: agent_context without the flag is ignored (the chat
+    # persona doesn't read it), and we log that it was dropped — never the values themselves.
+    with caplog.at_level(logging.WARNING):
+        agent = build_agent(
+            {"agent_context": {"member_id": "M1"}},
+            boundary=PassthroughPHIBoundary(),
+            session_id="s1",
+        )
+    assert isinstance(agent, VeraAgent)
+    assert "agent_context present without enable_ivr_navigation" in caplog.text
+    assert "M1" not in caplog.text  # never log the values
+
+
 def test_build_agent_playbook_specializes_but_never_selects() -> None:
     boundary = PassthroughPHIBoundary()
     # With the flag on, the playbook specializes the navigator's instructions.
     nav = build_agent(
-        {"enable_ivr_navigation": True, "ivr_playbook": {"rep_keyword": "Advocate"}},
+        {"enable_ivr_navigation": True, "ivr_playbook": {"provider_subflows": "Press 3"}},
         boundary=boundary,
         session_id="s1",
     )
     assert isinstance(nav, IvrNavigatorAgent)
-    assert "<rep_keyword>Advocate</rep_keyword>" in nav.instructions
+    assert "<provider_subflows>Press 3</provider_subflows>" in nav.instructions
     # The flag is the sole selector: a playbook without it — even with the flag explicitly
     # false — never overrides the opt-out into a silent-on-connect navigator.
     for meta in (
-        {"ivr_playbook": {"rep_keyword": "Advocate"}},
-        {"enable_ivr_navigation": False, "ivr_playbook": {"rep_keyword": "Advocate"}},
+        {"ivr_playbook": {"provider_subflows": "Press 3"}},
+        {"enable_ivr_navigation": False, "ivr_playbook": {"provider_subflows": "Press 3"}},
     ):
         assert isinstance(build_agent(meta, boundary=boundary, session_id="s1"), VeraAgent)
     # A malformed playbook is fail-safe: the navigator still runs, just generic.

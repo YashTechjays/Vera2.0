@@ -4,6 +4,7 @@ Every endpoint is exercised against a live RLS-enforcing Postgres
 connection with a FakeLiveKit injected in the authz_app fixture (see conftest.py).
 """
 
+import json
 from collections.abc import AsyncGenerator
 from uuid import UUID, uuid4
 
@@ -12,12 +13,20 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
+from control_plane.api.v1.calls import _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
+from tests.integration.control_plane.conftest import (
+    FakeLiveKit,
+    RBACWorld,
+    _MemCallStreamStore,
+    seed_call,
+)
+from vera_core.call_stream import CallStreamService
 from vera_core.db import uuid7
-from vera_core.models import AppUser, AuditLog, Call, InsuranceProvider, PatientForm
+from vera_core.db.rls import tenant_session
+from vera_core.models import AppUser, AuditLog, Call, PatientForm, Transcript
 from vera_core.models.authoring import FormSchema, SchemaVersion
-from vera_core.models.enums import InsuranceType
-from vera_core.observability.correlation import parse_room_name
+from vera_core.models.enums import CallStatus, InsuranceType
+from vera_core.observability.correlation import parse_room_name, room_name_for_call
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -147,25 +156,24 @@ async def test_list_calls_empty_then_populated(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    # create a call
-    resp = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert resp.status_code == 200, resp.text
-    summary = resp.json()["data"]
-    assert summary["status"] == "initiated"
-    assert parse_room_name(summary["room_name"]) is not None
 
-    # it now appears in the list
     lst = await client.get(
         "/api/v1/calls",
         headers=_auth(rbac_world.admin_token),
     )
     assert lst.status_code == 200, lst.text
-    assert any(c["id"] == summary["id"] for c in lst.json()["data"])
+    row = next((c for c in lst.json()["data"] if c["id"] == str(call_id)), None)
+    assert row is not None
+    assert row["status"] == "initiated"
+    assert parse_room_name(row["room_name"]) is not None
 
 
 @pytest.mark.asyncio
@@ -174,15 +182,16 @@ async def test_join_token_returns_room_scoped_token(
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
-    room = created.json()["data"]["room_name"]
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
 
     tok = await client.get(
         f"/api/v1/calls/{call_id}/join-token",
@@ -202,98 +211,16 @@ async def test_join_token_returns_room_scoped_token(
     assert talk.status_code == 200, talk.text
     assert fake_livekit.minted[-1][2] is True
 
-
-@pytest.mark.asyncio
-async def test_create_call_unknown_form_returns_404(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-) -> None:
-    resp = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(uuid4())},
+    # Owner joins are audited too, and the event names the mode: the watch-only
+    # mint above is a listen-only join; the publish-capable one audits as the
+    # (feature-pending) intervene join.
+    result = await admin_session.execute(
+        select(AuditLog)
+        .where(AuditLog.resource_type == "call", AuditLog.resource_id == str(call_id))
+        .order_by(AuditLog.created_at)
     )
-    assert resp.status_code == 404, resp.text
-
-
-@pytest.mark.asyncio
-async def test_create_call_unknown_provider_returns_404(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-    seeded_form_id: UUID,
-) -> None:
-    # Checked before flush so an unknown id is a 404, not an FK violation → 500.
-    resp = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id), "insurance_provider_id": str(uuid4())},
-    )
-    assert resp.status_code == 404, resp.text
-
-
-@pytest.mark.asyncio
-async def test_create_call_inactive_provider_returns_404(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-    seeded_form_id: UUID,
-    admin_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    # An inactive provider must not start a call (nor let its playbook steer one) — the
-    # existence check requires status = active, so it 404s like an unknown id.
-    provider_id = uuid7()
-    async with admin_sessionmaker() as s, s.begin():
-        s.add(
-            InsuranceProvider(id=provider_id, name=f"Inactive {provider_id.hex}", status="inactive")
-        )
-    try:
-        resp = await client.post(
-            "/api/v1/calls",
-            headers=_auth(rbac_world.admin_token),
-            json={"form_id": str(seeded_form_id), "insurance_provider_id": str(provider_id)},
-        )
-        assert resp.status_code == 404, resp.text
-    finally:
-        async with admin_sessionmaker() as s, s.begin():
-            await s.execute(
-                text("DELETE FROM insurance_provider WHERE id = :i").bindparams(i=provider_id)
-            )
-
-
-@pytest.mark.asyncio
-async def test_create_call_nests_persona_tweak_in_dispatch_metadata(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-    seeded_form_id: UUID,
-    fake_livekit: FakeLiveKit,
-    admin_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """The tweak rides under its own metadata key so sibling keys (enable_ivr_navigation, …)
-    never trip the worker's extra="forbid" PersonaTweak validation and silently drop it."""
-    async with admin_sessionmaker() as s, s.begin():
-        await s.execute(
-            text("UPDATE tenant SET persona_tweak = CAST(:p AS jsonb) WHERE id = :t").bindparams(
-                p='{"greeting": "Hello from Acme."}', t=rbac_world.tenant_id
-            )
-        )
-    try:
-        resp = await client.post(
-            "/api/v1/calls",
-            headers=_auth(rbac_world.admin_token),
-            json={"form_id": str(seeded_form_id), "enable_ivr_navigation": True},
-        )
-        assert resp.status_code == 200, resp.text
-        meta = fake_livekit.dispatch_metadata[-1]
-        assert meta is not None
-        assert meta["persona_tweak"] == {"greeting": "Hello from Acme."}
-        assert meta["enable_ivr_navigation"] is True
-    finally:
-        # persona_tweak is JSONB NOT NULL; the untouched default is the empty object.
-        async with admin_sessionmaker() as s, s.begin():
-            await s.execute(
-                text(
-                    "UPDATE tenant SET persona_tweak = CAST('{}' AS jsonb) WHERE id = :t"
-                ).bindparams(t=rbac_world.tenant_id)
-            )
+    events = [row.event_type for row in result.scalars().all()]
+    assert events == ["call.listen-only.join", "call.intervene.join"]
 
 
 @pytest.mark.asyncio
@@ -319,23 +246,43 @@ async def test_supervisor_token_can_list_calls(
 
 
 @pytest.mark.asyncio
-async def test_calls_require_auth(
+async def test_virtual_assistant_can_list_and_publish_calls(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """All three endpoints deny unauthenticated callers."""
+    """VA now holds calls:read/calls:publish (Live Monitoring page access)."""
+    listed = await client.get("/api/v1/calls", headers=_auth(rbac_world.virtual_assistant_token))
+    assert listed.status_code == 200, listed.text
+
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.virtual_assistant_id,
+    )
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish",
+        headers=_auth(rbac_world.virtual_assistant_token),
+    )
+    assert published.status_code == 200, published.text
+
+
+@pytest.mark.asyncio
+async def test_calls_require_auth(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    """All endpoints deny unauthenticated callers."""
     resp_list = await client.get("/api/v1/calls")
     assert resp_list.status_code == 401
 
-    resp_create = await client.post(
-        "/api/v1/calls",
-        json={"form_id": str(seeded_form_id)},
-    )
-    assert resp_create.status_code == 401
-
     resp_token = await client.get(f"/api/v1/calls/{uuid4()}/join-token")
     assert resp_token.status_code == 401
+
+    resp_events = await client.get(f"/api/v1/calls/{uuid4()}/events")
+    assert resp_events.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -344,34 +291,17 @@ async def test_new_call_is_private_by_default(
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert created.status_code == 200, created.text
-    call_id = UUID(created.json()["data"]["id"])
     row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
     assert row.published is False
     assert row.published_at is None
-
-
-@pytest.mark.asyncio
-async def test_create_call_summary_reports_owner_and_private(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,
-    seeded_form_id: UUID,
-) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
-    )
-    assert created.status_code == 200, created.text
-    data = created.json()["data"]
-    assert data["published"] is False
-    assert data["is_owner"] is True
 
 
 @pytest.mark.asyncio
@@ -380,28 +310,29 @@ async def test_list_scopes_to_owner_or_published(
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
+    call_id_str = str(call_id)
 
     # A non-owner (supervisor) does NOT see the admin's private call.
     before = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
-    assert all(c["id"] != call_id for c in before.json()["data"])
+    assert all(c["id"] != call_id_str for c in before.json()["data"])
 
     # Flip published directly in the DB (publish endpoint is Task 6).
-    await admin_session.execute(update(Call).where(Call.id == UUID(call_id)).values(published=True))
+    await admin_session.execute(update(Call).where(Call.id == call_id).values(published=True))
     await admin_session.commit()
 
     after = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
-    assert any(c["id"] == call_id for c in after.json()["data"])
+    assert any(c["id"] == call_id_str for c in after.json()["data"])
     # And the owner still sees their own call.
     owner = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
-    assert any(c["id"] == call_id for c in owner.json()["data"])
+    assert any(c["id"] == call_id_str for c in owner.json()["data"])
 
 
 @pytest.mark.asyncio
@@ -437,27 +368,16 @@ async def test_ownerless_call_is_tenant_visible_and_joinable(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
-    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A call with no owner (legacy dispatcher row) must not become invisible:
+    """A call with no owner (ownerless dispatcher row) must not become invisible:
     it is tenant-visible and joinable like a published call, but unpublishable
     (there is no owner to publish it)."""
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
-    )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
-
-    # Simulate a pre-ownership dispatcher call: strip the owner in the DB.
-    await admin_session.execute(
-        update(Call).where(Call.id == UUID(call_id)).values(initiated_by_id=None)
-    )
-    await admin_session.commit()
+    call_id = await seed_call(admin_sessionmaker, rbac_world.tenant_id, seeded_form_id)
+    call_id_str = str(call_id)
 
     listed = await client.get("/api/v1/calls", headers=_auth(rbac_world.supervisor_token))
-    row = next((c for c in listed.json()["data"] if c["id"] == call_id), None)
+    row = next((c for c in listed.json()["data"] if c["id"] == call_id_str), None)
     assert row is not None
     assert row["is_owner"] is False
     assert row["published"] is False
@@ -479,14 +399,14 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
 
     # Non-owner with calls:publish (supervisor) cannot publish someone else's call.
     forbidden = await client.post(
@@ -503,7 +423,7 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     async def publish_audit_rows() -> list[AuditLog]:
         result = await admin_session.execute(
             select(AuditLog).where(
-                AuditLog.event_type == "call.publish", AuditLog.resource_id == call_id
+                AuditLog.event_type == "call.publish", AuditLog.resource_id == str(call_id)
             )
         )
         return list(result.scalars().all())
@@ -534,14 +454,14 @@ async def test_join_token_gated_and_audited_for_non_owner(
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
 
     # Non-owner on a PRIVATE call: 404 (existence not revealed).
     private = await client.get(
@@ -564,27 +484,27 @@ async def test_join_token_gated_and_audited_for_non_owner(
 
     result = await admin_session.execute(
         select(AuditLog).where(
-            AuditLog.event_type == "call.intervene.join", AuditLog.resource_id == call_id
+            AuditLog.event_type == "call.listen-only.join", AuditLog.resource_id == str(call_id)
         )
     )
     assert len(result.scalars().all()) == 1
 
 
 @pytest.mark.asyncio
-async def test_owner_revokes_intervener_access(
+async def test_owner_revokes_viewer_access(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     fake_livekit: FakeLiveKit,
     admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
     published = await client.post(
         f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
     )
@@ -623,7 +543,7 @@ async def test_owner_revokes_intervener_access(
 
     result = await admin_session.execute(
         select(AuditLog).where(
-            AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
+            AuditLog.event_type == "call.access.revoke", AuditLog.resource_id == str(call_id)
         )
     )
     assert len(result.scalars().all()) == 1
@@ -633,32 +553,32 @@ async def test_owner_revokes_intervener_access(
         f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
     )
     assert denied.status_code == 404, denied.text
-    row = (await admin_session.execute(select(Call).where(Call.id == UUID(call_id)))).scalar_one()
+    row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
     assert row.published is True
     assert row.revoked_user_ids == [str(target)]
 
 
 @pytest.mark.asyncio
-async def test_owner_revoke_of_departed_intervener_is_noop_but_audited(
+async def test_owner_revoke_of_departed_viewer_is_noop_but_audited(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     fake_livekit: FakeLiveKit,
     admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    created = await client.post(
-        "/api/v1/calls",
-        headers=_auth(rbac_world.admin_token),
-        json={"form_id": str(seeded_form_id)},
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
     )
-    assert created.status_code == 200, created.text
-    call_id = created.json()["data"]["id"]
     published = await client.post(
         f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
     )
     assert published.status_code == 200, published.text
 
-    # The intervener already left / never joined — LiveKit reports not_found.
+    # The viewer already left / never joined — LiveKit reports not_found.
     fake_livekit.remove_not_found = True
 
     revoked = await client.post(
@@ -670,7 +590,552 @@ async def test_owner_revoke_of_departed_intervener_is_noop_but_audited(
 
     result = await admin_session.execute(
         select(AuditLog).where(
-            AuditLog.event_type == "call.intervene.revoke", AuditLog.resource_id == call_id
+            AuditLog.event_type == "call.access.revoke", AuditLog.resource_id == str(call_id)
         )
     )
     assert len(result.scalars().all()) == 1
+
+
+# ---------------------------------------------------------------------------
+# GET /calls/{call_id}/events — live envelope SSE
+#
+# These tests seed the Call row directly via seed_call rather than through
+# POST /calls: that manual-creation endpoint has been removed.
+# ---------------------------------------------------------------------------
+
+
+async def _events_audit_rows(
+    admin_session: AsyncSession, call_id: UUID, *, decision: str
+) -> list[AuditLog]:
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.event_type == "phi.access",
+            AuditLog.resource_type == "call_events",
+            AuditLog.resource_id == str(call_id),
+            AuditLog.decision == decision,
+        )
+    )
+    return list(result.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_call_events_streams_envelope_frames_for_owner(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+) -> None:
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    await call_stream_service.publish_turn(room, "agent", "hello", ts=1)
+    await call_stream_service.end(room)
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["x-accel-buffering"] == "no"
+
+    # Parse the body as SSE frames: each is "id: <entry>\ndata: <json>" and the
+    # data JSON is a full CallStreamEvent envelope.
+    frames = [f for f in resp.text.split("\n\n") if f]
+    assert frames, resp.text
+    id_line, data_line = frames[0].split("\n")
+    assert id_line.startswith("id: ")
+    assert data_line.startswith("data: ")
+    envelope = json.loads(data_line.removeprefix("data: "))
+    assert envelope["type"] == "transcript"
+    assert envelope["data"] == {"role": "agent", "source": "bot", "text": "hello"}
+    assert isinstance(envelope["ts"], int)
+
+    # The disclosure is audited with decision=allow.
+    assert len(await _events_audit_rows(admin_session, call_id, decision="allow")) == 1
+
+
+@pytest.mark.asyncio
+async def test_call_events_visible_call_without_permission_403_and_audited_deny(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A VISIBLE (ownerless) call requested without calls:read is a 403 — not a
+    404, since visibility already passed — and the deny is audited."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=None,  # ownerless → tenant-visible, like join-token
+    )
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.norole_token)
+    )
+    assert resp.status_code == 403, resp.text
+    assert len(await _events_audit_rows(admin_session, call_id, decision="deny")) == 1
+
+
+@pytest.mark.asyncio
+async def test_call_events_hidden_for_private_call_non_owner(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_call_events_unknown_call_returns_404(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    resp = await client.get(
+        f"/api/v1/calls/{uuid4()}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_call_events_terminal_call_no_stream_serves_db_transcript_then_closes(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+) -> None:
+    """Task 16 deletes the stream at closeout — for a terminal call with no live
+    stream, the DB Transcript rows are the record. The endpoint must replay them
+    as the same envelope frame shape, then close (no hang)."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert await call_stream_service.exists(room) is False  # no stream for this room
+
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        session.add_all(
+            [
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=call_id,
+                    seq=0,
+                    source="bot",
+                    role="",  # blank role -> falls back to source-derived (bot -> agent)
+                    message="Hello, how can I help?",
+                    spoke_at=None,
+                ),
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=call_id,
+                    seq=1,
+                    source="rep",
+                    role="user",  # explicit role wins over source-derived
+                    message="I need a claim status.",
+                    spoke_at=None,
+                ),
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=call_id,
+                    seq=2,
+                    source="bot",
+                    role="dtmf",  # a keypad press: bot-attributed, non-speech role
+                    message="3",
+                    spoke_at=None,
+                ),
+            ]
+        )
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    frames = [f for f in resp.text.split("\n\n") if f]
+    assert len(frames) == 4, resp.text
+
+    id0, data0 = frames[0].split("\n")
+    assert id0 == "id: db-0"
+    envelope0 = json.loads(data0.removeprefix("data: "))
+    assert envelope0 == {
+        "type": "transcript",
+        "data": {"role": "agent", "source": "bot", "text": "Hello, how can I help?"},
+        "ts": 0,
+    }
+
+    id1, data1 = frames[1].split("\n")
+    assert id1 == "id: db-1"
+    envelope1 = json.loads(data1.removeprefix("data: "))
+    assert envelope1 == {
+        "type": "transcript",
+        "data": {"role": "user", "source": "rep", "text": "I need a claim status."},
+        "ts": 0,
+    }
+
+    id2, data2 = frames[2].split("\n")
+    assert id2 == "id: db-2"
+    envelope2 = json.loads(data2.removeprefix("data: "))
+    assert envelope2 == {
+        "type": "transcript",
+        "data": {"role": "dtmf", "source": "bot", "text": "3"},
+        "ts": 0,
+    }
+
+    _id3, data3 = frames[3].split("\n")
+    envelope3 = json.loads(data3.removeprefix("data: "))
+    assert envelope3["type"] == "call_status"
+    assert envelope3["data"] == {"status": CallStatus.COMPLETED.value}
+
+
+@pytest.mark.asyncio
+async def test_call_events_live_call_no_stream_terminates_at_deadline(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live (non-terminal) call whose stream never appears must not pin the SSE
+    connection open forever — bound the tail with a tiny deadline for the test."""
+    monkeypatch.setattr("control_plane.api.v1.calls._LIVE_TAIL_FIRST_ENTRY_DEADLINE_S", 0.05)
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert await call_stream_service.exists(room) is False
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events",
+        headers=_auth(rbac_world.admin_token),
+        timeout=5.0,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    # The stream never appeared, so no frames are emitted and the connection closes.
+    assert resp.text == ""
+
+
+@pytest.mark.asyncio
+async def test_call_events_stream_exists_branch_still_passes_the_deadline(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+    call_stream_store: _MemCallStreamStore,
+) -> None:
+    """Even when EXISTS said the stream is there, the tail must carry the
+    first-entry deadline: the finalizer can delete the stream between the EXISTS
+    check and the tail's first read (every live->terminal transition opens this
+    window), and a None deadline on a now-vanished, never-seen stream would hang
+    the SSE forever. Harmless for a genuinely live stream — it always has >= 1
+    entry, so the replay-from-0 first read marks it seen before the deadline can
+    ever fire."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    await call_stream_service.publish_turn(room, "agent", "hello", ts=1)
+    await call_stream_service.end(room)
+    assert await call_stream_service.exists(room) is True
+
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+
+    deadlines = [d for r, d in call_stream_store.read_deadlines if r == room]
+    assert deadlines == [_LIVE_TAIL_FIRST_ENTRY_DEADLINE_S]
+
+
+# ---------------------------------------------------------------------------
+# POST /calls/{call_id}/end — tear the LiveKit room down; the worker's
+# call.ended event drives the actual closeout pipeline.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_end_call_owner_deletes_room_and_audits(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+    )
+
+    resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert room in fake_livekit.deleted
+
+    rows = (
+        await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.end", AuditLog.resource_id == str(call_id)
+            )
+        )
+    ).scalars()
+    assert len(list(rows)) == 1
+
+    # The endpoint never writes status — the worker's call.ended event does.
+    row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+    assert row.current_status == "active"
+
+
+@pytest.mark.asyncio
+async def test_end_call_visibility_matches_join_token(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+    )
+
+    # Non-owner on a PRIVATE call: 404 (existence not revealed).
+    private = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert private.status_code == 404, private.text
+
+    # No-permission user: 403.
+    norole = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.norole_token)
+    )
+    assert norole.status_code == 403, norole.text
+
+    # Unknown call: 404.
+    unknown = await client.post(
+        f"/api/v1/calls/{uuid7()}/end", headers=_auth(rbac_world.admin_token)
+    )
+    assert unknown.status_code == 404, unknown.text
+
+    # Published → the supervisor (non-owner) may end it, and the audit row carries
+    # the owner id so the disclosure trail shows whose call was ended.
+    published = await client.post(
+        f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
+    )
+    assert published.status_code == 200, published.text
+    ended = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert ended.status_code == 200, ended.text
+    audit = (
+        (
+            await admin_session.execute(
+                select(AuditLog).where(
+                    AuditLog.event_type == "call.end", AuditLog.resource_id == str(call_id)
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert audit.detail == {"owner_id": str(rbac_world.admin_id), "phase": "live"}
+
+
+@pytest.mark.asyncio
+async def test_end_call_pre_answer_cancels_synchronously(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    call_stream_store: _MemCallStreamStore,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """End Call while still dialing: no worker session exists, so no call.ended
+    will ever arrive — the endpoint must close the call itself, as CANCELED,
+    and resolve the form through the post-call pipeline into EXCEPTION_REVIEW
+    (user intent: parked for a human, never auto-redialed)."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    # Mirror the dispatcher: a form with a live call is IN_CALL.
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+        form_row = (
+            await s.execute(select(PatientForm).where(PatientForm.id == seeded_form_id))
+        ).scalar_one()
+        form_row.status = "in_call"
+
+    resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+
+    row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+    assert row.current_status == "canceled"
+    assert row.end_requested_by_id == rbac_world.admin_id
+    assert row.ended_at is not None
+    assert room_name_for_call(rbac_world.tenant_id, call_id) in fake_livekit.deleted
+
+    form = (
+        await admin_session.execute(select(PatientForm).where(PatientForm.id == seeded_form_id))
+    ).scalar_one()
+    assert form.status == "exception_review"  # parked for a human; NOT re-queued
+
+    audit = (
+        (
+            await admin_session.execute(
+                select(AuditLog).where(
+                    AuditLog.event_type == "call.end", AuditLog.resource_id == str(call_id)
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert audit.detail["phase"] == "pre_answer"
+
+    # A supervisor already tailing the live SSE learns the cancel: the terminal
+    # status rides the per-call event stream (the worker never publishes for a
+    # pre-answer call — no session ever existed). Asserted via the fake's
+    # delete-surviving log — the finalizer deletes the stream right after.
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert (room, "canceled") in call_stream_store.status_log
+
+
+@pytest.mark.asyncio
+async def test_end_call_live_stamps_intent_and_defers_to_worker(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """End Call on an answered call: intent is stamped durably (the sweeper
+    closes as CANCELED, not FAILED, if the worker's call.ended never lands),
+    but the status write is left to the worker-event consumer."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+    )
+    resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+
+    row = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+    assert row.current_status == "active"  # the worker's call.ended owns closeout
+    assert row.end_requested_by_id == rbac_world.admin_id
+    assert room_name_for_call(rbac_world.tenant_id, call_id) in fake_livekit.deleted
+
+
+@pytest.mark.asyncio
+async def test_end_call_denied_for_revoked_user(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+        published=True,
+    )
+    target = (
+        await admin_session.execute(
+            select(AppUser.id).where(
+                AppUser.email == "supervisor@test.example",
+                AppUser.tenant_id == rbac_world.tenant_id,
+            )
+        )
+    ).scalar_one()
+    revoked = await client.post(
+        f"/api/v1/calls/{call_id}/revoke-access",
+        headers=_auth(rbac_world.admin_token),
+        json={"target_user_id": str(target)},
+    )
+    assert revoked.status_code == 200, revoked.text
+
+    denied = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert denied.status_code == 404, denied.text
+
+
+@pytest.mark.asyncio
+async def test_end_call_terminal_is_idempotent_noop(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="completed",
+    )
+
+    resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+
+    # Already closed out: no room teardown, no audit row.
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    assert room not in fake_livekit.deleted
+    rows = (
+        await admin_session.execute(
+            select(AuditLog).where(
+                AuditLog.event_type == "call.end", AuditLog.resource_id == str(call_id)
+            )
+        )
+    ).scalars()
+    assert list(rows) == []

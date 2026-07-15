@@ -26,6 +26,12 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid4())}
 
 
+def _extract_token(invite_resp: httpx.Response) -> str:
+    """Extract the raw invite token from the invite_url returned by POST /users/invitations."""
+    invite_url: str = invite_resp.json()["data"]["invite_url"]
+    return invite_url.split("token=", 1)[1]
+
+
 # --- auth/me (session hydration, no permission gate) -------------------------
 
 
@@ -115,6 +121,18 @@ async def test_invite_records_inviter_and_role_grant_provenance(
     assert granted_at is not None
 
 
+async def test_invite_rejects_invalid_email(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """Sprint-2 #11 — invalid email address must be rejected with 422."""
+    resp = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "not-an-email", "send_email": False},
+    )
+    assert resp.status_code == 422, resp.text
+
+
 async def test_invite_link_only_skips_email(
     client: httpx.AsyncClient, rbac_world: RBACWorld, email_sender: InMemoryEmailSender
 ) -> None:
@@ -142,7 +160,7 @@ async def test_invite_then_accept_activates_user(
     )
     assert invite.status_code == 200, invite.text
     user_id = invite.json()["data"]["user_id"]
-    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    token = _extract_token(invite)
 
     accept = await client.post(
         f"/api/v1/tenants/{tid}/auth/invitations/accept",
@@ -173,7 +191,7 @@ async def test_accept_is_single_use(client: httpx.AsyncClient, rbac_world: RBACW
         headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"email": "once@test.example", "send_email": False},
     )
-    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    token = _extract_token(invite)
     first = await client.post(
         f"/api/v1/tenants/{tid}/auth/invitations/accept",
         json={"token": token, "password": "a-strong-password"},
@@ -207,6 +225,109 @@ async def test_deactivate_user(
             text("SELECT status FROM app_user WHERE id = :i").bindparams(i=UUID(user_id))
         )
     assert status == "deactivated"
+
+
+# --- invitations/validate -----------------------------------------------------
+
+
+async def test_validate_valid_token(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
+    """A fresh invite token returns state='valid'."""
+    tid = rbac_world.tenant_id
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "validate_valid@test.example", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    token = _extract_token(invite)
+
+    resp = await client.get(
+        f"/api/v1/tenants/{tid}/auth/invitations/validate",
+        params={"token": token},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["state"] == "valid"
+    # No PHI in response body
+    assert "email" not in data
+    assert "user_id" not in data
+    assert "name" not in data
+    # Cache-Control header set
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+async def test_validate_deactivated_user_token(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """A token whose user has been deactivated returns state='deactivated'."""
+    tid = rbac_world.tenant_id
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "validate_deactivated@test.example", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    user_id = invite.json()["data"]["user_id"]
+    token = _extract_token(invite)
+
+    # Deactivate the user before they accept
+    deactivate = await client.post(
+        f"/api/v1/users/{user_id}/deactivate",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert deactivate.status_code == 200, deactivate.text
+
+    resp = await client.get(
+        f"/api/v1/tenants/{tid}/auth/invitations/validate",
+        params={"token": token},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["state"] == "deactivated"
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+async def test_validate_bogus_token_returns_invalid(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """A missing/bogus token returns state='invalid' (not a 4xx error)."""
+    tid = rbac_world.tenant_id
+    resp = await client.get(
+        f"/api/v1/tenants/{tid}/auth/invitations/validate",
+        params={"token": "this-is-not-a-real-token"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["state"] == "invalid"
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+async def test_validate_used_token_returns_invalid(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """After a token is consumed by accept, validate returns state='invalid'."""
+    tid = rbac_world.tenant_id
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "validate_used@test.example", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    token = _extract_token(invite)
+
+    # Consume the token via accept
+    accept = await client.post(
+        f"/api/v1/tenants/{tid}/auth/invitations/accept",
+        json={"token": token, "password": "strong-password-123"},
+    )
+    assert accept.status_code == 200, accept.text
+
+    # Now validate returns invalid (token consumed, user is no longer "invited")
+    resp = await client.get(
+        f"/api/v1/tenants/{tid}/auth/invitations/validate",
+        params={"token": token},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["state"] == "invalid"
+    assert resp.headers.get("cache-control") == "no-store"
 
 
 async def test_admin_endpoint_denied_without_permission(

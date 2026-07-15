@@ -5,7 +5,15 @@
 import { ApiError, BASE_URL } from "@/lib/api/client"
 import { getToken } from "@/lib/auth/storage"
 
-export type TranscriptEvent = { role: "user" | "agent"; text: string; ts: number }
+export type TranscriptEvent = {
+  role: "user" | "agent"
+  /** Who produced the turn — "bot" for the AI agent, "rep" for the caller/human.
+   *  Matches the `source` field from the backend SSE payload (same vocabulary as
+   *  TranscriptTurnSource in callEvents.ts). May be absent on older events. */
+  source?: "bot" | "rep"
+  text: string
+  ts: number
+}
 
 export async function streamTranscription(
   roomName: string,

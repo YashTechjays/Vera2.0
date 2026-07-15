@@ -33,11 +33,6 @@ export function listCalls(): Promise<CallSummary[]> {
   return apiRequest<CallSummary[]>("/calls")
 }
 
-/** POST /calls — start a call for a patient form; the caller becomes the owner. */
-export function startCall(formId: string): Promise<CallSummary> {
-  return apiRequest<CallSummary>("/calls", { method: "POST", body: { form_id: formId } })
-}
-
 /** POST /calls/{id}/publish — owner-only, one-way, idempotent. */
 export function publishCall(callId: string): Promise<CallSummary> {
   return apiRequest<CallSummary>(`/calls/${encodeURIComponent(callId)}/publish`, {
@@ -50,6 +45,16 @@ export function publishCall(callId: string): Promise<CallSummary> {
 export function getJoinToken(callId: string, intervene = false): Promise<JoinTokenResponse> {
   const query = intervene ? "?intervene=true" : ""
   return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
+}
+
+/** POST /calls/{id}/end — tear down the call's LiveKit room (hangs up the SIP
+ *  leg, shuts the agent down); the backend pipeline then completes the call.
+ *  Allowed for anyone who can watch/intervene on the call (owner, or a
+ *  published call minus revoked users). */
+export function endCall(callId: string): Promise<null> {
+  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/end`, {
+    method: "POST",
+  })
 }
 
 /** POST /calls/{id}/revoke-access — owner ejects an intervener from the room. */

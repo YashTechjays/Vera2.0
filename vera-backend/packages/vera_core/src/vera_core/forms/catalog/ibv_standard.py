@@ -30,6 +30,7 @@ from vera_core.forms.dsl import (
     AskGroup,
     Codes,
     Comparison,
+    ConfirmInTask,
     Contradiction,
     Derive,
     FieldPrompt,
@@ -38,6 +39,7 @@ from vera_core.forms.dsl import (
     FormSchemaDoc,
     Group,
     Leaf,
+    PromotedFields,
     RequiredWhen,
     Section,
     Task,
@@ -47,6 +49,7 @@ from vera_core.forms.dsl import (
 
 _FAMILY = ref("family_coverage")
 _REQUIRED_WHEN_FAMILY = RequiredWhen(when=_FAMILY)
+_CONFIRM_IN_INSURANCE_BASICS = ConfirmInTask(task_key="insurance_basics", confirm_immediate=True)
 
 _DEDUCTIBLE_NOOPS = ["$0", "None", "No Deductible", "Unlimited", "No Limit"]
 _OOP_NOOPS = ["$0", "None", "Unlimited", "No Limit"]
@@ -183,7 +186,7 @@ def _context_sections() -> dict[str, Section]:
                     title="Spouse / Partner Name",
                     role="confirm",
                     default="N/A",
-                    confirm_in_task="insurance_basics",
+                    confirm_in_task=_CONFIRM_IN_INSURANCE_BASICS,
                     applicable_when=_FAMILY,
                     required=_REQUIRED_WHEN_FAMILY,
                     prompt=FieldPrompt(
@@ -199,7 +202,7 @@ def _context_sections() -> dict[str, Section]:
                     title="Spouse / Partner Date of Birth",
                     role="confirm",
                     default="N/A",
-                    confirm_in_task="insurance_basics",
+                    confirm_in_task=_CONFIRM_IN_INSURANCE_BASICS,
                     applicable_when=_FAMILY,
                     required=_REQUIRED_WHEN_FAMILY,
                     prompt=FieldPrompt(
@@ -902,30 +905,26 @@ def _admin_sections() -> dict[str, Section]:
         ),
         "insurance_reference_information": Section(
             title="Insurance Reference Information",
-            description="Optional reference details about the insurance provider, collected when available.",
+            role="context",
+            description=(
+                "Insurance provider contact details supplied at intake. Provided to the "
+                "agent as background; never asked on the call."
+            ),
             fields={
-                "insurance_provider_name": text_ask(
-                    "Insurance Provider Name",
-                    "Could you provide the full name of the insurance provider?",
+                "insurance_provider_name": Leaf(
+                    type="text", title="Insurance Provider Name", role="context"
                 ),
-                "insurance_phone_number": text_ask(
-                    "Insurance Provider Phone",
-                    "What is the primary phone number for the insurance provider?",
-                    type_="phone",
+                "insurance_phone_number": Leaf(
+                    type="phone", title="Insurance Provider Phone", role="context"
                 ),
-                "web_portal": text_ask(
-                    "Web Portal", "Is there a provider portal URL or access information available?"
-                ),
-                "web_portal_reference_number": text_ask(
-                    "Web Portal Reference Number",
-                    "Is there a web portal reference number for this inquiry?",
-                ),
-                "member_services_pca": text_ask(
-                    "Member Services PCA Contact",
-                    "Could you provide the Member Services PCA contact?",
-                ),
-                "employer_name": text_ask(
-                    "Employer Name", "May I also have the patient's employer name?"
+                "web_portal": Leaf(
+                    type="text",
+                    title="Web Portal",
+                    role="input",
+                    description=(
+                        "Provider portal URL or access information. Display only; "
+                        "never part of the call."
+                    ),
                 ),
             },
         ),
@@ -955,9 +954,28 @@ def _admin_sections() -> dict[str, Section]:
     }
 
 
+def _patient_verification() -> Section:
+    return Section(
+        title="Patient Verification",
+        description=(
+            "Outcome of the call-opening membership check. Recorded during the "
+            "introduction task; a denial terminates the call via the "
+            "patient_not_on_plan flow rule."
+        ),
+        fields={
+            "patient_on_plan": enum_ask(
+                "Patient On Plan",
+                "Can you confirm the patient is on this plan?",
+                YES_NO,
+            ),
+        },
+    )
+
+
 def build_ibv_standard() -> FormSchemaDoc:
     sections: dict[str, Section] = {
         **_context_sections(),
+        "patient_verification": _patient_verification(),
         "insurance_information": _insurance_information(),
         "benefit_coverage": _benefit_coverage(),
         "infertility_treatment": _infertility_treatment(),
@@ -997,7 +1015,6 @@ def build_ibv_standard() -> FormSchemaDoc:
             "appointment_date": "sections.appointment_information.appointment_date",
             "appointment_type": "sections.appointment_information.appointment_type",
             "member_id": "sections.insurance_information.policy_number",
-            "policy_id": "sections.insurance_information.policy_number",
             "insurance_provider_name": "sections.insurance_reference_information.insurance_provider_name",
             "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
             "verified_by": "sections.verification_information.verified_by",
@@ -1010,6 +1027,86 @@ def build_ibv_standard() -> FormSchemaDoc:
             "doctor_name": "sections.provider_reference_information.provider_name",
             "doctor_npi": "sections.provider_reference_information.npi",
         },
+        # patient_form columns re-derived from the current answer at intake AND
+        # dispute-resolve (2026-07-10 design doc). Every path must also be a
+        # system_fields target (dsl.py validates this).
+        promoted_fields=PromotedFields(
+            patient_name="sections.patient_information.patient_name",
+            patient_dob="sections.patient_information.patient_dob",
+            chart_number="sections.patient_information.chart_number",
+            appointment_date="sections.appointment_information.appointment_date",
+            appointment_type="sections.appointment_information.appointment_type",
+            member_id="sections.insurance_information.policy_number",
+            insurance_provider="sections.insurance_reference_information.insurance_provider_name",
+            insurance_provider_phone_number=(
+                "sections.insurance_reference_information.insurance_phone_number"
+            ),
+        ),
+        prerequisite_fields=[
+            "sections.appointment_information.appointment_date",
+            "sections.appointment_information.appointment_type",
+            "sections.verification_information.callback_number",
+        ],
+        stt_key_terms=[
+            # treatments
+            "intrauterine insemination",
+            "IUI",
+            "in vitro fertilization",
+            "IVF",
+            "ovulation induction",
+            "egg cryopreservation",
+            "embryo cryopreservation",
+            "frozen embryo transfer",
+            "embryo biopsy",
+            "semen analysis",
+            "sperm cryopreservation",
+            "infertility",
+            # plan / benefits
+            "coinsurance",
+            "copay",
+            "deductible",
+            "out-of-pocket maximum",
+            "lifetime maximum",
+            "prior authorization",
+            "coordination of benefits",
+            "policy situs",
+            "PPO",
+            "HMO",
+            "EPO",
+            "POS",
+            "self insured",
+            "fully funded",
+            "benefit year",
+            "plan year",
+            "telehealth",
+            "PCP referral",
+            "infertility plan mandate",
+            "cycle limit",
+            # admin
+            "pharmacy benefit manager",
+            "third party administrator",
+            "specialty pharmacy",
+            "member ID",
+            "group number",
+            "NPI",
+            "tax ID",
+            # common answers (prune first if live tuning shows over-recognition)
+            "covered",
+            "not covered",
+            "in network",
+            "out of network",
+            "individual",
+            "family",
+            "spouse",
+            "dependent",
+            "primary",
+            "secondary",
+            "tertiary",
+            "small group",
+            "large group",
+            "no limit",
+            "unlimited",
+        ],
         shared_conditions={
             "family_coverage": eq("sections.benefit_coverage.coverage_type", "Family"),
             "infertility_covered": eq(
@@ -1030,6 +1127,46 @@ def build_ibv_standard() -> FormSchemaDoc:
         },
         sections=sections,
         tasks=[
+            Task(
+                task_key="introduction",
+                title="Introduction & Patient Verification",
+                intro=(
+                    "Hello, I'm VERA, an AI Virtual Assistant... calling from "
+                    "{{hospital_name}}, on behalf of Dr. {{doctor_name}}. Before we "
+                    "begin... I'd like to let you know that this call is being "
+                    "recorded for quality and training purposes. Also, please note "
+                    "that... this call is supervised by my human manager, "
+                    "{{verified_by}}, who may intervene if necessary. I'm looking "
+                    "at the details for... {{patient_name}}, date of birth "
+                    "{{patient_dob}}. Could you let me know if this matches the "
+                    "name on the plan?"
+                ),
+                prompt=(
+                    "Deliver the introduction exactly once, calmly; if interrupted, "
+                    "continue from where you left off — never restart it. Wait for "
+                    "the representative to confirm they can see the patient AND "
+                    "introduce themselves. 'Let me check', 'hold on', 'one moment', "
+                    "'give me a second' and similar are NOT confirmations — say "
+                    "'Take your time' once, then stay silent until they return. A "
+                    "bare 'yes' without the representative introducing themselves "
+                    "is NOT a confirmation — keep waiting. If the representative "
+                    "cannot find the patient, provide the member ID {{member_id}} "
+                    "and the insurance provider {{insurance_provider_name}}. If the "
+                    "representative asks questions to verify the call is "
+                    "legitimate, answer from these details: patient "
+                    "{{patient_name}}, date of birth {{patient_dob}}, member ID "
+                    "{{member_id}}, facility {{hospital_name}} at "
+                    "{{hospital_address}}, facility NPI {{hospital_npi}}, tax ID "
+                    "{{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} "
+                    "with NPI {{doctor_npi}}, callback number {{callback_number}}. "
+                    "Record Patient On Plan as 'No' ONLY after those details have "
+                    "been provided and the representative still denies the patient "
+                    "is on the plan — then wrap up politely. After this task, never "
+                    "re-introduce yourself for the rest of the call."
+                ),
+                outro="Great, let me pull up my questions...",
+                sections=["patient_verification"],
+            ),
             Task(
                 task_key="insurance_basics",
                 title="Insurance Basics",
@@ -1098,28 +1235,53 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "when the entity does not exist."
                 ),
                 intro="Just a few more questions about administrative details.",
-                outro="Perfect, I have all the administrative details I need. One second please.",
+                outro=(
+                    "Perfect, I have all the administrative details I need. Let me "
+                    "take a quick moment to review my notes and make sure I haven't "
+                    "missed anything. One moment please."
+                ),
                 sections=[
                     "enrollment",
                     "authorization_department",
                     "third_party_administrator",
                     "pharmacy_benefit_manager",
                     "infertility_specialty_pharmacy",
-                    "insurance_reference_information",
                 ],
             ),
             Task(
                 task_key="wrap_up",
                 title="Wrap Up",
+                intro="Thanks so much for your patience — that covers everything on my list.",
                 prompt=(
                     "Always run last, even on early termination: capture the "
-                    "representative's name and a call reference number before ending the "
-                    "call politely."
+                    "representative's name and a call reference number before "
+                    "ending the call politely. Both are critical fields and must be "
+                    "actual values — never accept 'None', 'Unknown', 'Not provided' "
+                    "or any placeholder; politely re-ask until the representative "
+                    "provides them. Ask for them only once every remaining question "
+                    "has been resolved."
+                ),
+                outro=(
+                    "That's everything I need today. Thank you so much for all "
+                    "your help — have a wonderful day!"
                 ),
                 sections=["insurance_representative"],
             ),
         ],
         flow_rules=[
+            FlowRule(
+                rule_key="patient_not_on_plan",
+                when=eq("sections.patient_verification.patient_on_plan", "No"),
+                action="terminate_call",
+                skip_to_task="wrap_up",
+                note=(
+                    "The representative denied the patient is on the plan even "
+                    "after the member ID, insurance provider and verification "
+                    "details were provided. Skip all remaining tasks, collect the "
+                    "representative name and call reference number, then end the "
+                    "call."
+                ),
+            ),
             FlowRule(
                 rule_key="no_out_of_network_coverage",
                 when=AllCondition(
@@ -1136,7 +1298,7 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "out-of-network coverage. Skip all remaining tasks, collect the "
                     "representative name and call reference number, then end the call."
                 ),
-            )
+            ),
         ],
         contradictions=[
             Contradiction(

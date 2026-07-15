@@ -3,6 +3,7 @@ import {
   X,
   Volume2,
   Grid3x3,
+  Loader2,
   MessageSquare,
   Copy,
   PhoneOff,
@@ -19,6 +20,9 @@ import { cn } from "@/lib/utils"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
+import { CallTranscript } from "./CallTranscript"
+import { useCallStatus } from "./useCallStatus"
+import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
 type TabKey = "info" | "transcript"
@@ -38,14 +42,30 @@ export function InterveneModal({
   call,
   open,
   onOpenChange,
+  onEndCall,
+  ending,
 }: {
   call: LiveCall | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** Ends the call for real (backend room teardown), not just closes the modal. */
+  onEndCall: () => void
+  /** True while the end-call request is in flight — disables the button. */
+  ending: boolean
 }) {
   const [tab, setTab] = useState<TabKey>("info")
   const [keypadOpen, setKeypadOpen] = useState(false)
+  const { startedAtMs, callEnded, terminalStatus, onCallStatus } = useCallStatus(call?.id)
   const progress = call?.formProgress ?? 0
+
+  // The SSE feed only runs while the transcript tab is mounted; on the info tab
+  // the polled started_at (refreshed through the modalCall prop) seeds the timer.
+  const { label: duration, running } = useLiveDuration({
+    open,
+    ended: callEnded,
+    sseMs: startedAtMs,
+    startedAt: call?.startedAt,
+  })
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -141,8 +161,11 @@ export function InterveneModal({
                 </Button>
               </div>
               {call?.id ? (
-                <div className="flex min-h-[240px] flex-1 flex-col rounded-lg border border-border">
-                  <LiveCallRoom key={call.id} callId={call.id} microphone />
+                <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border">
+                  <div className="shrink-0 border-b border-border">
+                    <LiveCallRoom key={call.id} callId={call.id} microphone ended={callEnded} endedStatus={terminalStatus} />
+                  </div>
+                  <CallTranscript key={`t-${call.id}`} callId={call.id} onCallStatus={onCallStatus} />
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
@@ -158,8 +181,13 @@ export function InterveneModal({
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-2 text-sm font-semibold tabular-nums">
-              <span className="size-2 rounded-full bg-emerald-500" />
-              {call?.callTime ?? "00:00"}
+              <span
+                className={cn(
+                  "size-2 rounded-full",
+                  running ? "bg-emerald-500" : "bg-amber-500",
+                )}
+              />
+              {duration}
             </span>
             <button
               type="button"
@@ -183,11 +211,12 @@ export function InterveneModal({
               Save Form
             </Button>
             <Button
-              onClick={() => onOpenChange(false)}
+              onClick={onEndCall}
+              disabled={ending || callEnded}
               className="gap-1.5 bg-red-500 text-white hover:bg-red-600"
             >
-              <PhoneOff className="size-4" />
-              End Call
+              {ending ? <Loader2 className="size-4 animate-spin" /> : <PhoneOff className="size-4" />}
+              {callEnded ? "Call Ended" : ending ? "Ending…" : "End Call"}
             </Button>
           </div>
         </div>

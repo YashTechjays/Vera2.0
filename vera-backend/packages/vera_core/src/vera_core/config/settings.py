@@ -48,6 +48,23 @@ class Settings(BaseSettings):
     worker_events_reclaim_idle_ms: int = 60_000  # VERA_WORKER_EVENTS_RECLAIM_IDLE_MS
     call_failed_teardown_grace_ms: int = 1_500  # VERA_CALL_FAILED_TEARDOWN_GRACE_MS
 
+    # Pipeline sweeper: reconciles stuck calls (worker crash / lost event) and
+    # wakes the dispatcher on a timer (working-hours reopen, queue expiry).
+    pipeline_sweep_interval_seconds: int = 60  # VERA_PIPELINE_SWEEP_INTERVAL_SECONDS
+    # A non-terminal call younger than the grace window is never touched — protects
+    # the create→dial gap and normal-end races with the consumer.
+    call_stuck_grace_seconds: int = 300  # VERA_CALL_STUCK_GRACE_SECONDS
+    # Hard cap: a non-terminal call older than this gets its room deleted and is
+    # failed even if the room is still alive (wedged worker session). Payer calls
+    # with long holds run long — keep this generous.
+    call_max_duration_seconds: int = 3 * 3600  # VERA_CALL_MAX_DURATION_SECONDS
+    # Feature gate for the lifecycle's "system auto-retry: low completion" edge
+    # (AI_PROCESSING → IN_QUEUE). OFF until post-call answer extraction exists:
+    # nothing raises completion_pct between calls today, so a retry would redial
+    # up to max_retries times to no benefit. When off, every completed call goes
+    # to EXCEPTION_REVIEW.
+    form_auto_retry_enabled: bool = False  # VERA_FORM_AUTO_RETRY_ENABLED
+
     gcp_project: str | None = None
 
     # --- KMS ------------------------------------------------------------------
@@ -152,13 +169,6 @@ class Settings(BaseSettings):
     # An orphan egress (no Recording row) is reaped only once it is older than this,
     # so a just-started recording whose row is still committing is never killed.
     recording_orphan_grace_seconds: int = 300  # VERA_RECORDING_ORPHAN_GRACE_SECONDS
-    # --- transcript reconciliation ------------------------------------------
-    # A crashed worker never emits call.ended, so the finalizer never runs and the
-    # turns expire from Redis. The reconciler sweeps stranded streams: it drains an
-    # un-finalized stream once it has been idle past the grace window (crash-orphaned),
-    # and clears streams whose call was already persisted.
-    transcript_reconcile_interval_seconds: int = 300  # VERA_TRANSCRIPT_RECONCILE_INTERVAL_SECONDS
-    transcript_reconcile_idle_seconds: int = 900  # VERA_TRANSCRIPT_RECONCILE_IDLE_SECONDS
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require

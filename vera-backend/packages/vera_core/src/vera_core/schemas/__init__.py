@@ -5,7 +5,6 @@ from .dto import (
     RetentionPolicy,
     RetentionPolicyUpdate,
     RevokeAccessRequest,
-    StartCallRequest,
     StartVoiceSessionRequest,
     VoiceSessionResponse,
 )
@@ -25,7 +24,6 @@ __all__ = [
     "RetentionPolicy",
     "RetentionPolicyUpdate",
     "RevokeAccessRequest",
-    "StartCallRequest",
     "StartVoiceSessionRequest",
     "VoiceSessionResponse",
 ]

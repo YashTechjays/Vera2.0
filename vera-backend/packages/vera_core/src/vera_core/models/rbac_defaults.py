@@ -41,8 +41,11 @@ PLATFORM_PERMISSIONS: Final[dict[str, str]] = {
     "platform:elevations:read": "List active tenant elevations (platform oversight)",
     "platform:prompts:read": "View the prompt authoring catalog and its versions",
     "platform:prompts:write": "Create and publish prompt versions",
-    "platform:ivr_playbooks:read": "View insurance providers and their IVR playbooks",
-    "platform:ivr_playbooks:write": "Create and manage insurance providers and IVR playbooks",
+    "platform:insurance_providers:read": "View insurance providers",
+    "platform:insurance_providers:write": "Create and manage insurance providers",
+    "platform:ivr_playbooks:read": "View IVR playbooks",
+    "platform:ivr_playbooks:write": "Create and manage IVR playbooks",
+    "platform:form_schemas:read": "View form schemas and their versions",
 }
 
 # The full catalog seeded into `permission` (tenant + platform).
@@ -70,5 +73,7 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
             "phi:detokenize",
         }
     ),
-    "VIRTUAL_ASSISTANT": frozenset({"voice_lab:sandbox"}),
+    "VIRTUAL_ASSISTANT": frozenset(
+        {"voice_lab:sandbox", "calls:read", "calls:publish", "forms:read", "forms:write"}
+    ),
 }

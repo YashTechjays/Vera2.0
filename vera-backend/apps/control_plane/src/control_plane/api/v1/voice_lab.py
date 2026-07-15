@@ -12,8 +12,6 @@ VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
 import logging
-import re
-from collections.abc import AsyncIterator
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -34,10 +32,11 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
-from control_plane.ivr_selection import add_active_playbook_metadata
 from control_plane.livekit_gateway import OutboundDialError
+from control_plane.queueability import E164_RE
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
+from control_plane.sse import frames_with_keepalive
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
@@ -51,14 +50,12 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.schemas import StartVoiceSessionRequest, VoiceSessionResponse
+from vera_core.services.ivr_selection import add_active_playbook_metadata
 from vera_core.transcript import TranscriptEvent, TranscriptService
 
 router = APIRouter(tags=["voice-lab"])
 
 logger = logging.getLogger("control_plane.voice_lab")
-
-# E.164: a leading + and 1-15 digits, first digit non-zero.
-_E164 = re.compile(r"^\+[1-9]\d{1,14}$")
 
 
 class ProviderOption(BaseModel):
@@ -124,7 +121,7 @@ async def start_voice_session(
     # both values as a typed pair so the dial site needs no None-narrowing asserts.
     outbound: tuple[str, str] | None = None
     if is_outbound:
-        if body.phone_number is None or not _E164.match(body.phone_number):
+        if body.phone_number is None or not E164_RE.match(body.phone_number):
             raise CustomAPIException(
                 DefaultExceptionCode.VALIDATION_ERROR,
                 message="phone_number must be E.164 for an outbound call",
@@ -263,12 +260,8 @@ async def stream_transcript(
             DefaultExceptionCode.FORBIDDEN, message="missing permission voice_lab:sandbox"
         )
 
-    async def _events() -> AsyncIterator[str]:
-        async for entry_id, event in service.consume(room_name):
-            yield _sse_frame(entry_id, event)
-
     return StreamingResponse(
-        _events(),
+        frames_with_keepalive(service.consume(room_name), _sse_frame),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

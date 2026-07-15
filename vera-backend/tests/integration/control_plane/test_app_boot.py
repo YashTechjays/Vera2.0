@@ -44,11 +44,32 @@ class _SpyWorkerEventConsumer:
         return
 
 
+class _SpyPipelineSweeper:
+    """Stands in for PipelineSweeper: records construction, never touches the DB."""
+
+    instances: ClassVar[list["_SpyPipelineSweeper"]] = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        _SpyPipelineSweeper.instances.append(self)
+
+    async def run(self) -> None:
+        """No-op: returns immediately so `asyncio.create_task(sweeper.run())` never
+        performs real DB/LiveKit I/O."""
+        return
+
+
 @pytest.fixture(autouse=True)
 def spy_consumer(monkeypatch: pytest.MonkeyPatch) -> list[_SpyWorkerEventConsumer]:
     _SpyWorkerEventConsumer.instances = []
     monkeypatch.setattr(control_plane_main, "WorkerEventConsumer", _SpyWorkerEventConsumer)
     return _SpyWorkerEventConsumer.instances
+
+
+@pytest.fixture(autouse=True)
+def spy_sweeper(monkeypatch: pytest.MonkeyPatch) -> list[_SpyPipelineSweeper]:
+    _SpyPipelineSweeper.instances = []
+    monkeypatch.setattr(control_plane_main, "PipelineSweeper", _SpyPipelineSweeper)
+    return _SpyPipelineSweeper.instances
 
 
 async def _boot_and_get(app: Any, path: str) -> int:
@@ -62,6 +83,7 @@ async def _boot_and_get(app: Any, path: str) -> int:
 @pytest.mark.asyncio
 async def test_app_boots_without_consumer_when_livekit_unset(
     spy_consumer: list[_SpyWorkerEventConsumer],
+    spy_sweeper: list[_SpyPipelineSweeper],
 ) -> None:
     app = control_plane_main.create_app(
         settings=Settings(_env_file=None, livekit_url=None), kms=_KMS
@@ -69,11 +91,13 @@ async def test_app_boots_without_consumer_when_livekit_unset(
     status_code = await _boot_and_get(app, "/does-not-exist")
     assert status_code == 404
     assert spy_consumer == []
+    assert spy_sweeper == []
 
 
 @pytest.mark.asyncio
 async def test_app_starts_consumer_when_livekit_configured(
     spy_consumer: list[_SpyWorkerEventConsumer],
+    spy_sweeper: list[_SpyPipelineSweeper],
 ) -> None:
     settings = Settings(_env_file=None, livekit_url="ws://fake:7880")
     stub_livekit = LiveKitGateway(url="ws://fake:7880", api_key="fake", api_secret="fake")
@@ -81,3 +105,4 @@ async def test_app_starts_consumer_when_livekit_configured(
     status_code = await _boot_and_get(app, "/does-not-exist")
     assert status_code == 404
     assert len(spy_consumer) == 1
+    assert len(spy_sweeper) == 1

@@ -3,15 +3,9 @@
 // (config knobs that specialize the generic IVR navigator) attached to an insurance provider.
 import { apiRequest, randomId } from "@/lib/api/client"
 
-/** The structured config overlay stored in ivr_playbook.instructions. All fields optional;
- *  an unset field falls back to the generic navigator's built-in default. */
+/** The free-form config overlay stored in ivr_playbook.instructions. Both fields optional;
+ *  an unset field falls back to the generic navigator's built-in defaults. */
 export type IvrPlaybookInstructions = {
-  transition_trigger?: string | null
-  rep_keyword?: string | null
-  multiple_patients_answer?: string | null
-  survey_answer?: string | null
-  date_scope?: string | null
-  callback_vs_hold?: string | null
   provider_subflows?: string | null
   extra_rules?: string | null
 }

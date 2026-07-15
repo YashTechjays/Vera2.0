@@ -1,10 +1,10 @@
 """Worker→control-plane event bus over Redis Streams + a consumer group.
 
 The agent worker is DB-less; this is its first-class channel to signal domain
-events (call failures today; call-status transitions for the real /calls flow
-later) to the control plane. Events are PHI-free by construction: only a
-room_name (tenant+call UUIDs), an enum, and a timestamp — never a phone number
-or transcript text.
+events (call failures, and the answered/ended call-status transitions that
+drive the consumer's closeout) to the control plane. Events are PHI-free by
+construction: only a room_name (tenant+call UUIDs), an enum, and a timestamp —
+never a phone number or transcript text.
 """
 
 from enum import StrEnum
@@ -36,19 +36,31 @@ class CallFailedEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
+class CallAnsweredEvent(BaseModel):
+    """Emitted when the SIP callee answered — the call is live."""
+
+    type: Literal["call.answered"] = "call.answered"
+    room_name: str
+    ts: int  # epoch milliseconds
+
+
 class CallEndedEvent(BaseModel):
-    """Emitted by the worker at session shutdown for a canonical call room, AFTER
-    the transcript ended-sentinel is written — the control plane's trigger to
-    persist the tokenized transcript to Postgres. PHI-free: room name + ts only."""
+    """Emitted from the worker's shutdown callback — the session finished after
+    the call was live (hangup by either side, or the agent's end_call tool).
+    Written AFTER the transcript ended-sentinel, so it doubles as the control
+    plane's trigger to persist the tokenized transcript to Postgres."""
 
     type: Literal["call.ended"] = "call.ended"
     room_name: str
     ts: int  # epoch milliseconds
 
 
-type WorkerEvent = CallFailedEvent | CallEndedEvent
+type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
-    Annotated[CallFailedEvent | CallEndedEvent, Field(discriminator="type")]
+    Annotated[
+        CallFailedEvent | CallAnsweredEvent | CallEndedEvent,
+        Field(discriminator="type"),
+    ]
 )
 
 

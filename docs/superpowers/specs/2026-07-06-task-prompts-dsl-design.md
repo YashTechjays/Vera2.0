@@ -1,0 +1,282 @@
+# Task prompts in the form-schema DSL — introduction task, placeholder contract, STT key terms
+
+**Date:** 2026-07-06 (STT key terms added 2026-07-08)
+**Status:** Approved
+**Amends:** `2026-07-02-form-schema-dsl-v2-design.md` §4.6 (tasks), §5 (task builder / prompt compiler contracts)
+
+## 1. Problem
+
+The v2.1 DSL gives every task `intro` / `outro` / `prompt`, but the IBV catalog fills
+them with thin one-liners and the call's opening ritual — the agent introducing itself
+to the insurance representative and establishing that the patient is on the plan — is
+not representable at all: the spec deliberately pushed it to the runtime prompt
+pipeline. In practice that split makes the LiveKit AgentTask mapping guessy: the task
+builder has to invent what the agent says when a task starts and ends, and the
+verification behavior (what the rep may ask to establish the call is legitimate) lives
+nowhere near the schema that knows the patient's identifiers.
+
+Vera 1.0 solved this with per-phase prompt modules
+(`src/pipecat_module/prompts/phases/phase_*.py`). This design ports the _task-specific_
+parts of those phases into the schema DSL and defines the placeholder contract that
+lets one schema serve every patient form.
+
+## 2. Goals / non-goals
+
+**Goals**
+
+- A schema-defined greeting/verification task that runs before `insurance_basics`,
+  has no section questions, and carries the exact spoken introduction script.
+- A crisp LiveKit mapping for every task: `intro` = verbatim speech on task entry,
+  `outro` = verbatim speech on task exit, `prompt` = agent instructions. No guessing
+  at task-definition time.
+- `{{system_field_key}}` placeholders in task-level text, hydrated per patient form at
+  task creation, validated at document-validation time.
+- Port the remaining task-specific Vera 1.0 content (wrap-up critical-fields rule,
+  hold-phrase outro).
+- A document-level `stt_key_terms` vocabulary fed to the STT component to improve
+  transcription of domain terms — session-wide, applying to every task.
+
+**Non-goals**
+
+- IVR navigation (provider playbooks), the gap-analysis phase, and the end-call
+  mechanics remain runtime stages composed around the schema tasks; gap analysis is
+  pinned between `closing_admin` and `wrap_up` (§5), and the goodbye itself is now
+  `wrap_up`'s outro.
+- No new `Task` model fields; no `dsl_version` bump — the only grammar addition
+  (`stt_key_terms`) is optional and additive (§6).
+- The runtime task builder / prompt compiler implementation (this branch's next step)
+  is specified only at the contract level here.
+
+## 3. Task contract (LiveKit AgentTask mapping)
+
+For every task in `tasks`:
+
+| Key        | LiveKit AgentTask meaning                                                                                                | Placeholders |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------ | ------------ |
+| `intro`    | Spoken verbatim when the task starts (TTS-safe text — no stage directions; pacing via ellipses)                          | yes          |
+| `outro`    | Spoken verbatim when the task completes; also masks next-task spin-up latency                                            | yes          |
+| `prompt`   | Supplied directly as the agent's task instructions                                                                       | yes          |
+| `sections` | The form sections whose `ask`/`confirm` fields the task collects; **may be empty** for ritual tasks that collect nothing | —            |
+
+A task with `sections: []` is a legal first-class shape for pure ritual tasks. (The
+introduction task ended up carrying one tiny collect section — `patient_verification`,
+§4.1 — so its outcome lands as a real field answer.) The UI and the intake/review
+readers never consume `tasks`, so nothing renders differently.
+
+### 3.1 Placeholder namespace
+
+Task-level `intro` / `outro` / `prompt` may embed `{{token}}` where `token` is a key of
+the document's top-level `system_fields` map (e.g. `{{patient_name}}`,
+`{{member_id}}`, `{{hospital_npi}}`) — or, since the 2026-07-08 amendment below, the
+root-anchored path of a `context`-role leaf. `{{value}}` (field-level confirm
+prompts) and `{{current_year}}` (derive templates) are separate, unchanged
+namespaces that do not apply to task text.
+
+**New validator rule:** every `{{token}}` occurring in any task's `intro`, `outro`, or
+`prompt` must resolve to a defined `system_fields` key. Unknown tokens are a document
+validation error (caught at compile/seed time, never at call time).
+
+> **Amended 2026-07-08** (by the prompt-compiler design §4): the namespace widens to
+> `system_fields` keys ∪ root-anchored paths of `role: "context"` leaves (e.g.
+> `{{sections.patient_information.patient_gender}}`); `PLACEHOLDER_RE` becomes
+> `\{\{([\w.]+)\}\}` and the validator accepts both forms.
+
+### 3.2 Hydration contract (task builder, runtime)
+
+At call initiation the task builder resolves each placeholder through
+`system_fields[token]` → field path → the form's intake `field_answer` value, falling
+back to the field's `default` (e.g. `callback_number` → `"N/A"`) when unanswered.
+
+**PHI (compliance decision, 2026-07-08, aligned with the security officer):** the
+LLM provider (Vertex AI Gemini) is BAA-covered with zero data retention, so raw PHI
+may flow through the **live** pipeline — placeholders hydrate with raw intake values
+at task creation, for LLM-visible instructions and TTS speech alike. Tokenization
+applies only where call content is **persisted**: structured logs, Langfuse
+traces/spans, and any stored transcript still cross `vera_core.phi` redaction before
+write. The schema stays neutral — placeholders carry no PHI marking.
+
+> Follow-up: this supersedes the STT→LLM de-identification stance written in
+> `vera-backend/CLAUDE.md` and `vera_core/CLAUDE.md` ("never put raw PHI in an LLM
+> prompt"); those files and the livekit skill's seam descriptions must be updated to
+> the persistence-only tokenization posture so future work doesn't re-introduce the
+> old wall.
+
+## 4. New `introduction` task (Vera 1.0 Phase 2 START)
+
+First entry in `tasks`, `task_key: "introduction"`, title "Introduction & Patient
+Verification", `sections: ["patient_verification"]` (§4.1).
+
+**intro** (adapted from `phase_2_basics.py::PHASE_2_START`; `{clinic_name}` →
+`{{hospital_name}}`, `[pause]` dropped — TTS would read it aloud):
+
+> Hello, I'm VERA, an AI Virtual Assistant... calling from {{hospital_name}}, on
+> behalf of Dr. {{doctor_name}}. Before we begin... I'd like to let you know that this
+> call is being recorded for quality and training purposes. Also, please note that...
+> this call is supervised by my human manager, {{verified_by}}, who may intervene if
+> necessary. I'm looking at the details for... {{patient_name}}, date of birth
+> {{patient_dob}}. Could you let me know if this matches the name on the plan?
+
+**prompt** (the verification behavior contract):
+
+- Deliver the introduction exactly once, calmly; if interrupted, continue from where
+  you left off — never restart it.
+- Wait for the representative to confirm they can see the patient AND introduce
+  themselves. "Let me check", "hold on", "one moment", "give me a second" and similar
+  are NOT confirmations — say "Take your time" once, then stay silent until they
+  return. A bare "yes" without the rep introducing themselves is NOT a confirmation —
+  keep waiting.
+- If the representative cannot find the patient, provide the member ID {{member_id}}
+  and the insurance provider {{insurance_provider_name}}.
+- Record `patient_on_plan = "No"` ONLY after the fallback details and the
+  verification details below have been provided and the representative still denies
+  the patient is on the plan — then wrap up the conversation politely (the
+  `patient_not_on_plan` flow rule routes to `wrap_up`, §4.1).
+- If the representative asks questions to verify the call is legitimate, answer from
+  these details: patient {{patient_name}}, date of birth {{patient_dob}}, member ID
+  {{member_id}}, facility {{hospital_name}} at {{hospital_address}}, facility NPI
+  {{hospital_npi}}, tax ID {{hospital_tax_id}}, ordering provider Dr. {{doctor_name}}
+  with NPI {{doctor_npi}}, callback number {{callback_number}}.
+- After this task, never re-introduce yourself for the rest of the call.
+
+**outro:** "Great, let me pull up my questions..." — plays while `insurance_basics`
+spins up; `insurance_basics` therefore keeps no `intro` and its first ask lands
+immediately after.
+
+### 4.1 Verification outcome + denial flow rule
+
+Flow rules trigger on conditions over field answers, so the verification needs an
+outcome field. New collect section `patient_verification` — placed first among the
+collect sections (right before `insurance_information` in document order) — with a
+single required leaf:
+
+```jsonc
+"patient_on_plan": { "type": "enum", "title": "Patient On Plan", "role": "ask",
+  "required": true, "values": ["Yes", "No"],
+  "prompt": { "ask": "Can you confirm the patient is on this plan?" } }
+```
+
+The intro script already poses this question; the standalone `prompt.ask` exists for
+re-asks. The extractor records the rep's answer as a real `field_answer` row, and the
+UI shows a visible "Patient On Plan" field — an audit trail for why a call ended.
+
+New flow rule (mirrors `no_out_of_network_coverage`):
+
+```jsonc
+{ "rule_key": "patient_not_on_plan",
+  "when": { "field": "sections.patient_verification.patient_on_plan",
+            "op": "eq", "value": "No" },
+  "action": "terminate_call",
+  "skip_to_task": "wrap_up",
+  "note": "Representative denied the patient is on the plan even after the security
+           details were provided." }
+```
+
+Termination still routes through `wrap_up`, so the representative's name and the call
+reference number are captured before the graceful goodbye; gap analysis does not run.
+
+## 5. Vera 1.0 phase → task mapping (existing tasks)
+
+| Vera 1.0 phase         | Task                 | Change                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase 1 IVR            | —                    | runtime (IVR playbooks) — unchanged                                                                                                                                                                                                                                                                                                                                                             |
+| Phase 2 START          | `introduction` (new) | §4 above                                                                                                                                                                                                                                                                                                                                                                                        |
+| Phase 2 questions      | `insurance_basics`   | no intro (by design); prompt unchanged — OON early termination already lives in `flow_rules.no_out_of_network_coverage`                                                                                                                                                                                                                                                                         |
+| Phase 3                | `coverage`           | intro/outro already match; unchanged                                                                                                                                                                                                                                                                                                                                                            |
+| Phase 4                | `financial`          | intro/outro already match; unchanged                                                                                                                                                                                                                                                                                                                                                            |
+| Phase 5 male partner   | `male_partner`       | intro/outro already match; unchanged                                                                                                                                                                                                                                                                                                                                                            |
+| Phase 5 admin          | `closing_admin`      | intro already matches; **outro extended with the hold phrase** (plays right before the runtime gap-analysis review and masks its spin-up): "Perfect, I have all the administrative details I need. Let me take a quick moment to review my notes and make sure I haven't missed anything. One moment please." |
+| Phase 5 gap analysis   | —                    | runtime — **pinned to run after `closing_admin` and before `wrap_up`**, re-asking any required-but-unanswered questions |
+| Phase 6 closing ritual | `wrap_up`            | runs LAST, after gap analysis. intro added: "Thanks so much for your patience — that covers everything on my list." prompt gains the critical-fields rule: the representative's name and the call reference number must be actual values — never accept "None", "Unknown", "Not provided" or any placeholder — and are asked only once every missing question is cleared. outro = the gradual goodbye: "That's everything I need today. Thank you so much for all your help — have a wonderful day!" |
+
+**Call-flow ordering (pinned):** `closing_admin` → runtime gap analysis (re-ask
+required ∧ applicable ∧ unanswered fields) → `wrap_up` (rep name + reference number)
+→ graceful call end. The hold phrase is `closing_admin`'s outro so it masks the
+gap-analysis review; `wrap_up` stays the final schema task so the representative's
+name and the reference number are captured only after every gap is cleared. The
+goodbye IS `wrap_up`'s outro; call termination remains a runtime tool call — fired
+only after the outro finishes playing (graceful drain, never aborting in-flight
+TTS), not a phrase trigger. On early termination (`flow_rules`,
+`skip_to_task: "wrap_up"`) the runtime jumps straight to `wrap_up`; gap analysis does
+not run.
+
+## 6. `stt_key_terms` — session-wide STT vocabulary
+
+New optional top-level key on `FormSchemaDoc`, alongside `system_fields`:
+
+```jsonc
+"stt_key_terms": ["intrauterine insemination", "IUI", "coinsurance", ...]
+```
+
+**Semantics.** A flat list of domain terms fed verbatim to the STT component when the
+voice session is built — `deepgram.STTv2(model="flux-general-en", keyterms=terms)` in
+`agent_worker/cascade.py::build_session`. STT is constructed once per session, so the
+terms apply to every task for the whole call; they are deliberately NOT per-task.
+Plain strings only: Flux keyterm prompting takes no boost weights (nova-2 `keywords`
+did; that model is not in play).
+
+**Validator rules.** Every term is a non-empty trimmed string (multi-word phrases
+count as one keyterm); no case-insensitive duplicates; at most 100 terms (Deepgram's
+keyterm-prompting limit); no `{{placeholders}}` — key terms are static domain
+vocabulary and are never hydrated. Being schema-level and shared across all patients,
+per-patient PHI in key terms is impossible by construction.
+
+**Rejected shapes.** Per-task terms (STT is per-session; requirement is session-wide)
+and auto-derivation from schema titles/enum values (implicit and noisy — it would
+sweep in "Yes"/"No"/"N/A"; an authoring helper can come later).
+
+**Initial IBV vocabulary** (authored in `catalog/ibv_standard.py`, ~55 terms):
+
+- _Treatments:_ intrauterine insemination, IUI, in vitro fertilization, IVF,
+  ovulation induction, egg cryopreservation, embryo cryopreservation, frozen embryo
+  transfer, embryo biopsy, semen analysis, sperm cryopreservation, infertility
+- _Plan/benefits:_ coinsurance, copay, deductible, out-of-pocket maximum, lifetime
+  maximum, prior authorization, coordination of benefits, policy situs, PPO, HMO,
+  EPO, POS, self insured, fully funded, benefit year, plan year, telehealth,
+  PCP referral, infertility plan mandate, cycle limit
+- _Admin:_ pharmacy benefit manager, third party administrator, specialty pharmacy,
+  member ID, group number, NPI, tax ID
+- _Common answers_ (the enum values the extractor records — misrecognition here costs
+  a field): covered, not covered, in network, out of network, individual, family,
+  spouse, dependent, primary, secondary, tertiary, small group, large group,
+  no limit, unlimited
+
+CPT codes are deliberately excluded — they are spoken as digit strings, where keyterm
+boosting does not help. The common-answer terms are ordinary English words, which
+keyterm prompting can over-trigger on; if live-call tuning shows over-recognition,
+prune from that group first.
+
+**Versioning.** Additive optional key; `_Model` is `extra="forbid"` but validator and
+documents ship together in-repo, so no `dsl_version` bump and no intake/review/
+frontend gate changes (the UI subset ignores voice-only keys).
+
+## 7. Implementation surfaces
+
+1. `vera_core/forms/dsl.py` — the placeholder validator rule (scan task
+   `intro`/`outro`/`prompt` for `{{token}}`, require membership in `system_fields`);
+   `Task` doc comment documenting the LiveKit mapping + placeholder contract;
+   `FormSchemaDoc.stt_key_terms` + its validator rules (§6).
+2. `vera_core/forms/catalog/ibv_standard.py` — the `introduction` task; the
+   `patient_verification` section + `patient_not_on_plan` flow rule (§4.1);
+   `closing_admin` / `wrap_up` prompt + intro/outro changes (§5); the
+   `stt_key_terms` list. Compiled JSON is generated — never hand-edited; run
+   `just compile-schemas` and let the freshness + round-trip tests gate drift.
+3. Spec `2026-07-02-form-schema-dsl-v2-design.md` — amend §4.6 ("only
+   form-collection tasks") to admit schema-defined ritual tasks with `sections: []`;
+   document the placeholder namespace, validator rule, and PHI hydration note in §5;
+   add `stt_key_terms` to the document grammar (§4) and the task-builder contract (§5).
+4. Tests (`tests/unit/forms/test_schema_dsl.py` area) — unknown placeholder rejected;
+   known placeholder accepted; `sections: []` task valid; `stt_key_terms` duplicate /
+   over-cap / placeholder-bearing lists rejected; recompiled artifact fresh.
+5. `just check` + code-simplifier pass before commit (repo rule).
+
+## 8. Edge cases
+
+- Unknown `{{token}}` in task text → document validation error listing the task key
+  and the offending token.
+- `{{` without a closing `}}` → not a placeholder; left as literal text (validator
+  matches complete `{{token}}` tokens only).
+- Placeholder whose system field has no intake answer → task-builder falls back to
+  the leaf's `default`; schema guarantees only that the key exists.
+- Seeding: the published document changes (new task + changed strings), so
+  `just seed-schemas` publishes a new `schema_version` — expected, order-sensitive
+  equality is the mechanism.

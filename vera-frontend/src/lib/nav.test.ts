@@ -13,6 +13,15 @@ vi.mock("@/lib/auth/storage", () => ({
 import { defaultRouteFor, isRouteVisible, visibleNavFor } from "@/lib/nav"
 
 const ALL_PERMS = ["forms:read", "calls:read", "users:read"]
+// A super admin's /auth/me carries the SUPER_ADMIN role's platform grants.
+const PLATFORM_PERMS = [
+  "platform:elevations:read",
+  "platform:prompts:read",
+  "platform:insurance_providers:read",
+  "platform:ivr_playbooks:read",
+  "platform:form_schemas:read",
+]
+const SUPER_PERMS = [...PLATFORM_PERMS, ...ALL_PERMS]
 
 describe("visibleNavFor", () => {
   it("tenant user sees permission-gated tenant items, never platform items", () => {
@@ -28,7 +37,9 @@ describe("visibleNavFor", () => {
     expect(titles).not.toContain("Voice Lab") // voice_lab:sandbox missing
     expect(titles).not.toContain("Tenant Access") // platform-only
     expect(titles).not.toContain("Agent Prompt")
+    expect(titles).not.toContain("Insurance Providers")
     expect(titles).not.toContain("IVR Playbooks")
+    expect(titles).not.toContain("Form Schemas")
   })
 
   it("virtual_assistant-shaped permission set sees only Voice Lab and Settings", () => {
@@ -43,20 +54,53 @@ describe("visibleNavFor", () => {
   it("super admin, NOT elevated: only platform items, tenant items hidden", () => {
     // Even with every tenant permission, the tenant menus stay hidden until elevated.
     const titles = visibleNavFor({
-      permissions: ALL_PERMS,
+      permissions: SUPER_PERMS,
       isSuperAdmin: true,
       isElevated: false,
     }).map((i) => i.title)
-    expect(titles).toEqual(["Tenant Access", "Agent Prompt", "IVR Playbooks"])
+    expect(titles).toEqual([
+      "Tenant Access",
+      "Agent Prompt",
+      "Insurance Providers",
+      "IVR Playbooks",
+      "Form Schemas",
+    ])
+  })
+
+  it("platform items are permission-gated: a super admin without the grant loses the item", () => {
+    const titles = visibleNavFor({
+      permissions: PLATFORM_PERMS.filter((p) => p !== "platform:form_schemas:read"),
+      isSuperAdmin: true,
+      isElevated: false,
+    }).map((i) => i.title)
+    expect(titles).not.toContain("Form Schemas")
+    expect(titles).toContain("IVR Playbooks")
+  })
+
+  it("a tenant user holding a platform permission still never sees platform items", () => {
+    // Account type is the backstop: the grant alone must not surface platform UI.
+    const titles = visibleNavFor({
+      permissions: ["platform:form_schemas:read", "users:read"],
+      isSuperAdmin: false,
+      isElevated: false,
+    }).map((i) => i.title)
+    expect(titles).not.toContain("Form Schemas")
+    expect(titles).toContain("Users")
   })
 
   it("super admin, elevated: platform items first, then tenant items", () => {
     const titles = visibleNavFor({
-      permissions: ALL_PERMS,
+      permissions: SUPER_PERMS,
       isSuperAdmin: true,
       isElevated: true,
     }).map((i) => i.title)
-    expect(titles.slice(0, 3)).toEqual(["Tenant Access", "Agent Prompt", "IVR Playbooks"])
+    expect(titles.slice(0, 5)).toEqual([
+      "Tenant Access",
+      "Agent Prompt",
+      "Insurance Providers",
+      "IVR Playbooks",
+      "Form Schemas",
+    ])
     expect(titles).toContain("Live Monitoring")
     expect(titles).toContain("Users")
   })

@@ -7,48 +7,16 @@ the seam without a real LiveKit server.
 
 import httpx
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
-from vera_core.config.kms import LocalDevKMS
+from tests.integration.control_plane.conftest import TEST_TRUNK_ID, FakeLiveKit, RBACWorld
 from vera_core.db import uuid7
-from vera_core.integrations.credentials import seal_credentials
-from vera_core.models import Integration, IntegrationType
 from vera_core.observability.correlation import parse_room_name, room_name_for_call
 
-_TRUNK_TYPE = "livekit_outbound_trunk_id"
-_TRUNK_VALUE = "ST_test_trunk"
+_TRUNK_VALUE = TEST_TRUNK_ID
 
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
-
-
-@pytest.fixture
-async def trunk_configured(
-    admin_sessionmaker: async_sessionmaker[AsyncSession],
-    rbac_world: RBACWorld,
-    trunk_integration_type: None,
-) -> None:
-    """Seal a trunk credential for the test tenant so the outbound dial resolves it from
-    the DB. Uses the same LocalDevKMS master key as the app under test, so the app's
-    get_integration_credentials can open what we seal here. The `trunk_integration_type`
-    fixture owns the catalog-type row and tears down the Integration we add below."""
-    kms = LocalDevKMS(master_key=b"a" * 32)
-    async with admin_sessionmaker() as session, session.begin():
-        type_id = (
-            await session.execute(
-                select(IntegrationType.id).where(IntegrationType.name == _TRUNK_TYPE)
-            )
-        ).scalar_one()
-        integration = Integration(
-            tenant_id=rbac_world.tenant_id,
-            integration_type_id=type_id,
-            status="active",
-        )
-        await seal_credentials(kms, integration=integration, credentials={"trunk_id": _TRUNK_VALUE})
-        session.add(integration)
 
 
 @pytest.mark.asyncio

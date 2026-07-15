@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react"
+import { useState, type FormEvent, useEffect } from "react"
 import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { QRCodeSVG } from "qrcode.react"
 import { Button } from "@/components/ui/button"
@@ -8,9 +8,12 @@ import { PasswordInput } from "@/components/ui/password-input"
 import { Label } from "@/components/ui/label"
 import { ApiError } from "@/lib/api/client"
 import { RecoveryCodes } from "@/components/auth/RecoveryCodes"
-import { acceptInvite, activateInviteMfa } from "@/lib/auth/api"
+import { acceptInvite, activateInviteMfa, validateInvite } from "@/lib/auth/api"
 
 type Phase =
+  | { kind: "checking" }
+  | { kind: "invalid" }
+  | { kind: "deactivated" }
   | { kind: "password" }
   | { kind: "mfa"; mfaToken: string; provisioningUri: string | null }
   | { kind: "recovery"; codes: string[] }
@@ -22,13 +25,35 @@ export function AcceptInvite() {
   const token = params.get("token") ?? ""
   const navigate = useNavigate()
 
-  const [phase, setPhase] = useState<Phase>({ kind: "password" })
+  const [phase, setPhase] = useState<Phase>(() => (token ? { kind: "checking" } : { kind: "invalid" }))
   const [password, setPassword] = useState("")
   const [code, setCode] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   const loginHref = "/login"
+
+  useEffect(() => {
+    if (!token) return
+    let cancelled = false
+    validateInvite(tenantSlug, token)
+      .then((res) => {
+        if (cancelled) return
+        if (res.state === "valid") {
+          setPhase({ kind: "password" })
+        } else if (res.state === "deactivated") {
+          setPhase({ kind: "deactivated" })
+        } else {
+          setPhase({ kind: "invalid" })
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPhase({ kind: "invalid" })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tenantSlug, token])
 
   async function onSetPassword(e: FormEvent) {
     e.preventDefault()
@@ -63,9 +88,30 @@ export function AcceptInvite() {
     }
   }
 
-  if (!token) {
+  if (phase.kind === "checking") {
     return (
-      <CenteredCard title="Invalid invitation" desc="This invite link is missing its token.">
+      <CenteredCard title="Checking invitation…" desc="Please wait a moment.">
+        <div className="flex justify-center py-4">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        </div>
+      </CenteredCard>
+    )
+  }
+
+  if (phase.kind === "invalid") {
+    return (
+      <CenteredCard title="Invalid invitation" desc="This invite link is missing, invalid, or has expired.">
+        <Button className="w-full" onClick={() => navigate(loginHref)}>Go to sign in</Button>
+      </CenteredCard>
+    )
+  }
+
+  if (phase.kind === "deactivated") {
+    return (
+      <CenteredCard
+        title="Account deactivated"
+        desc="This account has been deactivated. Please contact your administrator."
+      >
         <Button className="w-full" onClick={() => navigate(loginHref)}>Go to sign in</Button>
       </CenteredCard>
     )
@@ -74,17 +120,19 @@ export function AcceptInvite() {
   if (phase.kind === "recovery") {
     return (
       <CenteredCard title="Account ready" desc="Save your recovery codes, then sign in.">
-        <RecoveryCodes codes={phase.codes} onContinue={() => navigate(loginHref)} />
+        <RecoveryCodes codes={phase.codes} onContinue={() => navigate(loginHref, { replace: true })} />
       </CenteredCard>
     )
   }
+
   if (phase.kind === "done") {
     return (
       <CenteredCard title="Account active" desc="Your account is ready.">
-        <Button className="w-full" onClick={() => navigate(loginHref)}>Sign in</Button>
+        <Button className="w-full" onClick={() => navigate(loginHref, { replace: true })}>Sign in</Button>
       </CenteredCard>
     )
   }
+
   if (phase.kind === "mfa") {
     return (
       <CenteredCard title="Set up two-factor" desc="Scan the QR code, then enter a code to finish.">
