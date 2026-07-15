@@ -10,6 +10,9 @@ are NOT re-checked here.
 from typing import TYPE_CHECKING
 
 from control_plane.exceptions import CustomAPIException, DefaultExceptionCode
+
+# Single source of truth in vera_core.forms.intake. Used locally below and re-exported
+# (explicit `as`) for api/v1/voice_lab.py, which imports E164_RE from this module.
 from vera_core.forms.intake import E164_RE as E164_RE
 from vera_core.integrations.credentials import get_integration_credentials
 
