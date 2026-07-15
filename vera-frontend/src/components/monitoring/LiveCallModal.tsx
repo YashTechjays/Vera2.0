@@ -39,19 +39,13 @@ function confidenceColor(score: number): string {
 }
 
 /**
- * The live-call modal: auto-connects listen-only on open, and — for holders of
- * calls:intervene — upgrades in place to a publish-capable connection via
- * Intervene. The mode is part of LiveCallRoom's key: LiveKit ignores a token
- * swap while connected, so switching modes remounts the room with a freshly
- * minted token. Intervening is one-way: the modal cannot be closed (and the
- * mode cannot be dropped) until the call ends.
+ * The live-call modal: auto-connects listen-only, and upgrades in place to publish via
+ * Intervene for calls:intervene holders. Mode is part of LiveCallRoom's key — LiveKit
+ * ignores a token swap while connected, so a mode switch remounts. Intervening is one-way:
+ * no close until the call ends.
  *
- * "Call ended" is driven by the events stream's terminal call_status (the room
- * can outlive the call while supervisors sit in it) OR by the room dying
- * (End Call deletes it server-side before the closeout lands).
- *  - left: collapsible "Patient Information Form" summary + call controls
- *  - right: live call panel (connection, participants, audio) + SSE transcript
- *  - footer: Close / End Call · Intervene
+ * "Call ended" comes from the events stream's terminal call_status or the room dying
+ * (End Call deletes it server-side).
  */
 export function LiveCallModal({
   call,
@@ -86,10 +80,7 @@ export function LiveCallModal({
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
 
-  // A fresh open always starts listen-only (the call can't change while open —
-  // the worklist is behind the modal), so resetting on close covers every path.
-  // Radix routes Esc/overlay-click here too, so an intervener can't escape
-  // without the call ending.
+  // Reset to listen-only on close; Radix routes Esc/overlay-click here too, so an intervener can't escape until the call ends.
   function handleOpenChange(next: boolean) {
     if (!shouldAllowClose(mode, callEnded, next)) return
     if (!next) {
@@ -105,8 +96,7 @@ export function LiveCallModal({
     setEnding(true)
     try {
       await endCall(call.id)
-      // The room is torn down server-side; the SSE terminal status / room
-      // disconnect flips callEnded and unlocks the modal, which we then close.
+      // The room is torn down server-side; SSE terminal status / disconnect flips callEnded and unlocks the modal.
       setMode("listen")
       setRoomStatus(null)
       setActionError(null)
@@ -118,8 +108,7 @@ export function LiveCallModal({
     }
   }
 
-  // An intervene token can be refused (e.g. someone else took the mic first —
-  // 409) — fall back to listening instead of a dead panel.
+  // An intervene token can be refused (e.g. 409 if someone took the mic first) — fall back to listening.
   function handleJoinFailed(error: unknown) {
     if (mode !== "intervene") return
     setMode("listen")
@@ -132,7 +121,6 @@ export function LiveCallModal({
         showCloseButton={false}
         className="flex max-h-[92vh] w-[96vw] max-w-[1100px] flex-col gap-0 p-0"
       >
-        {/* Header */}
         <div className="border-b border-border p-4">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -181,11 +169,8 @@ export function LiveCallModal({
           </div>
         </div>
 
-        {/* Body — two columns */}
         <div className="flex min-h-[360px] flex-1 gap-4 overflow-hidden bg-[#f8f9fa] p-4">
-          {/* Left — form summary + call controls */}
           <div className="flex flex-1 flex-col gap-3 overflow-auto">
-            {/* Form summary bar */}
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-white px-4 py-3">
               <button
                 type="button"
@@ -229,15 +214,13 @@ export function LiveCallModal({
               </div>
             </div>
 
-            {/* Inline form (when expanded) */}
             {formExpanded && (
               <div className="overflow-auto rounded-lg border border-border bg-white p-4">
                 <SchemaForm />
               </div>
             )}
 
-            {/* Call status / controls bar — the timer starts on the SSE "active"
-                event (callee answered) and freezes on a terminal status. */}
+            {/* Timer starts on the SSE "active" event (callee answered) and freezes on a terminal status. */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
               <span className="flex items-center gap-2 text-sm font-semibold tabular-nums">
                 <span
@@ -259,7 +242,6 @@ export function LiveCallModal({
             </div>
           </div>
 
-          {/* Right — live call panel + transcript */}
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
             <div className="flex items-center justify-between bg-[#f3f5f7] px-4 py-3">
               <h3 className="font-semibold text-foreground">Live Transcripts</h3>
@@ -290,7 +272,6 @@ export function LiveCallModal({
           </div>
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
           <div className="flex items-center gap-3">
             {!callEnded && (

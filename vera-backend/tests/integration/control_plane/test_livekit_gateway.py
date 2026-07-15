@@ -165,10 +165,8 @@ def test_set_room_metadata_serializes_json(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_set_room_metadata_tolerates_missing_room(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mirrors delete_room's not_found tolerance: a teardown race (crash after
-    delete_room but before ack, or a sweeper that already deleted the room) can
-    redeliver call.failed after the room is gone — set_room_metadata must be a
-    no-op instead of raising and permanently wedging the PEL entry."""
+    """A teardown race can redeliver call.failed after the room is gone, so a
+    not_found is a no-op (like delete_room) instead of wedging the PEL entry."""
     from livekit import api
     from livekit.api.twirp_client import TwirpError
 
@@ -287,12 +285,8 @@ def test_create_call_room_sets_room_lifetimes(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_default_agent_name_stays_vera_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected.
-
-    Settings reads VERA_* env vars and the local .env — a dev box overriding
-    VERA_LIVEKIT_AGENT_NAME (e.g. "vera-agent-local") must not fail this test,
-    which asserts the *shipped* default.
-    """
+    """Unset → "vera-agent" (the shipped default). delenv so a dev box overriding
+    VERA_LIVEKIT_AGENT_NAME doesn't fail this test."""
     monkeypatch.delenv("VERA_LIVEKIT_AGENT_NAME", raising=False)
     settings = Settings(livekit_url="ws://x", _env_file=None)
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})

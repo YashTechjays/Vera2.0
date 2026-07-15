@@ -495,10 +495,8 @@ async def entrypoint(ctx: JobContext) -> None:
         record=False,
     )
 
-    # Supervisor takeover: the agent's input is pinned to the callee, so it can't
-    # hear an intervening supervisor. The first time a participant carries the
-    # intervene mode attribute, silence the agent for the rest of the call — a
-    # takeover is one-way (the call continues human-to-human), so it never resumes.
+    # Supervisor takeover: the first time a participant carries the intervene mode
+    # attribute, silence the agent for the rest of the call (one-way, never resumes).
     takeover_ctl = AgentTakeoverController(session)
 
     def _check_takeover(*_args: object) -> None:

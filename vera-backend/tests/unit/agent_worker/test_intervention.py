@@ -46,8 +46,7 @@ def test_engage_is_idempotent_and_never_resumes() -> None:
     ctl = AgentTakeoverController(session)
 
     ctl.engage()
-    # Repeated room events (a listener joins, the supervisor leaves, an attribute
-    # refresh) must never re-interrupt and must never re-enable the agent's audio.
+    # Repeated room events must never re-interrupt or re-enable the agent's audio.
     ctl.engage()
     ctl.engage()
     assert session.interrupts == 1

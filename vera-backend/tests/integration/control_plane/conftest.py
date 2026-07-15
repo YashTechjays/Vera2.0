@@ -55,12 +55,8 @@ class MintedToken(NamedTuple):
 
 
 class FakeLiveKit(LiveKitGateway):
-    """Minimal LiveKitGateway stand-in for integration tests.
-
-    Records every room that was created so tests can assert on it without
-    a real LiveKit server.  `mint_join_token` returns a deterministic string
-    so tests can assert its structure without verifying a real JWT.
-    """
+    """Minimal LiveKitGateway stand-in: records created rooms and mints a
+    deterministic token so tests can assert without a real LiveKit server."""
 
     def __init__(self) -> None:
         # Skip the parent __init__ — we don't need real LiveKit credentials.
@@ -137,9 +133,8 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 async def drain_dispatch_tasks() -> AsyncIterator[None]:
-    """Enqueue endpoints schedule detached post-commit dispatch tasks
-    (control_plane.dispatch). Never let one cross a test boundary — a stray task
-    would insert call rows mid-teardown or pollute the next test's tenant."""
+    """Drain detached post-commit dispatch tasks so none crosses a test boundary
+    (a stray task would insert rows mid-teardown or pollute the next tenant)."""
     yield
     await drain_pending()
 
@@ -150,20 +145,16 @@ def transcript_service() -> TranscriptService:
 
 
 class _MemCallStreamStore:
-    """In-memory CallStreamStore fake, keyed by room_name (mirrors the room-keying
-    InMemoryTranscriptStore uses, not the flat _MemStore in the Task 9 unit tests) —
-    this fixture is session-scoped like transcript_service, so it must not let one
-    test's preloaded events bleed into another's; every test uses a distinct room_name."""
+    """In-memory CallStreamStore fake, keyed by room_name. Session-scoped, so every
+    test must use a distinct room_name to avoid preloaded events bleeding across."""
 
     def __init__(self) -> None:
         self._entries: dict[str, list[tuple[str, CallStreamEvent]]] = {}
-        # (room_name, first_entry_deadline_s) per read() call — lets endpoint tests
-        # pin WHICH deadline each SSE branch passes down (a None on a tail branch
-        # would reopen the unbounded-hang hole if the stream vanishes post-EXISTS).
+        # (room_name, first_entry_deadline_s) per read() — lets tests pin which
+        # deadline each SSE branch passes down.
         self.read_deadlines: list[tuple[str, float | None]] = []
-        # Every call_status ever published, SURVIVING delete() — in production a
-        # blocked XREAD receives the entry before the finalizer's DEL, but this
-        # fake has no reader, so closeout-announce assertions need a durable log.
+        # Every call_status published, surviving delete() — the fake has no reader,
+        # so closeout-announce assertions need a durable log.
         self.status_log: list[tuple[str, object]] = []
 
     async def publish(self, room_name: str, event: CallStreamEvent) -> None:
@@ -184,10 +175,8 @@ class _MemCallStreamStore:
     async def read(
         self, room_name: str, *, first_entry_deadline_s: float | None = None
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
-        # This fake replays a fixed snapshot and never blocks, so there is no idle
-        # wait for a deadline to bound — a never-published room simply yields
-        # nothing and the generator ends immediately, same observable effect. The
-        # deadline is still RECORDED so endpoint tests can assert what was passed.
+        # This fake replays a fixed snapshot and never blocks; the deadline is only
+        # recorded so endpoint tests can assert what was passed.
         self.read_deadlines.append((room_name, first_entry_deadline_s))
         for entry_id, event in list(self._entries.get(room_name, [])):
             yield entry_id, event
@@ -487,16 +476,12 @@ TRUNK_INTEGRATION_TYPE = "livekit_outbound_trunk_id"
 async def trunk_integration_type(
     admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
 ) -> AsyncIterator[None]:
-    """Ensure the `livekit_outbound_trunk_id` catalog type exists (it is seeded in real
-    deployments, but the integration tests run against a migrated, unseeded DB). Find-or-
-    create so it is safe whether or not the row is already present.
+    """Find-or-create the `livekit_outbound_trunk_id` catalog type (unseeded in the
+    integration DB).
 
-    Teardown is deliberately scoped to the **test tenant only** (rbac_world). The suite
-    shares the local dev database, so a blanket "delete every integration of this type"
-    would wipe a developer's real tenant credential — NEVER widen this delete beyond the
-    test tenant. The catalog type row is removed only if this fixture created it (so a
-    seeded/real DB keeps its row, and the per-tenant delete leaves other tenants' rows
-    untouched, satisfying the FK on the conditional type delete)."""
+    Teardown is scoped to the test tenant only: the suite shares the local dev DB,
+    so a blanket delete would wipe a developer's real credential — NEVER widen it.
+    The type row is dropped only if this fixture created it."""
     async with admin_sessionmaker() as session, session.begin():
         created = (
             await session.execute(
@@ -522,19 +507,16 @@ async def trunk_integration_type(
                 )
 
 
-# The trunk id value tests assert against when they check what got dialed
-# (test_voice_lab's outbound-call assertions).
+# The trunk id tests assert against when they check what got dialed.
 TEST_TRUNK_ID = "ST_test_trunk"
 
 
 async def seed_outbound_trunk(
     sessionmaker: async_sessionmaker[AsyncSession], kms: KeyManagementService, tenant_id: UUID
 ) -> None:
-    """Seal a `livekit_outbound_trunk_id` credential for `tenant_id` so any outbound-dial
-    seam (voice-lab, the queueability gate) resolves a trunk from the DB. Requires the
-    `trunk_integration_type` catalog-type fixture to already exist. The single seeding
-    mechanism shared by every test that needs a configured trunk — mirrors
-    `seal_credentials`'s envelope-encryption scheme (see its module docstring)."""
+    """Seal a `livekit_outbound_trunk_id` credential for `tenant_id` so any
+    outbound-dial seam resolves a trunk from the DB. Requires the
+    `trunk_integration_type` fixture."""
     async with sessionmaker() as session, session.begin():
         type_id = (
             await session.execute(
@@ -561,10 +543,8 @@ async def seed_call(
     status: str = "initiated",
     published: bool = False,
 ) -> UUID:
-    """Insert a Call row directly — the manual start-call endpoint is gone; tests
-    seed call state the way the dispatcher would. Production sets `started_at`
-    together with the answered (active) status, so seeded rows mirror that:
-    anything past the dialing phase carries a start timestamp."""
+    """Insert a Call row directly, the way the dispatcher would. Mirrors
+    production: `started_at` is set once past the dialing phase."""
     async with tenant_session(sessionmaker, tenant_id) as session:
         call = Call(
             tenant_id=tenant_id,

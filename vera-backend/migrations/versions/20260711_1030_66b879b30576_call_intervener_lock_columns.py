@@ -4,12 +4,8 @@ Revision ID: 66b879b30576
 Revises: 107da9e93469
 Create Date: 2026-07-11 10:30:00.000000
 
-Single-intervener lock for live-call monitoring: `intervener_user_id` holds the
-one user currently intervening (NULL = nobody), `intervener_claimed_at` the
-DB-clock claim time that drives join_token's stale-lock grace window.
-
-Idempotent DDL: a fresh CI database gets these columns from migration 0001's
-create_all off the live models, while the provisioned dev DB does not.
+Single-intervener lock columns for live-call monitoring: `intervener_user_id`
+(the one user currently intervening) and `intervener_claimed_at` (claim time).
 """
 
 from collections.abc import Sequence
@@ -25,8 +21,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.execute("ALTER TABLE call ADD COLUMN IF NOT EXISTS intervener_user_id uuid")
     op.execute("ALTER TABLE call ADD COLUMN IF NOT EXISTS intervener_claimed_at timestamptz")
-    # Postgres has no ADD CONSTRAINT IF NOT EXISTS — guard the FK by hand. The
-    # name follows the model NAMING_CONVENTION (db/base.py).
+    # Postgres has no ADD CONSTRAINT IF NOT EXISTS — guard the FK by hand.
     op.execute(
         """
         DO $$ BEGIN

@@ -1,14 +1,10 @@
 """Verification-call endpoints: join-token, active-list, live event stream,
 publish, and end.
 
-Auth note (acknowledged stopgap): join-token / active-list guard with
-`require("calls:read")` for now — the SPA has no real auth yet, and the
-spec flags this. `publish` is an owner-only action gated on
-`require("calls:publish")`: the caller must hold the permission *and* be
-the call's `initiated_by_id`, enforced by an explicit 403 check in the
-handler. A publish-capable join token (`?intervene=true`) additionally
-requires `calls:intervene`, checked in-handler after the visibility 404s
-(owners included), and claims the call's single-intervener lock.
+`publish` is owner-only: the caller must hold `calls:publish` *and* be the call's
+`initiated_by_id` (explicit 403 in-handler). A publish-capable join token
+(`?intervene=true`) additionally requires `calls:intervene`, checked after the
+visibility 404s, and claims the call's single-intervener lock.
 """
 
 import logging
@@ -133,8 +129,7 @@ def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
     """Whether *user_id* must NOT see this call (→ the same 404 as a missing row,
     so a private call is never revealed by enumeration).
 
-    The owner always sees their own call. A non-owner sees it only when it is
-    published or ownerless (dispatcher-created, joinable tenant-wide). Shared by
+    A non-owner sees it only when it is published or ownerless. Shared by
     join-token, the event stream, and end so the visibility gates never diverge.
     """
     if call.initiated_by_id == user_id:
@@ -142,10 +137,9 @@ def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
     return call.initiated_by_id is not None and not call.published
 
 
-# A just-minted intervene token belongs to a user who hasn't connected to LiveKit
-# yet, so a participant-presence probe would wrongly call the lock stale. Inside
-# this window a held lock is refused outright; past it, the holder must actually
-# be in the room or the lock is stolen.
+# A just-minted intervene token belongs to a user not yet connected to LiveKit, so
+# a presence probe would wrongly call the lock stale. Inside this window a held
+# lock is refused outright; past it, the holder must be in the room or it's stolen.
 _INTERVENE_CONNECT_GRACE = timedelta(seconds=30)
 
 
@@ -184,8 +178,7 @@ async def join_token(
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
     # Intervening claims the single-intervener lock — the row lock serializes
-    # concurrent claims while the listen path stays lock-free. RLS already
-    # constrains the row to the caller's tenant.
+    # concurrent claims while the listen path stays lock-free.
     stmt = select(Call).where(Call.id == call_id)
     if intervene:
         stmt = stmt.with_for_update()
@@ -193,18 +186,17 @@ async def join_token(
     if call is None:
         raise NotFoundError(message="call not found")
     if _call_hidden_from(call, caller.user_id):
-        raise NotFoundError(message="call not found")  # don't reveal a private call
+        raise NotFoundError(message="call not found")  # 404 not 403: don't reveal a private call
     room_name = room_name_for_call(tenant_id, call.id)
     stolen_from: UUID | None = None
     if intervene:
-        # Publishing audio into a live call needs calls:intervene — owners included.
         # Checked AFTER the visibility 404s so a private call never turns into a 403.
         user_id, permissions = await resolver.effective_permissions(
             session, tenant_id, caller.user_id
         )
         allowed = "calls:intervene" in permissions
-        # Same audit shape as rbac.require's allow/deny (endpoint-typed) so the
-        # dedicated join rows below stay the only "call"-typed rows per join.
+        # Endpoint-typed audit (like rbac.require) so the dedicated join rows below
+        # stay the only "call"-typed rows per join.
         await audit.emit(
             AuditRecord(
                 tenant_id=tenant_id,
@@ -230,8 +222,7 @@ async def join_token(
 
         holder = call.intervener_user_id
         if holder == caller.user_id:
-            # The holder reconnecting (tab refresh/crash) — refresh the claim,
-            # no new intervention rows.
+            # The holder reconnecting (tab refresh/crash) — refresh the claim only.
             call.intervener_claimed_at = func.now()
         else:
             if holder is not None:
@@ -249,8 +240,7 @@ async def join_token(
                 stolen_from = holder  # claim aged past grace and holder left the room
             call.intervener_user_id = caller.user_id
             call.intervener_claimed_at = func.now()
-            # The purpose-built intervention audit trail: a row = an intervention
-            # occurred (ADR §6). No payload — nothing beyond ids to record.
+            # Intervention audit trail: a row = an intervention occurred (ADR §6).
             session.add(
                 InterventionEvent(
                     tenant_id=tenant_id,
@@ -260,9 +250,8 @@ async def join_token(
                     payload_ref={},
                 )
             )
-    # Every join is audited — owner included (their join is a PHI access too);
-    # the event name carries the mode: listen-only, or the publish-capable
-    # intervene join that claimed the single-intervener lock above.
+    # Every join is audited (owner included — their join is a PHI access too); the
+    # event name carries the mode: listen-only or intervene.
     detail: dict[str, object] = {
         "owner_id": str(call.initiated_by_id) if call.initiated_by_id else None
     }
@@ -287,7 +276,6 @@ async def join_token(
     )
     identity = _supervisor_identity(caller.user_id)
     # Watch-only tokens are server-side mute; only ?intervene=true may publish.
-    # Name + mode attribute label the participant for everyone in the room.
     token = livekit.mint_join_token(
         room_name=room_name,
         identity=identity,

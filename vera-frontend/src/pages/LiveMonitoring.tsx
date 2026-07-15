@@ -58,9 +58,8 @@ const badgeStyle: Record<CallCategory, string> = {
   completed: "bg-emerald-100 text-emerald-700",
 }
 
-/** Adapt a real call into the shape the overview/intervene modals render. The
- *  `id` is the real call id so the modal can mint a join token. Fields the API
- *  doesn't provide yet (insurance, confidence, form %) are placeholders. */
+/** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
+ *  (insurance, confidence, form %) are placeholders. */
 function toLiveCall(c: CallSummary, now: number): LiveCall {
   return {
     id: c.id,
@@ -135,9 +134,7 @@ export function LiveMonitoring() {
     return calls
   }, [tab, calls])
 
-  // The open modal renders the freshest polled row (started_at lands only once the
-  // callee answers), falling back to the click-time snapshot after the call leaves
-  // the active list so an ended call keeps its header while the modal is open.
+  // Render the freshest polled row, falling back to the click-time snapshot once the call leaves the active list so its header survives while the modal is open.
   const modalCall = useMemo(() => {
     if (!selected) return null
     const fresh = calls.find((c) => c.id === selected.id) ?? selected
@@ -165,7 +162,6 @@ export function LiveMonitoring() {
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold tracking-tight">Live Monitoring</h1>
 
-      {/* Stat cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {stats.map(({ label, value, icon: Icon, tone }) => (
           <Card key={label}>

@@ -45,10 +45,8 @@ const MODE_BADGE_CLASS: Record<ParticipantMode, string> = {
   callee: "text-muted-foreground",
 }
 
-// While connected to the room, periodically signal the IdleManager that the user
-// is active — listening to a live call needs no mouse/keyboard, and without this
-// the session idle-expires mid-call and the logout tears the supervisor out of
-// the room. Renders nothing; must live inside <LiveKitRoom>.
+// Keeps the session alive while connected — a passive listener sends no input, so without this it
+// idle-expires and logs the supervisor out mid-call. Must render inside <LiveKitRoom>.
 function LiveActivityBeacon() {
   const state = useConnectionState()
   useEffect(() => {
@@ -121,8 +119,7 @@ function micToggleTitle(canSpeak: boolean, enabled: boolean): string {
   return enabled ? "Mute microphone" : "Unmute microphone"
 }
 
-/** Mic mute/unmute. Rendered in every mode; disabled while listen-only (the
- *  token cannot publish — the server, not this button, keeps listeners mute). */
+/** Mic mute/unmute; disabled while listen-only (the server, not this button, keeps listeners mute). */
 function MicToggle({ canSpeak }: { canSpeak: boolean }) {
   const { enabled, pending, toggle } = useTrackToggle({ source: Track.Source.Microphone })
   const title = micToggleTitle(canSpeak, enabled)
@@ -151,8 +148,7 @@ function RoomView({
   const state = useConnectionState()
   const participants = useParticipants()
   const [outputMuted, setOutputMuted] = useState(false)
-  // Latch (adjusted during render): once connected, a later disconnect means
-  // the room is gone, not that the initial connect is still in flight.
+  // Latch: once connected, a later disconnect means the room is gone, not a connect still in flight.
   const [everConnected, setEverConnected] = useState(false)
   if (state === ConnectionState.Connected && !everConnected) setEverConnected(true)
 
@@ -197,15 +193,10 @@ function RoomView({
 }
 
 /**
- * Joins a call's LiveKit room via a server-minted token and renders the live
- * panel: connection phase, all participants (email + join-mode badge), a
- * speaker toggle (autoplay unlock + output mute), and a mic toggle (active
- * while intervening). Unmounting (closing the modal) disconnects the
- * participant.
+ * Joins a call's LiveKit room via a server-minted token and renders the live panel.
  *
- * Changing `microphone` needs a NEW token with different grants, and LiveKit
- * ignores a token swap while connected — the parent must remount this
- * component (key it on the mode) to switch.
+ * Changing `microphone` needs a new token, and LiveKit ignores a token swap while
+ * connected — the parent must remount (key on the mode) to switch.
  */
 export function LiveCallRoom({
   callId,
@@ -216,22 +207,16 @@ export function LiveCallRoom({
   onJoinFailed,
 }: {
   callId: string
-  /** Publish the local mic (intervene only). Watch views must leave this off —
-   *  a viewer must never be audible in the room, and requesting mic access
-   *  fails outright where getUserMedia is blocked (e.g. incognito). */
+  /** Publish the local mic (intervene only) — a viewer must never be audible, and getUserMedia may be blocked (e.g. incognito). */
   microphone?: boolean
-  /** The call reached a terminal status (from the events stream). Shows the
-   *  ended banner and leaves/never joins the room — the room can outlive the
-   *  call while a supervisor sits in it, so room connection state alone would
-   *  keep reading "Live" after the callee hung up. */
+  /** Call hit a terminal status (events stream). The room can outlive the call while a supervisor
+   *  sits in it, so room state alone would keep reading "Live" after the callee hung up. */
   ended?: boolean
-  /** The terminal status itself, for status-specific banner copy — a busy or
-   *  unanswered dial reads "Call failed — …", not "Call ended". */
+  /** The terminal status, for status-specific banner copy (a failed dial reads "Call failed", not "Call ended"). */
   endedStatus?: string | null
   /** Room state lifted to the modal (close blocking, Intervene disabling). */
   onStatus?: (status: RoomStatus) => void
-  /** Token fetch failed — e.g. 409 while another supervisor holds the mic.
-   *  The modal uses it to fall back to listen-only. */
+  /** Token fetch failed (e.g. 409 while another supervisor holds the mic); modal falls back to listen-only. */
   onJoinFailed?: (error: unknown) => void
 }) {
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
@@ -257,8 +242,7 @@ export function LiveCallRoom({
     return () => {
       cancelled = true
     }
-    // onJoinFailed is deliberately not a dependency: modals pass a fresh
-    // closure each render and a re-fetch on that would loop.
+    // onJoinFailed is intentionally not a dep: modals pass a fresh closure each render, which would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [callId, microphone, ended])
 

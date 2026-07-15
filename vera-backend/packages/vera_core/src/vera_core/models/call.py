@@ -1,9 +1,7 @@
 """call + its status log and retry lineage.
 
-`current_status` is a maintained enum (CHECK), not a window-scan over free-text —
-the v1 P2 fix; `call_event` is the append-only status/phase/health log behind it.
-`prompt_version_id` pins exactly which prompt version ran the call (lineage). All
-child tables denormalize `tenant_id` for plain-column RLS.
+`current_status` is a maintained enum (CHECK); `call_event` is the append-only
+status/phase/health log behind it. Child tables denormalize `tenant_id` for RLS.
 """
 
 from datetime import datetime
@@ -35,7 +33,7 @@ from vera_core.db.base import (
 from vera_core.models.enums import CallEventType, CallMode, CallStatus, check_in
 
 # Terminal call statuses — a call in one of these will never become live again.
-# Keep in sync with the consumer's accepted statuses (control_plane/call_closeout.py).
+# Keep in sync with control_plane/call_closeout.py.
 TERMINAL_CALL_STATUSES = (
     CallStatus.COMPLETED,
     CallStatus.FAILED,
@@ -53,8 +51,8 @@ class Call(Base, TenantScopedMixin):
         check_in("current_status", CallStatus, name="current_status_valid"),
         Index("ix_call_tenant_status", "tenant_id", "current_status"),
         Index("ix_call_form_id", "form_id"),
-        # At most ONE live (non-terminal) call per form — DB backstop against a
-        # manual call and a dispatcher call racing onto the same form.
+        # At most ONE live (non-terminal) call per form — DB backstop against two
+        # calls racing onto the same form.
         Index(
             "uq_call_active_form",
             "form_id",
@@ -81,9 +79,8 @@ class Call(Base, TenantScopedMixin):
     initiated_by_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
-    # Stamped by POST /calls/{id}/end BEFORE the room is torn down: durable "a user
-    # asked to end this" signal. The sweeper closes such a call as CANCELED (no
-    # auto-redial) if the worker's call.ended never arrives.
+    # Durable "a user asked to end this" signal, stamped before the room is torn
+    # down: the sweeper closes such a call as CANCELED if call.ended never arrives.
     end_requested_by_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
@@ -92,7 +89,7 @@ class Call(Base, TenantScopedMixin):
     current_status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=CallStatus.INITIATED
     )
-    # Telephony/transport id (Twilio/LiveKit) — operational, not PHI.
+    # Telephony/transport id — operational, not PHI.
     provider_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     call_reference_no: Mapped[str | None] = mapped_column(String(128), nullable=True, info=PHI_INFO)
     rep_info: Mapped[dict[str, Any]] = mapped_column(
@@ -101,12 +98,12 @@ class Call(Base, TenantScopedMixin):
     completion_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Visibility axis — orthogonal to current_status. One-way: once True it never
-    # returns to False (spec §1 decision 4). False = private to initiated_by_id.
+    # Visibility axis, orthogonal to current_status. One-way: once True it never
+    # returns to False. False = private to initiated_by_id.
     published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Single-intervener lock: the user currently intervening (NULL = nobody) and
-    # the DB-clock claim time driving the stale-lock grace window (join_token).
+    # the DB-clock claim time driving the stale-lock grace window.
     intervener_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
@@ -116,8 +113,7 @@ class Call(Base, TenantScopedMixin):
 
 
 class CallLineage(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
-    """retry_call --is-a-retry-of--> parent_call. Complements
-    `field_answer.is_current` (the merge mechanism) for tracing retry descent."""
+    """retry_call --is-a-retry-of--> parent_call, for tracing retry descent."""
 
     __tablename__ = "call_lineage"
     __table_args__ = (UniqueConstraint("retry_call_id"),)
@@ -131,9 +127,8 @@ class CallLineage(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
 
 
 class CallEvent(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
-    """Append-only status/phase/health/callback log; the source for avg holding
-    time / IVR-success reports (derived from phase transitions, ADR §6).
-    `event_value` is normalized lowercase — closes the v1 casing problem."""
+    """Append-only status/phase/health/callback log; source for avg holding time /
+    IVR-success reports (ADR §6). `event_value` is normalized lowercase."""
 
     __tablename__ = "call_event"
     __table_args__ = (

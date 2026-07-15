@@ -3,16 +3,6 @@
 Revision ID: 107da9e93469
 Revises: 888cddaeaa58
 Create Date: 2026-07-10 19:00:00.000000
-
-Intervening (publishing audio into a live call) moves off the implicit
-calls:read gate onto a dedicated calls:intervene permission, enforced by
-GET /calls/{id}/join-token?intervene=true. This seeds the permission and
-grants it to the global TENANT_ADMIN and SUPERVISOR roles, mirroring
-rbac_defaults.py. No backfill: intervening is a deliberate new capability
-grant, not an access-preserving rename.
-
-Runs on the privileged migration connection (not RLS-bound) — the strict
-WITH CHECK on NULL-tenant role_permission rows does not block it.
 """
 
 from collections.abc import Sequence
@@ -47,9 +37,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Same rationale as the voice_lab:sandbox seed: seeded grants are
-    # indistinguishable at the row level from grants added since by real
-    # product usage — revert by hand if truly needed.
+    # Seeded grants are row-level indistinguishable from grants added since by
+    # real product usage — revert by hand if truly needed.
     raise RuntimeError(
         "downgrade unsupported for seed_calls_intervene_permission: cannot safely "
         "distinguish this migration's grants from live product data added since"

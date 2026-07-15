@@ -1,6 +1,4 @@
-// Pure view logic for the live-call panel, kept free of LiveKit imports so it
-// unit-tests without a browser. Connection states arrive as livekit-client's
-// ConnectionState string values.
+// Pure view logic for the live-call panel — no LiveKit imports, so it unit-tests without a browser.
 
 export type ConnectionPhase = "connecting" | "live" | "reconnecting" | "ended"
 
@@ -11,9 +9,8 @@ export const CONNECTION_PHASE_LABEL: Record<ConnectionPhase, string> = {
   ended: "Call ended",
 }
 
-/** Map a raw connection state to a display phase. `everConnected` latches once a
- *  connection succeeds: before it, "disconnected" is just the auto-connect in
- *  flight; after it, a disconnect means the room is gone (call ended). */
+/** Map a raw connection state to a display phase; `everConnected` latches on first connect so a
+ *  later disconnect reads as "ended", not "connecting". */
 export function connectionPhase(state: string, everConnected: boolean): ConnectionPhase {
   switch (state) {
     case "connected":
@@ -26,18 +23,14 @@ export function connectionPhase(state: string, everConnected: boolean): Connecti
   }
 }
 
-// Mirrors the backend vocabulary (vera_core.observability.correlation): the
-// control plane stamps each supervisor token with vera.mode, and human
-// participant identities are prefixed supervisor-/monitor-/caller-.
+// Mirrors backend vocabulary (vera_core.observability.correlation): the vera.mode attr + supervisor-/monitor-/caller- identity prefixes.
 export const MODE_ATTR = "vera.mode"
 const HUMAN_IDENTITY_PREFIXES = ["supervisor-", "monitor-", "caller-"]
 const SIP_CALLEE_IDENTITY = "phone-callee"
 
 export type ParticipantMode = "intervener" | "listener" | "agent" | "callee"
 
-/** The slice of a LiveKit Participant the view logic needs — kept structural so
- *  it unit-tests without a browser. `isAgent` is `p.kind === ParticipantKind.Agent`,
- *  precomputed by the caller. */
+/** The slice of a LiveKit Participant the view logic needs. `isAgent` is precomputed by the caller from `p.kind`. */
 export type ParticipantLike = {
   identity: string
   name?: string
@@ -46,9 +39,7 @@ export type ParticipantLike = {
   attributes?: Readonly<Record<string, string>>
 }
 
-/** Room state the modal needs from inside the LiveKit context: whether the
- *  call is over (gates closing while intervening) and whether someone else
- *  holds the mic (disables Intervene live). */
+/** Room state the modal needs from inside LiveKit: call-over (gates closing) and other-intervener (disables Intervene). */
 export type RoomStatus = {
   phase: ConnectionPhase
   otherIntervener: boolean
@@ -61,8 +52,7 @@ export const PARTICIPANT_MODE_BADGE: Record<ParticipantMode, string> = {
   callee: "Caller",
 }
 
-/** Kind beats identity beats attribute; an unrecognized identity is treated as
- *  the agent (self-hosted workers may not carry ParticipantKind.Agent). */
+/** Kind beats identity beats attribute; an unknown identity falls back to agent (self-hosted workers may lack ParticipantKind.Agent). */
 export function participantMode(p: ParticipantLike): ParticipantMode {
   if (p.isAgent) return "agent"
   if (p.identity === SIP_CALLEE_IDENTITY) return "callee"
@@ -96,9 +86,7 @@ export function isWaitingForCall(state: string, participants: ParticipantLike[])
 
 export type LiveCallMode = "listen" | "intervene"
 
-/** Radix routes every close path (X, Esc, overlay) through onOpenChange —
- *  an intervener may not leave until the call is over (End Call or the room
- *  dying on its own). */
+/** Radix routes every close path (X, Esc, overlay) here; an intervener can't leave until the call ends. */
 export function shouldAllowClose(
   mode: LiveCallMode,
   callEnded: boolean,
@@ -114,8 +102,7 @@ export type InterveneButtonState = {
   title?: string
 }
 
-/** Intervene is hidden without the permission, and enabled only while live
- *  with the mic free — mirroring the backend's calls:intervene gate + lock. */
+/** Hidden without the permission; enabled only while live with the mic free — mirrors the backend calls:intervene gate + lock. */
 export function interveneButtonState(
   canIntervene: boolean,
   status: RoomStatus | null,
@@ -135,9 +122,7 @@ export type SpeakerButtonState = {
   slashed: boolean
 }
 
-/** One speaker button covers both jobs: unlocking autoplay-blocked audio and
- *  muting/unmuting output. The unlock action always wins — until the browser
- *  allows playback there is nothing to mute. */
+/** One button for both jobs: unlock autoplay-blocked audio, then mute/unmute. Unlock wins — nothing to mute until playback is allowed. */
 export function speakerButtonState(canPlayAudio: boolean, outputMuted: boolean): SpeakerButtonState {
   if (!canPlayAudio) return { action: "unlock", title: "Enable audio", slashed: true }
   if (outputMuted) return { action: "unmute", title: "Unmute audio", slashed: true }
