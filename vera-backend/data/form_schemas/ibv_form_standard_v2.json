@@ -33,11 +33,6 @@
     "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
     "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number"
   },
-  "prerequisite_fields": [
-    "sections.appointment_information.appointment_date",
-    "sections.appointment_information.appointment_type",
-    "sections.verification_information.callback_number"
-  ],
   "stt_key_terms": [
     "intrauterine insemination",
     "IUI",
