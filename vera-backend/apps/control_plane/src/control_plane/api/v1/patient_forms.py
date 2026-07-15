@@ -48,7 +48,6 @@ from vera_core.forms.intake import (
     iter_leaf_answers,
     missing_required,
     normalize_phone_answers,
-    phone_promoted_paths,  # noqa: F401 -- unused here; Task 4 wires this into resolve_disputes
     promote_columns,
     unknown_payload_paths,
 )
