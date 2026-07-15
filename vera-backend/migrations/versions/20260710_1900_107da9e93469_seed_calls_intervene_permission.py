@@ -1,7 +1,7 @@
 """seed calls:intervene permission and grant it to TENANT_ADMIN and SUPERVISOR
 
 Revision ID: 107da9e93469
-Revises: 3083477bf7a5
+Revises: 888cddaeaa58
 Create Date: 2026-07-10 19:00:00.000000
 
 Intervening (publishing audio into a live call) moves off the implicit
@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "107da9e93469"
-down_revision: str | None = "3083477bf7a5"
+down_revision: str | None = "888cddaeaa58"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
