@@ -481,11 +481,11 @@
     },
     "patient_verification": {
       "title": "Patient Verification",
-      "description": "Outcome of the call-opening membership check. Recorded during the introduction task; a denial terminates the call via the patient_not_on_plan flow rule.",
+      "description": "Outcome of the call-opening membership check. Recorded during the introduction task; a denial terminates the call via the insurance_not_active flow rule.",
       "fields": {
-        "patient_on_plan": {
+        "is_insurance_active": {
           "type": "enum",
-          "title": "Patient On Plan",
+          "title": "Is Insurance Active",
           "role": "ask",
           "required": true,
           "values": [
@@ -493,7 +493,7 @@
             "No"
           ],
           "prompt": {
-            "ask": "Can you confirm the patient is on this plan?"
+            "ask": "Can you confirm the patient's insurance is currently active?"
           }
         }
       }
@@ -5118,7 +5118,7 @@
       "title": "Introduction & Patient Verification",
       "intro": "Hello, I'm VERA, an AI Virtual Assistant... calling from {{hospital_name}}, on behalf of Dr. {{doctor_name}}. Before we begin... I'd like to let you know that this call is being recorded for quality and training purposes. Also, please note that... this call is supervised by my human manager, {{verified_by}}, who may intervene if necessary. I'm looking at the details for... {{patient_name}}, date of birth {{patient_dob}}. Could you let me know if this matches the name on the plan?",
       "outro": "Great, let me pull up my questions...",
-      "prompt": "Deliver the introduction exactly once, calmly; if interrupted, continue from where you left off — never restart it. Wait for the representative to confirm they can see the patient AND introduce themselves. 'Let me check', 'hold on', 'one moment', 'give me a second' and similar are NOT confirmations — say 'Take your time' once, then stay silent until they return. A bare 'yes' without the representative introducing themselves is NOT a confirmation — keep waiting. If the representative cannot find the patient, provide the member ID {{member_id}} and the insurance provider {{insurance_provider_name}}. If the representative asks questions to verify the call is legitimate, answer from these details: patient {{patient_name}}, date of birth {{patient_dob}}, member ID {{member_id}}, facility {{hospital_name}} at {{hospital_address}}, facility NPI {{hospital_npi}}, tax ID {{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} with NPI {{doctor_npi}}, callback number {{callback_number}}. Record Patient On Plan as 'No' ONLY after those details have been provided and the representative still denies the patient is on the plan — then wrap up politely. After this task, never re-introduce yourself for the rest of the call.",
+      "prompt": "Deliver the introduction exactly once, calmly; if interrupted, continue from where you left off — never restart it. Wait for the representative to confirm they can see the patient AND introduce themselves. 'Let me check', 'hold on', 'one moment', 'give me a second' and similar are NOT confirmations — say 'Take your time' once, then stay silent until they return. A bare 'yes' without the representative introducing themselves is NOT a confirmation — keep waiting. If the representative cannot find the patient, provide the member ID {{member_id}} and the insurance provider {{insurance_provider_name}}. If the representative asks questions to verify the call is legitimate, answer from these details: patient {{patient_name}}, date of birth {{patient_dob}}, member ID {{member_id}}, facility {{hospital_name}} at {{hospital_address}}, facility NPI {{hospital_npi}}, tax ID {{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} with NPI {{doctor_npi}}, callback number {{callback_number}}. Record Is Insurance Active as 'No' ONLY after those details have been provided and the representative still confirms the insurance is not active — then wrap up politely. After this task, never re-introduce yourself for the rest of the call.",
       "sections": [
         "patient_verification"
       ]
@@ -5195,15 +5195,15 @@
   ],
   "flow_rules": [
     {
-      "rule_key": "patient_not_on_plan",
+      "rule_key": "insurance_not_active",
       "when": {
-        "field": "sections.patient_verification.patient_on_plan",
+        "field": "sections.patient_verification.is_insurance_active",
         "op": "eq",
         "value": "No"
       },
       "action": "terminate_call",
       "skip_to_task": "wrap_up",
-      "note": "The representative denied the patient is on the plan even after the member ID, insurance provider and verification details were provided. Skip all remaining tasks, collect the representative name and call reference number, then end the call."
+      "note": "The representative confirmed the patient's insurance is not active even after the member ID, insurance provider and verification details were provided. Skip all remaining tasks, collect the representative name and call reference number, then end the call."
     },
     {
       "rule_key": "no_out_of_network_coverage",

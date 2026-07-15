@@ -107,7 +107,7 @@ class TestCompiledArtifacts:
         assert "{{member_id}}" in (intro_task.prompt or "")
         assert intro_task.outro == "Great, let me pull up my questions..."
         rule_keys = [r.rule_key for r in doc.flow_rules or []]
-        assert rule_keys[0] == "patient_not_on_plan"
+        assert rule_keys[0] == "insurance_not_active"
         rule = (doc.flow_rules or [])[0]
         assert rule.action == "terminate_call"
         assert rule.skip_to_task == "wrap_up"

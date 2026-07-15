@@ -959,12 +959,12 @@ def _patient_verification() -> Section:
         description=(
             "Outcome of the call-opening membership check. Recorded during the "
             "introduction task; a denial terminates the call via the "
-            "patient_not_on_plan flow rule."
+            "insurance_not_active flow rule."
         ),
         fields={
-            "patient_on_plan": enum_ask(
-                "Patient On Plan",
-                "Can you confirm the patient is on this plan?",
+            "is_insurance_active": enum_ask(
+                "Is Insurance Active",
+                "Can you confirm the patient's insurance is currently active?",
                 YES_NO,
             ),
         },
@@ -1153,10 +1153,10 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "{{hospital_address}}, facility NPI {{hospital_npi}}, tax ID "
                     "{{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} "
                     "with NPI {{doctor_npi}}, callback number {{callback_number}}. "
-                    "Record Patient On Plan as 'No' ONLY after those details have "
-                    "been provided and the representative still denies the patient "
-                    "is on the plan — then wrap up politely. After this task, never "
-                    "re-introduce yourself for the rest of the call."
+                    "Record Is Insurance Active as 'No' ONLY after those details "
+                    "have been provided and the representative still confirms the "
+                    "insurance is not active — then wrap up politely. After this "
+                    "task, never re-introduce yourself for the rest of the call."
                 ),
                 outro="Great, let me pull up my questions...",
                 sections=["patient_verification"],
@@ -1264,16 +1264,16 @@ def build_ibv_standard() -> FormSchemaDoc:
         ],
         flow_rules=[
             FlowRule(
-                rule_key="patient_not_on_plan",
-                when=eq("sections.patient_verification.patient_on_plan", "No"),
+                rule_key="insurance_not_active",
+                when=eq("sections.patient_verification.is_insurance_active", "No"),
                 action="terminate_call",
                 skip_to_task="wrap_up",
                 note=(
-                    "The representative denied the patient is on the plan even "
-                    "after the member ID, insurance provider and verification "
-                    "details were provided. Skip all remaining tasks, collect the "
-                    "representative name and call reference number, then end the "
-                    "call."
+                    "The representative confirmed the patient's insurance is not "
+                    "active even after the member ID, insurance provider and "
+                    "verification details were provided. Skip all remaining "
+                    "tasks, collect the representative name and call reference "
+                    "number, then end the call."
                 ),
             ),
             FlowRule(
