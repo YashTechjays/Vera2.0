@@ -146,14 +146,19 @@ describe("getSectionTable", () => {
     )
   })
 
-  it("models diagnostic_testing: one row per leaf-only CPT group", () => {
+  it("models diagnostic_testing: nested CPT rows under one ICD-10-coded parent group", () => {
     const t = getSectionTable("diagnostic_testing", schema.sections.diagnostic_testing)!
-    expect(t.groups).toHaveLength(8)
+    expect(t.groups).toHaveLength(1)
     expect(t.extraColumns).toEqual([])
-    expect(t.groups[0].label).toBe("CPT 58340")
-    expect(t.groups[0].rows[0].path).toBe("sections.diagnostic_testing.cpt_58340")
+    expect(t.groups[0].label).toBe("Labs, Xray/Ultrasound")
+    expect(t.groups[0].icd10).toBe("Z31.41")
+    expect(t.groups[0].rows).toHaveLength(8)
+    expect(t.groups[0].rows[0].label).toBe("CPT 58340")
+    expect(t.groups[0].rows[0].path).toBe(
+      "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340"
+    )
     expect(t.groups[0].rows[0].cells.covered?.path).toBe(
-      "sections.diagnostic_testing.cpt_58340.covered"
+      "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"
     )
   })
 
