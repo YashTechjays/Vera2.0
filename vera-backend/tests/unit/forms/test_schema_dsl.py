@@ -1,6 +1,5 @@
 """Form-schema DSL: compiler freshness, round-trip, and document validation."""
 
-import json
 from datetime import date
 from pathlib import Path
 from typing import Any
