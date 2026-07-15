@@ -10,7 +10,7 @@ are NOT re-checked here.
 from typing import TYPE_CHECKING
 
 from control_plane.exceptions import CustomAPIException, DefaultExceptionCode
-from vera_core.forms.intake import E164_RE
+from vera_core.forms.intake import E164_RE as E164_RE
 from vera_core.integrations.credentials import get_integration_credentials
 
 if TYPE_CHECKING:
