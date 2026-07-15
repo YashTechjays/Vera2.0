@@ -144,3 +144,10 @@ to a clean, valid E.164 string.
 - Frontend validation/formatting (`vera-frontend/src/lib/ibv/validation.ts`,
   `FieldRenderer.tsx`).
 - Backfilling phone numbers on patient forms created before this change.
+- Normalizing the raw `intake_payload` JSON blob stored on `patient_form` (§3 step 5
+  in an earlier draft of this doc proposed a `set_path` helper for this). Dropped
+  during planning: no endpoint or UI ever reads `patient_form.intake_payload` back out
+  (confirmed by the final whole-branch review) — it's write-only archival of exactly
+  what the caller submitted. Normalizing it would add a helper and a mutation with no
+  observable effect, so `field_answer` and the promoted column (the two artifacts
+  anything actually reads) are the only two kept in sync.
