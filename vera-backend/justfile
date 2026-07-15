@@ -84,8 +84,8 @@ test_seed_patient_data status="ready_for_processing":
     uv run python scripts/seed_patient_data.py --status {{status}}
 
 # Probe the real intake endpoint (POST /api/v1/patient-forms) against a running
-# `just api`, with payloads derived live from ../appscript.js's DATA_MAPPING —
-# catches drift between the Sheet's field set and the live schema. Requires
+# `just api`, with payloads derived live from data/ibv_infertility_appscript.js's
+# DATA_MAPPING — catches drift between the Sheet's field set and the live schema. Requires
 # baseline schemas seeded (`just seed`/`just seed-schemas`) and `just api` running.
 # scenario: all (default) | full | system_only | drop_system_field
 intake-scenarios scenario="all":

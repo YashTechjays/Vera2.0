@@ -1,11 +1,12 @@
 """Probe the real intake HTTP endpoint (POST /api/v1/patient-forms) against a
 running local API server, with payloads derived from the Google Sheet's actual
-field set (../appscript.js's DATA_MAPPING) — not a synthetic "fill every leaf"
-payload, but exactly the section/field shape the real Sheet submits. Catches drift
-between the Sheet's field set and the live schema (a stale/renamed/moved path in
-DATA_MAPPING shows up as a 422 "unknown field paths" here, the same way it would
-for a real submission), and makes concrete exactly which fields the endpoint
-actually requires (only `system_fields` targets — see `intake.py::missing_required`).
+field set (data/ibv_infertility_appscript.js's DATA_MAPPING) — not a synthetic
+"fill every leaf" payload, but exactly the section/field shape the real Sheet
+submits. Catches drift between the Sheet's field set and the live schema (a
+stale/renamed/moved path in DATA_MAPPING shows up as a 422 "unknown field paths"
+here, the same way it would for a real submission), and makes concrete exactly
+which fields the endpoint actually requires (only `system_fields` targets — see
+`intake.py::missing_required`).
 
     just api                                    # in one terminal: start the server
     uv run python scripts/intake_scenarios.py   # in another: run every scenario
@@ -18,8 +19,8 @@ Scenarios:
                       that one field removed — expect a 422 naming exactly that path.
 
 Requires the baseline schemas already seeded (`just seed` / `just seed-schemas`) and
-`node` on PATH (used to read DATA_MAPPING out of the real appscript.js, so there is
-no second, hand-maintained copy of the field list to drift). Mints its own
+`node` on PATH (used to read DATA_MAPPING out of the real appscript source, so there
+is no second, hand-maintained copy of the field list to drift). Mints its own
 short-lived `intake:write` API key directly in the DB (bypassing the human-session
 `POST /api-keys` flow, since this is a local dev tool) and revokes it on exit, and
 cleans up the `patient_form` rows it creates before each run (fixed chart_number
@@ -63,7 +64,7 @@ _MARKER_CHART_NUMBER = {
     "full": "PROBE-FULL-SCENARIO",
     "system_only": "PROBE-SYSTEM-ONLY-SCENARIO",
 }
-_APPSCRIPT_PATH = Path(__file__).resolve().parents[1] / "appscript.js"
+_APPSCRIPT_PATH = Path(__file__).resolve().parents[1] / "data" / "ibv_infertility_appscript.js"
 
 
 def _dummy_leaf_value(field_key: str, leaf: dict[str, Any]) -> str:
@@ -93,13 +94,14 @@ def _dummy_leaf_value(field_key: str, leaf: dict[str, Any]) -> str:
 
 
 def _load_sheet_field_skeleton() -> dict[str, Any]:
-    """The exact section/field tree the Sheet submits, read live from appscript.js's
-    DATA_MAPPING (never hand-duplicated). Cell references are irrelevant here — every
-    leaf collapses to `True`, a marker meaning "the Sheet has a cell for this field";
-    the actual value comes from the live schema in `_fill_from_skeleton`, not the cell.
+    """The exact section/field tree the Sheet submits, read live from the appscript
+    source's DATA_MAPPING (never hand-duplicated). Cell references are irrelevant here —
+    every leaf collapses to `True`, a marker meaning "the Sheet has a cell for this
+    field"; the actual value comes from the live schema in `_fill_from_skeleton`, not
+    the cell.
 
-    Extracted via a temp CommonJS module (`require`), not `eval` — `appscript.js` is a
-    trusted, repo-local file, but `require`-as-a-module keeps this from ever being able
+    Extracted via a temp CommonJS module (`require`), not `eval` — the appscript source
+    is a trusted, repo-local file, but `require`-as-a-module keeps this from ever being able
     to execute arbitrary injected script text, only a plain object literal assignment."""
     src = _APPSCRIPT_PATH.read_text()
     match = re.search(r"const DATA_MAPPING = (\{[\s\S]*?\n\});", src)
@@ -325,7 +327,7 @@ async def run(base_url: str, only: str | None) -> None:
     sheet_skeleton = _load_sheet_field_skeleton()
     full_payload, stale = _full_form_payload(schema_json, sheet_skeleton)
     if stale:
-        print("WARNING: appscript.js DATA_MAPPING references paths not in the live schema:")
+        print("WARNING: appscript DATA_MAPPING references paths not in the live schema:")
         for path in stale:
             print(f"  - {path}")
 
