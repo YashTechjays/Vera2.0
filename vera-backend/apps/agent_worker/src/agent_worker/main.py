@@ -27,6 +27,7 @@ from redis.asyncio import Redis
 
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.intervention import AgentPauseController, intervener_present
 from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
 from agent_worker.transcript_publisher import (
     FanOutTurnPublisher,
@@ -44,6 +45,7 @@ from vera_core.events import (
     WorkerEventBus,
 )
 from vera_core.observability.correlation import (
+    PARTICIPANT_MODE_ATTR,
     call_trace_attributes,
     is_observer_identity,
     parse_room_name,
@@ -486,6 +488,24 @@ async def entrypoint(ctx: JobContext) -> None:
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
         record=False,
     )
+
+    # Supervisor takeover: the agent's input is pinned to the callee, so it can't
+    # hear an intervening supervisor. Watch the room for the intervene mode
+    # attribute and silence/resume the agent so it never talks over a takeover.
+    pause_ctl = AgentPauseController(session)
+
+    def _recompute_intervention(*_args: object) -> None:
+        pause_ctl.apply(
+            intervener_present(
+                p.attributes.get(PARTICIPANT_MODE_ATTR)
+                for p in ctx.room.remote_participants.values()
+            )
+        )
+
+    ctx.room.on("participant_connected", _recompute_intervention)
+    ctx.room.on("participant_disconnected", _recompute_intervention)
+    ctx.room.on("participant_attributes_changed", _recompute_intervention)
+    _recompute_intervention()  # apply initial state (an intervener already present)
 
 
 def build_worker_options() -> WorkerOptions:
