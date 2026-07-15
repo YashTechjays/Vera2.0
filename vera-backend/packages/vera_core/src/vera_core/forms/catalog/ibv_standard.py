@@ -160,7 +160,6 @@ def _context_sections() -> dict[str, Section]:
                     type="text",
                     title="Chart Number",
                     role="input",
-                    default="N/A",
                     description="Clinic-internal chart number. Display only; never part of the call.",
                 ),
                 "patient_name": Leaf(
@@ -178,7 +177,6 @@ def _context_sections() -> dict[str, Section]:
                     title="Patient Gender",
                     role="context",
                     values=["Female", "Male", "Other"],
-                    default="N/A",
                     required=True,
                 ),
                 "spouse_partner_name": Leaf(
@@ -265,7 +263,6 @@ def _context_sections() -> dict[str, Section]:
                     type="phone",
                     title="Callback Number",
                     role="context",
-                    default="N/A",
                     description="The callback phone number of your supervisor",
                 ),
             },

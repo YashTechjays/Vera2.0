@@ -267,7 +267,6 @@
           "type": "text",
           "title": "Chart Number",
           "role": "input",
-          "default": "N/A",
           "description": "Clinic-internal chart number. Display only; never part of the call."
         },
         "patient_name": {
@@ -294,8 +293,7 @@
             "Female",
             "Male",
             "Other"
-          ],
-          "default": "N/A"
+          ]
         },
         "spouse_partner_name": {
           "type": "text",
@@ -412,7 +410,6 @@
           "type": "phone",
           "title": "Callback Number",
           "role": "context",
-          "default": "N/A",
           "description": "The callback phone number of your supervisor"
         }
       }
