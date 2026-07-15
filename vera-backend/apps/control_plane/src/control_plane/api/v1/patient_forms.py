@@ -47,8 +47,9 @@ from vera_core.forms.intake import (
     PromotedIdentifiers,
     iter_leaf_answers,
     missing_required,
+    normalize_phone_answers,
+    phone_promoted_paths,  # noqa: F401 -- unused here; Task 4 wires this into resolve_disputes
     promote_columns,
-    resolve_path,
     unknown_payload_paths,
 )
 from vera_core.forms.review import (
@@ -162,9 +163,28 @@ async def upload_patient_form(
                 data={"fields": missing},
             )
         doc = _v2_doc(version.schema_json)
-        promoted = PromotedIdentifiers()
+
+        # Flattened + phone-normalized intake answers: one INTAKE-source field_answer per
+        # provided leaf. v2 documents use root-anchored paths (`sections.…` — spec §4.2), so
+        # the payload (nested by section_key) is flattened under a `sections` root. v1
+        # schemas have no leaf set to validate against, so the unknown-path check and phone
+        # normalization both live in the `doc is not None` branch. Building `answers` before
+        # promotion (rather than after) lets `promote_columns` read the already-`+`-prefixed
+        # value, so field_answer and the promoted column agree on it (2026-07-15 design doc).
         if doc is not None:
-            promoted = _promote_or_422(lambda p: resolve_path(body.intake_payload, p), doc)
+            answers = list(iter_leaf_answers({"sections": body.intake_payload}))
+            unrecognized = unknown_payload_paths(answers, doc)
+            if unrecognized:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="intake payload contains unknown field paths",
+                    data={"fields": unrecognized},
+                )
+            answers = normalize_phone_answers(answers, doc)
+            promoted = _promote_or_422(dict(answers).get, doc)
+        else:
+            answers = list(iter_leaf_answers(body.intake_payload))
+            promoted = PromotedIdentifiers()
 
         form = PatientForm(
             tenant_id=principal.tenant_id,
@@ -185,24 +205,6 @@ async def upload_patient_form(
         session.add(form)
         await session.flush()
 
-        # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
-        # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
-        # payload (nested by section_key) is flattened under a `sections` root.
-        # v1 schemas have no leaf set to validate against, so the unknown-path check
-        # is v2-only (doc is not None); the ternary and the guard share one branch.
-        if doc is not None:
-            payload_root: dict[str, Any] = {"sections": body.intake_payload}
-            answers = list(iter_leaf_answers(payload_root))
-            unrecognized = unknown_payload_paths(answers, doc)
-            if unrecognized:
-                raise CustomAPIException(
-                    DefaultExceptionCode.VALIDATION_ERROR,
-                    message="intake payload contains unknown field paths",
-                    data={"fields": unrecognized},
-                )
-        else:
-            payload_root = body.intake_payload
-            answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(
                 tenant_id=principal.tenant_id,
