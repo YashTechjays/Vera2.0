@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import (
+    AppSettings,
     Audit,
     CallPlans,
     LiveKit,
@@ -37,6 +38,7 @@ from control_plane.auth.rbac import (
 )
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.deps import (
+    current_elevation,
     current_identity,
     get_call_stream_service,
     get_kms,
@@ -51,6 +53,7 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.post_call import resolve_ai_processing
+from control_plane.recording_storage import SigningUnavailable, parse_gcs_uri
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from control_plane.sse import frames_with_keepalive
@@ -64,9 +67,9 @@ from vera_core.call_stream import (
 )
 from vera_core.config.kms import KeyManagementService
 from vera_core.db.rls import tenant_session
-from vera_core.models import Call, InterventionEvent, PatientForm, Transcript
+from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallStatus, InterventionType
+from vera_core.models.enums import CallStatus, InterventionType, RecordingStatus
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     PARTICIPANT_MODE_INTERVENER,
@@ -74,7 +77,7 @@ from vera_core.observability.correlation import (
     SUPERVISOR_IDENTITY_PREFIX,
     room_name_for_call,
 )
-from vera_core.schemas import CallSummary, JoinTokenResponse
+from vera_core.schemas import CallSummary, JoinTokenResponse, RecordingPlayback
 
 logger = logging.getLogger(__name__)
 
@@ -642,3 +645,107 @@ async def list_calls(
         fields=["patient_name"],
     )
     return ok([_summary(c, name, caller.user_id) for c, name in rows])
+
+
+@router.get(
+    "/calls/{call_id}/recording",
+    response_model=ResponseModel[RecordingPlayback],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+    ),
+)
+async def get_recording_playback(
+    call_id: UUID,
+    request: Request,
+    response: Response,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: Audit,
+    settings: AppSettings,
+    caller: VerifiedIdentity = require("recordings:read"),
+) -> ResponseModel[RecordingPlayback]:
+    """Mint a TTL-bounded signed URL for the call's recording.
+
+    Authorization is permission AND call visibility (spec decision 6): the
+    recording is never more visible than the call itself. Every issuance is a
+    PHI disclosure → RECORDING_ACCESSED on the append-only audit trail.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    call = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one_or_none()
+    if call is None:
+        raise NotFoundError(message="call not found")
+    if _call_hidden_from(call, caller.user_id):
+        raise NotFoundError(message="call not found")  # don't reveal a private call
+
+    storage = request.app.state.recording_storage
+    if storage is None:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT, message="call recording is not configured"
+        )
+
+    # Latest AVAILABLE wins: a newer FAILED/PENDING attempt must not shadow a
+    # playable recording (only its absence makes the call unplayable).
+    recording = (
+        await session.execute(
+            select(Recording)
+            .where(Recording.call_id == call_id)
+            .order_by(
+                (Recording.status == RecordingStatus.AVAILABLE.value).desc(),
+                Recording.created_at.desc(),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if recording is None:
+        raise NotFoundError(message="no recording for this call")
+    if recording.status != RecordingStatus.AVAILABLE.value:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message=f"recording is not available (status: {recording.status})",
+        )
+
+    try:
+        bucket, object_path = parse_gcs_uri(recording.gcs_uri)
+    except ValueError as exc:
+        # A malformed stored pointer is an operational defect, not a caller error —
+        # surface a clean envelope instead of an unhandled 500. URI is UUID-only.
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT, message="recording pointer is invalid"
+        ) from exc
+    ttl = settings.recording_signed_url_ttl_seconds
+    try:
+        url = await storage.signed_url(bucket, object_path, ttl_seconds=ttl)
+    except SigningUnavailable as exc:
+        # User ADC / missing signBlob grant — a clean envelope, not a raw 500.
+        logger.error("signed-url minting failed (%s)", exc)
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message="recording storage cannot mint playback URLs in this environment",
+        ) from exc
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.RECORDING_ACCESSED.value,
+            resource_type="recording",
+            resource_id=str(recording.id),
+            permission_key="recordings:read",
+            decision="allow",
+            request_id=current_request_id(request),
+            elevation_session_id=current_elevation(request),
+            detail={"call_id": str(call_id), "ttl_seconds": ttl},
+        )
+    )
+    # expires_at is informational for the client; the URL's own signature is the
+    # enforcement (GCS rejects after expiry regardless of this field).
+    return ok(
+        RecordingPlayback(
+            url=url,
+            expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
+        )
+    )

@@ -608,8 +608,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     def _check_takeover(*_args: object) -> None:
         if intervener_present(
-            p.attributes.get(PARTICIPANT_MODE_ATTR)
-            for p in ctx.room.remote_participants.values()
+            p.attributes.get(PARTICIPANT_MODE_ATTR) for p in ctx.room.remote_participants.values()
         ):
             takeover_ctl.engage()
 

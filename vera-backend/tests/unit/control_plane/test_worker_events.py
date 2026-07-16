@@ -225,7 +225,14 @@ def _consumer(
     monkeypatch.setattr(post_call, "tenant_session", _fake_tenant_session)
 
     async def _fake_run_dispatch_pass(
-        sessionmaker: Any, tenant_id: Any, lk: Any, kms: Any, aud: Any, *, plan_service: Any = None
+        sessionmaker: Any,
+        tenant_id: Any,
+        lk: Any,
+        kms: Any,
+        aud: Any,
+        *,
+        recording: Any = None,
+        plan_service: Any = None,
     ) -> None:
         dispatch_calls.append((tenant_id, lk, kms, aud))
 

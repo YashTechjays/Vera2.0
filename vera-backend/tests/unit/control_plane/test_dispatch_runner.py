@@ -39,6 +39,7 @@ async def test_runs_try_dispatch_in_its_own_tenant_session(monkeypatch: Any) -> 
         kms: Any,
         *,
         audit: Any = None,
+        recording: Any = None,
         plan_service: Any = None,
     ) -> int:
         seen.update(session=session, tenant_id=tenant_id)
@@ -62,6 +63,7 @@ async def test_forwards_plan_service_to_try_dispatch(monkeypatch: Any) -> None:
         kms: Any,
         *,
         audit: Any = None,
+        recording: Any = None,
         plan_service: Any = None,
     ) -> int:
         seen["plan_service"] = plan_service
@@ -84,6 +86,7 @@ async def test_swallows_and_logs_dispatch_errors(monkeypatch: Any, caplog: Any) 
         kms: Any,
         *,
         audit: Any = None,
+        recording: Any = None,
         plan_service: Any = None,
     ) -> None:
         raise RuntimeError("livekit down")
@@ -105,6 +108,7 @@ async def test_schedule_dispatch_pass_runs_detached(monkeypatch: Any) -> None:
         kms: Any,
         *,
         audit: Any = None,
+        recording: Any = None,
         plan_service: Any = None,
     ) -> None:
         ran.append(tenant_id)
@@ -135,6 +139,7 @@ async def test_pass_survives_caller_cancellation(monkeypatch: Any) -> None:
         kms: Any,
         *,
         audit: Any = None,
+        recording: Any = None,
         plan_service: Any = None,
     ) -> None:
         entered.set()
@@ -175,6 +180,7 @@ async def test_wait_for_form_barrier_runs_before_pass(monkeypatch: Any) -> None:
         kms: Any,
         *,
         audit: Any = None,
+        recording: Any = None,
         plan_service: Any = None,
     ) -> None:
         dispatched_with.append(session)

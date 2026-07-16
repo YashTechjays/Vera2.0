@@ -8,7 +8,7 @@ the single source of truth. The defaults below are local-dev only.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,8 +33,11 @@ class Settings(BaseSettings):
     # Live-transcript Redis stream lifetime (Voice Lab / SSE). The rolling backstop
     # TTL is refreshed on every publish so an abandoned stream self-clears; the end
     # grace TTL lets connected readers drain the `ended` sentinel before it clears.
+    # The grace window is also the persistence-finalizer's durability budget: the
+    # control plane must consume call.ended and drain the stream before it expires,
+    # so it is sized to ride out a control-plane restart, not just an SSE drain.
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
-    transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
+    transcript_end_grace_seconds: int = 900  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
     # Worker→control-plane event bus (Redis Streams + consumer group). Stream is
     # MAXLEN-trimmed; the consumer blocks for block_ms, reclaims entries a crashed
@@ -154,6 +157,21 @@ class Settings(BaseSettings):
     audit_anchor_bucket: str | None = None
     audit_anchor_prefix: str = "audit-anchors"
     audit_anchor_local_dir: str = ".audit-anchors"
+    # --- call recording (LiveKit composite egress → GCS) --------------------
+    # Unset bucket → recording disabled end-to-end (no egress started, no
+    # Recording rows, playback 409s) — mirrors the langfuse_host no-op switch.
+    recording_bucket: str | None = None  # VERA_RECORDING_BUCKET
+    recording_prefix: str = "recordings"  # VERA_RECORDING_PREFIX
+    recording_retention_days_default: int = 90  # VERA_RECORDING_RETENTION_DAYS_DEFAULT
+    # Bounded: a misconfigured env var must not mint day-long bearer URLs.
+    recording_signed_url_ttl_seconds: int = Field(
+        default=600, ge=60, le=3600
+    )  # VERA_RECORDING_SIGNED_URL_TTL_SECONDS
+    recording_verify_interval_seconds: int = 30  # VERA_RECORDING_VERIFY_INTERVAL_SECONDS
+    retention_sweep_interval_seconds: int = 3600  # VERA_RETENTION_SWEEP_INTERVAL_SECONDS
+    # An orphan egress (no Recording row) is reaped only once it is older than this,
+    # so a just-started recording whose row is still committing is never killed.
+    recording_orphan_grace_seconds: int = 300  # VERA_RECORDING_ORPHAN_GRACE_SECONDS
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from vera_core.audit import AuditSink
     from vera_core.plan_store import CallPlanService
+    from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ def schedule_dispatch_pass(
     audit: "AuditSink | None",
     *,
     wait_for_form_id: "UUID | None" = None,
+    recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
 ) -> None:
     """Fire-and-forget a dispatch pass on the running loop. See run_dispatch_pass
@@ -54,6 +56,7 @@ def schedule_dispatch_pass(
                 kms,
                 audit,
                 wait_for_form_id=wait_for_form_id,
+                recording=recording,
                 plan_service=plan_service,
             )
         )
@@ -80,6 +83,7 @@ async def run_dispatch_pass(
     audit: "AuditSink | None",
     *,
     wait_for_form_id: "UUID | None" = None,
+    recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
 ) -> None:
     """Await one dispatch pass, shielded from the caller's cancellation.
@@ -99,6 +103,7 @@ async def run_dispatch_pass(
             kms,
             audit,
             wait_for_form_id=wait_for_form_id,
+            recording=recording,
             plan_service=plan_service,
         )
     )
@@ -114,6 +119,7 @@ async def _dispatch_pass(
     audit: "AuditSink | None",
     *,
     wait_for_form_id: "UUID | None" = None,
+    recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
 ) -> None:
     """One dispatch pass in a fresh tenant-scoped session; commits on success.
@@ -134,7 +140,13 @@ async def _dispatch_pass(
                 )
         async with tenant_session(sessionmaker, tenant_id) as session:
             await try_dispatch(
-                session, tenant_id, livekit, kms, audit=audit, plan_service=plan_service
+                session,
+                tenant_id,
+                livekit,
+                kms,
+                audit=audit,
+                recording=recording,
+                plan_service=plan_service,
             )
     except Exception as exc:
         # Type name only — SQLAlchemy statement errors embed the bound

@@ -54,6 +54,7 @@ from vera_core.services.ivr_selection import (
     add_active_playbook_metadata,
     add_agent_context_metadata,
 )
+from vera_core.services.recordings import start_recording_for_call
 from vera_core.telephony import LiveKitUnavailable, OutboundDialError
 
 if TYPE_CHECKING:
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from vera_core.audit import AuditSink
     from vera_core.config.kms import KeyManagementService
     from vera_core.plan_store import CallPlanService
+    from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,7 @@ async def try_dispatch(
     kms: KeyManagementService | Any,
     *,
     audit: AuditSink | None = None,
+    recording: RecordingConfig | None = None,
     dial_pacing_s: float = 1.0,
     plan_service: CallPlanService | None = None,
 ) -> int:
@@ -127,6 +130,10 @@ async def try_dispatch(
     audit:
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
+    recording:
+        Optional ``RecordingConfig``. When provided, audio egress is started
+        for each successfully dialed call (fail-open — a recording failure
+        never rolls back a dispatched call).
     dial_pacing_s:
         Seconds to sleep between successive dials in one pass, to stay under
         the carrier's calls-per-second limit (Twilio ~1 CPS). Applied between
@@ -442,6 +449,18 @@ async def try_dispatch(
             continue
 
         dispatched += 1
+        if recording is not None:
+            # Fail-open, after a successful dial: a recording failure must never
+            # undo a dispatched call, and a failed dial should not leave an egress
+            # recording an empty room.
+            await start_recording_for_call(
+                session,
+                livekit,
+                config=recording,
+                tenant_id=tenant_id,
+                call_id=call.id,
+                audit=audit,
+            )
         logger.info(
             "dispatch: initiated call %s for form %s (mode=%s)",
             call.id,

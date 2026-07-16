@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from control_plane.api.v1.common import (
+    AppSettings,
     CallPlans,
     Kms,
     LiveKit,
@@ -87,6 +88,7 @@ from vera_core.models.enums import (
 )
 from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.recordings import recording_config_from
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -915,6 +917,7 @@ async def update_patient_form_status(
     tenant_id: TenantId,
     livekit: LiveKit,
     kms: Kms,
+    settings: AppSettings,
     call_plans: CallPlans,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
@@ -1050,6 +1053,7 @@ async def update_patient_form_status(
             kms,
             audit,
             wait_for_form_id=form_id,
+            recording=recording_config_from(settings),
             plan_service=call_plans,
         )
 
