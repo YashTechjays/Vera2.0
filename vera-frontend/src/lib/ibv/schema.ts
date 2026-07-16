@@ -184,7 +184,7 @@ export function suggestionsOf(field: LeafField): string[] {
  * - `noop`: UI-only — never in the prompt, never asked (role input/readonly).
  * - `asked`: collected on the call (role ask/confirm).
  */
-export type FieldUsage = "prerequisite" | "system" | "context" | "noop" | "asked"
+export type FieldUsage = "system" | "context" | "noop" | "asked"
 
 const _systemPathsBySchema = new WeakMap<FormSchema, Set<string>>()
 
@@ -198,24 +198,11 @@ export function systemFieldPaths(schema: FormSchema): Set<string> {
   return paths
 }
 
-const _prerequisitePathsBySchema = new WeakMap<FormSchema, Set<string>>()
-
-/** The field paths listed in `prerequisite_fields` (call-prerequisite UI annotation). */
-export function prerequisiteFieldPaths(schema: FormSchema): Set<string> {
-  let paths = _prerequisitePathsBySchema.get(schema)
-  if (!paths) {
-    paths = new Set(schema.prerequisite_fields ?? [])
-    _prerequisitePathsBySchema.set(schema, paths)
-  }
-  return paths
-}
-
 export function fieldUsageOf(
   schema: FormSchema,
   path: string,
   field: LeafField
 ): FieldUsage {
-  if (prerequisiteFieldPaths(schema).has(path)) return "prerequisite"
   if (systemFieldPaths(schema).has(path)) return "system"
   // A ui_only SECTION is never voice-touched, whatever its leaves' roles say.
   if (schema.sections[path.split(".")[1]]?.role === "ui_only") return "noop"

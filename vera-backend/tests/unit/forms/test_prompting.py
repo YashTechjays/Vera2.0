@@ -96,7 +96,7 @@ class TestTaskText:
         )
 
     def test_flow_rules_attach_to_firing_task(self) -> None:
-        assert "TERMINATION RULE — patient_not_on_plan" in task("introduction").prompt
+        assert "TERMINATION RULE — insurance_not_active" in task("introduction").prompt
         assert "TERMINATION RULE — no_out_of_network_coverage" in task("insurance_basics").prompt
         assert "TERMINATION RULE" not in task("coverage").prompt
 

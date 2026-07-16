@@ -54,8 +54,10 @@ from vera_core.forms.intake import (
     PromotedIdentifiers,
     iter_leaf_answers,
     missing_required,
+    normalize_phone_answers,
+    normalize_phone_prefix,
+    phone_promoted_paths,
     promote_columns,
-    resolve_path,
     unknown_payload_paths,
 )
 from vera_core.forms.review import (
@@ -71,6 +73,7 @@ from vera_core.models import (
     DisputeAction,
     FieldAnswer,
     FormSchema,
+    InsuranceProvider,
     PatientForm,
     SchemaVersion,
     Tenant,
@@ -80,6 +83,7 @@ from vera_core.models.enums import (
     AnswerSource,
     DisputeActionType,
     FormStatus,
+    ProviderStatus,
 )
 from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
@@ -168,9 +172,28 @@ async def upload_patient_form(
                 data={"fields": missing},
             )
         doc = _v2_doc(version.schema_json)
-        promoted = PromotedIdentifiers()
+
+        # Flattened + phone-normalized intake answers: one INTAKE-source field_answer per
+        # provided leaf. v2 documents use root-anchored paths (`sections.…` — spec §4.2), so
+        # the payload (nested by section_key) is flattened under a `sections` root. v1
+        # schemas have no leaf set to validate against, so the unknown-path check and phone
+        # normalization both live in the `doc is not None` branch. Building `answers` before
+        # promotion (rather than after) lets `promote_columns` read the already-`+`-prefixed
+        # value, so field_answer and the promoted column agree on it (2026-07-15 design doc).
         if doc is not None:
-            promoted = _promote_or_422(lambda p: resolve_path(body.intake_payload, p), doc)
+            answers = list(iter_leaf_answers({"sections": body.intake_payload}))
+            unrecognized = unknown_payload_paths(answers, doc)
+            if unrecognized:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="intake payload contains unknown field paths",
+                    data={"fields": unrecognized},
+                )
+            answers = normalize_phone_answers(answers, doc)
+            promoted = _promote_or_422(dict(answers).get, doc)
+        else:
+            answers = list(iter_leaf_answers(body.intake_payload))
+            promoted = PromotedIdentifiers()
 
         form = PatientForm(
             tenant_id=principal.tenant_id,
@@ -191,24 +214,6 @@ async def upload_patient_form(
         session.add(form)
         await session.flush()
 
-        # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
-        # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
-        # payload (nested by section_key) is flattened under a `sections` root.
-        # v1 schemas have no leaf set to validate against, so the unknown-path check
-        # is v2-only (doc is not None); the ternary and the guard share one branch.
-        if doc is not None:
-            payload_root: dict[str, Any] = {"sections": body.intake_payload}
-            answers = list(iter_leaf_answers(payload_root))
-            unrecognized = unknown_payload_paths(answers, doc)
-            if unrecognized:
-                raise CustomAPIException(
-                    DefaultExceptionCode.VALIDATION_ERROR,
-                    message="intake payload contains unknown field paths",
-                    data={"fields": unrecognized},
-                )
-        else:
-            payload_root = body.intake_payload
-            answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(
                 tenant_id=principal.tenant_id,
@@ -315,6 +320,9 @@ class PatientFormDetail(BaseModel):
     patient_name: str | None
     chart_number: str | None
     appointment_date: date | None
+    # The form's current insurance provider (promoted intake column). The send-to-queue
+    # UI pre-selects the matching catalog provider from this string.
+    insurance_provider: str | None
     # Voice-lab-style toggle stored on the form (default True) — the UI's re-queue
     # toggle pre-loads from here so an operator's earlier choice round-trips.
     ivr_navigation_enabled: bool
@@ -418,6 +426,7 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         patient_name=form.patient_name,
         chart_number=form.chart_number,
         appointment_date=form.appointment_date,
+        insurance_provider=form.insurance_provider,
         ivr_navigation_enabled=form.ivr_navigation_enabled,
         fields=[FieldView(**view) for view in views],
     )
@@ -523,6 +532,40 @@ async def list_patient_forms(
     return ok(PaginatedForms(items=items, page=page, page_size=page_size, total=total))
 
 
+class ProviderOption(BaseModel):
+    """Minimal active-provider option for the send-to-queue provider picker (non-PHI)."""
+
+    id: UUID
+    name: str
+
+
+# Declared BEFORE `/patient-forms/{form_id}` so the literal path is matched instead of
+# being captured as a (non-UUID) form_id and 422'd.
+@router.get(
+    "/patient-forms/insurance-providers",
+    response_model=ResponseModel[list[ProviderOption]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_form_insurance_providers(
+    response: Response,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[list[ProviderOption]]:
+    """Active insurance providers an operator can pick when sending a form to the queue. The
+    insurance_provider catalog is GLOBAL (no RLS, no PHI), so it resolves on the tenant session."""
+    response.headers["Cache-Control"] = "no-store"
+    rows = (
+        await session.execute(
+            select(InsuranceProvider.id, InsuranceProvider.name)
+            .where(InsuranceProvider.status == ProviderStatus.ACTIVE)
+            .order_by(InsuranceProvider.name)
+        )
+    ).all()
+    return ok([ProviderOption(id=row.id, name=row.name) for row in rows])
+
+
 @router.get(
     "/patient-forms/{form_id}",
     response_model=ResponseModel[PatientFormDetail],
@@ -591,6 +634,16 @@ async def resolve_disputes(
     if form is None:
         raise NotFoundError(message="patient form not found")
 
+    # Fetched here (not after the edit loop, as before) so phone-typed promoted paths
+    # are known before normalizing incoming edits below (2026-07-15 design doc).
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    doc = _v2_doc(version.schema_json)
+    phone_paths = phone_promoted_paths(doc) if doc is not None else set()
+
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
     open_paths = await _open_dispute_paths(session, form_id)
@@ -652,6 +705,8 @@ async def resolve_disputes(
         session.add(_human_answer(cur.field_path, raw))
 
     for path, new_value in body.form_data.items():
+        if path in phone_paths:
+            new_value = normalize_phone_prefix(new_value)
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).
@@ -687,15 +742,10 @@ async def resolve_disputes(
     # in the audit for the worker, and re-queueing is a manual status change.
     await session.flush()
     current_values: dict[str, Any] = await current_values_by_path(session, form_id)
-    version = (
-        await session.execute(
-            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one()
-    doc = _v2_doc(version.schema_json)
-    # Re-derive promoted patient_form columns from the post-write current answers —
-    # any resolve call that changes a promoted field's value (dispute or plain edit)
-    # keeps the worklist columns in sync, not just intake (2026-07-10 design doc).
+    # doc/phone_paths already resolved above. Re-derive promoted patient_form columns
+    # from the post-write current answers — any resolve call that changes a promoted
+    # field's value (dispute or plain edit) keeps the worklist columns in sync, not
+    # just intake (2026-07-10 design doc).
     if doc is not None:
         promoted = _promote_or_422(current_values.get, doc)
         for column, _path in doc.promoted_fields.items():
@@ -831,6 +881,11 @@ class UpdateStatusRequest(BaseModel):
     # call run the IVR navigator? None keeps the form's stored choice (so a requeue
     # without the field preserves the operator's earlier decision).
     enable_ivr_navigation: bool | None = None
+    # Operator-picked insurance provider, meaningful only on → IN_QUEUE. The form's
+    # `insurance_provider` string is canonicalized to this catalog provider's exact
+    # name so the async dispatcher resolves the right provider (and its IVR playbook).
+    # None leaves the intake string untouched (dispatch falls back to its own match).
+    insurance_provider_id: UUID | None = None
 
 
 class PatientFormStatusResponse(BaseModel):
@@ -898,8 +953,29 @@ async def update_patient_form_status(
         )
 
     # Hard dialability gate: a form that can never be dialed must not enter the queue.
+    canonicalized_provider = False
     if target == FormStatus.IN_QUEUE:
         await ensure_queueable(session, kms, form)
+        # Canonicalize the provider from the operator's pick so the async dispatcher
+        # resolves the right catalog provider (and its IVR playbook) — the string, not
+        # a new FK, carries the choice. insurance_provider is GLOBAL (no RLS).
+        if body.insurance_provider_id is not None:
+            provider = (
+                await session.execute(
+                    select(InsuranceProvider).where(
+                        InsuranceProvider.id == body.insurance_provider_id,
+                        InsuranceProvider.status == ProviderStatus.ACTIVE,
+                    )
+                )
+            ).scalar_one_or_none()
+            if provider is None:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="unknown or inactive insurance provider",
+                    data={"field": "insurance_provider_id"},
+                )
+            form.insurance_provider = provider.name
+            canonicalized_provider = True
 
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
@@ -942,6 +1018,9 @@ async def update_patient_form_status(
     detail: dict[str, Any] = {"from": current.value, "to": target.value}
     if target == FormStatus.IN_QUEUE:
         detail["ivr_navigation"] = form.ivr_navigation_enabled
+        # Record the mutated field NAME only (never the value) per the audit contract.
+        if canonicalized_provider:
+            detail["fields"] = ["insurance_provider"]
 
     audit = get_audit(request)
     await audit.emit(
