@@ -14,6 +14,8 @@ Two caller classes share this router:
 Every PHI response audits field **names** only (never values).
 """
 
+import asyncio
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -22,26 +24,42 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import LiveKit, TenantId, TenantSession
+from control_plane.api.v1.common import (
+    AppSettings,
+    CallPlans,
+    Kms,
+    LiveKit,
+    TenantId,
+    TenantSession,
+    emit_phi_read_audit,
+)
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.deps import get_audit, get_sessionmaker
+from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.queueability import ensure_queueable
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
 from vera_core.forms.conditions import is_v2
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import (
     InvalidIntakeValue,
+    PromotedIdentifiers,
     iter_leaf_answers,
     missing_required,
+    normalize_phone_answers,
+    normalize_phone_prefix,
+    phone_promoted_paths,
     promote_columns,
+    unknown_payload_paths,
 )
 from vera_core.forms.review import (
     AnswerRow,
@@ -55,6 +73,7 @@ from vera_core.models import (
     DisputeAction,
     FieldAnswer,
     FormSchema,
+    InsuranceProvider,
     PatientForm,
     SchemaVersion,
     Tenant,
@@ -64,10 +83,11 @@ from vera_core.models.enums import (
     AnswerSource,
     DisputeActionType,
     FormStatus,
+    ProviderStatus,
 )
-from vera_core.services.field_status import load_current_values
+from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
-from vera_core.services.queue_dispatcher import try_dispatch
+from vera_core.services.recordings import recording_config_from
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -87,6 +107,26 @@ class PatientFormResponse(BaseModel):
     schema_version_id: UUID
     completion_pct: float
     created_at: datetime
+
+
+def _v2_doc(schema_json: dict[str, Any]) -> FormSchemaDoc | None:
+    """The parsed v2 document, or `None` for a legacy v1 schema — the single "is this
+    v2, and if so hand me the doc" check shared by intake and dispute-resolve column
+    promotion (both call `promote_columns` against it)."""
+    return FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
+
+
+def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
+    """`promote_columns`, translated to the API's validation-error contract — the
+    error-wrapping shared by intake and dispute-resolve column promotion."""
+    try:
+        return promote_columns(get_value, doc)
+    except InvalidIntakeValue as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="invalid field value",
+            data={"fields": [exc.field_path]},
+        ) from exc
 
 
 @router.post(
@@ -132,14 +172,29 @@ async def upload_patient_form(
                 message="missing required fields",
                 data={"fields": missing},
             )
-        try:
-            promoted = promote_columns(body.intake_payload)
-        except InvalidIntakeValue as exc:
-            raise CustomAPIException(
-                DefaultExceptionCode.VALIDATION_ERROR,
-                message="invalid field value",
-                data={"fields": [exc.field_path]},
-            ) from exc
+        doc = _v2_doc(version.schema_json)
+
+        # Flattened + phone-normalized intake answers: one INTAKE-source field_answer per
+        # provided leaf. v2 documents use root-anchored paths (`sections.…` — spec §4.2), so
+        # the payload (nested by section_key) is flattened under a `sections` root. v1
+        # schemas have no leaf set to validate against, so the unknown-path check and phone
+        # normalization both live in the `doc is not None` branch. Building `answers` before
+        # promotion (rather than after) lets `promote_columns` read the already-`+`-prefixed
+        # value, so field_answer and the promoted column agree on it (2026-07-15 design doc).
+        if doc is not None:
+            answers = list(iter_leaf_answers({"sections": body.intake_payload}))
+            unrecognized = unknown_payload_paths(answers, doc)
+            if unrecognized:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="intake payload contains unknown field paths",
+                    data={"fields": unrecognized},
+                )
+            answers = normalize_phone_answers(answers, doc)
+            promoted = _promote_or_422(dict(answers).get, doc)
+        else:
+            answers = list(iter_leaf_answers(body.intake_payload))
+            promoted = PromotedIdentifiers()
 
         form = PatientForm(
             tenant_id=principal.tenant_id,
@@ -150,9 +205,8 @@ async def upload_patient_form(
             patient_dob=promoted.patient_dob,
             appointment_date=promoted.appointment_date,
             chart_number=promoted.chart_number,
-            member_id=promoted.member_id,
             appointment_type=promoted.appointment_type,
-            member_policy_id=promoted.member_policy_id,
+            member_id=promoted.member_id,
             insurance_provider=promoted.insurance_provider,
             insurance_provider_phone_number=promoted.insurance_provider_phone_number,
             completion_pct=0,
@@ -161,13 +215,6 @@ async def upload_patient_form(
         session.add(form)
         await session.flush()
 
-        # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
-        # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
-        # payload (nested by section_key) is flattened under a `sections` root.
-        payload_root = (
-            {"sections": body.intake_payload} if is_v2(version.schema_json) else body.intake_payload
-        )
-        answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(
                 tenant_id=principal.tenant_id,
@@ -232,7 +279,7 @@ class PatientFormSummary(BaseModel):
     appointment_date: date | None
     # Promoted out of intake_payload into typed columns (see PatientForm).
     appointment_type: str | None
-    member_policy_id: str | None
+    member_id: str | None
     insurance_provider: str | None
     insurance_provider_phone_number: str | None
     completion_pct: float
@@ -274,7 +321,12 @@ class PatientFormDetail(BaseModel):
     patient_name: str | None
     chart_number: str | None
     appointment_date: date | None
-    member_id: str | None
+    # The form's current insurance provider (promoted intake column). The send-to-queue
+    # UI pre-selects the matching catalog provider from this string.
+    insurance_provider: str | None
+    # Voice-lab-style toggle stored on the form (default True) — the UI's re-queue
+    # toggle pre-loads from here so an operator's earlier choice round-trips.
+    ivr_navigation_enabled: bool
     fields: list[FieldView]
 
 
@@ -282,21 +334,6 @@ class ResolveRequest(BaseModel):
     form_data: dict[str, Any] = {}  # current value per dotted path (post-edit)
     dispute_fields: list[str] = []  # paths the reviewer explicitly accepted
     reasked_fields: list[str] = []  # paths to re-verify on the next call
-
-
-def _audit_phi_read(
-    request: Request, tenant_id: UUID, caller: VerifiedIdentity, resource_id: str, fields: list[str]
-) -> AuditRecord:
-    return AuditRecord(
-        tenant_id=tenant_id,
-        actor_type=ActorType.USER,
-        actor_user_id=caller.user_id,
-        actor_label=caller.email or caller.subject,
-        event_type=AuditEvent.PHI_ACCESS.value,
-        resource_type="patient_form",
-        resource_id=resource_id,
-        detail={"fields": fields},
-    )
 
 
 def _baseline_query(form_id: UUID) -> Any:
@@ -390,7 +427,8 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         patient_name=form.patient_name,
         chart_number=form.chart_number,
         appointment_date=form.appointment_date,
-        member_id=form.member_id,
+        insurance_provider=form.insurance_provider,
+        ivr_navigation_enabled=form.ivr_navigation_enabled,
         fields=[FieldView(**view) for view in views],
     )
 
@@ -420,22 +458,61 @@ async def list_patient_forms(
     if q:
         conds.append(PatientForm.patient_name.ilike(f"%{q.lower()}%"))
 
-    total = (
-        await session.execute(select(func.count()).select_from(PatientForm).where(*conds))
-    ).scalar_one()
-    rows = (
-        (
+    async def _fetch_page() -> tuple[list[PatientForm], int]:
+        """One round trip: the page rows with the filtered total as a window
+        column. An out-of-range page returns no rows (so no total); fall back
+        to a bare count for it."""
+        result = (
             await session.execute(
-                select(PatientForm)
+                select(PatientForm, func.count().over())
                 .where(*conds)
                 .order_by(PatientForm.created_at.desc())
                 .offset((page - 1) * page_size)
                 .limit(page_size)
             )
-        )
-        .scalars()
-        .all()
+        ).all()
+        if result:
+            return [form for form, _total in result], result[0][1]
+        total = (
+            await session.execute(select(func.count()).select_from(PatientForm).where(*conds))
+        ).scalar_one()
+        return [], total
+
+    audited_fields = [
+        "patient_name",
+        "chart_number",
+        "appointment_date",
+        "appointment_type",
+        "member_id",
+        "insurance_provider",
+        "insurance_provider_phone_number",
+    ]
+    # The PHI-access audit writes in its own session/transaction, so it can
+    # overlap the page query instead of serializing after it; it is still
+    # awaited before any data leaves (audit-before-disclosure).
+    # return_exceptions=True: a plain gather() would, on one coroutine raising,
+    # propagate immediately while leaving the other running in the background —
+    # here that would mean _fetch_page still executing against `session` after
+    # this request's teardown starts closing it. Collecting both results first
+    # and raising explicitly keeps them from outliving this function.
+    fetch_result, audit_result = await asyncio.gather(
+        _fetch_page(),
+        emit_phi_read_audit(
+            get_audit(request),
+            request,
+            tenant_id=tenant_id,
+            caller=caller,
+            resource_type="patient_form",
+            resource_id="list",
+            fields=audited_fields,
+        ),
+        return_exceptions=True,
     )
+    if isinstance(audit_result, BaseException):
+        raise audit_result
+    if isinstance(fetch_result, BaseException):
+        raise fetch_result
+    rows, total = fetch_result
     items = [
         PatientFormSummary(
             id=r.id,
@@ -444,7 +521,7 @@ async def list_patient_forms(
             chart_number=r.chart_number,
             appointment_date=r.appointment_date,
             appointment_type=r.appointment_type,
-            member_policy_id=r.member_policy_id,
+            member_id=r.member_id,
             insurance_provider=r.insurance_provider,
             insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
@@ -453,24 +530,41 @@ async def list_patient_forms(
         )
         for r in rows
     ]
-    await get_audit(request).emit(
-        _audit_phi_read(
-            request,
-            tenant_id,
-            caller,
-            "list",
-            [
-                "patient_name",
-                "chart_number",
-                "appointment_date",
-                "appointment_type",
-                "member_policy_id",
-                "insurance_provider",
-                "insurance_provider_phone_number",
-            ],
-        )
-    )
     return ok(PaginatedForms(items=items, page=page, page_size=page_size, total=total))
+
+
+class ProviderOption(BaseModel):
+    """Minimal active-provider option for the send-to-queue provider picker (non-PHI)."""
+
+    id: UUID
+    name: str
+
+
+# Declared BEFORE `/patient-forms/{form_id}` so the literal path is matched instead of
+# being captured as a (non-UUID) form_id and 422'd.
+@router.get(
+    "/patient-forms/insurance-providers",
+    response_model=ResponseModel[list[ProviderOption]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_form_insurance_providers(
+    response: Response,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[list[ProviderOption]]:
+    """Active insurance providers an operator can pick when sending a form to the queue. The
+    insurance_provider catalog is GLOBAL (no RLS, no PHI), so it resolves on the tenant session."""
+    response.headers["Cache-Control"] = "no-store"
+    rows = (
+        await session.execute(
+            select(InsuranceProvider.id, InsuranceProvider.name)
+            .where(InsuranceProvider.status == ProviderStatus.ACTIVE)
+            .order_by(InsuranceProvider.name)
+        )
+    ).all()
+    return ok([ProviderOption(id=row.id, name=row.name) for row in rows])
 
 
 @router.get(
@@ -497,10 +591,14 @@ async def get_patient_form(
     if form is None:
         raise NotFoundError(message="patient form not found")
     detail = await _build_detail(session, form)
-    await get_audit(request).emit(
-        _audit_phi_read(
-            request, tenant_id, caller, str(form_id), [f.field_path for f in detail.fields]
-        )
+    await emit_phi_read_audit(
+        get_audit(request),
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="patient_form",
+        resource_id=str(form_id),
+        fields=[f.field_path for f in detail.fields],
     )
     return ok(detail)
 
@@ -510,6 +608,7 @@ async def get_patient_form(
     response_model=ResponseModel[PatientFormDetail],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.VALIDATION_ERROR,
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
     ),
@@ -535,6 +634,16 @@ async def resolve_disputes(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
+
+    # Fetched here (not after the edit loop, as before) so phone-typed promoted paths
+    # are known before normalizing incoming edits below (2026-07-15 design doc).
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    doc = _v2_doc(version.schema_json)
+    phone_paths = phone_promoted_paths(doc) if doc is not None else set()
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
@@ -597,6 +706,8 @@ async def resolve_disputes(
         session.add(_human_answer(cur.field_path, raw))
 
     for path, new_value in body.form_data.items():
+        if path in phone_paths:
+            new_value = normalize_phone_prefix(new_value)
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).
@@ -631,13 +742,24 @@ async def resolve_disputes(
     # disputes only records the human answers/actions; re-asked fields are surfaced
     # in the audit for the worker, and re-queueing is a manual status change.
     await session.flush()
-    current_values = await load_current_values(session, form_id)
-    version = (
-        await session.execute(
-            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one()
-    form.completion_pct = form_completion_pct(current_values, version.schema_json)
+    current_values: dict[str, Any] = await current_values_by_path(session, form_id)
+    # doc/phone_paths already resolved above. Re-derive promoted patient_form columns
+    # from the post-write current answers — any resolve call that changes a promoted
+    # field's value (dispute or plain edit) keeps the worklist columns in sync, not
+    # just intake (2026-07-10 design doc).
+    if doc is not None:
+        promoted = _promote_or_422(current_values.get, doc)
+        for column, _path in doc.promoted_fields.items():
+            new_value = getattr(promoted, column)
+            if getattr(form, column) != new_value:
+                setattr(form, column, new_value)
+    # v2 completion needs the values (applicable_when/required.when evaluate against
+    # them); v1 only needs which paths are filled.
+    form.completion_pct = (
+        completion_pct_v2(current_values, version.schema_json)
+        if doc is not None
+        else completion_pct(set(current_values), version.schema_json)
+    )
     # Flush BEFORE refresh: refresh() reloads from the DB and DISCARDS pending
     # attribute changes — without this flush the completion update was silently
     # lost. The refresh then reloads server-updated columns (updated_at onupdate)
@@ -648,10 +770,14 @@ async def resolve_disputes(
     detail = await _build_detail(session, form)
     audit = get_audit(request)
     # The response discloses every field value (PHI) — audit the disclosure, then the action.
-    await audit.emit(
-        _audit_phi_read(
-            request, tenant_id, caller, str(form_id), [f.field_path for f in detail.fields]
-        )
+    await emit_phi_read_audit(
+        audit,
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="patient_form",
+        resource_id=str(form_id),
+        fields=[f.field_path for f in detail.fields],
     )
     await audit.emit(
         AuditRecord(
@@ -752,6 +878,15 @@ _MANUAL_TARGETS: dict[FormStatus, frozenset[FormStatus]] = {
 
 class UpdateStatusRequest(BaseModel):
     status: FormStatus  # validated against the lifecycle enum (unknown value → 422)
+    # Voice-lab-style toggle, meaningful only on → IN_QUEUE: should the dispatched
+    # call run the IVR navigator? None keeps the form's stored choice (so a requeue
+    # without the field preserves the operator's earlier decision).
+    enable_ivr_navigation: bool | None = None
+    # Operator-picked insurance provider, meaningful only on → IN_QUEUE. The form's
+    # `insurance_provider` string is canonicalized to this catalog provider's exact
+    # name so the async dispatcher resolves the right provider (and its IVR playbook).
+    # None leaves the intake string untouched (dispatch falls back to its own match).
+    insurance_provider_id: UUID | None = None
 
 
 class PatientFormStatusResponse(BaseModel):
@@ -780,6 +915,9 @@ async def update_patient_form_status(
     session: TenantSession,
     tenant_id: TenantId,
     livekit: LiveKit,
+    kms: Kms,
+    settings: AppSettings,
+    call_plans: CallPlans,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -816,6 +954,31 @@ async def update_patient_form_status(
             data={"from": current.value, "to": target.value},
         )
 
+    # Hard dialability gate: a form that can never be dialed must not enter the queue.
+    canonicalized_provider = False
+    if target == FormStatus.IN_QUEUE:
+        await ensure_queueable(session, kms, form)
+        # Canonicalize the provider from the operator's pick so the async dispatcher
+        # resolves the right catalog provider (and its IVR playbook) — the string, not
+        # a new FK, carries the choice. insurance_provider is GLOBAL (no RLS).
+        if body.insurance_provider_id is not None:
+            provider = (
+                await session.execute(
+                    select(InsuranceProvider).where(
+                        InsuranceProvider.id == body.insurance_provider_id,
+                        InsuranceProvider.status == ProviderStatus.ACTIVE,
+                    )
+                )
+            ).scalar_one_or_none()
+            if provider is None:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="unknown or inactive insurance provider",
+                    data={"field": "insurance_provider_id"},
+                )
+            form.insurance_provider = provider.name
+            canonicalized_provider = True
+
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
         remaining = await _unresolved_dispute_count(session, form_id)
@@ -831,7 +994,9 @@ async def update_patient_form_status(
 
     sm = FormStateMachine()
     try:
-        sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+        # This endpoint is the operator surface — manual transitions start a
+        # fresh enqueue episode (never blocked by, and resetting, the retry cap).
+        sm.transition(form, target, tenant_max_retries=tenant.max_retries, manual=True)
     except InvalidTransitionError as exc:
         raise CustomAPIException(
             DefaultExceptionCode.VALIDATION_ERROR,
@@ -846,10 +1011,19 @@ async def update_patient_form_status(
         # (`initiated_by_id`) even when the call is created later by a different
         # actor (freed-slot dispatch, retry-at-callback).
         form.enqueued_by_id = caller.user_id
+        if body.enable_ivr_navigation is not None:
+            form.ivr_navigation_enabled = body.enable_ivr_navigation
 
     await session.flush()
 
     # Status is not PHI — audit the state change (from/to) only; no PHI disclosure.
+    detail: dict[str, Any] = {"from": current.value, "to": target.value}
+    if target == FormStatus.IN_QUEUE:
+        detail["ivr_navigation"] = form.ivr_navigation_enabled
+        # Record the mutated field NAME only (never the value) per the audit contract.
+        if canonicalized_provider:
+            detail["fields"] = ["insurance_provider"]
+
     audit = get_audit(request)
     await audit.emit(
         AuditRecord(
@@ -860,16 +1034,27 @@ async def update_patient_form_status(
             event_type=AuditEvent.FORM_STATUS_CHANGE.value,
             resource_type="patient_form",
             resource_id=str(form_id),
-            detail={"from": current.value, "to": target.value},
+            detail=detail,
         )
     )
 
-    # Fire the dispatcher if a form was just enqueued. The response acknowledges
-    # the manual transition (target), not whatever the dispatcher advanced the
-    # form to afterwards — clients observe dispatch via the calls list. The
-    # dispatcher itself attributes ownership from `form.enqueued_by_id`, set above.
+    # Kick a dispatch pass strictly AFTER this transaction commits: a detached
+    # task whose first statement lock-waits on the enqueued row (see
+    # control_plane.dispatch). NOT fastapi.BackgroundTasks — those run before
+    # yield-dependency teardown, i.e. before this transaction's commit. The
+    # response acknowledges the manual transition only; clients observe dispatch
+    # via the calls list.
     if target == FormStatus.IN_QUEUE:
-        await try_dispatch(session, tenant_id, livekit, audit=audit)
+        schedule_dispatch_pass(
+            get_sessionmaker(request),
+            tenant_id,
+            livekit,
+            kms,
+            audit,
+            wait_for_form_id=form_id,
+            recording=recording_config_from(settings),
+            plan_service=call_plans,
+        )
 
     return ok(
         PatientFormStatusResponse(id=form.id, status=target.value),

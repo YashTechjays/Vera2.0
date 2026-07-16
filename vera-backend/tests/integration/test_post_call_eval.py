@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session, uuid7
+from vera_core.forms.dsl import PromotedFields
 from vera_core.integrations.llm import ExtractedField, FakeLLMClient, JudgeVerdict, TranscriptTurn
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.call import Call
@@ -42,6 +43,11 @@ _SCHEMA_JSON: dict[str, object] = {
     "dsl_version": "2.1",
     "name": "PostCallEval Test Schema",
     "insurance_type": "infertility_treatment",
+    # The DSL requires every PatientForm promoted column mapped to a
+    # system_fields target — point them all at the single leaf (the same
+    # shortcut tests/unit/forms/test_conditions.py uses).
+    "system_fields": {"in_network": "sections.coverage.in_network"},
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.coverage.in_network"),
     "sections": {
         "coverage": {
             "title": "Coverage",

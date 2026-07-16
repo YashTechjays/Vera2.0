@@ -1,7 +1,6 @@
 """Readers over a form's current field answers.
 
 `load_field_status` feeds the retry decision and is PHI-free (no value columns).
-`load_current_values` returns the values themselves (PHI — callers never log them);
 it is the single "current values of a form" query for snapshots and completion %.
 """
 
@@ -61,15 +60,3 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
         for path, source, confidence, supported in rows
     }
 
-
-async def load_current_values(session: AsyncSession, form_id: UUID) -> dict[str, Any]:
-    """Return {field_path: raw value} for the form's current FieldAnswer rows."""
-    rows = (
-        await session.execute(
-            select(FieldAnswer.field_path, FieldAnswer.value).where(
-                FieldAnswer.form_id == form_id,
-                FieldAnswer.is_current.is_(True),
-            )
-        )
-    ).all()
-    return {path: unwrap_value(value) for path, value in rows}

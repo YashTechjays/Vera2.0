@@ -16,6 +16,7 @@ import authReducer, {
   forceLogout,
   loginThunk,
   loginRedirectPath,
+  logoutThunk,
   platformLoginThunk,
   platformEnrollActivateThunk,
   fetchMe,
@@ -23,6 +24,7 @@ import authReducer, {
   selectMfa,
   selectIsElevated,
   selectIdleTimeoutMs,
+  selectLogoutRedirectPath,
   selectSessionExpiresAt,
 } from "@/store/authSlice"
 
@@ -35,6 +37,11 @@ const me: api.MeResponse = {
   tenant_id: "t1", tenant_slug: "acme", roles: ["TENANT_ADMIN"],
   permissions: ["users:manage"], active_elevation: null,
   login_idle_timeout_seconds: 3600, login_absolute_remaining_seconds: 10 * 3600,
+}
+
+const platformMe: api.MeResponse = {
+  ...me, account_type: "platform", tenant_id: null, tenant_slug: null,
+  roles: ["SUPER_ADMIN"],
 }
 
 const elevatedState = (expiresAt: string | null) =>
@@ -149,6 +156,31 @@ describe("authSlice", () => {
     expect(deadline).not.toBeNull()
     expect(deadline!).toBeGreaterThanOrEqual(before + 10 * 3600 * 1000)
     expect(deadline!).toBeLessThanOrEqual(after + 10 * 3600 * 1000)
+  })
+
+  it("captures the platform plane on logout so the redirect path is /platform/login", async () => {
+    vi.mocked(api.getMe).mockResolvedValue(platformMe)
+    vi.mocked(api.logout).mockResolvedValue(null)
+    const store = makeStore()
+    await store.dispatch(fetchMe())
+    // Pre-logout the selector still answers /login (logoutPlane unset, persisted
+    // hint cleared once the MFA challenge completed) — which is exactly why logout
+    // consumers must read the path AFTER the logout reducers run, never from a
+    // value captured at render time.
+    expect(selectLogoutRedirectPath(store.getState())).toBe("/login")
+    await store.dispatch(logoutThunk())
+    expect(selectLogoutRedirectPath(store.getState())).toBe("/platform/login")
+  })
+
+  it("captures the platform plane on forceLogout (401 burst) as well", async () => {
+    vi.mocked(api.getMe).mockResolvedValue(platformMe)
+    const store = makeStore()
+    await store.dispatch(fetchMe())
+    store.dispatch(forceLogout())
+    expect(selectLogoutRedirectPath(store.getState())).toBe("/platform/login")
+    // A second forceLogout (no user left) must not overwrite the captured plane.
+    store.dispatch(forceLogout())
+    expect(selectLogoutRedirectPath(store.getState())).toBe("/platform/login")
   })
 
   it("loginRedirectPath is platform-aware from state, else the persisted plane", () => {

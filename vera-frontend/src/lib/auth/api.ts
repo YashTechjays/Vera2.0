@@ -119,6 +119,17 @@ export function activateInviteMfa(slug: string, mfaToken: string, code: string) 
   })
 }
 
+export type InviteValidateResult = {
+  state: "valid" | "invalid" | "deactivated"
+}
+
+export function validateInvite(slug: string, token: string) {
+  return apiRequest<InviteValidateResult>(
+    `${tenantAuth(slug)}/invitations/validate?token=${encodeURIComponent(token)}`,
+    { method: "GET", auth: false },
+  )
+}
+
 export function getMe() {
   return apiRequest<MeResponse>(`/auth/me`)
 }

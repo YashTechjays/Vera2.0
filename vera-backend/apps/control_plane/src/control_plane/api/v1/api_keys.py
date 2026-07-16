@@ -21,7 +21,6 @@ from control_plane.api.v1.common import (
     AuthAudit,
     TenantId,
     TenantSession,
-    emit_auth_event,
 )
 from control_plane.auth import api_key
 from control_plane.auth.identity import VerifiedIdentity
@@ -36,6 +35,7 @@ from control_plane.exceptions import (
 )
 from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
+from vera_core.audit import emit_auth_event
 from vera_core.db import uuid7
 from vera_core.models import ApiKey
 from vera_core.models.enums import AuthEvent

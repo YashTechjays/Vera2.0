@@ -27,6 +27,12 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 # no `justid`, both always return this shape at runtime.
 type StreamEntries = list[tuple[str, dict[str, str]]]
 
+# An entry whose handler keeps failing (poison: bad payload shape the parser
+# accepts, persistent DB violation) is dropped after this many deliveries
+# instead of being reclaimed — and its work re-billed — forever. Handlers are
+# idempotent and every flow has a sweeper-style fallback, so dropping is safe.
+MAX_DELIVERIES = 5
+
 
 class StreamGroupConsumer[T](ABC):
     """Group bootstrap + reclaim/read/ack discipline over one (stream, group)."""
@@ -139,11 +145,32 @@ class StreamGroupConsumer[T](ABC):
         try:
             await self._handle(entry_id, item)
         except Exception:
+            if await self._deliveries(entry_id) >= MAX_DELIVERIES:
+                self._log.exception(
+                    "handler failed for entry %s on %d deliveries; dropping as poison",
+                    entry_id,
+                    MAX_DELIVERIES,
+                )
+                await self._ack(entry_id)
+                return
             self._log.exception(
                 "handler failed for entry %s; leaving unacked for reclaim", entry_id
             )
             return  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
         await self._ack(entry_id)
+
+    async def _deliveries(self, entry_id: str) -> int:
+        """Delivery count for one pending entry; 0 when it can't be determined
+        (the safe direction — the entry stays unacked and retries)."""
+        try:
+            pending = await self._redis.xpending_range(
+                self.stream, self.group, min=entry_id, max=entry_id, count=1
+            )
+        except RedisError:
+            return 0
+        if not pending:
+            return 0
+        return int(pending[0].get("times_delivered", 0))
 
     async def _ack(self, entry_id: str) -> None:
         await self._redis.xack(self.stream, self.group, entry_id)

@@ -43,6 +43,8 @@ class CallStatus(enum.StrEnum):
     FAILED = "failed"
     NO_ANSWER = "no_answer"
     BUSY = "busy"
+    # User-requested end (End Call in Live Monitoring); never auto-retried.
+    CANCELED = "canceled"
 
 
 class CallEventType(enum.StrEnum):
@@ -62,6 +64,18 @@ class TranscriptSource(enum.StrEnum):
     REP = "rep"
     BOT = "bot"
     SUPERVISOR = "supervisor"
+
+
+class RecordingStatus(enum.StrEnum):
+    """recording lifecycle. PENDING at egress start; AVAILABLE once the object is
+    sha256-verified; FAILED (egress start or run failed); DISCARDED (no-answer/busy
+    call — object deleted at verify time); DELETED (retention-sweep tombstone)."""
+
+    PENDING = "pending"
+    AVAILABLE = "available"
+    FAILED = "failed"
+    DISCARDED = "discarded"
+    DELETED = "deleted"
 
 
 class DisputeActionType(enum.StrEnum):
@@ -181,6 +195,8 @@ class AuthEvent(enum.StrEnum):
     # Token-scoped self-logout (/auth/logout). Tenant users write a tenant-scoped
     # row; platform operators (tenant_id IS NULL) go through log_auth_event.
     LOGOUT = "logout"
+    # Tenant-level recording retention policy updated (old/new day counts, no PHI).
+    RETENTION_POLICY_UPDATED = "retention_policy_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

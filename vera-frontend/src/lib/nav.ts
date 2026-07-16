@@ -1,9 +1,11 @@
 import {
   Activity,
   Bot,
+  Building2,
   PhoneCall,
   BarChart3,
   Database,
+  FileText,
   KeyRound,
   ListTree,
   Mic,
@@ -18,10 +20,9 @@ export type NavItem = {
   title: string
   to: string
   icon: LucideIcon
-  /** When set, the item only renders if the user holds this permission. */
+  /** When set, the item only renders if the user holds this permission.
+   *  `platform:*` permissions mark platform-plane items (see visibleNavFor). */
   permission?: string
-  /** When true, the item only renders for platform super admins. */
-  superAdminOnly?: boolean
 }
 
 export const navItems: NavItem[] = [
@@ -30,12 +31,20 @@ export const navItems: NavItem[] = [
   { title: "Voice Lab", to: "/voice-lab", icon: Mic, permission: "voice_lab:sandbox" },
   { title: "Call History", to: "/call-history", icon: PhoneCall, permission: "calls:read" },
   { title: "Analytics", to: "/analytics", icon: BarChart3, permission: "calls:read" },
-  { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, superAdminOnly: true },
-  { title: "Agent Prompt", to: "/agent-prompt", icon: Bot, superAdminOnly: true },
-  { title: "IVR Playbooks", to: "/ivr-playbooks", icon: ListTree, superAdminOnly: true },
+  { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, permission: "platform:elevations:read" },
+  { title: "Agent Prompt", to: "/agent-prompt", icon: Bot, permission: "platform:prompts:read" },
+  { title: "Insurance Providers", to: "/insurance-providers", icon: Building2, permission: "platform:insurance_providers:read" },
+  { title: "IVR Playbooks", to: "/ivr-playbooks", icon: ListTree, permission: "platform:ivr_playbooks:read" },
+  { title: "Form Schemas", to: "/form-schemas", icon: FileText, permission: "platform:form_schemas:read" },
   { title: "Users", to: "/users", icon: Users, permission: "users:read" },
   { title: "Settings", to: "/settings", icon: Settings },
 ]
+
+/** Platform-plane items are identified by their permission tier, not a role flag —
+ *  privilege comes from an RBAC grant, never from who the user "is". */
+function isPlatformItem(item: NavItem): boolean {
+  return item.permission?.startsWith("platform:") ?? false
+}
 
 export type NavContext = {
   permissions: string[]
@@ -45,19 +54,20 @@ export type NavContext = {
 
 /** The nav items visible to the current user, in display order.
  *  - permission-gated items need the permission;
- *  - platform-only items (superAdminOnly) show for super admins only;
+ *  - platform-tier items (`platform:*` permission) additionally require a
+ *    platform account — the grant is the gate, the account type the backstop;
  *  - tenant-scoped items are hidden from a super admin until they elevate
  *    (un-elevated they'd 403 anyway); tenant users always see them;
- *  - for a super admin, platform-only items are surfaced first. */
+ *  - for a super admin, platform items are surfaced first. */
 export function visibleNavFor({ permissions, isSuperAdmin, isElevated }: NavContext): NavItem[] {
   const visible = navItems.filter((item) => {
     if (item.permission && !permissions.includes(item.permission)) return false
-    if (item.superAdminOnly) return isSuperAdmin
+    if (isPlatformItem(item)) return isSuperAdmin
     if (isSuperAdmin) return isElevated
     return true
   })
   return isSuperAdmin
-    ? [...visible.filter((i) => i.superAdminOnly), ...visible.filter((i) => !i.superAdminOnly)]
+    ? [...visible.filter(isPlatformItem), ...visible.filter((i) => !isPlatformItem(i))]
     : visible
 }
 

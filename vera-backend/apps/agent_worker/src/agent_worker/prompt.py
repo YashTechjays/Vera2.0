@@ -1,7 +1,14 @@
-"""Agent persona for the Vera infertility-verification voice worker.
+"""Worker-side prompt helpers.
 
-Chat-only slice: no tool machinery. The cascade agent imports these strings
-and wires up the LLM pipeline.
+Plan-only (2026-07-13): the monolithic real-call SYSTEM_PROMPT / GREETING were removed —
+a real verification call's prompt is the compiled CallPlan, full stop. What remains is the
+Cartesia TTS markup guide (appended to every plan agent's instructions, so CPT codes stay
+`<spell>`-wrapped) and the tenant persona-tweak parser.
+
+The `VOICE_LAB_*` persona below is the ONE exception: it drives the Voice Lab *preview*
+sandbox, which dispatches with no PatientForm and therefore no CallPlan. It is never used
+on a real dispatched call (those always carry a plan or fail fast) — it exists only so a
+Voice Lab session has something conversational to say instead of hanging up.
 """
 
 from __future__ import annotations
@@ -13,7 +20,21 @@ from vera_core.schemas import PersonaTweak
 
 logger = logging.getLogger("agent_worker")
 
-SYSTEM_PROMPT = """You are a voice bot verifying insurance coverage for infertility services over the phone. Your responses will be spoken out loud, so keep them short, casual, and fluid, exactly like a natural human conversation.
+CARTESIA_MARKUP_GUIDE = """SPOKEN MARKUP (Cartesia TTS only)
+Cartesia Sonic 3.5 sounds natural from plain prose, so keep writing plain sentences — tone comes from your word choice, not markup. Tone and pacing are already set on the voice itself. Only two inline tags are supported, and they are the sole exception to the plain-sentences rule above:
+
+- <spell>...</spell> reads the contents one character at a time, which is the most reliable way to voice a code. Wrap every CPT code in it using the bare digit string, e.g. <spell>58340</spell>, instead of writing the digits out as words. For an ICD-10 code, spell each side of the decimal and say the point in prose, e.g. <spell>Z31</spell> point <spell>89</spell>.
+- <break time="200ms"/> inserts a short pause between two distinct thoughts. Use it rarely — at most once per response, and never chain two breaks.
+
+Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature and will be read aloud). Never speak a tag name out loud. Never wrap a tool call in a tag."""
+
+
+# --- Voice Lab preview persona (sandbox only — NOT a real-call fallback) --------------
+# A Voice Lab session has no PatientForm and no CallPlan, so it can't run the schema-driven
+# plan agents. This generic infertility-verification persona lets the sandbox actually hold a
+# conversation for previewing the voice pipeline / IVR navigation. A real dispatched call
+# never reaches this — it always has a plan or fails fast.
+VOICE_LAB_SYSTEM_PROMPT = """You are a voice bot verifying insurance coverage for infertility services over the phone. Your responses will be spoken out loud, so keep them short, casual, and fluid, exactly like a natural human conversation.
 
 Do not output any special characters, symbols, or bullet points in your speech. Speak in plain sentences only.
 
@@ -70,58 +91,47 @@ Pronounce CPT codes naturally as individual digits, for example "five eight thre
 If the representative asks for a diagnostic code at any point, state the ICD-10 code for the current service naturally, for example "the diagnostic code is Z thirty-one point eight nine," and then pick up right where you left off.
 
 CONVERSATION STYLE
-Every assistant response follows the same pattern: one short two-or-three-word warm acknowledgement ("Got it,", "Perfect,", "Awesome,", "Great, thanks,", "Of course,", "Sounds good,") then immediately your next question or next step. Vary your acks across turns so you do not sound scripted. Do NOT recap or repeat back what the rep just told you (no "Got it, IUI is covered with 30% coinsurance" or "noted, IVF saved" — they just said it, they do not need to hear it back). Do NOT produce ack-only turns where the next question lands in a separate response — that doubles the TTS round-trips and feels stilted.
+Every assistant response follows the same pattern: one short two-or-three-word warm acknowledgement ("Got it,", "Perfect,", "Awesome,", "Great, thanks,", "Of course,", "Sounds good,") then immediately your next question or next step. Vary your acks across turns so you do not sound scripted. Do NOT recap or repeat back what the rep just told you. Do NOT produce ack-only turns where the next question lands in a separate response — that doubles the TTS round-trips and feels stilted.
 
 When the verification is complete, say a brief polite closing line such as "thanks so much for your help, have a good one" and then call the end_call tool to hang up.
 
 Stay focused on the verification task. Do not discuss anything outside diagnostic testing and infertility benefits. If the representative goes off topic, gently steer back."""
 
 
-GREETING = (
+VOICE_LAB_GREETING = (
     "Hi, I'm calling on behalf of a patient to verify their infertility treatment "
     "coverage under this plan. Do you have a few minutes to go through the benefits?"
 )
 
 
-CARTESIA_MARKUP_GUIDE = """SPOKEN MARKUP (Cartesia TTS only)
-Cartesia Sonic 3.5 sounds natural from plain prose, so keep writing plain sentences — tone comes from your word choice, not markup. Tone and pacing are already set on the voice itself. Only two inline tags are supported, and they are the sole exception to the plain-sentences rule above:
-
-- <spell>...</spell> reads the contents one character at a time, which is the most reliable way to voice a code. Wrap every CPT code in it using the bare digit string, e.g. <spell>58340</spell>, instead of writing the digits out as words. For an ICD-10 code, spell each side of the decimal and say the point in prose, e.g. <spell>Z31</spell> point <spell>89</spell>.
-- <break time="200ms"/> inserts a short pause between two distinct thoughts. Use it rarely — at most once per response, and never chain two breaks.
-
-Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature and will be read aloud). Never speak a tag name out loud. Never wrap a tool call in a tag."""
-
-
-def build_instructions(
-    tweak: PersonaTweak | None = None, *, retry_fields: list[str] | None = None
-) -> str:
-    """Chat-only instructions: base persona (+ optional tenant extra instructions)
-    followed by the Cartesia readback guide (we use sonic-3.5).
-
-    When retry_fields is a non-empty list, prepends a retry-focus block before the base.
-    """
-    base_parts = [SYSTEM_PROMPT]
+def build_voice_lab_instructions(tweak: PersonaTweak | None = None) -> str:
+    """Voice Lab preview instructions: the sandbox persona (+ optional tenant extra
+    instructions) followed by the Cartesia readback guide. Sandbox-only — a real call
+    is driven by its CallPlan, never this."""
+    parts = [VOICE_LAB_SYSTEM_PROMPT]
     if tweak is not None and tweak.extra_instructions:
-        base_parts.append(tweak.extra_instructions)
-    base_parts.append(CARTESIA_MARKUP_GUIDE)
-    base = "\n\n".join(base_parts)
-
-    if retry_fields:
-        focus = (
-            "RETRY CALL. A previous call already collected most of this verification. "
-            "You must collect ONLY the following still-missing data points, confirm them, "
-            "then politely close and end the call: " + ", ".join(retry_fields) + ". "
-            "Do not re-verify anything else.\n\n"
-        )
-        return focus + base
-    return base
+        parts.append(tweak.extra_instructions)
+    parts.append(CARTESIA_MARKUP_GUIDE)
+    return "\n\n".join(parts)
 
 
-def resolve_greeting(tweak: PersonaTweak | None = None) -> str:
-    """The outbound opener: the tenant override when set, else the base greeting."""
+def retry_focus_block(retry_fields: list[str]) -> str:
+    """The RETRY-call focus overlay: rides PlanRunController's extra_instructions
+    so every plan agent collects only the still-missing fields. Labels are schema
+    titles (non-PHI), set by the dispatcher as `retry_fields` room metadata."""
+    return (
+        "RETRY CALL. A previous call already collected most of this verification. "
+        "You must collect ONLY the following still-missing data points, confirm them, "
+        "then politely close and end the call: " + ", ".join(retry_fields) + ". "
+        "Do not re-verify anything else."
+    )
+
+
+def resolve_voice_lab_greeting(tweak: PersonaTweak | None = None) -> str:
+    """The Voice Lab opener: the tenant override when set, else the base preview greeting."""
     if tweak is not None and tweak.greeting:
         return tweak.greeting
-    return GREETING
+    return VOICE_LAB_GREETING
 
 
 def parse_persona_tweak(metadata: str | None) -> PersonaTweak:
@@ -133,7 +143,7 @@ def parse_persona_tweak(metadata: str | None) -> PersonaTweak:
     also accepts the legacy flat shape (the whole dict IS the tweak) — logging a warning — so
     a rollout in either order doesn't silently drop the persona. Fail-safe: any missing, empty,
     or malformed metadata yields the no-op tweak so a bad config never kills a live call
-    (mirrors the cascade's fail-safe posture, not the strict PHI seams)."""
+    (the cascade's fail-safe posture)."""
     if not metadata:
         return PersonaTweak()
     try:

@@ -1,16 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { IdleWarningDialog } from "@/components/auth/IdleWarningDialog"
-import { computeIdleState, KEEPALIVE_THROTTLE_MS } from "@/lib/auth/idle"
+import {
+  computeIdleState,
+  KEEPALIVE_THROTTLE_MS,
+  LIVE_CALL_ACTIVITY_EVENT,
+} from "@/lib/auth/idle"
 import {
   keepaliveThunk,
   logoutThunk,
   selectIdleTimeoutMs,
+  selectLogoutRedirectPath,
   selectSessionExpiresAt,
 } from "@/store/authSlice"
-import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { useAppDispatch, useAppSelector, useAppStore } from "@/store/hooks"
 
-const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"] as const
+// User input plus the live-call beacon: an open live-call connection counts as
+// activity (the supervisor is actively listening even without touching the page).
+const ACTIVITY_EVENTS = [
+  "mousemove",
+  "mousedown",
+  "keydown",
+  "scroll",
+  "touchstart",
+  LIVE_CALL_ACTIVITY_EVENT,
+] as const
 
 // Single idle-manager. Mounted only inside AppShell (authenticated), so every
 // listener/timer is torn down on logout via the effect cleanups when it unmounts.
@@ -20,6 +34,7 @@ export function IdleManager() {
   // Timeout config is backend-driven (from /me), never hardcoded here.
   const idleTimeoutMs = useAppSelector(selectIdleTimeoutMs)
   const sessionExpiresAt = useAppSelector(selectSessionExpiresAt)
+  const store = useAppStore()
 
   const lastActivity = useRef(0)
   const lastKeepalive = useRef(0)
@@ -33,9 +48,12 @@ export function IdleManager() {
     if (loggingOut.current) return
     loggingOut.current = true
     void dispatch(logoutThunk()).finally(() => {
-      navigate("/login", { replace: true })
+      // Read the path AFTER the logout reducers run — `logoutPlane` is only
+      // captured then; a value captured when the callback was created would
+      // send a platform operator to the tenant /login.
+      navigate(selectLogoutRedirectPath(store.getState()), { replace: true })
     })
-  }, [dispatch, navigate])
+  }, [dispatch, navigate, store])
 
   const staySignedIn = useCallback(() => {
     const now = Date.now()

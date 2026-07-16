@@ -11,7 +11,6 @@
     "appointment_date": "sections.appointment_information.appointment_date",
     "appointment_type": "sections.appointment_information.appointment_type",
     "member_id": "sections.insurance_information.policy_number",
-    "policy_id": "sections.insurance_information.policy_number",
     "insurance_provider_name": "sections.insurance_reference_information.insurance_provider_name",
     "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number",
     "verified_by": "sections.verification_information.verified_by",
@@ -24,6 +23,72 @@
     "doctor_name": "sections.provider_reference_information.provider_name",
     "doctor_npi": "sections.provider_reference_information.npi"
   },
+  "promoted_fields": {
+    "patient_name": "sections.patient_information.patient_name",
+    "patient_dob": "sections.patient_information.patient_dob",
+    "chart_number": "sections.patient_information.chart_number",
+    "appointment_date": "sections.appointment_information.appointment_date",
+    "appointment_type": "sections.appointment_information.appointment_type",
+    "member_id": "sections.insurance_information.policy_number",
+    "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
+    "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number"
+  },
+  "stt_key_terms": [
+    "intrauterine insemination",
+    "IUI",
+    "in vitro fertilization",
+    "IVF",
+    "ovulation induction",
+    "egg cryopreservation",
+    "embryo cryopreservation",
+    "frozen embryo transfer",
+    "embryo biopsy",
+    "semen analysis",
+    "sperm cryopreservation",
+    "infertility",
+    "coinsurance",
+    "copay",
+    "deductible",
+    "out-of-pocket maximum",
+    "lifetime maximum",
+    "prior authorization",
+    "coordination of benefits",
+    "policy situs",
+    "PPO",
+    "HMO",
+    "EPO",
+    "POS",
+    "self insured",
+    "fully funded",
+    "benefit year",
+    "plan year",
+    "telehealth",
+    "PCP referral",
+    "infertility plan mandate",
+    "cycle limit",
+    "pharmacy benefit manager",
+    "third party administrator",
+    "specialty pharmacy",
+    "member ID",
+    "group number",
+    "NPI",
+    "tax ID",
+    "covered",
+    "not covered",
+    "in network",
+    "out of network",
+    "individual",
+    "family",
+    "spouse",
+    "dependent",
+    "primary",
+    "secondary",
+    "tertiary",
+    "small group",
+    "large group",
+    "no limit",
+    "unlimited"
+  ],
   "shared_conditions": {
     "family_coverage": {
       "field": "sections.benefit_coverage.coverage_type",
@@ -55,6 +120,11 @@
     "any_service_requires_prior_auth": {
       "any": [
         {
+          "field": "sections.infertility_treatment.ovulation_induction.prior_auth",
+          "op": "eq",
+          "value": "Yes"
+        },
+        {
           "field": "sections.infertility_treatment.intrauterine_insemination.cpt_58323.prior_auth",
           "op": "eq",
           "value": "Yes"
@@ -66,11 +136,6 @@
         },
         {
           "field": "sections.infertility_treatment.intrauterine_insemination.cpt_89261.prior_auth",
-          "op": "eq",
-          "value": "Yes"
-        },
-        {
-          "field": "sections.infertility_treatment.ovulation_induction.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
@@ -90,11 +155,6 @@
           "value": "Yes"
         },
         {
-          "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.prior_auth",
-          "op": "eq",
-          "value": "Yes"
-        },
-        {
           "field": "sections.infertility_treatment.embryo_cryopreservation.cpt_89258.prior_auth",
           "op": "eq",
           "value": "Yes"
@@ -105,12 +165,17 @@
           "value": "Yes"
         },
         {
-          "field": "sections.infertility_treatment.frozen_embryo_transfer.cpt_58974.prior_auth",
+          "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
           "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.prior_auth",
+          "op": "eq",
+          "value": "Yes"
+        },
+        {
+          "field": "sections.infertility_treatment.frozen_embryo_transfer.cpt_58974.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
@@ -125,42 +190,42 @@
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_58340.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_82670.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_83001.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_83002.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_84146.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_84443.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_84144.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
         {
-          "field": "sections.diagnostic_testing.cpt_76830.prior_auth",
+          "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.prior_auth",
           "op": "eq",
           "value": "Yes"
         },
@@ -202,7 +267,6 @@
           "type": "text",
           "title": "Chart Number",
           "role": "input",
-          "default": "N/A",
           "description": "Clinic-internal chart number. Display only; never part of the call."
         },
         "patient_name": {
@@ -229,8 +293,7 @@
             "Female",
             "Male",
             "Other"
-          ],
-          "default": "N/A"
+          ]
         },
         "spouse_partner_name": {
           "type": "text",
@@ -245,7 +308,10 @@
           "applicable_when": {
             "ref": "family_coverage"
           },
-          "confirm_in_task": "insurance_basics",
+          "confirm_in_task": {
+            "task_key": "insurance_basics",
+            "confirm_immediate": true
+          },
           "prompt": {
             "confirm": "Can we also check the spouse on the plan? I have the spouse listed as {{value}} — can you confirm that is correct?"
           }
@@ -266,7 +332,10 @@
           "applicable_when": {
             "ref": "family_coverage"
           },
-          "confirm_in_task": "insurance_basics",
+          "confirm_in_task": {
+            "task_key": "insurance_basics",
+            "confirm_immediate": true
+          },
           "prompt": {
             "confirm": "And the spouse's date of birth I have is {{value}} — is that right?"
           }
@@ -341,7 +410,6 @@
           "type": "phone",
           "title": "Callback Number",
           "role": "context",
-          "default": "N/A",
           "description": "The callback phone number of your supervisor"
         }
       }
@@ -405,6 +473,25 @@
           "type": "text",
           "title": "Office Location",
           "role": "context"
+        }
+      }
+    },
+    "patient_verification": {
+      "title": "Patient Verification",
+      "description": "Outcome of the call-opening membership check. Recorded during the introduction task; a denial terminates the call via the insurance_not_active flow rule.",
+      "fields": {
+        "is_insurance_active": {
+          "type": "enum",
+          "title": "Is Insurance Active",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Yes",
+            "No"
+          ],
+          "prompt": {
+            "ask": "Can you confirm the patient's insurance is currently active?"
+          }
         }
       }
     },
@@ -482,7 +569,7 @@
         },
         "plan_type": {
           "type": "text",
-          "title": "Plan Type",
+          "title": "Health Plan Type",
           "role": "ask",
           "required": true,
           "special_values": [
@@ -540,12 +627,15 @@
         },
         "policy_situs": {
           "type": "text",
-          "title": "Policy Situs",
+          "title": "Home Plan / Policy Situs",
           "role": "ask",
           "required": true,
           "default": "N/A",
           "prompt": {
-            "ask": "What is the policy state or contract state?"
+            "ask": "What is the policy state or contract state?",
+            "hints": [
+              "If the representative doesn't understand the question, clarify: In which state was this policy written?"
+            ]
           },
           "description": "The state whose law governs the policy (contract state)."
         }
@@ -752,12 +842,6 @@
         },
         {
           "members": [
-            "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.copay",
-            "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.coinsurance"
-          ]
-        },
-        {
-          "members": [
             "sections.infertility_treatment.embryo_cryopreservation.cpt_89258.copay",
             "sections.infertility_treatment.embryo_cryopreservation.cpt_89258.coinsurance"
           ]
@@ -770,14 +854,20 @@
         },
         {
           "members": [
-            "sections.infertility_treatment.frozen_embryo_transfer.cpt_58974.copay",
-            "sections.infertility_treatment.frozen_embryo_transfer.cpt_58974.coinsurance"
+            "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.copay",
+            "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.coinsurance"
           ]
         },
         {
           "members": [
             "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.copay",
             "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.coinsurance"
+          ]
+        },
+        {
+          "members": [
+            "sections.infertility_treatment.frozen_embryo_transfer.cpt_58974.copay",
+            "sections.infertility_treatment.frozen_embryo_transfer.cpt_58974.coinsurance"
           ]
         },
         {
@@ -808,6 +898,144 @@
           ],
           "prompt": {
             "ask": "Is infertility treatment covered under this plan?"
+          }
+        },
+        "ovulation_induction": {
+          "type": "group",
+          "title": "Ovulation Induction/Timed Intercourse (OI/TI)",
+          "codes": {
+            "icd10": [
+              "Z31.89"
+            ]
+          },
+          "applicable_when": {
+            "ref": "infertility_covered"
+          },
+          "prompt": {
+            "ask": "Can you provide coverage and benefit details for ovulation induction?"
+          },
+          "fields": {
+            "covered": {
+              "type": "enum",
+              "title": "Covered",
+              "role": "ask",
+              "required": true,
+              "values": [
+                "Yes",
+                "No",
+                "N/A"
+              ],
+              "inapplicable_value": "No",
+              "prompt": {
+                "ask": "Is ovulation induction covered under this plan? Please answer Yes, No, or N/A."
+              }
+            },
+            "copay": {
+              "type": "currency",
+              "title": "Copay ($)",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "$0",
+                "None"
+              ],
+              "validation": {
+                "range": {
+                  "min": 0
+                }
+              },
+              "inapplicable_value": "$0",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.ovulation_induction.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "What is the copay amount for this service?"
+              }
+            },
+            "coinsurance": {
+              "type": "percent",
+              "title": "Coinsurance (%)",
+              "role": "ask",
+              "required": true,
+              "validation": {
+                "range": {
+                  "min": 0,
+                  "max": 100
+                }
+              },
+              "inapplicable_value": "0%",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.ovulation_induction.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "What is the coinsurance percentage for this service?"
+              }
+            },
+            "prior_auth": {
+              "type": "enum",
+              "title": "Prior Authorization Required",
+              "role": "ask",
+              "required": true,
+              "values": [
+                "Yes",
+                "No",
+                "N/A"
+              ],
+              "special_values": [
+                "Prior auth department"
+              ],
+              "tags": [
+                "prior_auth"
+              ],
+              "inapplicable_value": "N/A",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.ovulation_induction.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+              }
+            },
+            "cycle_limit": {
+              "type": "text",
+              "title": "Cycle Limit",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "No Limit"
+              ],
+              "inapplicable_value": "N/A",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.ovulation_induction.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "What is the cycle limit for this service?"
+              }
+            },
+            "additional_notes": {
+              "type": "text",
+              "title": "Additional Notes",
+              "role": "ask",
+              "inapplicable_value": "N/A",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.ovulation_induction.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "Are there any additional notes or limitations for this service?"
+              },
+              "ui": {
+                "widget": "textarea"
+              }
+            }
           }
         },
         "intrauterine_insemination": {
@@ -1180,144 +1408,6 @@
                     "value": "Yes"
                   }
                 ]
-              },
-              "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
-              },
-              "ui": {
-                "widget": "textarea"
-              }
-            }
-          }
-        },
-        "ovulation_induction": {
-          "type": "group",
-          "title": "Ovulation Induction",
-          "codes": {
-            "icd10": [
-              "Z31.89"
-            ]
-          },
-          "applicable_when": {
-            "ref": "infertility_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage and benefit details for ovulation induction?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "inapplicable_value": "No",
-              "prompt": {
-                "ask": "Is ovulation induction covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
-                }
-              },
-              "inapplicable_value": "$0",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.ovulation_induction.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
-              }
-            },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
-                }
-              },
-              "inapplicable_value": "0%",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.ovulation_induction.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
-              }
-            },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
-              "inapplicable_value": "N/A",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.ovulation_induction.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            },
-            "cycle_limit": {
-              "type": "text",
-              "title": "Cycle Limit",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "No Limit"
-              ],
-              "inapplicable_value": "N/A",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.ovulation_induction.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the cycle limit for this service?"
-              }
-            },
-            "additional_notes": {
-              "type": "text",
-              "title": "Additional Notes",
-              "role": "ask",
-              "inapplicable_value": "N/A",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.ovulation_induction.covered",
-                "op": "eq",
-                "value": "Yes"
               },
               "prompt": {
                 "ask": "Are there any additional notes or limitations for this service?"
@@ -1708,158 +1798,6 @@
             }
           }
         },
-        "egg_cryopreservation_elective": {
-          "type": "group",
-          "title": "Egg Cryopreservation (Elective)",
-          "codes": {
-            "icd10": [
-              "Z31.83"
-            ]
-          },
-          "applicable_when": {
-            "ref": "infertility_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage and benefit details for elective egg cryopreservation?"
-          },
-          "fields": {
-            "cpt_89337": {
-              "type": "group",
-              "title": "CPT 89337",
-              "codes": {
-                "cpt": [
-                  "89337"
-                ]
-              },
-              "prompt": {
-                "ask": "Can you provide coverage details for CPT code 89337?"
-              },
-              "fields": {
-                "covered": {
-                  "type": "enum",
-                  "title": "Covered",
-                  "role": "ask",
-                  "required": true,
-                  "values": [
-                    "Yes",
-                    "No",
-                    "N/A"
-                  ],
-                  "inapplicable_value": "No",
-                  "prompt": {
-                    "ask": "Is CPT code 89337 covered under this plan? Please answer Yes, No, or N/A."
-                  }
-                },
-                "copay": {
-                  "type": "currency",
-                  "title": "Copay ($)",
-                  "role": "ask",
-                  "required": true,
-                  "special_values": [
-                    "$0",
-                    "None"
-                  ],
-                  "validation": {
-                    "range": {
-                      "min": 0
-                    }
-                  },
-                  "inapplicable_value": "$0",
-                  "applicable_when": {
-                    "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
-                    "op": "eq",
-                    "value": "Yes"
-                  },
-                  "prompt": {
-                    "ask": "What is the copay amount for this service?"
-                  }
-                },
-                "coinsurance": {
-                  "type": "percent",
-                  "title": "Coinsurance (%)",
-                  "role": "ask",
-                  "required": true,
-                  "validation": {
-                    "range": {
-                      "min": 0,
-                      "max": 100
-                    }
-                  },
-                  "inapplicable_value": "0%",
-                  "applicable_when": {
-                    "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
-                    "op": "eq",
-                    "value": "Yes"
-                  },
-                  "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
-                  }
-                },
-                "prior_auth": {
-                  "type": "enum",
-                  "title": "Prior Authorization Required",
-                  "role": "ask",
-                  "required": true,
-                  "values": [
-                    "Yes",
-                    "No",
-                    "N/A"
-                  ],
-                  "special_values": [
-                    "Prior auth department"
-                  ],
-                  "tags": [
-                    "prior_auth"
-                  ],
-                  "inapplicable_value": "N/A",
-                  "applicable_when": {
-                    "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
-                    "op": "eq",
-                    "value": "Yes"
-                  },
-                  "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-                  }
-                }
-              }
-            },
-            "cycle_limit": {
-              "type": "text",
-              "title": "Cycle Limit",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "No Limit"
-              ],
-              "inapplicable_value": "N/A",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the cycle limit for this service?"
-              }
-            },
-            "additional_notes": {
-              "type": "text",
-              "title": "Additional Notes",
-              "role": "ask",
-              "inapplicable_value": "N/A",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
-              },
-              "ui": {
-                "widget": "textarea"
-              }
-            }
-          }
-        },
         "embryo_cryopreservation": {
           "type": "group",
           "title": "Embryo Cryopreservation",
@@ -2130,6 +2068,306 @@
             }
           }
         },
+        "egg_cryopreservation_elective": {
+          "type": "group",
+          "title": "Egg Cryopreservation Elective",
+          "codes": {
+            "icd10": [
+              "Z31.83"
+            ]
+          },
+          "applicable_when": {
+            "ref": "infertility_covered"
+          },
+          "prompt": {
+            "ask": "Can you provide coverage and benefit details for elective egg cryopreservation?"
+          },
+          "fields": {
+            "cpt_89337": {
+              "type": "group",
+              "title": "CPT 89337",
+              "codes": {
+                "cpt": [
+                  "89337"
+                ]
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 89337?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "inapplicable_value": "No",
+                  "prompt": {
+                    "ask": "Is CPT code 89337 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
+                }
+              }
+            },
+            "cycle_limit": {
+              "type": "text",
+              "title": "Cycle Limit",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "No Limit"
+              ],
+              "inapplicable_value": "N/A",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "What is the cycle limit for this service?"
+              }
+            },
+            "additional_notes": {
+              "type": "text",
+              "title": "Additional Notes",
+              "role": "ask",
+              "inapplicable_value": "N/A",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "Are there any additional notes or limitations for this service?"
+              },
+              "ui": {
+                "widget": "textarea"
+              }
+            }
+          }
+        },
+        "egg_cryopreservation_cancer": {
+          "type": "group",
+          "title": "Egg Cryopreservation Cancer",
+          "codes": {},
+          "applicable_when": {
+            "ref": "infertility_covered"
+          },
+          "prompt": {
+            "ask": "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?"
+          },
+          "fields": {
+            "cpt_89337": {
+              "type": "group",
+              "title": "CPT 89337",
+              "codes": {
+                "cpt": [
+                  "89337"
+                ]
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 89337?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "inapplicable_value": "No",
+                  "prompt": {
+                    "ask": "Is CPT code 89337 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
+                }
+              }
+            },
+            "cycle_limit": {
+              "type": "text",
+              "title": "Cycle Limit",
+              "role": "ask",
+              "required": true,
+              "special_values": [
+                "No Limit"
+              ],
+              "inapplicable_value": "N/A",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "What is the cycle limit for this service?"
+              }
+            },
+            "additional_notes": {
+              "type": "text",
+              "title": "Additional Notes",
+              "role": "ask",
+              "inapplicable_value": "N/A",
+              "applicable_when": {
+                "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
+                "op": "eq",
+                "value": "Yes"
+              },
+              "prompt": {
+                "ask": "Are there any additional notes or limitations for this service?"
+              },
+              "ui": {
+                "widget": "textarea"
+              }
+            }
+          }
+        },
         "frozen_embryo_transfer": {
           "type": "group",
           "title": "Frozen Embryo Transfer (FET)",
@@ -2270,158 +2508,6 @@
               "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.infertility_treatment.frozen_embryo_transfer.cpt_58974.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
-              },
-              "ui": {
-                "widget": "textarea"
-              }
-            }
-          }
-        },
-        "egg_cryopreservation_cancer": {
-          "type": "group",
-          "title": "Egg Cryopreservation (Cancer-Related)",
-          "codes": {
-            "icd10": [
-              "Z31.83"
-            ]
-          },
-          "applicable_when": {
-            "ref": "infertility_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?"
-          },
-          "fields": {
-            "cpt_89337": {
-              "type": "group",
-              "title": "CPT 89337",
-              "codes": {
-                "cpt": [
-                  "89337"
-                ]
-              },
-              "prompt": {
-                "ask": "Can you provide coverage details for CPT code 89337?"
-              },
-              "fields": {
-                "covered": {
-                  "type": "enum",
-                  "title": "Covered",
-                  "role": "ask",
-                  "required": true,
-                  "values": [
-                    "Yes",
-                    "No",
-                    "N/A"
-                  ],
-                  "inapplicable_value": "No",
-                  "prompt": {
-                    "ask": "Is CPT code 89337 covered under this plan? Please answer Yes, No, or N/A."
-                  }
-                },
-                "copay": {
-                  "type": "currency",
-                  "title": "Copay ($)",
-                  "role": "ask",
-                  "required": true,
-                  "special_values": [
-                    "$0",
-                    "None"
-                  ],
-                  "validation": {
-                    "range": {
-                      "min": 0
-                    }
-                  },
-                  "inapplicable_value": "$0",
-                  "applicable_when": {
-                    "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
-                    "op": "eq",
-                    "value": "Yes"
-                  },
-                  "prompt": {
-                    "ask": "What is the copay amount for this service?"
-                  }
-                },
-                "coinsurance": {
-                  "type": "percent",
-                  "title": "Coinsurance (%)",
-                  "role": "ask",
-                  "required": true,
-                  "validation": {
-                    "range": {
-                      "min": 0,
-                      "max": 100
-                    }
-                  },
-                  "inapplicable_value": "0%",
-                  "applicable_when": {
-                    "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
-                    "op": "eq",
-                    "value": "Yes"
-                  },
-                  "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
-                  }
-                },
-                "prior_auth": {
-                  "type": "enum",
-                  "title": "Prior Authorization Required",
-                  "role": "ask",
-                  "required": true,
-                  "values": [
-                    "Yes",
-                    "No",
-                    "N/A"
-                  ],
-                  "special_values": [
-                    "Prior auth department"
-                  ],
-                  "tags": [
-                    "prior_auth"
-                  ],
-                  "inapplicable_value": "N/A",
-                  "applicable_when": {
-                    "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
-                    "op": "eq",
-                    "value": "Yes"
-                  },
-                  "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-                  }
-                }
-              }
-            },
-            "cycle_limit": {
-              "type": "text",
-              "title": "Cycle Limit",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "No Limit"
-              ],
-              "inapplicable_value": "N/A",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the cycle limit for this service?"
-              }
-            },
-            "additional_notes": {
-              "type": "text",
-              "title": "Additional Notes",
-              "role": "ask",
-              "inapplicable_value": "N/A",
-              "applicable_when": {
-                "field": "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered",
                 "op": "eq",
                 "value": "Yes"
               },
@@ -2717,53 +2803,53 @@
       "ask_groups": [
         {
           "fields": [
-            "sections.diagnostic_testing.cpt_58340.covered",
-            "sections.diagnostic_testing.cpt_82670.covered",
-            "sections.diagnostic_testing.cpt_83001.covered",
-            "sections.diagnostic_testing.cpt_83002.covered",
-            "sections.diagnostic_testing.cpt_84146.covered",
-            "sections.diagnostic_testing.cpt_84443.covered",
-            "sections.diagnostic_testing.cpt_84144.covered",
-            "sections.diagnostic_testing.cpt_76830.covered"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.covered",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.covered",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.covered",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.covered",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.covered",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.covered",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.covered"
           ],
           "ask": "Are diagnostic labs, X-ray and ultrasound services covered under this plan? Please answer Yes, No, or N/A."
         },
         {
           "fields": [
-            "sections.diagnostic_testing.cpt_58340.copay",
-            "sections.diagnostic_testing.cpt_82670.copay",
-            "sections.diagnostic_testing.cpt_83001.copay",
-            "sections.diagnostic_testing.cpt_83002.copay",
-            "sections.diagnostic_testing.cpt_84146.copay",
-            "sections.diagnostic_testing.cpt_84443.copay",
-            "sections.diagnostic_testing.cpt_84144.copay",
-            "sections.diagnostic_testing.cpt_76830.copay"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.copay"
           ],
           "ask": "What is the copay amount for diagnostic testing?"
         },
         {
           "fields": [
-            "sections.diagnostic_testing.cpt_58340.coinsurance",
-            "sections.diagnostic_testing.cpt_82670.coinsurance",
-            "sections.diagnostic_testing.cpt_83001.coinsurance",
-            "sections.diagnostic_testing.cpt_83002.coinsurance",
-            "sections.diagnostic_testing.cpt_84146.coinsurance",
-            "sections.diagnostic_testing.cpt_84443.coinsurance",
-            "sections.diagnostic_testing.cpt_84144.coinsurance",
-            "sections.diagnostic_testing.cpt_76830.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.coinsurance",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.coinsurance",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.coinsurance",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.coinsurance",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.coinsurance",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.coinsurance",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.coinsurance",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.coinsurance"
           ],
           "ask": "What is the coinsurance percentage for diagnostic testing?"
         },
         {
           "fields": [
-            "sections.diagnostic_testing.cpt_58340.prior_auth",
-            "sections.diagnostic_testing.cpt_82670.prior_auth",
-            "sections.diagnostic_testing.cpt_83001.prior_auth",
-            "sections.diagnostic_testing.cpt_83002.prior_auth",
-            "sections.diagnostic_testing.cpt_84146.prior_auth",
-            "sections.diagnostic_testing.cpt_84443.prior_auth",
-            "sections.diagnostic_testing.cpt_84144.prior_auth",
-            "sections.diagnostic_testing.cpt_76830.prior_auth"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.prior_auth",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.prior_auth",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.prior_auth",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.prior_auth",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.prior_auth",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.prior_auth",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.prior_auth",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.prior_auth"
           ],
           "ask": "Is prior authorization required for diagnostic testing? Please answer Yes, No, or N/A."
         }
@@ -2771,50 +2857,50 @@
       "alternatives": [
         {
           "members": [
-            "sections.diagnostic_testing.cpt_58340.copay",
-            "sections.diagnostic_testing.cpt_58340.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.coinsurance"
           ]
         },
         {
           "members": [
-            "sections.diagnostic_testing.cpt_82670.copay",
-            "sections.diagnostic_testing.cpt_82670.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.coinsurance"
           ]
         },
         {
           "members": [
-            "sections.diagnostic_testing.cpt_83001.copay",
-            "sections.diagnostic_testing.cpt_83001.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.coinsurance"
           ]
         },
         {
           "members": [
-            "sections.diagnostic_testing.cpt_83002.copay",
-            "sections.diagnostic_testing.cpt_83002.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.coinsurance"
           ]
         },
         {
           "members": [
-            "sections.diagnostic_testing.cpt_84146.copay",
-            "sections.diagnostic_testing.cpt_84146.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.coinsurance"
           ]
         },
         {
           "members": [
-            "sections.diagnostic_testing.cpt_84443.copay",
-            "sections.diagnostic_testing.cpt_84443.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.coinsurance"
           ]
         },
         {
           "members": [
-            "sections.diagnostic_testing.cpt_84144.copay",
-            "sections.diagnostic_testing.cpt_84144.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.coinsurance"
           ]
         },
         {
           "members": [
-            "sections.diagnostic_testing.cpt_76830.copay",
-            "sections.diagnostic_testing.cpt_76830.coinsurance"
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.copay",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.coinsurance"
           ]
         }
       ],
@@ -2835,794 +2921,832 @@
             "ask": "Is diagnostic testing covered under this plan?"
           }
         },
-        "cpt_58340": {
+        "labs_xray_ultrasound": {
           "type": "group",
-          "title": "CPT 58340",
+          "title": "Labs, Xray/Ultrasound",
           "codes": {
-            "cpt": [
-              "58340"
+            "icd10": [
+              "Z31.41"
             ]
           },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
           "prompt": {
-            "ask": "Can you provide coverage details for CPT code 58340?"
+            "ask": "Can you provide coverage and benefit details for diagnostic labs, X-ray and ultrasound services?"
           },
           "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
+            "cpt_58340": {
+              "type": "group",
+              "title": "CPT 58340",
+              "codes": {
+                "cpt": [
+                  "58340"
+                ]
+              },
+              "applicable_when": {
+                "ref": "diagnostic_testing_covered"
+              },
               "prompt": {
-                "ask": "Is CPT code 58340 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
+                "ask": "Can you provide coverage details for CPT code 58340?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 58340 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_58340.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
               }
             },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
+            "cpt_82670": {
+              "type": "group",
+              "title": "CPT 82670",
+              "codes": {
+                "cpt": [
+                  "82670"
+                ]
+              },
+              "applicable_when": {
+                "ref": "diagnostic_testing_covered"
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 82670?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 82670 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_82670.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_58340.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
               }
             },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
+            "cpt_83001": {
+              "type": "group",
+              "title": "CPT 83001",
+              "codes": {
+                "cpt": [
+                  "83001"
+                ]
+              },
               "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_58340.covered",
-                "op": "eq",
-                "value": "Yes"
+                "ref": "diagnostic_testing_covered"
               },
               "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            }
-          }
-        },
-        "cpt_82670": {
-          "type": "group",
-          "title": "CPT 82670",
-          "codes": {
-            "cpt": [
-              "82670"
-            ]
-          },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage details for CPT code 82670?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "prompt": {
-                "ask": "Is CPT code 82670 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
+                "ask": "Can you provide coverage details for CPT code 83001?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 83001 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83001.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_82670.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
               }
             },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
+            "cpt_83002": {
+              "type": "group",
+              "title": "CPT 83002",
+              "codes": {
+                "cpt": [
+                  "83002"
+                ]
+              },
+              "applicable_when": {
+                "ref": "diagnostic_testing_covered"
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 83002?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 83002 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_83002.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_82670.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
               }
             },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
+            "cpt_84146": {
+              "type": "group",
+              "title": "CPT 84146",
+              "codes": {
+                "cpt": [
+                  "84146"
+                ]
+              },
               "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_82670.covered",
-                "op": "eq",
-                "value": "Yes"
+                "ref": "diagnostic_testing_covered"
               },
               "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            }
-          }
-        },
-        "cpt_83001": {
-          "type": "group",
-          "title": "CPT 83001",
-          "codes": {
-            "cpt": [
-              "83001"
-            ]
-          },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage details for CPT code 83001?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "prompt": {
-                "ask": "Is CPT code 83001 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
+                "ask": "Can you provide coverage details for CPT code 84146?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 84146 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84146.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_83001.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
               }
             },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
+            "cpt_84443": {
+              "type": "group",
+              "title": "CPT 84443",
+              "codes": {
+                "cpt": [
+                  "84443"
+                ]
+              },
+              "applicable_when": {
+                "ref": "diagnostic_testing_covered"
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 84443?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 84443 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84443.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_83001.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
               }
             },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
+            "cpt_84144": {
+              "type": "group",
+              "title": "CPT 84144",
+              "codes": {
+                "cpt": [
+                  "84144"
+                ]
+              },
               "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_83001.covered",
-                "op": "eq",
-                "value": "Yes"
+                "ref": "diagnostic_testing_covered"
               },
               "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            }
-          }
-        },
-        "cpt_83002": {
-          "type": "group",
-          "title": "CPT 83002",
-          "codes": {
-            "cpt": [
-              "83002"
-            ]
-          },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage details for CPT code 83002?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "prompt": {
-                "ask": "Is CPT code 83002 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
+                "ask": "Can you provide coverage details for CPT code 84144?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 84144 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_83002.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
               }
             },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
+            "cpt_76830": {
+              "type": "group",
+              "title": "CPT 76830",
+              "codes": {
+                "cpt": [
+                  "76830"
+                ]
+              },
+              "applicable_when": {
+                "ref": "diagnostic_testing_covered"
+              },
+              "prompt": {
+                "ask": "Can you provide coverage details for CPT code 76830?"
+              },
+              "fields": {
+                "covered": {
+                  "type": "enum",
+                  "title": "Covered",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "prompt": {
+                    "ask": "Is CPT code 76830 covered under this plan? Please answer Yes, No, or N/A."
+                  }
+                },
+                "copay": {
+                  "type": "currency",
+                  "title": "Copay ($)",
+                  "role": "ask",
+                  "required": true,
+                  "special_values": [
+                    "$0",
+                    "None"
+                  ],
+                  "validation": {
+                    "range": {
+                      "min": 0
+                    }
+                  },
+                  "inapplicable_value": "$0",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the copay amount for this service?"
+                  }
+                },
+                "coinsurance": {
+                  "type": "percent",
+                  "title": "Coinsurance (%)",
+                  "role": "ask",
+                  "required": true,
+                  "validation": {
+                    "range": {
+                      "min": 0,
+                      "max": 100
+                    }
+                  },
+                  "inapplicable_value": "0%",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "What is the coinsurance percentage for this service?"
+                  }
+                },
+                "prior_auth": {
+                  "type": "enum",
+                  "title": "Prior Authorization Required",
+                  "role": "ask",
+                  "required": true,
+                  "values": [
+                    "Yes",
+                    "No",
+                    "N/A"
+                  ],
+                  "special_values": [
+                    "Prior auth department"
+                  ],
+                  "tags": [
+                    "prior_auth"
+                  ],
+                  "inapplicable_value": "N/A",
+                  "applicable_when": {
+                    "field": "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.covered",
+                    "op": "eq",
+                    "value": "Yes"
+                  },
+                  "prompt": {
+                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                  }
                 }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_83002.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
-              }
-            },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_83002.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            }
-          }
-        },
-        "cpt_84146": {
-          "type": "group",
-          "title": "CPT 84146",
-          "codes": {
-            "cpt": [
-              "84146"
-            ]
-          },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage details for CPT code 84146?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "prompt": {
-                "ask": "Is CPT code 84146 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84146.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
-              }
-            },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84146.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
-              }
-            },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84146.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            }
-          }
-        },
-        "cpt_84443": {
-          "type": "group",
-          "title": "CPT 84443",
-          "codes": {
-            "cpt": [
-              "84443"
-            ]
-          },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage details for CPT code 84443?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "prompt": {
-                "ask": "Is CPT code 84443 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84443.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
-              }
-            },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84443.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
-              }
-            },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84443.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            }
-          }
-        },
-        "cpt_84144": {
-          "type": "group",
-          "title": "CPT 84144",
-          "codes": {
-            "cpt": [
-              "84144"
-            ]
-          },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage details for CPT code 84144?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "prompt": {
-                "ask": "Is CPT code 84144 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84144.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
-              }
-            },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84144.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
-              }
-            },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_84144.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-              }
-            }
-          }
-        },
-        "cpt_76830": {
-          "type": "group",
-          "title": "CPT 76830",
-          "codes": {
-            "cpt": [
-              "76830"
-            ]
-          },
-          "applicable_when": {
-            "ref": "diagnostic_testing_covered"
-          },
-          "prompt": {
-            "ask": "Can you provide coverage details for CPT code 76830?"
-          },
-          "fields": {
-            "covered": {
-              "type": "enum",
-              "title": "Covered",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "prompt": {
-                "ask": "Is CPT code 76830 covered under this plan? Please answer Yes, No, or N/A."
-              }
-            },
-            "copay": {
-              "type": "currency",
-              "title": "Copay ($)",
-              "role": "ask",
-              "required": true,
-              "special_values": [
-                "$0",
-                "None"
-              ],
-              "validation": {
-                "range": {
-                  "min": 0
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_76830.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the copay amount for this service?"
-              }
-            },
-            "coinsurance": {
-              "type": "percent",
-              "title": "Coinsurance (%)",
-              "role": "ask",
-              "required": true,
-              "validation": {
-                "range": {
-                  "min": 0,
-                  "max": 100
-                }
-              },
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_76830.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
-              }
-            },
-            "prior_auth": {
-              "type": "enum",
-              "title": "Prior Authorization Required",
-              "role": "ask",
-              "required": true,
-              "values": [
-                "Yes",
-                "No",
-                "N/A"
-              ],
-              "special_values": [
-                "Prior auth department"
-              ],
-              "tags": [
-                "prior_auth"
-              ],
-              "applicable_when": {
-                "field": "sections.diagnostic_testing.cpt_76830.covered",
-                "op": "eq",
-                "value": "Yes"
-              },
-              "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
               }
             }
           }
@@ -3714,6 +3838,7 @@
                       "min": 0
                     }
                   },
+                  "inapplicable_value": "$0",
                   "applicable_when": {
                     "field": "sections.general_coverage.office_visits.cpt_99211.covered",
                     "op": "eq",
@@ -3734,6 +3859,7 @@
                       "max": 100
                     }
                   },
+                  "inapplicable_value": "0%",
                   "applicable_when": {
                     "field": "sections.general_coverage.office_visits.cpt_99211.covered",
                     "op": "eq",
@@ -3759,6 +3885,7 @@
                   "tags": [
                     "prior_auth"
                   ],
+                  "inapplicable_value": "N/A",
                   "applicable_when": {
                     "field": "sections.general_coverage.office_visits.cpt_99211.covered",
                     "op": "eq",
@@ -3824,6 +3951,7 @@
                       "min": 0
                     }
                   },
+                  "inapplicable_value": "$0",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_professional.cpt_58555.covered",
                     "op": "eq",
@@ -3844,6 +3972,7 @@
                       "max": 100
                     }
                   },
+                  "inapplicable_value": "0%",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_professional.cpt_58555.covered",
                     "op": "eq",
@@ -3869,6 +3998,7 @@
                   "tags": [
                     "prior_auth"
                   ],
+                  "inapplicable_value": "N/A",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_professional.cpt_58555.covered",
                     "op": "eq",
@@ -3934,6 +4064,7 @@
                       "min": 0
                     }
                   },
+                  "inapplicable_value": "$0",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_facility.cpt_58555.covered",
                     "op": "eq",
@@ -3954,6 +4085,7 @@
                       "max": 100
                     }
                   },
+                  "inapplicable_value": "0%",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_facility.cpt_58555.covered",
                     "op": "eq",
@@ -3979,6 +4111,7 @@
                   "tags": [
                     "prior_auth"
                   ],
+                  "inapplicable_value": "N/A",
                   "applicable_when": {
                     "field": "sections.general_coverage.asc_facility.cpt_58555.covered",
                     "op": "eq",
@@ -4347,27 +4480,6 @@
           "ui": {
             "widget": "textarea"
           }
-        },
-        "lifetime_cycle_max": {
-          "type": "integer",
-          "title": "Lifetime Cycle Maximum",
-          "role": "ask",
-          "required": true,
-          "special_values": [
-            "No Limit"
-          ],
-          "prompt": {
-            "ask": "What is the infertility lifetime cycle maximum for this patient?"
-          }
-        },
-        "cycles_used": {
-          "type": "integer",
-          "title": "Cycles Used to Date",
-          "role": "ask",
-          "required": true,
-          "prompt": {
-            "ask": "How many treatment cycles have been used to date?"
-          }
         }
       }
     },
@@ -4725,6 +4837,20 @@
           "prompt": {
             "ask": "What is the phone number for the enrollment provider?"
           }
+        },
+        "center_of_excellence_required": {
+          "type": "enum",
+          "title": "Center of Excellence Required",
+          "role": "ask",
+          "required": true,
+          "values": [
+            "Yes",
+            "No",
+            "N/A"
+          ],
+          "prompt": {
+            "ask": "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A."
+          }
         }
       }
     },
@@ -4762,20 +4888,6 @@
           },
           "prompt": {
             "ask": "What is the authorization department phone number?"
-          }
-        },
-        "center_of_excellence_required": {
-          "type": "enum",
-          "title": "Center of Excellence Required",
-          "role": "ask",
-          "required": true,
-          "values": [
-            "Yes",
-            "No",
-            "N/A"
-          ],
-          "prompt": {
-            "ask": "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A."
           }
         }
       }
@@ -4936,55 +5048,24 @@
     },
     "insurance_reference_information": {
       "title": "Insurance Reference Information",
-      "description": "Optional reference details about the insurance provider, collected when available.",
+      "role": "context",
+      "description": "Insurance provider contact details supplied at intake. Provided to the agent as background; never asked on the call.",
       "fields": {
         "insurance_provider_name": {
           "type": "text",
           "title": "Insurance Provider Name",
-          "role": "ask",
-          "prompt": {
-            "ask": "Could you provide the full name of the insurance provider?"
-          }
+          "role": "context"
         },
         "insurance_phone_number": {
           "type": "phone",
           "title": "Insurance Provider Phone",
-          "role": "ask",
-          "prompt": {
-            "ask": "What is the primary phone number for the insurance provider?"
-          }
+          "role": "context"
         },
         "web_portal": {
           "type": "text",
           "title": "Web Portal",
-          "role": "ask",
-          "prompt": {
-            "ask": "Is there a provider portal URL or access information available?"
-          }
-        },
-        "web_portal_reference_number": {
-          "type": "text",
-          "title": "Web Portal Reference Number",
-          "role": "ask",
-          "prompt": {
-            "ask": "Is there a web portal reference number for this inquiry?"
-          }
-        },
-        "member_services_pca": {
-          "type": "text",
-          "title": "Member Services PCA Contact",
-          "role": "ask",
-          "prompt": {
-            "ask": "Could you provide the Member Services PCA contact?"
-          }
-        },
-        "employer_name": {
-          "type": "text",
-          "title": "Employer Name",
-          "role": "ask",
-          "prompt": {
-            "ask": "May I also have the patient's employer name?"
-          }
+          "role": "input",
+          "description": "Provider portal URL or access information. Display only; never part of the call."
         }
       }
     },
@@ -5029,6 +5110,16 @@
     }
   },
   "tasks": [
+    {
+      "task_key": "introduction",
+      "title": "Introduction & Patient Verification",
+      "intro": "Hello, I'm VERA, an AI Virtual Assistant... calling from {{hospital_name}}, on behalf of Dr. {{doctor_name}}. Before we begin... I'd like to let you know that this call is being recorded for quality and training purposes. Also, please note that... this call is supervised by my human manager, {{verified_by}}, who may intervene if necessary. I'm looking at the details for... {{patient_name}}, date of birth {{patient_dob}}. Could you let me know if this matches the name on the plan?",
+      "outro": "Great, let me pull up my questions...",
+      "prompt": "Deliver the introduction exactly once, calmly; if interrupted, continue from where you left off — never restart it. Wait for the representative to confirm they can see the patient AND introduce themselves. 'Let me check', 'hold on', 'one moment', 'give me a second' and similar are NOT confirmations — say 'Take your time' once, then stay silent until they return. A bare 'yes' without the representative introducing themselves is NOT a confirmation — keep waiting. If the representative cannot find the patient, provide the member ID {{member_id}} and the insurance provider {{insurance_provider_name}}. If the representative asks questions to verify the call is legitimate, answer from these details: patient {{patient_name}}, date of birth {{patient_dob}}, member ID {{member_id}}, facility {{hospital_name}} at {{hospital_address}}, facility NPI {{hospital_npi}}, tax ID {{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} with NPI {{doctor_npi}}, callback number {{callback_number}}. Record Is Insurance Active as 'No' ONLY after those details have been provided and the representative still confirms the insurance is not active — then wrap up politely. After this task, never re-introduce yourself for the rest of the call.",
+      "sections": [
+        "patient_verification"
+      ]
+    },
     {
       "task_key": "insurance_basics",
       "title": "Insurance Basics",
@@ -5078,27 +5169,39 @@
       "task_key": "closing_admin",
       "title": "Administrative Details",
       "intro": "Just a few more questions about administrative details.",
-      "outro": "Perfect, I have all the administrative details I need. One second please.",
+      "outro": "Perfect, I have all the administrative details I need. Let me take a quick moment to review my notes and make sure I haven't missed anything. One moment please.",
       "prompt": "Close out enrollment, authorization and third-party administration details. Ask the existence gate first and skip the contact questions when the entity does not exist.",
       "sections": [
         "enrollment",
         "authorization_department",
         "third_party_administrator",
         "pharmacy_benefit_manager",
-        "infertility_specialty_pharmacy",
-        "insurance_reference_information"
+        "infertility_specialty_pharmacy"
       ]
     },
     {
       "task_key": "wrap_up",
       "title": "Wrap Up",
-      "prompt": "Always run last, even on early termination: capture the representative's name and a call reference number before ending the call politely.",
+      "intro": "Thanks so much for your patience — that covers everything on my list.",
+      "outro": "That's everything I need today. Thank you so much for all your help — have a wonderful day!",
+      "prompt": "Always run last, even on early termination: capture the representative's name and a call reference number before ending the call politely. Both are critical fields and must be actual values — never accept 'None', 'Unknown', 'Not provided' or any placeholder; politely re-ask until the representative provides them. Ask for them only once every remaining question has been resolved.",
       "sections": [
         "insurance_representative"
       ]
     }
   ],
   "flow_rules": [
+    {
+      "rule_key": "insurance_not_active",
+      "when": {
+        "field": "sections.patient_verification.is_insurance_active",
+        "op": "eq",
+        "value": "No"
+      },
+      "action": "terminate_call",
+      "skip_to_task": "wrap_up",
+      "note": "The representative confirmed the patient's insurance is not active even after the member ID, insurance provider and verification details were provided. Skip all remaining tasks, collect the representative name and call reference number, then end the call."
+    },
     {
       "rule_key": "no_out_of_network_coverage",
       "when": {

@@ -20,13 +20,38 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
+from datetime import date
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+# {{token}} placeholders in task-level text; token = a system_fields key or the
+# root-anchored path of a context-role leaf (2026-07-08 spec §4).
+PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
+# Reserved runtime tokens — exempt from placeholder-resolution validation and
+# handled by the call-plan fuse, not by field lookup: {{value}} is the agent's
+# recorded-value sentinel (kept verbatim in prompt text); {{current_year}} is
+# hydrated at fuse time. Every validator and the resolver consume THIS set so
+# they can never disagree about what counts as reserved.
+RESERVED_PLACEHOLDER_TOKENS: frozenset[str] = frozenset({"value", "current_year"})
+# A complete {{…}} pair whose innards did NOT parse as a token above — e.g.
+# "{{ member_id }}" (inner whitespace) or "{{patient-name}}" (bad chars). These
+# are operator typos that would otherwise reach the spoken prompt as literal
+# braces, so validation flags them. A lone unclosed "{{" stays legal literal
+# text (2026-07-06 spec §8).
+_MALFORMED_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]*\}\}")
+
+
+def malformed_placeholders(text: str) -> list[str]:
+    """Brace pairs that look like placeholders but fail PLACEHOLDER_RE, in
+    document order. Valid tokens are stripped first so only leftovers report."""
+    return _MALFORMED_PLACEHOLDER_RE.findall(PLACEHOLDER_RE.sub("", text))
+
+
 PATH_PREFIX = "sections."
 MAX_PATH_LENGTH = 255
+MAX_STT_KEY_TERMS = 100  # Deepgram keyterm-prompting limit
 
 SectionRole = Literal["collect", "context", "ui_only"]
 LeafRole = Literal["ask", "confirm", "context", "readonly", "input"]
@@ -78,6 +103,40 @@ class RefCondition(_Model):
 Condition = Comparison | AllCondition | AnyCondition | NotCondition | RefCondition
 
 
+def condition_field_paths(
+    cond: Condition, shared: dict[str, Condition] | None, depth: int = 0
+) -> Iterator[str]:
+    """Every leaf path a condition references, shared refs expanded."""
+    if depth > 10:
+        return
+    match cond:
+        case Comparison(field=field):
+            yield field
+        case RefCondition(ref=ref):
+            if shared and ref in shared:
+                yield from condition_field_paths(shared[ref], shared, depth + 1)
+        case AllCondition(all=subs) | AnyCondition(any=subs):
+            for sub in subs:
+                yield from condition_field_paths(sub, shared, depth + 1)
+        case NotCondition(not_=sub):
+            yield from condition_field_paths(sub, shared, depth + 1)
+
+
+class ConfirmInTask(_Model):
+    """Where and when a context-section confirm field is spoken (2026-07-08 spec §3.4)."""
+
+    task_key: str = Field(description="The task during which this confirmation is spoken.")
+    confirm_immediate: bool = Field(
+        default=False,
+        description=(
+            "True: speak the confirmation immediately after the anchor question — "
+            "the last collectable leaf in the named task referenced by this "
+            "field's applicable_when gate chain — is answered and the gate holds. "
+            "False: speak it at the end of the named task."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Field building blocks
 # ---------------------------------------------------------------------------
@@ -97,8 +156,52 @@ class Range(_Model):
 
 
 # Tokens legal in `date_format` (closed set — extend deliberately): month/day
-# with or without a leading zero, 4- or 2-digit year, `/` `-` `.` separators.
-DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY|YY)(?:[-/.](?:MM?|DD?|YYYY|YY))*$")
+# with or without a leading zero, 4-digit year, `/` `-` `.` separators. No 2-digit
+# year (`YY`): unsafe on a DOB field — "55" is ambiguous between 1955 and 2055 —
+# and never gets any better resolved by adding a pivot-year heuristic, so it's
+# rejected outright rather than silently guessing a century.
+DATE_FORMAT_RE = re.compile(r"^(?:MM?|DD?|YYYY)(?:[-/.](?:MM?|DD?|YYYY))*$")
+
+_DATE_TOKEN_RE = re.compile(r"YYYY|MM?|DD?")
+_DATE_TOKEN_PATTERNS: dict[str, str] = {
+    "YYYY": r"(?P<year>\d{4})",
+    "MM": r"(?P<month>\d{2})",
+    "M": r"(?P<month>\d{1,2})",
+    "DD": r"(?P<day>\d{2})",
+    "D": r"(?P<day>\d{1,2})",
+}
+
+
+def parse_date_format(text: str, date_format: str) -> date | None:
+    """Parse `text` against a leaf's display/entry `date_format` (e.g. "M/D/YYYY" —
+    see `Validation.date_format`), for values a human typed in that format rather
+    than ISO (the review UI prompts and validates against this same format; see
+    `vera-frontend/src/lib/ibv/validation.ts`). Returns `None` on a shape or
+    calendar mismatch — never raises; the caller decides whether that's an error."""
+    pattern = ""
+    pos = 0
+    for m in _DATE_TOKEN_RE.finditer(date_format):
+        pattern += re.escape(date_format[pos : m.start()]) + _DATE_TOKEN_PATTERNS[m.group()]
+        pos = m.end()
+    pattern += re.escape(date_format[pos:])
+    try:
+        match = re.fullmatch(pattern, text)
+    except re.error:
+        # A grammar-legal but degenerate date_format (e.g. "M/M/YYYY" — DATE_FORMAT_RE
+        # doesn't forbid a repeated token) builds a pattern with a duplicate named
+        # group, which re.compile rejects. Not this function's contract to raise on
+        # a malformed schema — treat it as "doesn't parse," same as any other mismatch.
+        return None
+    if match is None:
+        return None
+    groups = match.groupdict()
+    month, day, year = groups.get("month"), groups.get("day"), groups.get("year")
+    if month is None or day is None or year is None:
+        return None
+    try:
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
 
 
 class Validation(_Model):
@@ -116,7 +219,8 @@ class Validation(_Model):
                 raise ValueError(f"invalid pattern regex: {exc}") from exc
         if self.date_format is not None and not DATE_FORMAT_RE.match(self.date_format):
             raise ValueError(
-                "date_format must combine M/MM, D/DD, YYYY/YY tokens with -/. separators"
+                "date_format must combine M/MM, D/DD, YYYY tokens with -/. separators "
+                "(no YY — a 2-digit year is ambiguous on a date field)"
             )
         return self
 
@@ -162,7 +266,7 @@ class Leaf(_Model):
     inapplicable_value: str | None = None
     applicable_when: Condition | None = None
     derive: Derive | None = None
-    confirm_in_task: str | None = None
+    confirm_in_task: ConfirmInTask | None = None
     codes: Codes | None = None
     prompt: FieldPrompt | None = None
     ui: Ui | None = None
@@ -262,12 +366,19 @@ class Section(_Model):
 
 
 class Task(_Model):
+    """One LiveKit AgentTask.
+
+    ``intro``/``outro`` are spoken verbatim on task entry/exit (TTS-safe text);
+    ``prompt`` is supplied directly as the agent's task instructions. All three
+    may embed ``{{system_field_key}}`` placeholders, hydrated per patient form
+    at task creation and validated against ``system_fields`` below. ``sections``
+    may be empty for ritual tasks that collect nothing.
+    """
+
     task_key: str
     title: str
     intro: str | None = None
     outro: str | None = None
-    # Task-level agent instructions; the prompt compiler folds this into the
-    # task's composite prompt ahead of the schema-derived question list.
     prompt: str | None = None
     sections: list[str]
     applicable_when: Condition | None = None
@@ -296,12 +407,49 @@ class Contradiction(_Model):
 # ---------------------------------------------------------------------------
 
 
+class PromotedFields(_Model):
+    """patient_form column -> root-anchored leaf path.
+
+    The attribute set mirrors PatientForm's promoted columns (searchable
+    identifiers + worklist display fields); every schema must map all of them,
+    so a new schema can neither forget nor typo a column (enforced at
+    authoring/compile/load — extra="forbid", no defaults). Declaration order
+    is the compiled-artifact key order. Consumed by
+    vera_core.forms.intake.promote_columns and the dispute-resolve promotion
+    in control_plane.api.v1.patient_forms.
+    """
+
+    patient_name: str
+    patient_dob: str
+    chart_number: str
+    appointment_date: str
+    appointment_type: str
+    member_id: str
+    insurance_provider: str
+    insurance_provider_phone_number: str
+
+    def items(self) -> list[tuple[str, str]]:
+        """(column, leaf path) pairs, in declaration order."""
+        return [(column, getattr(self, column)) for column in type(self).model_fields]
+
+
 class FormSchemaDoc(_Model):
     dsl_version: Literal["2.1"]
     name: str
     insurance_type: str
     description: str | None = None
     system_fields: dict[str, str] | None = None
+    # patient_form column name -> root-anchored leaf path. Required: every schema
+    # must map every promotable column (PromotedFields). Each path must also be a
+    # system_fields target (validated below) — that guarantees a promoted column can
+    # never be *unexpectedly* empty at intake (system_fields targets are exactly what
+    # required_intake_fields enforces at creation, intake.py), though a leaf with its
+    # own `default` is still allowed to be absent from the payload (it counts as
+    # filled either way).
+    promoted_fields: PromotedFields
+    # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
+    # at voice-session build; applies to every task. Static domain terms only.
+    stt_key_terms: list[str] | None = None
     shared_conditions: dict[str, Condition] | None = None
     sections: dict[str, Section]
     tasks: list[Task]
@@ -330,6 +478,12 @@ class FormSchemaDoc(_Model):
     def group_paths(self) -> set[str]:
         """Root-anchored paths of every group node."""
         return {path for path, field in self._iter_fields() if isinstance(field, Group)}
+
+    def section_to_task(self) -> dict[str, str]:
+        """section key -> owning task_key. Collect sections appear exactly once
+        (validated below); context/ui_only sections are absent. The prompt
+        renderer and the call-plan compiler both route leaves through this map."""
+        return {s: t.task_key for t in self.tasks for s in t.sections}
 
     def collection_paths(self, section_keys: list[str] | None = None) -> list[str]:
         """Voice-agent collection targets: role in (ask, confirm), optionally per section."""
@@ -374,19 +528,26 @@ class FormSchemaDoc(_Model):
                 errors.append(f"{where}: bad key {key!r}")
 
         # fields, roles, gating
+        immediate_confirms: list[tuple[str, ConfirmInTask, tuple[Condition, ...]]] = []
+
         def walk_fields(
-            prefix: str, fields: dict[str, FormField], section: Section, gated: bool
+            prefix: str,
+            fields: dict[str, FormField],
+            section: Section,
+            chain: tuple[Condition, ...],
         ) -> None:
             for key, field in fields.items():
                 path = f"{prefix}.{key}"
                 check_key(path, key)
                 if len(path) > MAX_PATH_LENGTH:
                     errors.append(f"{path}: exceeds {MAX_PATH_LENGTH} chars")
-                field_gated = gated or field.applicable_when is not None
+                field_chain = (
+                    (*chain, field.applicable_when) if field.applicable_when is not None else chain
+                )
                 if field.applicable_when is not None:
                     check_condition(f"{path}.applicable_when", field.applicable_when)
                 if isinstance(field, Group):
-                    walk_fields(path, field.fields, section, field_gated)
+                    walk_fields(path, field.fields, section, field_chain)
                     continue
                 if (
                     field.role in COLLECTED_ROLES
@@ -397,16 +558,21 @@ class FormSchemaDoc(_Model):
                         f"{path}: role {field.role} outside a collect section "
                         "requires confirm_in_task"
                     )
-                if field.confirm_in_task is not None and field.confirm_in_task not in task_keys:
+                if (
+                    field.confirm_in_task is not None
+                    and field.confirm_in_task.task_key not in task_keys
+                ):
                     errors.append(f"{path}: confirm_in_task references unknown task")
                 if isinstance(field.required, RequiredWhen):
                     check_condition(f"{path}.required.when", field.required.when)
                 if field.derive is not None:
                     check_condition(f"{path}.derive.when", field.derive.when)
-                if field.inapplicable_value is not None and not field_gated:
+                if field.inapplicable_value is not None and not field_chain:
                     errors.append(
                         f"{path}: inapplicable_value without applicable_when on self or ancestor"
                     )
+                if field.confirm_in_task is not None and field.confirm_in_task.confirm_immediate:
+                    immediate_confirms.append((path, field.confirm_in_task, field_chain))
 
         for section_key, section in self.sections.items():
             check_key(f"section {section_key}", section_key)
@@ -416,7 +582,7 @@ class FormSchemaDoc(_Model):
                 f"{PATH_PREFIX}{section_key}",
                 section.fields,
                 section,
-                section.applicable_when is not None,
+                (section.applicable_when,) if section.applicable_when is not None else (),
             )
 
         # shared conditions
@@ -426,6 +592,7 @@ class FormSchemaDoc(_Model):
 
         # tasks: every collect section in exactly one task
         assigned: list[str] = []
+        context_paths = {p for p, leaf in leaves.items() if leaf.role == "context"}
         for task in self.tasks:
             check_key(f"task {task.task_key}", task.task_key)
             if task.applicable_when is not None:
@@ -443,11 +610,44 @@ class FormSchemaDoc(_Model):
                         f"task {task.task_key}: section {skey!r} has role "
                         f"{task_section.role!r}, only collect sections belong to tasks"
                     )
+            for attr in ("intro", "outro", "prompt"):
+                text: str | None = getattr(task, attr)
+                for token in PLACEHOLDER_RE.findall(text or ""):
+                    if (
+                        token not in RESERVED_PLACEHOLDER_TOKENS
+                        and token not in (self.system_fields or {})
+                        and token not in context_paths
+                    ):
+                        errors.append(
+                            f"task {task.task_key}.{attr}: unknown placeholder "
+                            f"{{{{{token}}}}} (not a system_fields key or context-leaf path)"
+                        )
+                for snippet in malformed_placeholders(text or ""):
+                    errors.append(
+                        f"task {task.task_key}.{attr}: malformed placeholder {snippet!r} "
+                        "(use {{token}} — word characters and dots only, no spaces)"
+                    )
         if len(set(task_keys)) != len(task_keys):
             errors.append("duplicate task_key")
         for skey, section in self.sections.items():
             if section.role == "collect" and skey not in assigned:
                 errors.append(f"collect section {skey!r} not assigned to any task")
+
+        # confirm_immediate needs a determinable anchor inside its task
+        task_sections = {t.task_key: set(t.sections) for t in self.tasks}
+        for path, cit, chain in immediate_confirms:
+            in_task = task_sections.get(cit.task_key, set())
+            refs = {ref for cond in chain for ref in condition_field_paths(cond, shared)}
+            if not any(
+                ref in leaves
+                and leaves[ref].role in COLLECTED_ROLES
+                and ref.split(".")[1] in in_task
+                for ref in refs
+            ):
+                errors.append(
+                    f"{path}: confirm_immediate=true needs an anchor — the gate chain "
+                    f"must reference a collectable leaf inside task {cit.task_key!r}"
+                )
 
         # ask_groups / alternatives
         for skey, section in self.sections.items():
@@ -488,6 +688,37 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
+
+        # promoted fields — patient_form columns re-derived from the current answer at
+        # dispute-resolve time too (not just intake). Column names are enforced by the
+        # PromotedFields model itself; each path must be a system_fields target so a
+        # promoted column is never legitimately empty.
+        system_field_paths = set((self.system_fields or {}).values())
+        for column, path in self.promoted_fields.items():
+            if path not in leaves:
+                errors.append(f"promoted_fields.{column}: {path!r} does not resolve to a leaf")
+            elif path not in system_field_paths:
+                errors.append(
+                    f"promoted_fields.{column}: {path!r} is not a system_fields target "
+                    "(promoted fields must be guaranteed present at intake)"
+                )
+
+        # stt key terms: bounded, unique, static vocabulary
+        terms = self.stt_key_terms or []
+        if len(terms) > MAX_STT_KEY_TERMS:
+            errors.append(f"stt_key_terms: {len(terms)} terms exceeds limit of {MAX_STT_KEY_TERMS}")
+        seen_terms: set[str] = set()
+        for i, term in enumerate(terms):
+            where = f"stt_key_terms[{i}]"
+            if not term or term != term.strip():
+                errors.append(f"{where}: empty or untrimmed term {term!r}")
+                continue
+            if "{{" in term:
+                errors.append(f"{where}: placeholders are not allowed in key terms")
+            lowered = term.lower()
+            if lowered in seen_terms:
+                errors.append(f"{where}: duplicate term {term!r}")
+            seen_terms.add(lowered)
 
         # flow rules
         for rule in self.flow_rules or []:

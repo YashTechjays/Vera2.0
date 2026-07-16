@@ -27,7 +27,7 @@ from control_plane.auth.password import hash_password
 from vera_core.config import get_settings
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.forms.dsl import FormSchemaDoc
-from vera_core.forms.prompting import compile_prompt_document
+from vera_core.forms.prompting import FACTORY_SESSION, PromptDocument, validate_prompt_document
 from vera_core.models import (
     AppUser,
     FormSchema,
@@ -51,10 +51,13 @@ from vera_core.models.rbac_defaults import ALL_PERMISSIONS, SYSTEM_ROLES
 # top-level "name"; the document itself is stored opaquely in schema_version.schema_json.
 FORM_SCHEMA_DIR = Path(__file__).parent.parent / "data" / "form_schemas"
 
-# Prompts are GENERATED from each published form schema (vera_core.forms.prompting):
-# composite_json = per-task nested JSON of the task-level prompt + the schema-derived
-# question lists. The legacy hand-written documents under data/prompts/ are reference
-# material only and are no longer seeded.
+# A prompt_version.composite_json is a PromptDocument (vera_core.forms.prompting):
+# literal session text + sparse per-task text overrides. The seeder only ever writes
+# the code-authored FACTORY_SESSION on a schema's first prompt (bootstrap) or carries
+# the prior (operator-owned) document forward onto a republished schema — it never
+# regenerates content from the schema document. Rendering into runtime task prompts
+# happens at call time via `render_task_prompts`. The legacy hand-written documents
+# under data/prompts/ are reference material only and are no longer seeded.
 
 SAMPLE_TENANT_NAME = "Vera Health (Example)"
 # The URL-facing tenant handle (`/tenants/{slug}/auth/login`). Override with
@@ -298,15 +301,18 @@ async def _seed_form_schemas(session: AsyncSession) -> list[str]:
 
 
 async def _seed_prompts(session: AsyncSession) -> list[str]:
-    """Generate + publish one prompt per published form schema, compiled from the
-    schema document itself (`compile_prompt_document`): per-task nested JSON of
-    the task-level prompt + question lists. Mirrors `_seed_form_schemas`:
-    idempotent and keyed on `(schema_id, name)`. Re-running with an unchanged
-    schema is a no-op; a changed schema demotes the current published prompt
-    version to DRAFT and publishes a new one.
+    """Publish one prompt per published form schema with bootstrap-or-carry-forward
+    semantics (spec §6.1): a schema's very first prompt gets the code-authored
+    `FACTORY_SESSION` and empty task_overrides; a schema that republishes onto an
+    already-published prompt carries the prior (operator-owned) `PromptDocument`
+    forward as-is, pruning any task_overrides key whose task no longer exists in
+    the new schema. No text is ever regenerated from the schema document, and
+    nothing here renders — that happens at call time via `render_task_prompts`.
+    Mirrors `_seed_form_schemas`: idempotent and keyed on `(schema_id, name)`; a
+    prompt already bound to the schema's current published version is a no-op.
 
     `prompt_version.schema_version_id` is NOT NULL + RESTRICT, so a prompt is only
-    generated once its schema has a published version (form schemas are seeded
+    published once its schema has a published version (form schemas are seeded
     just before this); schemas without one are skipped with a warning."""
     summary: list[str] = []
     schemas = (
@@ -329,7 +335,6 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
             continue
 
         schema_doc = FormSchemaDoc.model_validate(published_schema.schema_json)
-        doc = compile_prompt_document(schema_doc)
         name = f"{schema_doc.name} Prompt"
 
         prompt = (
@@ -350,9 +355,41 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
                 )
             )
         ).scalar_one_or_none()
-        if published is not None and _same_document(published.composite_json, doc):
-            summary.append(f"{insurance_type} '{name}' v{published.version} (unchanged)")
+        if published is not None and published.schema_version_id == published_schema.id:
+            summary.append(f"{insurance_type} '{name}' v{published.version} (current)")
             continue
+
+        if published is None:
+            # Factory bootstrap (spec §6.1): code-authored session content, once.
+            doc_model = PromptDocument(
+                kind="prompt_document", session=FACTORY_SESSION, task_overrides={}
+            )
+            note = "factory"
+        else:
+            # Carry the operator-owned document to the new schema version, pruning
+            # overrides whose task no longer exists.
+            prior = PromptDocument.model_validate(published.composite_json)
+            task_keys = {t.task_key for t in schema_doc.tasks}
+            kept = {k: v for k, v in prior.task_overrides.items() if k in task_keys}
+            dropped = sorted(set(prior.task_overrides) - task_keys)
+            doc_model = prior.model_copy(update={"task_overrides": kept})
+            note = "carried forward" + (f", dropped: {', '.join(dropped)}" if dropped else "")
+            # Pruning only removes vanished task keys; surviving text can still
+            # reference placeholders the new schema no longer defines (a renamed
+            # system_fields handle or context leaf). Such tokens would render
+            # literally on calls, so surface them at seed time — carry-forward
+            # still proceeds (the document stays operator-owned; fixing the text
+            # is an editor job, not the seeder's).
+            stale = validate_prompt_document(doc_model, schema_doc)
+            if stale:
+                note += f"; WARNING stale content: {'; '.join(stale)}"
+                print(
+                    f"WARNING: {insurance_type} carried-forward prompt no longer "
+                    f"validates against schema v{published_schema.version}: "
+                    f"{'; '.join(stale)}",
+                    file=sys.stderr,
+                )
+        doc = doc_model.model_dump(mode="json")
 
         max_version = (
             await session.execute(
@@ -375,7 +412,7 @@ async def _seed_prompts(session: AsyncSession) -> list[str]:
             )
         )
         await session.flush()
-        summary.append(f"{insurance_type} '{name}' v{next_version} (published)")
+        summary.append(f"{insurance_type} '{name}' v{next_version} (published — {note})")
     return summary
 
 

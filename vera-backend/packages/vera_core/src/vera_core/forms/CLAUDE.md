@@ -61,6 +61,9 @@ fails CI on any drift, and round-trip (`load → compile` = identity) must hold.
 - All condition / `system_fields` / `ask_groups` / `alternatives` /
   `contradictions.fields` paths are **root-anchored** (`sections.<key>...`) and
   must resolve to defined leaves.
+- `promoted_fields` is REQUIRED and total: a `PromotedFields` block mapping all
+  eight patient_form columns; each path must resolve to a leaf AND be a
+  `system_fields` target.
 - `inapplicable_value` is only legal where self or an ancestor carries
   `applicable_when`.
 

@@ -22,8 +22,9 @@ import {
 } from "@/lib/api/platform"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { fetchMe, selectIsSuperAdmin } from "@/store/authSlice"
+import { parseDurationMinutes } from "@/pages/tenantAccess.helpers"
 
-const DEFAULT_DURATION = 60
+const DEFAULT_DURATION = "60"
 
 /** Human "expires in …" for a grant, recomputed on each render. */
 function expiresLabel(expiresAt: string): string {
@@ -45,6 +46,8 @@ export function TenantAccess() {
 
   const [tenantId, setTenantId] = useState("")
   const [reason, setReason] = useState("")
+  // Raw text, not a number: numeric state can't hold "empty", so clearing the
+  // field would instantly re-render "0" and further keystrokes append ("060").
   const [duration, setDuration] = useState(DEFAULT_DURATION)
   const [formError, setFormError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -103,8 +106,9 @@ export function TenantAccess() {
       setFormError("A reason is required.")
       return
     }
-    if (duration < 1 || duration > MAX_ELEVATION_MINUTES) {
-      setFormError(`Duration must be between 1 and ${MAX_ELEVATION_MINUTES} minutes.`)
+    const minutes = parseDurationMinutes(duration)
+    if (minutes === null) {
+      setFormError(`Duration must be a whole number between 1 and ${MAX_ELEVATION_MINUTES} minutes.`)
       return
     }
     setBusy(true)
@@ -112,7 +116,7 @@ export function TenantAccess() {
       await createElevation({
         target_tenant_id: id,
         reason: reason.trim(),
-        duration_minutes: duration,
+        duration_minutes: minutes,
       })
       setTenantId("")
       setReason("")
@@ -251,7 +255,8 @@ export function TenantAccess() {
                 min={1}
                 max={MAX_ELEVATION_MINUTES}
                 value={duration}
-                onChange={(ev) => setDuration(Number(ev.target.value))}
+                onChange={(ev) => setDuration(ev.target.value)}
+                onFocus={(e) => e.target.select()}
                 className="max-w-32"
               />
             </div>

@@ -1,0 +1,8 @@
+Deliver the introduction exactly once, calmly; if interrupted, continue from where you left off — never restart it. Wait for the representative to confirm they can see the patient AND introduce themselves. 'Let me check', 'hold on', 'one moment', 'give me a second' and similar are NOT confirmations — say 'Take your time' once, then stay silent until they return. A bare 'yes' without the representative introducing themselves is NOT a confirmation — keep waiting. If the representative cannot find the patient, provide the member ID {{member_id}} and the insurance provider {{insurance_provider_name}}. If the representative asks questions to verify the call is legitimate, answer from these details: patient {{patient_name}}, date of birth {{patient_dob}}, member ID {{member_id}}, facility {{hospital_name}} at {{hospital_address}}, facility NPI {{hospital_npi}}, tax ID {{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} with NPI {{doctor_npi}}, callback number {{callback_number}}. Record Is Insurance Active as 'No' ONLY after those details have been provided and the representative still confirms the insurance is not active — then wrap up politely. After this task, never re-introduce yourself for the rest of the call.
+
+### Patient Verification
+1. Can you confirm the patient's insurance is currently active?
+   - Answers: Yes | No
+
+TERMINATION RULE — insurance_not_active:
+If "Is Insurance Active" is "No": The representative confirmed the patient's insurance is not active even after the member ID, insurance provider and verification details were provided. Skip all remaining tasks, collect the representative name and call reference number, then end the call. Stop the remaining questions and move to "Wrap Up".

@@ -48,3 +48,15 @@ boundary and is the last place PHI can leak.
 
 A blocked task is recoverable; a PHI disclosure is not. When you cannot tell whether
 something is PHI, treat it as PHI, and defer the call to compliance review.
+
+## Dependency changes
+
+- The npm version is pinned via the `packageManager` field in `package.json` and enforced
+  by Corepack (run `corepack enable` once per machine). Never install/update a global npm
+  and regenerate the lock file with it — a different npm version can resolve the same
+  `package.json` into a different `package-lock.json` (observed: optional peer deps of
+  `@napi-rs/wasm-runtime` hoisted differently between npm 11 and CI's npm 10.9.8), and
+  `npm ci` in CI will reject the drifted lock file with `EUSAGE`.
+- After touching `package.json` or `package-lock.json`, verify with `npm ci` (not just
+  `npm install`) before pushing — `npm ci` is the strict check CI runs; `npm install` will
+  silently "fix" a lockfile locally without surfacing that it drifted from what CI expects.

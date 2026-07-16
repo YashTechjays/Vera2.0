@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, Numeric, String
+from sqlalchemy import CheckConstraint, DateTime, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,5 +42,21 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     queue_expiry_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
+    # Recording retention in days; NULL → the platform default
+    # (settings.recording_retention_days_default). Stamped onto
+    # recording.retention_until at verify time; changing it does NOT rewrite
+    # already-stamped recordings (spec decision).
+    recording_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        # Mirrors the API bound (RetentionPolicyUpdate 1..3650): a direct DB write
+        # of 0/negative days would silently corrupt retention_until stamping.
+        # NULL passes a CHECK per SQL semantics, so no explicit IS NULL arm
+        # (same idiom as oversight.score_range / field_answer.confidence_range).
+        CheckConstraint(
+            "recording_retention_days BETWEEN 1 AND 3650",
+            name="recording_retention_days_range",
+        ),
+    )
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

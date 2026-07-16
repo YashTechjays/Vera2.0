@@ -1,18 +1,18 @@
-"""Tests for retry_fields partial-prompt nudge."""
+"""The RETRY-call focus overlay (rides PlanRunController's extra_instructions)."""
 
 from __future__ import annotations
 
-from agent_worker.prompt import build_instructions
+from agent_worker.prompt import retry_focus_block
 
 
-def test_retry_fields_prepends_focus_block() -> None:
-    out = build_instructions(None, retry_fields=["Network status", "Specialist copay"])
-    assert "RETRY" in out.upper()
-    assert "Network status" in out and "Specialist copay" in out
-    # base script still present
-    assert "verifying insurance coverage" in out.lower()
+def test_retry_focus_names_only_the_missing_fields() -> None:
+    block = retry_focus_block(["Doctor Inside Network", "Copay Amount"])
+    assert block.startswith("RETRY CALL.")
+    assert "Doctor Inside Network, Copay Amount" in block
+    assert "Do not re-verify anything else." in block
 
 
-def test_no_retry_fields_is_unchanged() -> None:
-    assert build_instructions(None, retry_fields=None) == build_instructions(None)
-    assert build_instructions(None, retry_fields=[]) == build_instructions(None)
+def test_retry_focus_single_field() -> None:
+    block = retry_focus_block(["Plan Fund Type"])
+    assert "collect ONLY the following still-missing data points" in block
+    assert "Plan Fund Type" in block

@@ -6,6 +6,7 @@ the DB orchestration lives in `evaluate_call` below.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import UUID
@@ -14,7 +15,6 @@ from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phi_codec.tokens.token import TOKEN_RE
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import (
@@ -29,18 +29,25 @@ from vera_core.models.enums import AnswerSource, FormStatus
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
-from vera_core.services.field_status import load_current_values, load_field_status
+from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
 
 logger = logging.getLogger("vera.post_call_eval")
+
+# Legacy de-identification token shape ("[[SSN_1]]"). The tokenization wall was
+# removed 2026-07-13 (phi_codec deleted; transcripts are plaintext in-boundary),
+# but a token-shaped extraction still means "not a real value" — quarantine it
+# to review rather than persisting it as an answer.
+PHI_TOKEN_RE = re.compile(r"\[\[([A-Z][A-Z_]*)_(\d+)\]\]")
 
 
 def has_phi_token(value: str) -> bool:
     """True if the extracted value still contains a `[[TYPE_N]]` PHI token — meaning the
     LLM surfaced an identifier we cannot safely materialize (no live vault). Such fields
     are routed to review rather than stored as a token."""
-    return TOKEN_RE.search(value) is not None
+    return PHI_TOKEN_RE.search(value) is not None
 
 
 def evidence_text(turns: list[TranscriptTurn], evidence_seq: int) -> str | None:
@@ -59,6 +66,9 @@ class EvalDeps:
     llm: LLMClient
     audit: AuditSink
     livekit: Any
+    kms: Any = None
+    recording: Any = None
+    plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
 
 
@@ -182,7 +192,14 @@ async def evaluate_call(
             )
         )
         await try_dispatch(
-            session, tenant_id, deps.livekit, audit=deps.audit, retry_floor=deps.floor
+            session,
+            tenant_id,
+            deps.livekit,
+            deps.kms,
+            audit=deps.audit,
+            recording=deps.recording,
+            plan_service=deps.plan_service,
+            retry_floor=deps.floor,
         )
         return EvalOutcome(status=target, answers_written=written, reviewed_fields=reviewed)
 
@@ -192,8 +209,22 @@ async def evaluate_call(
             FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="no_transcript"
         )
 
-    # (2) Parse schema — collection paths for extraction.
-    doc = FormSchemaDoc.model_validate(version.schema_json)
+    # (2) Parse schema — collection paths for extraction. A document the model
+    # can't parse (e.g. a legacy v1 schema — FormSchemaDoc only accepts 2.1)
+    # must route to review, not raise: an exception here leaves the job unacked
+    # and reclaim would re-run it forever.
+    try:
+        doc = FormSchemaDoc.model_validate(version.schema_json)
+    except Exception as exc:
+        logger.error(
+            "post_call_eval: unsupported schema for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
+            form_id,
+            type(exc).__name__,
+            exc,
+        )
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="unsupported_schema"
+        )
     paths = doc.collection_paths()
 
     # (4-5) Extract + persist (skip token-valued fields). Keep each written row so
@@ -267,7 +298,7 @@ async def evaluate_call(
     await session.flush()
 
     # (7) Recompute completion % from the form's current answers.
-    current_values = await load_current_values(session, form_id)
+    current_values = await current_values_by_path(session, form_id)
     form.completion_pct = form_completion_pct(current_values, version.schema_json)
 
     # (8) Update call_form_snapshot.after_state (the before_state row was written
