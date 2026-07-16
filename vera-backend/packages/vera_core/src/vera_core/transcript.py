@@ -27,9 +27,10 @@ ROLE_DTMF: Literal["dtmf"] = "dtmf"  # a keypad press (DTMF), text = the digits 
 
 SOURCE_REP: Literal["rep"] = "rep"  # the human on the line (payer rep / IVR side)
 SOURCE_BOT: Literal["bot"] = "bot"  # Vera — speech or an action it took
+SOURCE_SUPERVISOR: Literal["supervisor"] = "supervisor"  # a supervisor who took over the call
 
 type TurnRole = Literal["user", "agent", "dtmf"]
-type TurnSource = Literal["rep", "bot"]
+type TurnSource = Literal["rep", "bot", "supervisor"]
 
 _SOURCE_BY_ROLE: dict[str, TurnSource] = {
     ROLE_USER: SOURCE_REP,

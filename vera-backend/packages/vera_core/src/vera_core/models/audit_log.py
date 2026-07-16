@@ -49,9 +49,6 @@ class AuditEvent(enum.StrEnum):
     # listen-only from day one; the full intervention feature (agent takeover
     # behavior) is still TODO.
     CALL_INTERVENE_JOIN = "call.intervene.join"
-    # The owner revoked a user's access to a published call (they can no longer
-    # see or join it). Ids only.
-    CALL_ACCESS_REVOKE = "call.access.revoke"
     # A VA ended a live call (LiveKit room torn down; the worker's call.ended
     # event drives the actual closeout). Ids only, never PHI.
     CALL_END = "call.end"

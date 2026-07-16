@@ -114,11 +114,6 @@ export type FormSchema = {
   description?: string
   /** well-known system handles → field paths */
   system_fields?: Record<string, string>
-  /**
-   * Root-anchored leaf paths the platform treats as prerequisites for a call.
-   * Drives a distinct amber UI highlight, separate from the violet system-field tint.
-   */
-  prerequisite_fields?: string[]
   shared_conditions?: Record<string, Condition>
   /** object keyed by section_key; key order = UI order */
   sections: Record<string, Section>

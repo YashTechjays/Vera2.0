@@ -33,6 +33,7 @@ from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
 from vera_core.models.enums import AccountType
+from vera_core.plan_store import CallPlanService
 from vera_core.transcript import TranscriptService
 
 if TYPE_CHECKING:
@@ -96,6 +97,11 @@ def get_transcript_service(request: Request) -> TranscriptService:
 
 def get_call_stream_service(request: Request) -> CallStreamService:
     service: CallStreamService = request.app.state.call_stream_service
+    return service
+
+
+def get_call_plans(request: Request) -> CallPlanService:
+    service: CallPlanService = request.app.state.call_plans
     return service
 
 

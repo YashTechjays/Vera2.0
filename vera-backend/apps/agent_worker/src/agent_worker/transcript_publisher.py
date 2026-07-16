@@ -1,10 +1,9 @@
-"""Publish finalized, de-identified transcript turns via the TranscriptService — in true
+"""Publish finalized transcript turns via the TranscriptService — in true
 chronological order, even when the caller barges in over the agent.
 
-Taps AgentSession events on the de-identified side of the PHI wall: user turns are the
-redacted FINAL transcript (post stt_node); agent turns are the LLM's token-only output
-(pre tts_node hydration). Best-effort — a Redis failure logs and is swallowed, never
-breaking the call.
+Taps AgentSession events: user turns are the FINAL transcript (post stt_node);
+agent turns are the LLM's token-only output (pre tts_node). Best-effort — a
+Redis failure logs and is swallowed, never breaking the call.
 
 ## Why a reordering emitter (the barge-in problem)
 

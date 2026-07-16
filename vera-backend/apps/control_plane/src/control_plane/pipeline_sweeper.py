@@ -50,6 +50,7 @@ from vera_core.observability.correlation import (
     parse_room_name,
     room_name_for_call,
 )
+from vera_core.plan_store import CallPlanService
 
 if TYPE_CHECKING:
     from vera_core.services.recordings import RecordingConfig
@@ -112,6 +113,7 @@ class PipelineSweeper:
         max_call_duration_s: int,
         form_auto_retry_enabled: bool = False,
         recording: "RecordingConfig | None" = None,
+        call_plans: CallPlanService | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._livekit = livekit
@@ -123,6 +125,7 @@ class PipelineSweeper:
         self._max_call_duration_s = max_call_duration_s
         self._form_auto_retry_enabled = form_auto_retry_enabled
         self._recording = recording
+        self._call_plans = call_plans
         # Rooms observed GONE on the previous tick (per-process memory for the
         # two-tick confirmation; room names embed the tenant id). Replicas each
         # keep their own — close_call's row lock makes a double-close a no-op.
@@ -276,4 +279,5 @@ class PipelineSweeper:
                 self._kms,
                 self._audit,
                 recording=self._recording,
+                plan_service=self._call_plans,
             )

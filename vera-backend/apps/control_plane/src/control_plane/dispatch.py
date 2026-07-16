@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from vera_core.audit import AuditSink
     from vera_core.services.recordings import RecordingConfig
+    from vera_core.plan_store import CallPlanService
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def schedule_dispatch_pass(
     *,
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
+    plan_service: "CallPlanService | None" = None,
 ) -> None:
     """Fire-and-forget a dispatch pass on the running loop. See run_dispatch_pass
     for why this is a detached task and not fastapi.BackgroundTasks: background
@@ -55,6 +57,7 @@ def schedule_dispatch_pass(
                 audit,
                 wait_for_form_id=wait_for_form_id,
                 recording=recording,
+                plan_service=plan_service,
             )
         )
     )
@@ -81,6 +84,7 @@ async def run_dispatch_pass(
     *,
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
+    plan_service: "CallPlanService | None" = None,
 ) -> None:
     """Await one dispatch pass, shielded from the caller's cancellation.
 
@@ -100,6 +104,7 @@ async def run_dispatch_pass(
             audit,
             wait_for_form_id=wait_for_form_id,
             recording=recording,
+            plan_service=plan_service,
         )
     )
     _track(task)
@@ -115,6 +120,7 @@ async def _dispatch_pass(
     *,
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
+    plan_service: "CallPlanService | None" = None,
 ) -> None:
     """One dispatch pass in a fresh tenant-scoped session; commits on success.
     Exception-safe: a failed pass logs and returns — queued forms are retried on
@@ -133,7 +139,15 @@ async def _dispatch_pass(
                     .with_for_update()
                 )
         async with tenant_session(sessionmaker, tenant_id) as session:
-            await try_dispatch(session, tenant_id, livekit, kms, audit=audit, recording=recording)
+            await try_dispatch(
+                session,
+                tenant_id,
+                livekit,
+                kms,
+                audit=audit,
+                recording=recording,
+                plan_service=plan_service,
+            )
     except Exception as exc:
         # Type name only — SQLAlchemy statement errors embed the bound
         # parameters, and the pass touches patient_form rows (PHI).

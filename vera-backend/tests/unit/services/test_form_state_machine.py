@@ -30,6 +30,8 @@ class TestTransitionMap:
             (FormStatus.READY_FOR_PROCESSING, FormStatus.EXCEPTION_REVIEW),
             (FormStatus.IN_QUEUE, FormStatus.IN_CALL),
             (FormStatus.IN_QUEUE, FormStatus.EXPIRED),
+            # Dispatcher marks an undispatchable (no-plan) form as failed.
+            (FormStatus.IN_QUEUE, FormStatus.CALL_FAILED),
             (FormStatus.IN_CALL, FormStatus.AI_PROCESSING),
             (FormStatus.IN_CALL, FormStatus.CALL_FAILED),
             (FormStatus.AI_PROCESSING, FormStatus.EXCEPTION_REVIEW),
@@ -80,6 +82,15 @@ class TestFormStateMachine:
         sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
         # enqueued_at starts as None and must remain unset by the state machine.
         assert form.enqueued_at is None
+
+    def test_transition_in_queue_to_call_failed_spends_no_retry_budget(self) -> None:
+        """Marking an undispatchable form CALL_FAILED is not a retry — retry_count is
+        untouched (only → IN_QUEUE edges spend the budget)."""
+        sm = FormStateMachine()
+        form = self._make_form(FormStatus.IN_QUEUE, retry_count=2)
+        sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=5)
+        assert form.status == FormStatus.CALL_FAILED.value
+        assert form.retry_count == 2
 
     def test_transition_call_failed_to_in_queue_increments_retry(self) -> None:
         sm = FormStateMachine()

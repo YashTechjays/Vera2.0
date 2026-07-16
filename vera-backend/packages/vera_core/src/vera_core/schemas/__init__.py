@@ -4,7 +4,6 @@ from .dto import (
     RecordingPlayback,
     RetentionPolicy,
     RetentionPolicyUpdate,
-    RevokeAccessRequest,
     StartVoiceSessionRequest,
     VoiceSessionResponse,
 )
@@ -23,7 +22,6 @@ __all__ = [
     "RecordingPlayback",
     "RetentionPolicy",
     "RetentionPolicyUpdate",
-    "RevokeAccessRequest",
     "StartVoiceSessionRequest",
     "VoiceSessionResponse",
 ]

@@ -1,18 +1,22 @@
-"""Tests for the cascade agents — the chat persona (with PHI-wall node overrides) and
-the IVR navigator (a plain agent, no phiwall), plus the metadata-driven selector."""
+"""Tests for the cascade agents — the plan-only conversational path, the IVR
+navigator, and the metadata-driven selector."""
 
 import logging
+import uuid
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from conftest import chat_ctx_texts
 from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
-from agent_worker.agent import VeraAgent, build_agent
+from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
+from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
@@ -22,9 +26,26 @@ from agent_worker.ivr_agent import (
     ivr_turn_handling,
 )
 from agent_worker.ivr_prompt import SILENCE_TOKEN
-from agent_worker.prompt import build_instructions
-from vera_core.phi import PassthroughPHIBoundary
+from agent_worker.plan_runtime import PlanRunController, PlanTaskAgent
+from vera_core.forms.call_plan import CallPlan, PlanSession, PlanTask
 from vera_core.schemas import PersonaTweak
+
+
+def _plan_controller() -> PlanRunController:
+    """A minimal live controller — the required input to build_agent / the IVR handoff."""
+    plan = CallPlan(
+        schema_name="T",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[PlanTask(task_key="t1", title="T1", prompt="ask")],
+    )
+    return PlanRunController(
+        plan,
+        room_name="call--t--c",
+        run_state=cast(Any, None),  # never touched before on_enter
+    )
 
 
 async def _press(agent: IvrNavigatorAgent, digits: str) -> str:
@@ -54,33 +75,45 @@ def _job_ctx(participant: _FakeParticipant) -> object:
     return SimpleNamespace(room=SimpleNamespace(local_participant=participant))
 
 
-def _navigator() -> IvrNavigatorAgent:
-    """An IVR navigator with a (no-op) boundary + session_id so it can build its
-    VeraAgent handoff target."""
-    return IvrNavigatorAgent(PassthroughPHIBoundary(), "s1")
+def _navigator(**kwargs: Any) -> IvrNavigatorAgent:
+    """An IVR navigator with a plan-task handoff factory (required)."""
+    controller = _plan_controller()
+    kwargs.setdefault("verification_agent_factory", controller.first_agent)
+    return IvrNavigatorAgent(**kwargs)
 
 
-def test_vera_agent_has_end_call_tool_and_persona() -> None:
-    agent = VeraAgent(boundary=PassthroughPHIBoundary(), session_id="s1")
+def _mock_session() -> MagicMock:
+    """A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards."""
+    session = MagicMock()
+    session.userdata = TakeoverState()
+    return session
+
+
+@pytest.mark.asyncio
+async def test_carry_chat_ctx_copies_spoken_turns_not_instructions() -> None:
+    # A tool-returned agent starts with an empty chat_ctx and LiveKit does not auto-carry
+    # history for that handoff shape, so carry_chat_ctx must copy the source's spoken turns
+    # into the target — dropping the source's own instructions and tool-call bookkeeping.
+    source = VeraAgent(instructions="SOURCE INSTRUCTIONS")
+    source._chat_ctx.add_message(role="assistant", content="Hello, this is VERA.")
+    source._chat_ctx.add_message(role="user", content="The member ID is POL-661522.")
+    source._chat_ctx.add_message(role="system", content="SOURCE INSTRUCTIONS")
+
+    target = VeraAgent(instructions="TARGET INSTRUCTIONS")
+    await carry_chat_ctx(source, target)
+
+    texts = chat_ctx_texts(target)
+    assert "Hello, this is VERA." in texts  # prior assistant turn carried
+    assert "The member ID is POL-661522." in texts  # prior user turn carried
+    assert "SOURCE INSTRUCTIONS" not in texts  # source's own instructions excluded
+    assert target.instructions == "TARGET INSTRUCTIONS"  # target keeps its own
+
+
+def test_vera_agent_carries_only_the_end_call_tool() -> None:
+    agent = VeraAgent(instructions="do things")
     tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
     assert tool_names == ["end_call"]
-    assert "infertility" in agent.instructions.lower()
-    # the chat persona greets on enter (overrides the base no-op)
-    assert type(agent).on_enter is not Agent.on_enter
-    # ...and carries the PHI-wall node overrides
-    assert type(agent).stt_node is not Agent.stt_node
-    assert type(agent).tts_node is not Agent.tts_node
-
-
-def test_vera_agent_accepts_overlaid_instructions() -> None:
-    instructions = build_instructions(PersonaTweak(extra_instructions="Confirm member ID twice."))
-    agent = VeraAgent(
-        boundary=PassthroughPHIBoundary(),
-        session_id="s1",
-        instructions=instructions,
-        greeting="Hello there.",
-    )
-    assert "Confirm member ID twice." in agent.instructions
+    assert agent.instructions == "do things"
 
 
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
@@ -90,10 +123,9 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     assert "infertility" not in agent.instructions.lower()
     # the navigator listens first: it does NOT greet, so on_enter stays the base no-op
     assert type(agent).on_enter is Agent.on_enter
-    # NO PHI-wall on the inbound path: stt_node stays the base default (no redaction override)
+    # stt stays the base default; tts/transcription ARE overridden — only to strip the
+    # silence sentinel, so a "stay silent" turn makes no sound
     assert type(agent).stt_node is Agent.stt_node
-    # ...but tts/transcription ARE overridden — only to strip the silence sentinel (not to
-    # hydrate PHI, which the navigator has none of), so a "stay silent" turn makes no sound
     assert type(agent).tts_node is not Agent.tts_node
     assert type(agent).transcription_node is not Agent.transcription_node
     # ...but it CAN press keypad digits (DTMF), hand off to the verifier, and give up
@@ -107,7 +139,7 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
 async def test_give_up_ends_the_call() -> None:
     # give_up is the navigator's bail-out for an unresolvable IVR loop — it hangs up cleanly.
     agent = _navigator()
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     give_up_tool = next(
         t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "give_up"
     )
@@ -124,7 +156,7 @@ async def test_turn_cap_grants_one_grace_turn_before_ending() -> None:
     # hung up on. So the first over-cap turn neither shuts down nor raises StopResponse.
     agent = _navigator()
     agent._turns = _IVR_MAX_TURNS  # the next completed turn trips the cap
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         await agent.on_user_turn_completed(MagicMock(), MagicMock())  # grace turn
     mock_session.shutdown.assert_not_called()
@@ -137,7 +169,7 @@ async def test_turn_cap_backstop_ends_the_call_after_the_grace_turn() -> None:
     agent = _navigator()
     agent._turns = _IVR_MAX_TURNS
     agent._final_turn_used = True  # grace turn already spent
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with (
         patch.object(type(agent), "session", new=property(lambda self: mock_session)),
         pytest.raises(StopResponse),
@@ -149,25 +181,11 @@ async def test_turn_cap_backstop_ends_the_call_after_the_grace_turn() -> None:
 @pytest.mark.asyncio
 async def test_under_the_turn_cap_does_not_end_the_call() -> None:
     agent = _navigator()
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         # one normal turn well under the cap — no shutdown, no StopResponse
         await agent.on_user_turn_completed(MagicMock(), MagicMock())
     mock_session.shutdown.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_transfer_to_verification_hands_off_to_vera_agent() -> None:
-    # When the navigator reaches a human, the handoff target is the VeraAgent verification
-    # persona — and it carries the PHI-wall overrides the navigator lacks, so the wall turns
-    # on for the rest of the call.
-    agent = _navigator()
-    call = cast("Callable[[], Awaitable[Agent]]", agent.transfer_to_verification)
-    handoff = await call()
-    assert isinstance(handoff, VeraAgent)
-    assert type(handoff).on_enter is not Agent.on_enter  # greets the rep on enter
-    assert type(handoff).stt_node is not Agent.stt_node
-    assert type(handoff).tts_node is not Agent.tts_node
 
 
 def test_ivr_turn_handling_is_patient() -> None:
@@ -185,13 +203,13 @@ def test_ivr_turn_handling_is_patient() -> None:
     assert th["interruption"]["min_words"] >= 2  # short self-echo transcripts don't trip the pause
 
 
-def test_ivr_navigator_wires_patient_turn_config_and_vera_does_not() -> None:
-    # The navigator carries the patient override; VeraAgent leaves it unset so it inherits the
-    # snappy human session default — which is how the config reverts automatically at the handoff.
+def test_ivr_navigator_wires_patient_turn_config_and_plan_agent_does_not() -> None:
+    # The navigator carries the patient override; the plan task agent leaves it unset so it
+    # inherits the snappy human session default — the config reverts automatically at handoff.
     nav = _navigator()
     assert nav.turn_detection == "vad"
-    vera = VeraAgent(boundary=PassthroughPHIBoundary(), session_id="s1")
-    assert not is_given(vera.turn_detection)
+    plan_agent = _plan_controller().first_agent()
+    assert not is_given(plan_agent.turn_detection)
 
 
 @pytest.mark.asyncio
@@ -251,7 +269,7 @@ async def test_press_keypad_reports_a_successful_press_to_on_keypress() -> None:
     # The transcript needs evidence of the action: a successful press reports the digits
     # actually sent (normalized) to the injected callback, which feeds the live transcript.
     pressed: list[str] = []
-    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    agent = _navigator(on_keypress=pressed.append)
     participant = _FakeParticipant()
     with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
         await _press(agent, " 3 ")
@@ -263,7 +281,7 @@ async def test_press_keypad_reports_a_successful_press_to_on_keypress() -> None:
 async def test_press_keypad_does_not_report_a_press_that_sent_nothing(digits: str) -> None:
     # Empty and invalid sequences emit no tones — nothing to evidence in the transcript.
     pressed: list[str] = []
-    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    agent = _navigator(on_keypress=pressed.append)
     participant = _FakeParticipant()
     with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
         await _press(agent, digits)
@@ -275,7 +293,7 @@ async def test_press_keypad_does_not_report_a_failed_press() -> None:
     # A transport failure means no tones reached the line — reporting it would fabricate
     # evidence of an action that never happened.
     pressed: list[str] = []
-    agent = IvrNavigatorAgent(PassthroughPHIBoundary(), "s1", on_keypress=pressed.append)
+    agent = _navigator(on_keypress=pressed.append)
     participant = _FakeParticipant(raise_on_publish=True)
     with patch("agent_worker.ivr_agent.get_job_context", return_value=_job_ctx(participant)):
         await _press(agent, "3")
@@ -287,10 +305,7 @@ def test_build_agent_passes_on_keypress_to_the_navigator() -> None:
         pass
 
     agent = build_agent(
-        {"enable_ivr_navigation": True},
-        boundary=PassthroughPHIBoundary(),
-        session_id="s1",
-        on_keypress=_cb,
+        {"enable_ivr_navigation": True}, controller=_plan_controller(), on_keypress=_cb
     )
     assert isinstance(agent, IvrNavigatorAgent)
     assert agent._on_keypress is _cb
@@ -406,40 +421,68 @@ async def test_transcription_path_keeps_plain_digits() -> None:
 
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
-    boundary = PassthroughPHIBoundary()
-    nav = build_agent({"enable_ivr_navigation": True}, boundary=boundary, session_id="s1")
+    controller = _plan_controller()
+    nav = build_agent({"enable_ivr_navigation": True}, controller=controller)
     assert isinstance(nav, IvrNavigatorAgent)
-    # absent or false → the default chat persona
-    assert isinstance(build_agent({}, boundary=boundary, session_id="s1"), VeraAgent)
-    assert isinstance(
-        build_agent({"enable_ivr_navigation": False}, boundary=boundary, session_id="s1"),
-        VeraAgent,
+    # absent or false → the plan's first task agent directly
+    assert build_agent({}, controller=controller) is controller.agents[0]
+    assert (
+        build_agent({"enable_ivr_navigation": False}, controller=controller) is controller.agents[0]
     )
+
+
+@pytest.mark.asyncio
+async def test_voice_lab_agent_greets_on_enter_and_carries_end_call() -> None:
+    agent = VoiceLabAgent(instructions="be helpful", greeting="Hi there, quick benefits check?")
+    tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
+    assert tool_names == ["end_call"]
+    assert agent.instructions == "be helpful"
+    mock_session = _mock_session()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        await agent.on_enter()
+    mock_session.say.assert_called_once_with("Hi there, quick benefits check?")
+
+
+def test_build_agent_no_controller_runs_voice_lab_fallback() -> None:
+    # Voice Lab preview: no CallPlan → the conversational VoiceLabAgent, not a hang-up.
+    agent = build_agent({}, controller=None)
+    assert isinstance(agent, VoiceLabAgent)
+    assert "infertility" in agent.instructions.lower()  # the preview persona
+
+
+def test_build_agent_no_controller_ivr_nav_verification_is_voice_lab() -> None:
+    # IVR-nav preview: the navigator runs, and its post-answer verification agent is a
+    # VoiceLabAgent (so IVR preview reaches a conversational agent, not a hang-up).
+    nav = build_agent({"enable_ivr_navigation": True}, controller=None)
+    assert isinstance(nav, IvrNavigatorAgent)
+    assert isinstance(nav._make_verification_agent(), VoiceLabAgent)
+
+
+def test_voice_lab_fallback_greeting_honors_tenant_tweak() -> None:
+    agent = build_agent({}, controller=None, tweak=PersonaTweak(greeting="Custom opener."))
+    assert isinstance(agent, VoiceLabAgent)
+    assert agent._greeting == "Custom opener."
 
 
 def test_build_agent_warns_on_agent_context_without_ivr_flag(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Symmetric with the ivr_playbook warning: agent_context without the flag is ignored (the chat
-    # persona doesn't read it), and we log that it was dropped — never the values themselves.
+    # Symmetric with the ivr_playbook warning: agent_context without the flag is ignored (the
+    # plan agents don't read it), and we log that it was dropped — never the values themselves.
+    controller = _plan_controller()
     with caplog.at_level(logging.WARNING):
-        agent = build_agent(
-            {"agent_context": {"member_id": "M1"}},
-            boundary=PassthroughPHIBoundary(),
-            session_id="s1",
-        )
-    assert isinstance(agent, VeraAgent)
+        agent = build_agent({"agent_context": {"member_id": "M1"}}, controller=controller)
+    assert agent is controller.agents[0]
     assert "agent_context present without enable_ivr_navigation" in caplog.text
     assert "M1" not in caplog.text  # never log the values
 
 
 def test_build_agent_playbook_specializes_but_never_selects() -> None:
-    boundary = PassthroughPHIBoundary()
+    controller = _plan_controller()
     # With the flag on, the playbook specializes the navigator's instructions.
     nav = build_agent(
         {"enable_ivr_navigation": True, "ivr_playbook": {"provider_subflows": "Press 3"}},
-        boundary=boundary,
-        session_id="s1",
+        controller=controller,
     )
     assert isinstance(nav, IvrNavigatorAgent)
     assert "<provider_subflows>Press 3</provider_subflows>" in nav.instructions
@@ -449,12 +492,41 @@ def test_build_agent_playbook_specializes_but_never_selects() -> None:
         {"ivr_playbook": {"provider_subflows": "Press 3"}},
         {"enable_ivr_navigation": False, "ivr_playbook": {"provider_subflows": "Press 3"}},
     ):
-        assert isinstance(build_agent(meta, boundary=boundary, session_id="s1"), VeraAgent)
+        assert build_agent(meta, controller=controller) is controller.agents[0]
     # A malformed playbook is fail-safe: the navigator still runs, just generic.
     generic = build_agent(
         {"enable_ivr_navigation": True, "ivr_playbook": {"bogus": "x"}},
-        boundary=boundary,
-        session_id="s1",
+        controller=controller,
     )
     assert isinstance(generic, IvrNavigatorAgent)
     assert "<provider_playbook" not in generic.instructions
+
+
+def test_build_agent_with_controller_starts_on_the_first_plan_task() -> None:
+    controller = _plan_controller()
+    agent = build_agent({}, controller=controller)
+    assert isinstance(agent, PlanTaskAgent)
+    assert agent is controller.agents[0]
+
+
+@pytest.mark.asyncio
+async def test_ivr_hands_off_to_the_first_plan_task_when_a_plan_is_active() -> None:
+    controller = _plan_controller()
+    agent = build_agent({"enable_ivr_navigation": True}, controller=controller)
+    assert isinstance(agent, IvrNavigatorAgent)
+    call = cast("Callable[[], Awaitable[Agent]]", agent.transfer_to_verification)
+    handoff = await call()
+    assert isinstance(handoff, PlanTaskAgent)
+    assert handoff is controller.agents[0]
+
+
+@pytest.mark.asyncio
+async def test_ivr_handoff_carries_the_navigation_conversation() -> None:
+    # The IVR already spoke the member ID; the plan agent must inherit that history so it
+    # doesn't re-ask it (the transcript's re-ask bug).
+    controller = _plan_controller()
+    nav = build_agent({"enable_ivr_navigation": True}, controller=controller)
+    nav._chat_ctx.add_message(role="assistant", content="The member ID is POL-661522.")
+    call = cast("Callable[[], Awaitable[Agent]]", nav.transfer_to_verification)
+    handoff = await call()
+    assert "The member ID is POL-661522." in chat_ctx_texts(handoff)
