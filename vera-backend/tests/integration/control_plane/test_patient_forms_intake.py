@@ -21,6 +21,7 @@ from vera_core.models.enums import InsuranceType, VersionStatus
 
 INTAKE_PAYLOAD = {
     "patient_information": {
+        "chart_number": "CH-10293",
         "patient_name": "Jane Doe",
         "patient_dob": "1990-04-12",
         "patient_gender": "Female",
@@ -31,7 +32,10 @@ INTAKE_PAYLOAD = {
         "insurance_provider_name": "Demo Health Plan",
         "insurance_phone_number": "+1 555 0100",
     },
-    "verification_information": {"verified_by": "Dr. Reyes"},
+    "verification_information": {
+        "verified_by": "Dr. Reyes",
+        "callback_number": "+1 555 0199",
+    },
     "hospital_information": {
         "hospital_name": "Demo Health Partners",
         "hospital_address": "123 Demo St, Austin, TX",
@@ -156,6 +160,7 @@ async def test_upload_creates_form_and_intake_answers(
         )
         # v2 documents record root-anchored paths (`sections.…` = field_answer.field_path).
         assert {a.field_path for a in answers} == {
+            "sections.patient_information.chart_number",
             "sections.patient_information.patient_name",
             "sections.patient_information.patient_dob",
             "sections.patient_information.patient_gender",
@@ -164,6 +169,7 @@ async def test_upload_creates_form_and_intake_answers(
             "sections.insurance_reference_information.insurance_provider_name",
             "sections.insurance_reference_information.insurance_phone_number",
             "sections.verification_information.verified_by",
+            "sections.verification_information.callback_number",
             "sections.hospital_information.hospital_name",
             "sections.hospital_information.hospital_address",
             "sections.hospital_information.tax_id",
@@ -241,15 +247,19 @@ async def test_missing_required_returns_422_with_paths_no_phi(
     assert resp.status_code == 422, resp.text
     body = resp.json()
     # v2 required-at-intake = the schema's `system_fields` targets without a
-    # declared default (patient_gender defaults to "N/A"), reported root-anchored,
-    # across every section — not just `patient_information`.
+    # declared default (appointment_type keeps its "N/A" default, so it stays the
+    # one exempt target), reported root-anchored, across every section — not just
+    # `patient_information`.
     assert set(body["data"]["fields"]) == {
+        "sections.patient_information.chart_number",
+        "sections.patient_information.patient_gender",
         "sections.patient_information.patient_dob",
         "sections.appointment_information.appointment_date",
         "sections.insurance_information.policy_number",
         "sections.insurance_reference_information.insurance_provider_name",
         "sections.insurance_reference_information.insurance_phone_number",
         "sections.verification_information.verified_by",
+        "sections.verification_information.callback_number",
         "sections.hospital_information.hospital_name",
         "sections.hospital_information.hospital_address",
         "sections.hospital_information.tax_id",
@@ -297,10 +307,12 @@ async def test_missing_required_field_outside_patient_information_returns_422(
 
     assert resp.status_code == 422, resp.text
     assert set(resp.json()["data"]["fields"]) == {
+        "sections.patient_information.chart_number",
         "sections.insurance_information.policy_number",
         "sections.insurance_reference_information.insurance_provider_name",
         "sections.insurance_reference_information.insurance_phone_number",
         "sections.verification_information.verified_by",
+        "sections.verification_information.callback_number",
         "sections.hospital_information.hospital_name",
         "sections.hospital_information.hospital_address",
         "sections.hospital_information.tax_id",

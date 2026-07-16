@@ -609,7 +609,7 @@ async def test_resolve_leaves_promoted_columns_untouched_for_a_non_promoted_fiel
 ) -> None:
     resp = await client.post(
         f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
-        json={"form_data": {"sections.patient_verification.patient_on_plan": "Yes"}},
+        json={"form_data": {"sections.patient_verification.is_insurance_active": "Yes"}},
         headers=_auth(rbac_world.admin_token),
     )
     assert resp.status_code == 200, resp.text

@@ -16,7 +16,8 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
 7. What is the group name?
 8. What is the group number?
 9. What is the policy state or contract state?
-Ask together on the first pass: "What type of plan is this — PPO, HMO, EPO, or something else? And for coordination of benefits, is this plan primary, secondary, or tertiary?" (covers: Plan Type, Coordination of Benefits).
+   - Hint: If the representative doesn't understand the question, clarify: In which state was this policy written?
+Ask together on the first pass: "What type of plan is this — PPO, HMO, EPO, or something else? And for coordination of benefits, is this plan primary, secondary, or tertiary?" (covers: Health Plan Type, Coordination of Benefits).
 Ask together on the first pass: "What is the group name and group number?" (covers: Group Name, Group Number).
 
 ### Benefit Coverage
@@ -34,7 +35,7 @@ Ask together on the first pass: "What is the group name and group number?" (cove
      * If "Coverage Type" is "Family": confirm — And the spouse's date of birth I have is {{value}} — is that right?
 14. Does this plan require a PCP referral?
    - Answers: Yes | No
-   - Ask only if "Plan Type" is "HMO".
+   - Ask only if "Health Plan Type" is "HMO".
 15. Does this plan cover telehealth services?
    - Answers: Yes | No | Limited
    - Hint: If the representative asks whether we use our own telehealth platform, answer exactly "Yes", then re-ask this question.
