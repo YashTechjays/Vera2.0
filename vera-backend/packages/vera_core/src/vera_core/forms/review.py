@@ -199,38 +199,71 @@ def is_field_satisfied(status: FieldStatus | None, *, floor: int) -> bool:
     return True  # unknown source but filled — treat as satisfied
 
 
-def _required_askable_paths(schema_json: Mapping[str, Any], values: Mapping[str, Any]) -> list[str]:
-    """Paths of required, applicable, collectible (ask/confirm role) leaves.
-    v2: filters by role + applicability. v1: returns all required paths."""
+def _required_paths(
+    schema_json: Mapping[str, Any], values: Mapping[str, Any], *, askable_only: bool
+) -> list[str]:
+    """Paths of required, applicable leaves — optionally only collectible
+    (ask/confirm role) ones. v2: filters by role + applicability. v1: returns
+    all required paths (no role concept)."""
     if is_v2(schema_json):
         doc = FormSchemaDoc.model_validate(schema_json)
         shared = doc.shared_conditions or {}
         return [
             path
             for path, leaf, gates in leaf_gates(doc)
-            if leaf.role in COLLECTED_ROLES
+            if (not askable_only or leaf.role in COLLECTED_ROLES)
             and is_applicable(gates, values, shared)
             and is_required(leaf, values, shared)
         ]
-    # v1: no role concept — all required paths are candidates.
     return all_required_paths(schema_json)
 
 
-def retryable_required_paths(
-    status_by_path: Mapping[str, FieldStatus], schema_json: Mapping[str, Any], *, floor: int
-) -> list[str]:
-    """Paths of required, applicable, askable fields that are not yet satisfied.
-    These are the fields a retry call should attempt to fill.
+def _gate_values(
+    status_by_path: Mapping[str, FieldStatus], values: Mapping[str, Any] | None
+) -> Mapping[str, Any]:
+    """The values conditions evaluate against. With *values* (the form's real
+    current answers — PHI, so only in-session callers pass them) gates evaluate
+    exactly. Without, a sentinel stands in for each filled field (PHI-free):
+    presence-based gates evaluate exactly; a value-comparing gate (``eq``/``in``…)
+    sees the sentinel and reads as "not matching", so its dependents are treated
+    as inapplicable — a deliberate conservative approximation for the dispatcher's
+    retry nudge, never for an authoritative status decision."""
+    return values if values is not None else dict.fromkeys(status_by_path, "x")
 
-    Conditions are evaluated against presence only (a sentinel stands in for each
-    filled field's value, keeping this path PHI-free): presence-based gates evaluate
-    exactly; a value-comparing gate (``eq``/``in`` …) sees the sentinel and reads as
-    "not matching", so its dependents are treated as inapplicable — a deliberate
-    conservative approximation for the retry nudge, not a general evaluation mode."""
-    values = dict.fromkeys(status_by_path, "x")
+
+def unsatisfied_required_paths(
+    status_by_path: Mapping[str, FieldStatus],
+    schema_json: Mapping[str, Any],
+    *,
+    floor: int,
+    values: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Paths of required, applicable fields (ANY role) that are not yet satisfied.
+    The authoritative completeness check: a form may only auto-COMPLETE when this
+    is empty — an unsatisfied non-askable field can never be fixed by a retry
+    call, so it must route to human review instead."""
+    gate_values = _gate_values(status_by_path, values)
     return [
         path
-        for path in _required_askable_paths(schema_json, values)
+        for path in _required_paths(schema_json, gate_values, askable_only=False)
+        if not is_field_satisfied(status_by_path.get(path), floor=floor)
+    ]
+
+
+def retryable_required_paths(
+    status_by_path: Mapping[str, FieldStatus],
+    schema_json: Mapping[str, Any],
+    *,
+    floor: int,
+    values: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Paths of required, applicable, askable fields that are not yet satisfied.
+    These are the fields a retry call should attempt to fill. See _gate_values
+    for the values-vs-sentinel evaluation contract."""
+    gate_values = _gate_values(status_by_path, values)
+    return [
+        path
+        for path in _required_paths(schema_json, gate_values, askable_only=True)
         if not is_field_satisfied(status_by_path.get(path), floor=floor)
     ]
 

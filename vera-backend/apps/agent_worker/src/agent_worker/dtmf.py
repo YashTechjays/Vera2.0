@@ -35,8 +35,9 @@ class DtmfTransportError(Exception):
     reach into livekit's internals."""
 
 
-async def send_dtmf(participant: rtc.LocalParticipant, digits: str, *, gap_s: float = 0.15) -> None:
+async def send_dtmf(participant: rtc.LocalParticipant, digits: str, *, gap_s: float = 0.15) -> str:
     """Send each character of `digits` as a SIP DTMF tone, in order, with a short gap.
+    Returns the normalized sequence actually sent (stripped/uppercased).
 
     Validates the whole sequence first and raises `InvalidDtmfError` before sending
     anything, so a bad character never emits a partial sequence. A publish failure on
@@ -59,3 +60,4 @@ async def send_dtmf(participant: rtc.LocalParticipant, digits: str, *, gap_s: fl
             raise DtmfTransportError(str(exc)) from exc
         if i < n - 1:
             await asyncio.sleep(gap_s)
+    return seq

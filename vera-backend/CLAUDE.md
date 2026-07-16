@@ -51,6 +51,15 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   A `SECURITY DEFINER` fn whose **param type** changes needs `DROP FUNCTION` + recreate +
   re-`ALTER FUNCTION … OWNER TO vera_definer_owner` — `CREATE OR REPLACE` leaves the old
   overload behind and the recreated fn loses its definer ownership (so BYPASSRLS stops applying).
+  **Superseding a column is ONE change — never leave the old column behind.** Before adding a
+  column, check whether an existing one already holds the concept; if the new column replaces it
+  (rename, semantic successor), the same migration must `ALTER TABLE … RENAME COLUMN` (keeps
+  data; prefer this for pure renames) or ADD-new + backfill + DROP-old (when type/semantics
+  change), with the model updated in the same commit. A dead column reads as live schema and
+  misleads every later reader. Anti-example: `1e6c84132026` introduced `enqueued_at` to replace
+  `scheduled_at` but left the dead column in place until `3083477bf7a5` removed it months of
+  commits later; correct example: `39f81ad53651` renamed `member_policy_id` and dropped the dead
+  `member_id` in one migration.
   Revision IDs are alembic's **random hex** (`just makemigration` auto-generates them; files are
   date-prefixed for chronological order) — **never hand-number them sequentially** (`0023`, `0024`…).
   Sequential IDs collide when two branches both grab "the next number," which silently breaks
@@ -73,17 +82,17 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   tick; otherwise a broad `except RedisError` miscatches every idle poll as an error (traceback +
   back-off log spam every window). Copy the canonical handling in `RedisTranscriptStore.read`
   (`vera_core/transcript.py`) and `control_plane/worker_events.py::_read_once`.
-- uv workspace: `vera_core` (shared core) + `phi_codec` (vendored) → consumed by `control_plane`
-  (FastAPI, owns Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
-- **Vendored `packages/phi_codec` is excluded from ruff & mypy** — don't lint/retype it; integrate
-  at the `vera_core.phi` boundary only.
+- uv workspace: `vera_core` (shared core) → consumed by `control_plane` (FastAPI, owns
+  Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
 
 ## Prime directive
 
 PHI never leaves the trust boundary in plaintext. It never lands in a log, trace,
-span, URL, path, query string, or cache. It never reaches the LLM as raw values, and
-never reaches the browser as ciphertext or with a key. **A smaller boundary is a safer
-boundary. When you cannot tell whether something is PHI, treat it as PHI.**
+span, URL, path, query string, or cache. It reaches the browser only inside an
+authorized, authenticated session, and never as ciphertext with a key. Inside the
+boundary PHI does flow in plaintext (every hop is BAA-covered — see Trust boundary).
+**A smaller boundary is a safer boundary. When you cannot tell whether something is
+PHI, treat it as PHI.**
 
 ## Trust boundary
 
@@ -91,9 +100,11 @@ boundary. When you cannot tell whether something is PHI, treat it as PHI.**
 Postgres, Memorystore Redis, Deepgram (STT), Cartesia (TTS), Twilio (SIP), LiveKit
 (self-hosted OSS — never LiveKit Cloud), Vertex AI Gemini (LLM), self-hosted Langfuse on GKE.
 
-**De-identification point:** between STT output and LLM input. Raw identifiers in the
-transcript are swapped for `[[TYPE_N]]` tokens before any LLM sees them and re-identified
-only at the TTS / payer-tool seams (`vera_core.phi`). Structured PHI at rest is protected by
+**No in-pipeline de-identification.** The former STT→LLM tokenization wall (`vera_core.phi`,
+`[[TYPE_N]]` tokens) was **removed (2026-07-13)**: every live-pipeline hop (Deepgram, Vertex
+Gemini, Cartesia, Twilio, LiveKit) sits inside the BAA-covered boundary above, so the
+transcript reaches the LLM as raw values. De-identification now applies only to what *leaves*
+the boundary — logs, traces, spans (see Bright lines). Structured PHI at rest is protected by
 Google **CMEK** at the storage layer (Cloud SQL + Memorystore); application-level envelope
 encryption of PHI columns is **deferred to a later decision** — do not introduce it.
 
@@ -106,10 +117,12 @@ any analytics / observability / error-tracking SaaS.
 - ⛔ NEVER log, print, trace, or attach to a Langfuse span: plaintext PHI.
 - ⛔ NEVER put PHI in a URL, path, query string, route template, or Referer.
 - NEVER persist PHI in browser storage (localStorage / sessionStorage / IndexedDB / cookies).
-- NEVER put raw PHI in an LLM prompt — tokenize at the STT→LLM boundary (`vera_core.phi.redact`).
-- NEVER store **plaintext** PHI in Redis. The session vault holds raw values **encrypted at
-  rest**, keyed per session and wiped at call end; everything else caches tokens / opaque
-  reference IDs, never values.
+- NEVER send PHI to an LLM outside the BAA boundary. The pipeline's only LLM is in-boundary
+  Vertex AI Gemini, and raw transcript PHI reaching it is expected (no tokenization) — but never
+  route a prompt or PHI to a non-BAA model or API.
+- NEVER write PHI to a Redis outside the BAA boundary. Memorystore is in-boundary and
+  CMEK-protected at rest, so PHI may live there (the call-plan blob and live transcript hold raw
+  intake / transcript values); per-call keys are wiped or TTL-expired at call end.
 - NEVER use `livekit.agents.inference.*` (Cloud-only — we self-host LiveKit OSS): it streams
   call audio off-box to `agent-gateway.livekit.cloud`. Keep audio/turn models local/plugin —
   e.g. pin `interruption.mode="vad"`, never the auto-selected adaptive detector (`cascade.py`).

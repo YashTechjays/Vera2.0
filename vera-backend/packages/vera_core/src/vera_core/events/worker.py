@@ -1,16 +1,16 @@
 """Worker→control-plane event bus over Redis Streams + a consumer group.
 
 The agent worker is DB-less; this is its first-class channel to signal domain
-events (call failures today; call-status transitions for the real /calls flow
-later) to the control plane. Events are PHI-free by construction: only a
-room_name (tenant+call UUIDs), an enum, and a timestamp — never a phone number
-or transcript text.
+events (call failures, and the answered/ended call-status transitions that
+drive the consumer's closeout) to the control plane. Events are PHI-free by
+construction: only a room_name (tenant+call UUIDs), an enum, and a timestamp —
+never a phone number or transcript text.
 """
 
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from vera_core.events.stream_bus import StreamBus
 
@@ -36,9 +36,32 @@ class CallFailedEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
-# Widen to a discriminated `Union[...]` on `type` when a second event type lands.
-type WorkerEvent = CallFailedEvent
-_ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(CallFailedEvent)
+class CallAnsweredEvent(BaseModel):
+    """Emitted when the SIP callee answered — the call is live."""
+
+    type: Literal["call.answered"] = "call.answered"
+    room_name: str
+    ts: int  # epoch milliseconds
+
+
+class CallEndedEvent(BaseModel):
+    """Emitted from the worker's shutdown callback — the session finished after
+    the call was live (hangup by either side, or the agent's end_call tool).
+    Written AFTER the transcript ended-sentinel, so it doubles as the control
+    plane's trigger to persist the tokenized transcript to Postgres."""
+
+    type: Literal["call.ended"] = "call.ended"
+    room_name: str
+    ts: int  # epoch milliseconds
+
+
+type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent
+_ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
+    Annotated[
+        CallFailedEvent | CallAnsweredEvent | CallEndedEvent,
+        Field(discriminator="type"),
+    ]
+)
 
 
 def parse_worker_event(raw: str) -> WorkerEvent:

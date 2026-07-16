@@ -30,7 +30,7 @@ from control_plane.deps import (
     tenant_scoped_session,
 )
 from control_plane.request_context import current_request_id
-from vera_core.audit import AuditRecord, AuthAuditRecord, AuthAuditSink
+from vera_core.audit import AuditRecord, AuditSink, AuthAuditSink, emit_auth_event
 from vera_core.models import AppUser, Permission, RolePermission, UserRole
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AuthEvent
@@ -57,7 +57,17 @@ class PermissionResolver:
         user's grants, a platform session (`tenant_id is None`) resolves a
         SUPER_ADMIN's global grants. RLS does the scoping, so a mismatched id
         resolves to no row. The cache keys on `tenant_id` directly — None is the
-        platform scope."""
+        platform scope.
+
+        A cache hit vouches for the active-status check too (entries are written
+        only after an RLS-scoped resolution of an active user), so it skips the DB
+        entirely. The staleness window is the cache TTL, same as for revoked roles;
+        the deactivate path calls `invalidate` to close it immediately."""
+        cache_key = str(user_id)
+        cached = await self._cache.get(tenant_id, cache_key)
+        if cached is not None:
+            return user_id, cached
+
         user = (
             await session.execute(
                 select(AppUser).where(AppUser.id == user_id, AppUser.status == "active")
@@ -65,11 +75,6 @@ class PermissionResolver:
         ).scalar_one_or_none()
         if user is None:
             return None, frozenset()
-
-        cache_key = str(user_id)
-        cached = await self._cache.get(tenant_id, cache_key)
-        if cached is not None:
-            return user.id, cached
 
         rows = await session.execute(
             select(Permission.code)
@@ -90,6 +95,38 @@ def get_resolver(request: Request) -> PermissionResolver:
     return resolver
 
 
+async def emit_authz_audit(
+    audit: AuditSink,
+    request: Request,
+    *,
+    tenant_id: UUID,
+    user_id: UUID | None,
+    actor_label: str,
+    permission: str,
+    allowed: bool,
+    scope: ResourceScope = ResourceScope.TENANT,
+) -> None:
+    """Standard endpoint authz allow/deny audit — the shape require() writes, so an
+    endpoint that checks a permission itself doesn't drop reason / elevation_session_id."""
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=user_id,
+            actor_label=actor_label,
+            event_type=AuditEvent.AUTHZ_ALLOW.value if allowed else AuditEvent.AUTHZ_DENY.value,
+            resource_type="endpoint",
+            resource_id=request.url.path,
+            permission_key=permission,
+            decision="allow" if allowed else "deny",
+            reason="" if allowed else ("unknown user" if user_id is None else "not granted"),
+            request_id=current_request_id(request),
+            detail={"scope": scope.value},
+            elevation_session_id=current_elevation(request),
+        )
+    )
+
+
 def require(permission: str, scope: ResourceScope = ResourceScope.TENANT) -> Any:
     """Dependency factory: 403 unless the caller holds `permission` at `scope`
     in the tenant-context-resolved tenant. Audits allow AND deny."""
@@ -105,26 +142,15 @@ def require(permission: str, scope: ResourceScope = ResourceScope.TENANT) -> Any
             session, tenant_id, identity.user_id
         )
         allowed = permission in permissions
-        await get_audit(request).emit(
-            AuditRecord(
-                tenant_id=tenant_id,
-                actor_type=ActorType.USER,
-                actor_user_id=user_id,
-                actor_label=identity.email or identity.subject,
-                event_type=(
-                    AuditEvent.AUTHZ_ALLOW.value if allowed else AuditEvent.AUTHZ_DENY.value
-                ),
-                resource_type="endpoint",
-                resource_id=request.url.path,
-                permission_key=permission,
-                decision="allow" if allowed else "deny",
-                reason="" if allowed else ("unknown user" if user_id is None else "not granted"),
-                request_id=current_request_id(request),
-                detail={"scope": scope.value},
-                # Links an elevated SUPER_ADMIN's access back to its grant; None for
-                # an ordinary tenant request.
-                elevation_session_id=current_elevation(request),
-            )
+        await emit_authz_audit(
+            get_audit(request),
+            request,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            actor_label=identity.email or identity.subject,
+            permission=permission,
+            allowed=allowed,
+            scope=scope,
         )
         if not allowed:
             raise HTTPException(
@@ -154,21 +180,20 @@ def platform_require(permission: str) -> Any:
             session, None, identity.user_id
         )
         allowed = permission in permissions
-        await auth_audit.emit(
-            AuthAuditRecord(
-                tenant_id=None,
-                # The caller per the verified token — recorded even when they hold no
-                # platform grant (a tenant user is invisible to the platform session).
-                app_user_id=identity.user_id,
-                event_type=(AuthEvent.AUTHZ_ALLOW.value if allowed else AuthEvent.AUTHZ_DENY.value),
-                ip_address=client_ip(request),
-                meta={
-                    "permission": permission,
-                    "path": request.url.path,
-                    "decision": "allow" if allowed else "deny",
-                    **({} if allowed else {"reason": "not granted"}),
-                },
-            )
+        await emit_auth_event(
+            auth_audit,
+            tenant_id=None,
+            event=AuthEvent.AUTHZ_ALLOW if allowed else AuthEvent.AUTHZ_DENY,
+            ip=client_ip(request),
+            # The caller per the verified token — recorded even when they hold no
+            # platform grant (a tenant user is invisible to the platform session).
+            user_id=identity.user_id,
+            meta={
+                "permission": permission,
+                "path": request.url.path,
+                "decision": "allow" if allowed else "deny",
+                **({} if allowed else {"reason": "not granted"}),
+            },
         )
         if not allowed:
             raise HTTPException(

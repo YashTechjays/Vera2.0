@@ -39,14 +39,19 @@ class AuditEvent(enum.StrEnum):
     # A human changed a patient_form's lifecycle status by hand (the dedicated
     # status endpoint). Records from/to status only — statuses are not PHI.
     FORM_STATUS_CHANGE = "form.status_change"
-    # A VA published a call so other tenant VAs can view/intervene (visibility
+    # A VA published a call so other tenant VAs can view it (visibility
     # widening — a disclosure-enabling decision). Ids only, never PHI.
     CALL_PUBLISH = "call.publish"
-    # A non-owner VA minted a join token for a published call — the actual PHI
-    # disclosure (they can now hear the live transcript). Ids only.
+    # A VA (owner or not) minted a listen-only join token for a call — the
+    # actual PHI disclosure (they can now hear the live transcript). Ids only.
+    CALL_LISTEN_ONLY_JOIN = "call.listen-only.join"
+    # A publish-capable (speaking) join (?intervene=true). Distinct from
+    # listen-only from day one; the full intervention feature (agent takeover
+    # behavior) is still TODO.
     CALL_INTERVENE_JOIN = "call.intervene.join"
-    # The owner ejected an intervener from a published call. Ids only.
-    CALL_INTERVENE_REVOKE = "call.intervene.revoke"
+    # A VA ended a live call (LiveKit room torn down; the worker's call.ended
+    # event drives the actual closeout). Ids only, never PHI.
+    CALL_END = "call.end"
     # Queue dispatch: the dispatcher picked a form off the queue and initiated a
     # call. Records form id + tenant — no PHI field values.
     QUEUE_DISPATCH = "queue.dispatch"
@@ -56,6 +61,14 @@ class AuditEvent(enum.StrEnum):
     # A user exported a completed form as a file — PHI left the perimeter.
     # Detail carries artifact id, format, and field NAMES only, never values.
     FORM_EXPORTED = "form.exported"
+    # Recording lifecycle (call audio in GCS). Ids/hashes/sizes only — never audio,
+    # never PHI. RECORDING_DELETED is emitted twice per sweep: detail.phase="before"
+    # (object snapshot pre-delete) and "after" (verified-gone confirmation).
+    RECORDING_START_FAILED = "recording.start_failed"
+    RECORDING_FAILED = "recording.failed"
+    RECORDING_DISCARDED = "recording.discarded"
+    RECORDING_ACCESSED = "recording.accessed"
+    RECORDING_DELETED = "recording.deleted"
 
 
 class AuditLog(Base, TenantScopedMixin):

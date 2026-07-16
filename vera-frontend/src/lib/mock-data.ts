@@ -41,6 +41,9 @@ export type LiveCall = {
   confidence: number
   formProgress: number
   callTime: string
+  /** ISO start time from the API (null until the callee answers) — the modals'
+   *  live-timer seed. Absent on mock rows. */
+  startedAt?: string | null
 }
 
 export const liveCalls: LiveCall[] = [

@@ -1,17 +1,15 @@
 """Readers over a form's current field answers.
 
 `load_field_status` feeds the retry decision and is PHI-free (no value columns).
-`load_current_values` returns the values themselves (PHI — callers never log them);
 it is the single "current values of a form" query for snapshots and completion %.
 """
 
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vera_core.forms.review import FieldStatus, unwrap_value
+from vera_core.forms.review import FieldStatus
 from vera_core.models.field_answer import FieldAnswer, FieldEvaluation
 
 
@@ -33,9 +31,10 @@ def latest_eval_subquery() -> Any:
 async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, FieldStatus]:
     """Return one FieldStatus per current field answer for *form_id*.
 
-    Selects only field_path, source, confidence, and the latest eval's supported
+    Selects only field_path, source, confidences, and the latest eval's supported
     flag — no value or evidence columns, so this query is PHI-free. An answer with
-    no evaluation yields ai_supported=None.
+    no evaluation yields ai_supported=None; ai_confidence is the judge's score
+    when an evaluation exists (the satisfaction gate's input), else the extractor's.
 
     The latest evaluation per answer is resolved in-DB via latest_eval_subquery().
     """
@@ -47,6 +46,7 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
                 FieldAnswer.source,
                 FieldAnswer.confidence,
                 FieldEvaluation.supported,
+                FieldEvaluation.confidence.label("eval_confidence"),
             )
             .outerjoin(
                 latest_eval,
@@ -61,19 +61,14 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
         )
     ).all()
     return {
-        path: FieldStatus(source=source, ai_supported=supported, ai_confidence=confidence)
-        for path, source, confidence, supported in rows
-    }
-
-
-async def load_current_values(session: AsyncSession, form_id: UUID) -> dict[str, Any]:
-    """Return {field_path: raw value} for the form's current FieldAnswer rows."""
-    rows = (
-        await session.execute(
-            select(FieldAnswer.field_path, FieldAnswer.value).where(
-                FieldAnswer.form_id == form_id,
-                FieldAnswer.is_current.is_(True),
-            )
+        # The satisfaction floor gates on the JUDGE's confidence (design: "judge-
+        # supported, confidence >= floor"); the extractor's self-reported score is
+        # only the fallback for an answer that has no evaluation yet — where
+        # ai_supported=None already fails the gate.
+        path: FieldStatus(
+            source=source,
+            ai_supported=supported,
+            ai_confidence=eval_confidence if eval_confidence is not None else confidence,
         )
-    ).all()
-    return {path: unwrap_value(value) for path, value in rows}
+        for path, source, confidence, supported, eval_confidence in rows
+    }

@@ -24,12 +24,20 @@ def build_extract_prompt(field_paths: list[str], turns: list[TranscriptTurn]) ->
     )
 
 
+def _clamp_confidence(raw: Any) -> int:
+    """Bound an LLM-reported confidence to [0, 100] — the DB check constraint
+    (`confidence_range`) rejects anything outside it, and structured output
+    doesn't guarantee numeric bounds. An IntegrityError here would leave the
+    job unacked and re-bill the eval on every reclaim."""
+    return max(0, min(100, int(raw)))
+
+
 def parse_extract_response(data: list[dict[str, Any]]) -> list[ExtractedField]:
     return [
         ExtractedField(
             field_path=str(d["field_path"]),
             value=str(d["value"]),
-            confidence=int(d["confidence"]),
+            confidence=_clamp_confidence(d["confidence"]),
             evidence_seq=int(d["evidence_seq"]),
         )
         for d in data
@@ -53,7 +61,7 @@ def parse_judge_response(data: list[dict[str, Any]]) -> list[JudgeVerdict]:
         JudgeVerdict(
             field_path=str(d["field_path"]),
             supported=bool(d["supported"]),
-            confidence=int(d["confidence"]),
+            confidence=_clamp_confidence(d["confidence"]),
             evidence=str(d["evidence"]),
         )
         for d in data

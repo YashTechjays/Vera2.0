@@ -211,6 +211,48 @@ async def test_mfa_verify_rejects_wrong_code(
     assert bad.status_code == 401
 
 
+async def test_mfa_verify_rejects_replayed_code(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    """A TOTP code is single-use: once it mints a session, replaying it within its
+    drift window is rejected. Also pins the mechanism — the matched timestep must be
+    persisted on the identity row (regression: the endpoint passed the app_user id
+    where the SECURITY DEFINER expects the user_identity PK, so the UPDATE matched
+    0 rows, the step was never recorded, and replays minted fresh sessions)."""
+    client, world = platform_world
+    code = pyotp.TOTP(world.totp_secret).now()
+
+    mfa_token = (
+        await client.post(
+            "/api/v1/platform/auth/login", json={"email": world.email, "password": PASSWORD}
+        )
+    ).json()["data"]["mfa_token"]
+    first = await client.post(
+        "/api/v1/platform/auth/mfa/verify", json={"mfa_token": mfa_token, "code": code}
+    )
+    assert first.status_code == 200, first.text
+
+    async with world.admin_sessionmaker() as session:
+        step = (
+            await session.execute(
+                text(
+                    "SELECT totp_last_used_timestep FROM user_identity WHERE app_user_id = :u"
+                ).bindparams(u=world.user_id)
+            )
+        ).scalar_one()
+    assert step is not None, "matched TOTP timestep was not persisted (definer no-op)"
+
+    replay_token = (
+        await client.post(
+            "/api/v1/platform/auth/login", json={"email": world.email, "password": PASSWORD}
+        )
+    ).json()["data"]["mfa_token"]
+    replay = await client.post(
+        "/api/v1/platform/auth/mfa/verify", json={"mfa_token": replay_token, "code": code}
+    )
+    assert replay.status_code == 401, "replayed TOTP code must be rejected"
+
+
 async def test_logout_invalidates_platform_session(
     platform_world: tuple[httpx.AsyncClient, PlatformWorld],
 ) -> None:

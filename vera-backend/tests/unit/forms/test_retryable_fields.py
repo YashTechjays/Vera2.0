@@ -1,8 +1,12 @@
+from typing import Any, cast
+
+from vera_core.forms.dsl import PromotedFields
 from vera_core.forms.review import (
     FieldStatus,
     field_labels,
     is_field_satisfied,
     retryable_required_paths,
+    unsatisfied_required_paths,
 )
 
 FLOOR = 70
@@ -12,6 +16,10 @@ V2 = {
     "dsl_version": "2.1",
     "name": "Test",
     "insurance_type": "infertility_treatment",
+    # The DSL requires every promoted column mapped to a system_fields target —
+    # point them all at one leaf (same shortcut as test_conditions.py).
+    "system_fields": {"network_status": "sections.cov.network_status"},
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.cov.network_status"),
     "sections": {
         "cov": {
             "title": "Coverage",
@@ -73,3 +81,57 @@ def test_retryable_only_unsatisfied_askable_required() -> None:
 
 def test_field_labels_uses_titles() -> None:
     assert field_labels(V2, ["sections.cov.network_status"]) == ["Network status"]
+
+
+# ---------------------------------------------------------------------------
+# The authoritative completeness check (unsatisfied_required_paths) vs the
+# retry-nudge list (retryable_required_paths).
+# ---------------------------------------------------------------------------
+
+
+def test_unsatisfied_includes_non_askable_required_fields() -> None:
+    """A required readonly leaf that is unfilled blocks completion (it routes to
+    review) even though a retry call can never ask for it."""
+    status = {"sections.cov.network_status": _human()}  # plan_name unfilled
+    unsatisfied = unsatisfied_required_paths(status, V2, floor=FLOOR)
+    assert unsatisfied == ["sections.cov.plan_name"]
+    # ...while the retry list correctly excludes it (nothing askable is missing).
+    assert retryable_required_paths(status, V2, floor=FLOOR) == []
+
+
+def _gated_schema() -> dict[str, Any]:
+    """`copay` is required only when network_status == "In Network" — a
+    value-comparing gate the sentinel approximation cannot see."""
+    import copy
+
+    doc = cast("dict[str, Any]", copy.deepcopy(V2))
+    fields = doc["sections"]["cov"]["fields"]
+    fields["copay"] = {
+        "type": "text",
+        "title": "Copay",
+        "role": "ask",
+        "required": True,
+        "prompt": {"ask": "What is the copay?"},
+        "applicable_when": {
+            "field": "sections.cov.network_status",
+            "op": "eq",
+            "value": "In Network",
+        },
+    }
+    return doc
+
+
+def test_real_values_evaluate_value_gates_exactly() -> None:
+    """With the form's real values, a value-gated required field counts; the
+    PHI-free sentinel approximation (no values passed) conservatively skips it —
+    which is why only the dispatcher's nudge may use the sentinel path."""
+    doc = _gated_schema()
+    status = {
+        "sections.cov.network_status": _human(),
+        "sections.cov.plan_name": _human(),
+    }
+    values = {"sections.cov.network_status": "In Network", "sections.cov.plan_name": "Acme"}
+    with_values = unsatisfied_required_paths(status, doc, floor=FLOOR, values=values)
+    assert with_values == ["sections.cov.copay"]
+    sentinel = unsatisfied_required_paths(status, doc, floor=FLOOR)
+    assert sentinel == []  # sentinel reads the eq-gate as not matching

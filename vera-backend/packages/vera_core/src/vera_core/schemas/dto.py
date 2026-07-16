@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CallSummary(BaseModel):
@@ -19,20 +19,6 @@ class CallSummary(BaseModel):
     created_at: datetime
     published: bool = False
     is_owner: bool = False
-
-
-class StartCallRequest(BaseModel):
-    form_id: UUID
-    # When ON, the worker navigates the payer IVR first; the provider's active playbook (if any)
-    # specializes the navigator, else it runs generic. Off preserves the direct-to-VeraAgent flow.
-    enable_ivr_navigation: bool = False
-    # Which insurance provider this call targets — populates Call.insurance_provider_id and drives
-    # playbook selection. Optional until forms carry a provider FK.
-    insurance_provider_id: UUID | None = None
-
-
-class RevokeAccessRequest(BaseModel):
-    target_user_id: UUID
 
 
 class JoinTokenResponse(BaseModel):
@@ -59,3 +45,26 @@ class VoiceSessionResponse(BaseModel):
     url: str  # settings.livekit_url, for the browser SDK
     token: str  # browser join JWT
     mode: str
+
+
+class RetentionPolicy(BaseModel):
+    """Tenant recording-retention knob. retention_days=None → the platform
+    default applies (surfaced as default_days so the UI can render the
+    effective value); otherwise bounded to 1 day..10 years."""
+
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+    default_days: int
+
+
+class RetentionPolicyUpdate(BaseModel):
+    """PATCH body: None retention_days reverts the tenant to the platform default."""
+
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class RecordingPlayback(BaseModel):
+    """A short-lived signed URL for one recording. The URL itself is the
+    credential — never logged, never cached (Cache-Control: no-store)."""
+
+    url: str
+    expires_at: datetime

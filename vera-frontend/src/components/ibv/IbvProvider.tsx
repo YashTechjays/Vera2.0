@@ -7,8 +7,8 @@ import {
   type ReactNode,
 } from "react"
 
-import { validateAll, type ValidationErrors } from "@/lib/ibv/validation"
-import { parseSchema } from "@/lib/ibv/schema"
+import { isoToDateFormat, validateAll, type ValidationErrors } from "@/lib/ibv/validation"
+import { allLeaves, isApplicable, isRequired, parseSchema } from "@/lib/ibv/schema"
 import { demoSchema, mockValues } from "@/lib/ibv/mock"
 import {
   activeDisputeValue,
@@ -28,11 +28,18 @@ import { ApiError } from "@/lib/api/client"
 import {
   getPatientForm,
   getSchemaVersion,
+  listInsuranceProviders,
   resolveDisputes,
   updatePatientFormStatus,
 } from "@/lib/patient-forms/api"
-import type { FieldProvenance, PatientFormDetail, PatientFormStatus } from "@/lib/patient-forms/types"
+import type {
+  FieldProvenance,
+  PatientFormDetail,
+  PatientFormStatus,
+  ProviderOption,
+} from "@/lib/patient-forms/types"
 import { valueToInput } from "@/lib/patient-forms/display"
+import { matchProvider } from "@/lib/patient-forms/providers"
 
 type SaveState = "idle" | "saving" | "saved"
 type Mode = "mock" | "api"
@@ -45,6 +52,8 @@ type IbvContextValue = {
   values: FormValues
   setValue: (path: string, value: string) => void
   errors: ValidationErrors
+  /** Required fields the reviewer emptied this session — saving is blocked on these. */
+  clearedRequired: string[]
   disputes: DisputeMap
   disputeFor: (path: string) => Dispute | undefined
   flagsFor: (path: string) => DisputeFlags
@@ -62,6 +71,18 @@ type IbvContextValue = {
   status: PatientFormStatus | null
   /** Change the form's status via the dedicated endpoint (status-only). */
   changeStatus: (next: PatientFormStatus) => Promise<void>
+  /** Voice-lab-style opt-out: run the IVR navigator on this form's calls.
+   *  Pre-loaded from the form detail; sent only alongside an in_queue change. */
+  ivrNavigation: boolean
+  setIvrNavigation: (v: boolean) => void
+  /** Active insurance providers for the send-to-queue picker (empty for the
+   *  demo/mock form or if the catalog fails to load). */
+  providers: ProviderOption[]
+  /** Picked provider id (""=none): auto-matched from the form's insurance_provider
+   *  string, overridable. Sent only alongside an in_queue change to canonicalize
+   *  the form's provider so dispatch resolves the right playbook. */
+  providerId: string
+  setProviderId: (id: string) => void
   /** A rejected status change (e.g. open disputes block completion) — shown inline. */
   statusError: string | null
   statusChanging: boolean
@@ -96,21 +117,36 @@ async function loadSchema(versionId: string): Promise<FormSchema> {
   return schema
 }
 
-/** Map an API form detail into the form's value, dispute, and provenance maps (keyed by path). */
-function adaptDetail(detail: PatientFormDetail): {
+/** Map an API form detail into the form's value, dispute, and provenance maps
+ * (keyed by path). Date leaves are converted from stored ISO to the schema's
+ * declared date_format on the way in — see isoToDateFormat. */
+function adaptDetail(
+  detail: PatientFormDetail,
+  schema: FormSchema
+): {
   values: FormValues
   disputes: DisputeMap
   provenance: Record<string, FieldProvenance>
 } {
+  const dateFormats = new Map<string, string>()
+  for (const leaf of allLeaves(schema)) {
+    const format = leaf.field.validation?.date_format
+    if (leaf.field.type === "date" && format) dateFormats.set(leaf.path, format)
+  }
+  const toInput = (raw: unknown, path: string): string => {
+    const text = valueToInput(raw)
+    const format = dateFormats.get(path)
+    return format ? isoToDateFormat(text, format) : text
+  }
   const values: FormValues = {}
   const disputes: DisputeMap = {}
   const provenance: Record<string, FieldProvenance> = {}
   for (const f of detail.fields) {
-    values[f.field_path] = valueToInput(f.value)
+    values[f.field_path] = toInput(f.value, f.field_path)
     if (f.dispute) {
       disputes[f.field_path] = {
-        previousValue: valueToInput(f.dispute.previous_value),
-        currentValue: valueToInput(f.dispute.current_value),
+        previousValue: toInput(f.dispute.previous_value, f.field_path),
+        currentValue: toInput(f.dispute.current_value, f.field_path),
         confidence: f.dispute.confidence ?? undefined,
         evidence: f.dispute.evidence ?? undefined,
         reasoning: f.dispute.reasoning ?? undefined,
@@ -150,11 +186,33 @@ export function IbvProvider({
   const [statusError, setStatusError] = useState<string | null>(null)
   const [statusChanging, setStatusChanging] = useState(false)
   const [insuranceType, setInsuranceType] = useState<string | null>(null)
+  const [ivrNavigation, setIvrNavigation] = useState(true)
+  const [providers, setProviders] = useState<ProviderOption[]>([])
+  const [providerId, setProviderId] = useState<string>("")
 
   const errors = useMemo(
     () => (schema ? validateAll(schema, values) : {}),
     [schema, values],
   )
+
+  // Required/applicable fields the reviewer emptied in THIS session (had a value on
+  // load, now blank). Saving is blocked on these — the reported defect is "mandatory
+  // fields cleared after upload". Computed directly (not from `errors`) so it counts
+  // only genuinely-cleared fields, never a field that merely arrived empty or holds
+  // a format-invalid value. A field with a declared default is never "cleared".
+  const clearedRequired = useMemo(() => {
+    if (!schema) return []
+    return allLeaves(schema)
+      .filter(
+        (leaf) =>
+          leaf.field.default === undefined &&
+          String(values[leaf.path] ?? "").trim() === "" &&
+          String(originalValues[leaf.path] ?? "").trim() !== "" &&
+          isApplicable(schema, leaf.gates, values) &&
+          isRequired(schema, leaf.field, values),
+      )
+      .map((leaf) => leaf.path)
+  }, [schema, values, originalValues])
 
   const seed = useCallback(
     (vals: FormValues, disp: DisputeMap, name: string | null) => {
@@ -179,6 +237,9 @@ export function IbvProvider({
     setStatusError(null)
     setInsuranceType(null)
     setProvenance({})
+    setIvrNavigation(true)
+    setProviders([])
+    setProviderId("")
     setSchema(demoSchema)
     seed({ ...mockValues, ...seedValues(mockDisputes) }, mockDisputes, "Demo Patient")
     setModalOpen(true)
@@ -203,18 +264,28 @@ export function IbvProvider({
       setStatusError(null)
       setInsuranceType(null)
       setProvenance({})
+      setIvrNavigation(true)
+      setProviders([])
+      setProviderId("")
       setSchema(null)
       getPatientForm(id)
         .then(async (detail) => {
           // Render against the exact document the form is pinned to — never a
-          // bundled copy (schema_version_id is the contract).
-          const loaded = await loadSchema(detail.schema_version_id)
-          const { values: v, disputes: d, provenance: prov } = adaptDetail(detail)
+          // bundled copy (schema_version_id is the contract). Load the provider
+          // catalog alongside — a failed load is non-fatal (picker stays empty).
+          const [loaded, providerList] = await Promise.all([
+            loadSchema(detail.schema_version_id),
+            listInsuranceProviders().catch(() => [] as ProviderOption[]),
+          ])
+          const { values: v, disputes: d, provenance: prov } = adaptDetail(detail, loaded)
           seed(v, d, detail.patient_name)
           setSchema(loaded)
           setStatus(detail.status)
           setInsuranceType(detail.insurance_type)
           setProvenance(prov)
+          setIvrNavigation(detail.ivr_navigation_enabled)
+          setProviders(providerList)
+          setProviderId(matchProvider(providerList, detail.insurance_provider))
         })
         .catch((err) => {
           // ApiError and the parseSchema dsl_version guard both carry a
@@ -291,7 +362,16 @@ export function IbvProvider({
       }
       setStatusChanging(true)
       try {
-        const res = await updatePatientFormStatus(formId, next)
+        const res = await updatePatientFormStatus(
+          formId,
+          next,
+          next === "in_queue"
+            ? {
+                enableIvrNavigation: ivrNavigation,
+                insuranceProviderId: providerId || undefined,
+              }
+            : undefined,
+        )
         setStatus(res.status)
         setSavedTick((t) => t + 1) // worklist refetches the new status
       } catch (err) {
@@ -303,12 +383,20 @@ export function IbvProvider({
         setStatusChanging(false)
       }
     },
-    [mode, formId],
+    [mode, formId, ivrNavigation, providerId],
   )
 
   const save = useCallback(async () => {
+    // Block save when the reviewer cleared a mandatory field that had a value on
+    // load. The Save button is also disabled in this state — this guards any
+    // programmatic call. Fields that arrived empty don't block (partial save OK).
+    if (clearedRequired.length > 0) {
+      setError("Restore the cleared required fields before saving.")
+      setSaveState("idle")
+      return
+    }
     setSaveState("saving")
-    if (mode === "mock" || !formId) {
+    if (mode === "mock" || !formId || !schema) {
       await new Promise((r) => setTimeout(r, 400))
       setDirty(false)
       setSaveState("saved")
@@ -334,7 +422,7 @@ export function IbvProvider({
         dispute_fields,
         reasked_fields: [],
       })
-      const { values: v, disputes: d, provenance: prov } = adaptDetail(refreshed)
+      const { values: v, disputes: d, provenance: prov } = adaptDetail(refreshed, schema)
       seed(v, d, refreshed.patient_name)
       setStatus(refreshed.status)
       setStatusError(null) // resolving disputes clears any "resolve first" warning
@@ -345,7 +433,7 @@ export function IbvProvider({
       setError(err instanceof ApiError ? err.message : "Could not save changes.")
       setSaveState("idle")
     }
-  }, [mode, formId, values, originalValues, disputes, flags, seed])
+  }, [mode, formId, schema, values, originalValues, disputes, flags, seed, clearedRequired])
 
   const provenanceFor = useCallback(
     (path: string) => provenance[path] ?? null,
@@ -357,6 +445,7 @@ export function IbvProvider({
     values,
     setValue,
     errors,
+    clearedRequired,
     disputes,
     disputeFor,
     flagsFor,
@@ -372,6 +461,11 @@ export function IbvProvider({
     patientName,
     status,
     changeStatus,
+    ivrNavigation,
+    setIvrNavigation,
+    providers,
+    providerId,
+    setProviderId,
     statusError,
     statusChanging,
     insuranceType,

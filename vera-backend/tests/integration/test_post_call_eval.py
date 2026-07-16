@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session, uuid7
+from vera_core.forms.dsl import PromotedFields
 from vera_core.integrations.llm import ExtractedField, FakeLLMClient, JudgeVerdict, TranscriptTurn
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.call import Call
@@ -42,6 +43,11 @@ _SCHEMA_JSON: dict[str, object] = {
     "dsl_version": "2.1",
     "name": "PostCallEval Test Schema",
     "insurance_type": "infertility_treatment",
+    # The DSL requires every PatientForm promoted column mapped to a
+    # system_fields target — point them all at the single leaf (the same
+    # shortcut tests/unit/forms/test_conditions.py uses).
+    "system_fields": {"in_network": "sections.coverage.in_network"},
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.coverage.in_network"),
     "sections": {
         "coverage": {
             "title": "Coverage",
@@ -319,6 +325,56 @@ async def seeded_ai_processing_form_maxed(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """The LLM emitting the same field_path twice must not violate fa_current_uq
+    (which would leave the job unacked and reclaim-loop it forever): the last
+    occurrence wins and exactly one current answer is written."""
+    ctx = seeded_ai_processing_form
+    path = ctx.collection_path
+    turns = [
+        TranscriptTurn(0, "agent", "are they in network"),
+        TranscriptTurn(1, "user", "yes in network"),
+    ]
+    llm = FakeLLMClient(
+        extracted=[
+            ExtractedField(path, "out-of-network", 55, 0),
+            ExtractedField(path, "in-network", 92, 1),
+        ],
+        verdicts=[JudgeVerdict(path, True, 88, "yes in network")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.answers_written == 1
+    rows = (
+        (
+            await ctx.session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == ctx.form_id,
+                    FieldAnswer.field_path == path,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].value["value"] == "in-network"  # last occurrence won
 
 
 async def test_evaluate_call_writes_answers_and_completes(

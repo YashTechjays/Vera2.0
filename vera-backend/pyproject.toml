@@ -6,6 +6,10 @@ requires-python = ">=3.12,<3.13"
 
 [tool.uv]
 package = false
+# livekit-agents hard-pins json-repair==0.59.10 (vulnerable: GHSA-xf7x-x43h-rpqh,
+# unbounded-CPU DoS). Override until upstream unpins; drop once livekit-agents
+# requires >=0.60.1 on its own.
+override-dependencies = ["json-repair>=0.60.1"]
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/*"]
@@ -25,13 +29,11 @@ dev = [
 ]
 
 # ---------------------------------------------------------------------------
-# Lint / format — packages/phi_codec is vendored (upstream: phi-codec-vault
-# repo) and keeps its own style; we don't rewrite vendored code.
+# Lint / format
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["packages/phi_codec"]
 
 [tool.ruff.lint]
 select = [
@@ -56,7 +58,7 @@ extend-immutable-calls = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["vera_core", "control_plane", "agent_worker", "phi_codec"]
+known-first-party = ["vera_core", "control_plane", "agent_worker"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["SIM117"]  # nested `with` reads better in test arrange blocks
@@ -77,21 +79,13 @@ files = [
     "apps/agent_worker/src",
     "tests",
 ]
-exclude = ["packages/phi_codec"]
 plugins = ["pydantic.mypy"]
-
-# Vendored phi_codec is not strict-typed; values crossing into vera_core.phi
-# are cast at the boundary.
-[[tool.mypy.overrides]]
-module = ["phi_codec", "phi_codec.*"]
-follow_imports = "skip"
-ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["tests", "packages/phi_codec/tests", "apps/agent_worker/tests", "apps/control_plane/tests"]
+testpaths = ["tests", "apps/agent_worker/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"

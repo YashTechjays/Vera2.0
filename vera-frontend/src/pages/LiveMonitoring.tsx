@@ -17,8 +17,8 @@ import { useIbv } from "@/components/ibv/IbvProvider"
 import { usePermission } from "@/lib/auth/permissions"
 import { listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
 import { ApiError } from "@/lib/api/client"
-import { CallOverviewModal } from "@/components/monitoring/CallOverviewModal"
-import { InterveneModal } from "@/components/monitoring/InterveneModal"
+import { elapsed } from "@/lib/monitoring/liveTimer"
+import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
@@ -58,18 +58,8 @@ const badgeStyle: Record<CallCategory, string> = {
   completed: "bg-emerald-100 text-emerald-700",
 }
 
-/** mm:ss elapsed since the call started (— until it has). */
-function elapsed(startedAt: string | null, now: number): string {
-  if (!startedAt) return "—"
-  const secs = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1000))
-  const m = Math.floor(secs / 60)
-  const s = secs % 60
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
-}
-
-/** Adapt a real call into the shape the overview/intervene modals render. The
- *  `id` is the real call id so the modal can mint a join token. Fields the API
- *  doesn't provide yet (insurance, confidence, form %) are placeholders. */
+/** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
+ *  (insurance, confidence, form %) are placeholders. */
 function toLiveCall(c: CallSummary, now: number): LiveCall {
   return {
     id: c.id,
@@ -85,6 +75,7 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     confidence: 0,
     formProgress: 0,
     callTime: elapsed(c.started_at, now),
+    startedAt: c.started_at,
   }
 }
 
@@ -105,9 +96,8 @@ export function LiveMonitoring() {
   const [tab, setTab] = useState<TabKey>("active")
   const [now, setNow] = useState(() => Date.now())
   const [publishing, setPublishing] = useState<string | null>(null)
-  const [modalCall, setModalCall] = useState<LiveCall | null>(null)
+  const [selected, setSelected] = useState<CallSummary | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
-  const [interveneOpen, setInterveneOpen] = useState(false)
 
   // Load + poll (skip while the tab is hidden).
   useEffect(() => {
@@ -144,6 +134,13 @@ export function LiveMonitoring() {
     return calls
   }, [tab, calls])
 
+  // Render the freshest polled row, falling back to the click-time snapshot once the call leaves the active list so its header survives while the modal is open.
+  const modalCall = useMemo(() => {
+    if (!selected) return null
+    const fresh = calls.find((c) => c.id === selected.id) ?? selected
+    return toLiveCall(fresh, now)
+  }, [selected, calls, now])
+
   async function onPublish(call: CallSummary) {
     setPublishing(call.id)
     try {
@@ -157,7 +154,7 @@ export function LiveMonitoring() {
   }
 
   function openOverview(call: CallSummary) {
-    setModalCall(toLiveCall(call, now))
+    setSelected(call)
     setOverviewOpen(true)
   }
 
@@ -165,7 +162,6 @@ export function LiveMonitoring() {
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold tracking-tight">Live Monitoring</h1>
 
-      {/* Stat cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {stats.map(({ label, value, icon: Icon, tone }) => (
           <Card key={label}>
@@ -294,18 +290,12 @@ export function LiveMonitoring() {
         </Table>
       </Card>
 
-      <CallOverviewModal
+      <LiveCallModal
         call={modalCall}
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
         onExpand={() => openForm()}
-        onIntervene={() => {
-          setOverviewOpen(false)
-          setInterveneOpen(true)
-        }}
       />
-
-      <InterveneModal call={modalCall} open={interveneOpen} onOpenChange={setInterveneOpen} />
     </div>
   )
 }
