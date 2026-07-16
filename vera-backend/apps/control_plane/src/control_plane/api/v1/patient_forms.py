@@ -45,9 +45,11 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     PromotedIdentifiers,
+    date_leaf_paths,
     iter_leaf_answers,
     missing_required,
     normalize_date_answers,
+    normalize_date_value,
     normalize_phone_answers,
     normalize_phone_prefix,
     phone_promoted_paths,
@@ -134,6 +136,16 @@ def _normalize_dates_or_422(
     `appointment_date` columns `_promote_or_422` covers."""
     try:
         return normalize_date_answers(answers, doc)
+    except InvalidIntakeValue as exc:
+        _raise_422(exc)
+
+
+def _normalize_date_or_422(value: Any, field_path: str, date_format: str | None) -> Any:
+    """`normalize_date_value`, translated to the API's validation-error contract —
+    the single-leaf counterpart to `_normalize_dates_or_422`, used when a
+    dispute-resolve edit reformats one date leaf's answer to its declared format."""
+    try:
+        return normalize_date_value(value, field_path, date_format)
     except InvalidIntakeValue as exc:
         _raise_422(exc)
 
@@ -654,6 +666,7 @@ async def resolve_disputes(
     ).scalar_one()
     doc = _v2_doc(version.schema_json)
     phone_paths = phone_promoted_paths(doc) if doc is not None else set()
+    date_paths = date_leaf_paths(doc) if doc is not None else {}
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
@@ -718,6 +731,8 @@ async def resolve_disputes(
     for path, new_value in body.form_data.items():
         if path in phone_paths:
             new_value = normalize_phone_prefix(new_value)
+        if path in date_paths:
+            new_value = _normalize_date_or_422(new_value, path, date_paths[path])
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).
