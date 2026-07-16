@@ -19,6 +19,7 @@ the bearer token alone (`current_identity`); scope is derived from the verified 
 `self_scoped_session`. The caller can only operate on their own session.
 """
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Annotated, Literal
@@ -37,7 +38,6 @@ from control_plane.api.v1.common import (
     Resolver,
     SelfScopedSession,
     TenantId,
-    emit_auth_event,
 )
 from control_plane.auth import elevation, mfa
 from control_plane.auth.identity import VerifiedIdentity
@@ -65,7 +65,7 @@ from control_plane.exceptions import (
     UnauthorizedError,
 )
 from control_plane.responses import ResponseModel, ok
-from vera_core.audit import AuthAuditSink
+from vera_core.audit import AuthAuditSink, emit_auth_event
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import tenant_session
 from vera_core.models import AppUser, Role, SsoProvider, UserIdentity, UserRole
@@ -181,6 +181,10 @@ class AcceptInviteResponse(BaseModel):
 class ActivateInviteMfaRequest(BaseModel):
     mfa_token: str
     code: str
+
+
+class InviteValidateResponse(BaseModel):
+    state: Literal["valid", "invalid", "deactivated"]
 
 
 # --- helpers -----------------------------------------------------------------
@@ -437,11 +441,15 @@ async def mfa_verify(
     if tenant_id is None or challenge is None or challenge.tenant_id != tenant_id:
         raise _unauthorized()
 
-    verified = False
     async with tenant_session(sessionmaker, tenant_id) as session:
-        ident = await _password_identity_row(session, challenge.user_id)
-        if ident is not None:
-            verified = await mfa.verify(kms, identity=ident, code=body.code)
+        ident = await _password_identity_row(session, challenge.user_id, for_update=True)
+        mfa_result = await mfa.verify(kms, identity=ident, code=body.code) if ident else None
+        # Persist the matched TOTP timestep so the code is single-use (replay guard).
+        # Tenant identities carry a real tenant_id, so the ORM UPDATE passes RLS.
+        # Recovery-code logins (result < 0) have no timestep to record.
+        if ident is not None and mfa_result is not None and mfa_result >= 0:
+            ident.totp_last_used_timestep = mfa_result
+        verified = mfa_result is not None
 
     if not verified:
         await _audit(
@@ -718,15 +726,54 @@ async def mfa_activate(
     return ok(RecoveryCodesResponse(recovery_codes=list(codes)))
 
 
-async def _password_identity_row(session: AsyncSession, user_id: UUID) -> UserIdentity | None:
-    return (
-        await session.execute(
-            select(UserIdentity).where(
-                UserIdentity.app_user_id == user_id,
-                UserIdentity.provider_type == ProviderKind.PASSWORD.value,
-            )
-        )
-    ).scalar_one_or_none()
+async def _password_identity_row(
+    session: AsyncSession, user_id: UUID, *, for_update: bool = False
+) -> UserIdentity | None:
+    q = select(UserIdentity).where(
+        UserIdentity.app_user_id == user_id,
+        UserIdentity.provider_type == ProviderKind.PASSWORD.value,
+    )
+    if for_update:
+        q = q.with_for_update()
+    return (await session.execute(q)).scalar_one_or_none()
+
+
+@router.get(
+    "/tenants/{tenant_slug}/auth/invitations/validate",
+    response_model=ResponseModel[InviteValidateResponse],
+)
+async def validate_invitation(
+    tenant_slug: str,
+    token: str,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    invites: Invites,
+) -> ResponseModel[InviteValidateResponse]:
+    """Token-scoped invite pre-flight: returns the eligibility state without
+    consuming the token or revealing any PHI. Because the caller must already
+    possess the high-entropy secret token, this does not enable enumeration.
+    `Cache-Control: no-store` — the result reflects live DB state."""
+    response.headers["Cache-Control"] = "no-store"
+    tenant_id, invite = await asyncio.gather(
+        resolve_tenant_id(sessionmaker, tenant_slug),
+        invites.get(INVITE_NS, token),
+    )
+    if tenant_id is None or invite is None or invite.tenant_id != tenant_id:
+        return ok(InviteValidateResponse(state="invalid"))
+
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        row = (
+            await session.execute(select(AppUser.status).where(AppUser.id == invite.app_user_id))
+        ).one_or_none()
+
+    if row is None:
+        return ok(InviteValidateResponse(state="invalid"))
+    if row.status == "invited":
+        return ok(InviteValidateResponse(state="valid"))
+    if row.status == "deactivated":
+        return ok(InviteValidateResponse(state="deactivated"))
+    # already activated, or any other non-invited, non-deactivated status → invalid
+    return ok(InviteValidateResponse(state="invalid"))
 
 
 @router.post(
@@ -743,6 +790,7 @@ async def accept_invitation(
     tenant_slug: str,
     body: AcceptInviteRequest,
     request: Request,
+    response: Response,
     sessionmaker: Sessionmaker,
     kms: KMS,
     audit: AuthAudit,
@@ -753,6 +801,7 @@ async def accept_invitation(
     tenant enforces MFA, this returns a provisioning URI + a bridge `mfa_token` and
     leaves the account `invited` until `activate-mfa`; otherwise the account goes
     `active`. The invite token is single-use (consumed here)."""
+    response.headers["Cache-Control"] = "no-store"
     tenant_id = await resolve_tenant_id(sessionmaker, tenant_slug)
     invite = await invites.get(INVITE_NS, body.token)
     if tenant_id is None or invite is None or invite.tenant_id != tenant_id:

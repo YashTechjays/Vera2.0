@@ -20,8 +20,8 @@ OPT-OUT / OVERRIDE  (for a reviewed, legitimate case):
   • Exempt a single line:   end the line with   # phi-guard: allow
   • Remove entirely:        delete the PreToolUse entry in .claude/settings.json
 
-Never scanned: comments, Markdown / CLAUDE.md, tests, and the vendored packages/phi_codec
-tree. The hook fails OPEN on its own internal error (a guardrail bug must not brick editing).
+Never scanned: comments, Markdown / CLAUDE.md, and tests. The hook fails OPEN on its own
+internal error (a guardrail bug must not brick editing).
 ────────────────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -98,8 +98,6 @@ def should_skip_file(fp: str) -> bool:
         return True
     if base == "CLAUDE.md" or p.endswith(".md"):
         return True
-    if "packages/phi_codec/" in p:  # vendored; legitimately handles raw values
-        return True
     if "/tests/" in p or base.startswith("test_") or base.endswith("_test.py"):
         return True
     if ".test." in base or ".spec." in base:
@@ -135,8 +133,7 @@ def scan(fp: str, text: str, skip: "frozenset[str] | set[str]" = frozenset()) ->
             out.append(Violation(
                 "phi-logging", i, raw,
                 "plaintext PHI in a log / print / console / trace / span. Scrub before emit; "
-                "trace token/reference IDs, counts, and shapes — never raw values (tokenize "
-                "via vera_core.phi.redact before any trace)."))
+                "trace reference IDs, counts, and shapes — never raw values."))
             continue
 
         if "phi-url" not in skip and phi_value:

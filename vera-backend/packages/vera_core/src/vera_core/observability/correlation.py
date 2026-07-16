@@ -1,11 +1,8 @@
 """Room-name correlation.
 
-One verification call = one LiveKit room. Both processes derive the SAME
-trace/session identifiers from the room name, so a control-plane request, the
-worker's pipeline spans, and the Langfuse session line up without sharing any
-state: the room name IS the correlation key.
-
-Raw PHI never goes into span attributes; tenant/call UUIDs are fine.
+One verification call = one LiveKit room. Both processes derive the same
+trace/session identifiers from the room name, so the room name is the correlation
+key and no shared state is needed. Raw PHI never goes into span attributes.
 """
 
 from typing import NamedTuple
@@ -15,18 +12,27 @@ _PREFIX = "call"
 _SEP = "--"
 
 # Voice-session participant identities — a cross-process vocabulary the control
-# plane mints and the agent worker reads. The worker greets only once a non-monitor
-# participant (the browser caller or the SIP callee) is present, so the monitor is
-# the one identity it must recognize as listen-only.
+# plane mints and the agent worker reads. Observers (monitor, supervisor) are
+# invisible for speaker resolution, so an observer leaving never ends the call.
 CALLER_IDENTITY_PREFIX = "caller-"  # browser participant that publishes its mic
-MONITOR_IDENTITY_PREFIX = "monitor-"  # listen-only browser observer (outbound mode)
+MONITOR_IDENTITY_PREFIX = "monitor-"  # listen-only browser observer (voice-lab outbound)
+SUPERVISOR_IDENTITY_PREFIX = "supervisor-"  # /calls listen-only browser observer
 SIP_CALLEE_IDENTITY = "phone-callee"  # outbound phone callee dialed in via SIP
 
+# Participant-attribute key carrying a supervisor's join mode, stamped into the
+# join token by the control plane and mirrored by the frontend.
+PARTICIPANT_MODE_ATTR = "vera.mode"
+PARTICIPANT_MODE_LISTENER = "listener"
+PARTICIPANT_MODE_INTERVENER = "intervener"
 
-def is_listen_only_identity(identity: str) -> bool:
-    """True for a participant that only listens (the monitor) and so must not, on
-    its own, trigger the agent's greeting."""
-    return identity.startswith(MONITOR_IDENTITY_PREFIX)
+_OBSERVER_PREFIXES = (MONITOR_IDENTITY_PREFIX, SUPERVISOR_IDENTITY_PREFIX)
+
+
+def is_observer_identity(identity: str) -> bool:
+    """True for a participant that observes the call (monitor, supervisor) rather
+    than being its speaker. Even a supervisor publishing audio stays an observer;
+    the call's speaker is always the callee."""
+    return identity.startswith(_OBSERVER_PREFIXES)
 
 
 class RoomRef(NamedTuple):
@@ -52,8 +58,7 @@ def parse_room_name(room_name: str) -> RoomRef | None:
 
 def call_trace_attributes(room_name: str) -> dict[str, str]:
     """Span/trace attributes shared by every span belonging to this call.
-    langfuse.session.id groups all of a call's traces into one Langfuse
-    session view."""
+    langfuse.session.id groups all of a call's traces into one session view."""
     ref = parse_room_name(room_name)
     if ref is None:
         return {"vera.room": room_name}

@@ -197,8 +197,23 @@ async def evaluate_call(
             FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="no_transcript"
         )
 
-    # (2) Parse schema — collection paths for extraction.
-    doc = dsl.load_document(json.dumps(version.schema_json))
+    # (2) Parse schema — collection paths for extraction. A document the DSL
+    # can't parse (e.g. a legacy v1 schema — load_document only accepts 2.1)
+    # must route to review, not raise: an exception here leaves the job unacked
+    # and reclaim would re-run it forever.
+    try:
+        doc = dsl.load_document(json.dumps(version.schema_json))
+    except Exception as exc:
+        logger.error(
+            "post_call_eval: unsupported schema for form %s — routing to EXCEPTION_REVIEW"
+            " (%s: %s)",
+            form_id,
+            type(exc).__name__,
+            exc,
+        )
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="unsupported_schema"
+        )
     paths = doc.collection_paths()
 
     # (4-5) Extract + persist (skip token-valued fields). Keep each written row so

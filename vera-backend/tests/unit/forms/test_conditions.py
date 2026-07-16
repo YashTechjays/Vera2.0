@@ -16,7 +16,7 @@ from vera_core.forms.conditions import (
     is_v2,
     leaf_gates,
 )
-from vera_core.forms.dsl import FormSchemaDoc, load_document
+from vera_core.forms.dsl import FormSchemaDoc, PromotedFields, load_document
 from vera_core.forms.intake import missing_required, required_intake_fields
 from vera_core.forms.review import completion_pct_v2
 
@@ -125,6 +125,8 @@ class TestCompletionPctV2:
         "dsl_version": "2.1",
         "name": "T",
         "insurance_type": "infertility_treatment",
+        "system_fields": {"a": "sections.s.a"},
+        "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.s.a"),
         "sections": {
             "s": {
                 "title": "S",
@@ -175,16 +177,19 @@ class TestIntakeV2:
         fields = required_intake_fields(V2_JSON)
         assert "sections.patient_information.patient_name" in fields
         assert "sections.patient_information.patient_dob" in fields
+        assert "sections.patient_information.patient_gender" in fields
+        assert "sections.patient_information.chart_number" in fields
+        assert "sections.verification_information.callback_number" in fields
         # carries default "N/A" → not intake-blocking even though it's a
-        # system_fields target (patient_gender).
-        assert "sections.patient_information.patient_gender" not in fields
+        # system_fields target (appointment_type; the one deliberate exception).
+        assert "sections.appointment_information.appointment_type" not in fields
         # not a system_fields target at all, despite `required: true` +
         # conditional `{when family_coverage}` — a "form filling" concern, not
         # a creation-time one.
         assert "sections.patient_information.spouse_partner_name" not in fields
         # dynamic over the WHOLE document, not just `patient_information`
         assert "sections.hospital_information.npi" in fields
-        # role=confirm, but it IS a system_fields target (member_id/policy_id)
+        # role=confirm, but it IS a system_fields target (member_id)
         # and carries no default → still required at creation.
         assert "sections.insurance_information.policy_number" in fields
 
@@ -195,14 +200,22 @@ class TestIntakeV2:
 
     def test_filled_v2_payload_passes(self) -> None:
         payload = {
-            "patient_information": {"patient_name": "Test", "patient_dob": "1990-01-01"},
+            "patient_information": {
+                "chart_number": "CH-10293",
+                "patient_name": "Test",
+                "patient_dob": "1990-01-01",
+                "patient_gender": "Female",
+            },
             "appointment_information": {"appointment_date": "2026-08-03"},
             "insurance_information": {"policy_number": "POL-550411"},
             "insurance_reference_information": {
                 "insurance_provider_name": "Demo Health Plan",
                 "insurance_phone_number": "+1 555 0100",
             },
-            "verification_information": {"verified_by": "Dr. Reyes"},
+            "verification_information": {
+                "verified_by": "Dr. Reyes",
+                "callback_number": "+1 555 0199",
+            },
             "hospital_information": {
                 "hospital_name": "Demo Health Partners",
                 "hospital_address": "123 Demo St, Austin, TX",
@@ -225,10 +238,13 @@ class TestIntakeV2:
             "appointment_information": {"appointment_date": "2026-08-03"},
         }
         assert set(missing_required(payload, V2_JSON)) == {
+            "sections.patient_information.patient_gender",
+            "sections.patient_information.chart_number",
             "sections.insurance_information.policy_number",
             "sections.insurance_reference_information.insurance_provider_name",
             "sections.insurance_reference_information.insurance_phone_number",
             "sections.verification_information.verified_by",
+            "sections.verification_information.callback_number",
             "sections.hospital_information.hospital_name",
             "sections.hospital_information.hospital_address",
             "sections.hospital_information.tax_id",

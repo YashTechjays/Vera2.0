@@ -1,6 +1,5 @@
-// Typed wrappers over the verification-call endpoints, mirroring `voiceLab.ts`.
-// Each rides `apiRequest`, which injects the bearer token, unwraps the response
-// envelope, and throws `ApiError` on failure.
+// Typed wrappers over the verification-call endpoints; each rides `apiRequest` (bearer token,
+// envelope unwrap, throws `ApiError`). Calls are created by the queue dispatcher — no manual start-call endpoint.
 
 import { apiRequest } from "@/lib/api/client"
 
@@ -12,7 +11,7 @@ export type CallSummary = {
   status: string
   room_name: string
   patient_name: string | null
-  /** ISO-8601; null until the call actually starts. */
+  /** ISO-8601; null until the callee answers. */
   started_at: string | null
   created_at: string
   /** One-way, tenant-wide visibility. Once true it never returns to false. */
@@ -33,11 +32,6 @@ export function listCalls(): Promise<CallSummary[]> {
   return apiRequest<CallSummary[]>("/calls")
 }
 
-/** POST /calls — start a call for a patient form; the caller becomes the owner. */
-export function startCall(formId: string): Promise<CallSummary> {
-  return apiRequest<CallSummary>("/calls", { method: "POST", body: { form_id: formId } })
-}
-
 /** POST /calls/{id}/publish — owner-only, one-way, idempotent. */
 export function publishCall(callId: string): Promise<CallSummary> {
   return apiRequest<CallSummary>(`/calls/${encodeURIComponent(callId)}/publish`, {
@@ -45,17 +39,15 @@ export function publishCall(callId: string): Promise<CallSummary> {
   })
 }
 
-/** GET /calls/{id}/join-token — listen-only by default; intervene mints a
- *  token that may publish audio (non-owners only for a published call). */
+/** GET /calls/{id}/join-token — listen-only by default; intervene mints a publish token
+ *  (needs calls:intervene; claims the single-intervener lock, 409 while another holds it). */
 export function getJoinToken(callId: string, intervene = false): Promise<JoinTokenResponse> {
   const query = intervene ? "?intervene=true" : ""
   return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
 }
 
-/** POST /calls/{id}/revoke-access — owner ejects an intervener from the room. */
-export function revokeAccess(callId: string, targetUserId: string): Promise<null> {
-  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/revoke-access`, {
-    method: "POST",
-    body: { target_user_id: targetUserId },
-  })
+/** POST /calls/{id}/end — tears the room down; the worker's call.ended event drives closeout
+ *  (a user-requested end closes as canceled). Allowed for anyone who can watch the call. */
+export function endCall(callId: string): Promise<null> {
+  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/end`, { method: "POST" })
 }

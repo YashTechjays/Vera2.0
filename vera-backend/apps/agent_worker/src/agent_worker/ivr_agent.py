@@ -1,16 +1,15 @@
 """IVR navigator agent and its turn-handling config.
 
-`IvrNavigatorAgent` (see the class) is the generic IVR navigator: a plain agent with no
-PHI-wall node overrides that navigates the payer's IVR and hands off to `VeraAgent` — a
-one-way swap — once a live human rep answers (from then on the PHI-wall overrides apply).
-`ivr_turn_handling()` is the navigator's per-agent turn config: patient end-of-turn detection
-for the IVR phase that reverts to the snappy human default at the handoff.
+`IvrNavigatorAgent` (see the class) is the generic IVR navigator: a plain agent that
+navigates the payer's IVR and hands off to the verification agent — a one-way swap —
+once a live human rep answers. `ivr_turn_handling()` is the navigator's per-agent turn
+config: patient end-of-turn detection for the IVR phase that reverts to the snappy
+human default at the handoff.
 """
 
-import functools
 import logging
 import re
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable
 
 from livekit import rtc
 from livekit.agents import (
@@ -24,9 +23,10 @@ from livekit.agents import (
 )
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
+from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
-from vera_core.phi import PHIBoundaryProtocol
 from vera_core.schemas import IvrPlaybookConfig
 
 logger = logging.getLogger("agent_worker")
@@ -57,6 +57,43 @@ async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
     cleaned = _SILENCE_RE.sub("", buffered)
     if cleaned.strip():
         yield cleaned
+
+
+_MIN_SPELL_DIGITS = 7  # a pure-number ID (member ID, NPI, Tax ID) is spelled only when this long
+_MIN_ALNUM_ID = 5  # a mixed letters+digits ID (e.g. "POL-661522") is spelled when this long
+# A candidate identifier token: a run of letters/digits with internal hyphens ("POL-661522",
+# "200-236-789") but NO spaces, so it never spans words — whitespace splits a sentence into words
+# that are each tested independently, and only an ID-like token is spelled.
+_ID_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+
+
+def _spell_id_tokens(text: str) -> str:
+    """Wrap each identifier token in `text` in a single Cartesia <spell> tag.
+
+    One tag around the whole token is Cartesia's documented usage — Sonic reads it character by
+    character at natural pace. Per-character tags with hard <break>s between them sound robotic.
+    Hyphens are dropped so they're never voiced as "dash".
+    """
+
+    def _spell(match: re.Match[str]) -> str:
+        token = match.group(0)
+        chars = [c for c in token if c.isalnum()]  # drop the hyphens; spell only alnum
+        has_letter = any(c.isalpha() for c in chars)
+        # A mixed letters+digits token is an ID; a purely-alphabetic token is NOT spelled (read as a
+        # word) — we can't tell a pure-alpha ID from a menu word like "Medical". Holds while payer
+        # IDs are numeric or alphanumeric-with-digits; revisit if a payer uses purely-alpha IDs.
+        is_alnum_id = has_letter and any(c.isdigit() for c in chars) and len(chars) >= _MIN_ALNUM_ID
+        is_long_number = not has_letter and len(chars) >= _MIN_SPELL_DIGITS
+        if not (is_alnum_id or is_long_number):
+            return token
+        return f"<spell>{''.join(chars)}</spell>"
+
+    return _ID_TOKEN_RE.sub(_spell, text)
+
+
+async def _tts_spoken_text(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    async for chunk in _strip_silence_token(text):
+        yield _spell_id_tokens(chunk)
 
 
 def ivr_turn_handling() -> TurnHandlingOptions:
@@ -94,39 +131,33 @@ class IvrNavigatorAgent(Agent):
     and pressing keypad digits (DTMF) via the `press_keypad` tool. Runs as a plain agent —
     no PHI-wall node overrides.
 
-    It holds a factory for its VeraAgent handoff target so that, once a live human rep
-    answers, `transfer_to_verification` can hand off to a VeraAgent (which greets the rep
-    and runs the benefits conversation)."""
+    It holds a factory for its handoff target so that, once a live human rep answers,
+    `transfer_to_verification` can hand off to the plan's first task agent (which greets
+    the rep and runs the benefits conversation)."""
 
     def __init__(
         self,
-        boundary: PHIBoundaryProtocol,
-        session_id: str,
         *,
+        verification_agent_factory: Callable[[], Agent],
         playbook: IvrPlaybookConfig | None = None,
-        verification_instructions: str | None = None,
-        verification_greeting: str | None = None,
+        context: dict[str, str] | None = None,
+        on_keypress: Callable[[str], None] | None = None,
     ) -> None:
-        # Deferred import breaks the agent <-> ivr_agent import cycle: agent.py imports
-        # IvrNavigatorAgent, and the navigator only needs VeraAgent at construction time.
-        from agent_worker.agent import VeraAgent
-
-        # The navigator runs plain (no PHI-wall overrides); it keeps only a factory for the
-        # VeraAgent it hands off to once a human answers (see transfer_to_verification).
-        self._make_verification_agent = functools.partial(
-            VeraAgent,
-            boundary,
-            session_id,
-            instructions=verification_instructions,
-            greeting=verification_greeting,
-        )
+        # The navigator keeps only a factory for the agent it hands off to once a human
+        # answers (see transfer_to_verification) — the plan's first task agent, injected
+        # by build_agent. The navigator only ever runs on a plan-backed call.
+        self._make_verification_agent = verification_agent_factory
         self._turns = 0  # IVR turns taken; the give-up backstop caps this
         self._final_turn_used = False  # spent the one grace turn granted at the cap
+        # Reports the digits of a successful press to the live transcript (evidence of the
+        # action — a tool call is otherwise invisible in the transcript). None in rooms
+        # with no transcript stream enabled.
+        self._on_keypress = on_keypress
         # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
         # A per-provider playbook (when present) specializes the generic navigator prompt.
         super().__init__(
-            instructions=build_ivr_instructions(playbook),
+            instructions=build_ivr_instructions(playbook, context),
             tools=[],
             turn_handling=ivr_turn_handling(),
         )
@@ -134,9 +165,8 @@ class IvrNavigatorAgent(Agent):
     def tts_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
     ) -> AsyncIterable[rtc.AudioFrame]:
-        # Not a PHI seam (the navigator injects no call_data, so there's nothing to hydrate);
-        # this only strips the silence sentinel so a "stay silent" turn makes no sound.
-        return Agent.default.tts_node(self, _strip_silence_token(text), model_settings)
+        # Strips the silence sentinel and <spell>-wraps ID tokens for Cartesia.
+        return Agent.default.tts_node(self, _tts_spoken_text(text), model_settings)
 
     def transcription_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
@@ -147,6 +177,9 @@ class IvrNavigatorAgent(Agent):
     def _end_navigation(self, reason: str) -> None:
         """Hang up the call cleanly (drain pending audio), to bail out of an unresolvable IVR
         loop rather than thrash forever. Mirrors VeraAgent's end_call."""
+        if takeover_engaged(self.session):
+            logger.info("IVR end-navigation refused: supervisor has taken over the call")
+            return
         logger.warning("IVR navigator: ending call — %s", reason)
         self.session.shutdown(drain=True)
 
@@ -184,7 +217,11 @@ class IvrNavigatorAgent(Agent):
         representative has clearly greeted you — a personal name paired with an open request
         for your info (e.g. "Hi, this is Martha, who am I speaking with?")."""
         logger.info("handoff: IVR navigator -> verification agent")
-        return self._make_verification_agent()
+        verifier = self._make_verification_agent()
+        # Carry the IVR conversation (incl. the member ID already spoken) into the
+        # plan agent so it doesn't re-ask what the navigator already established.
+        await carry_chat_ctx(self, verifier)
+        return verifier
 
     @function_tool
     async def press_keypad(self, digits: str) -> str:
@@ -200,7 +237,7 @@ class IvrNavigatorAgent(Agent):
             logger.info("press_keypad: called with no digits; nothing sent")
             return "No keypad digits were provided, so nothing was pressed."
         try:
-            await send_dtmf(get_job_context().room.local_participant, digits)
+            sent = await send_dtmf(get_job_context().room.local_participant, digits)
         except InvalidDtmfError:
             # The exception names the offending characters; keep them out of the return
             # (they feed the LLM/traces and can be PHI). A fixed message says enough.
@@ -213,4 +250,12 @@ class IvrNavigatorAgent(Agent):
             logger.exception("press_keypad: DTMF publish failed (%d tone(s))", count)
             return "Could not send the keypad tones over the call; continue without pressing."
         logger.info("press_keypad: sent %d DTMF tone(s)", count)
+        if self._on_keypress is not None:
+            # Best-effort evidence — a transcript-side failure must never fail the press
+            # the model was told succeeded. Exception content stays out of the log (it can
+            # embed the digits); the type alone tells the operator what broke.
+            try:
+                self._on_keypress(sent)
+            except Exception as exc:
+                logger.warning("press_keypad: keypress event failed (%s)", type(exc).__name__)
         return "Sent the keypad tones."

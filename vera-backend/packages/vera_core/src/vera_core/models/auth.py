@@ -118,6 +118,7 @@ class UserIdentity(Base, UUIDv7PKMixin, TimestampMixin, NullableTenantColumnMixi
     totp_dek_ct: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_key_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     recovery_code_hashes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    totp_last_used_timestep: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class TenantElevation(Base, UUIDv7PKMixin, TimestampMixin):

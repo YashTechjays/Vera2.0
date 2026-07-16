@@ -5,30 +5,56 @@ verify path (SessionVerifier -> tenant_guard -> require) without re-running the
 password/MFA dance, which has its own tests."""
 
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from datetime import timedelta
+from typing import NamedTuple
 from uuid import UUID
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from livekit.api.twirp_client import TwirpError
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.auth.invitations import InMemoryInvitationStore
 from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import InMemorySessionStore, SessionData
+from control_plane.dispatch import drain_pending
 from control_plane.email import InMemoryEmailSender
 from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
+from vera_core.call_stream import CallStreamEvent, CallStreamService
 from vera_core.config import EnvSecretProvider, Settings
-from vera_core.config.kms import LocalDevKMS
+from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.events import PostCallJob
-from vera_core.models import AppUser, Integration, IntegrationType, Tenant, UserRole
+from vera_core.db.rls import tenant_session
+from vera_core.integrations.credentials import seal_credentials
+from vera_core.models import (
+    AppUser,
+    Call,
+    Integration,
+    IntegrationType,
+    Role,
+    RolePermission,
+    Tenant,
+    UserRole,
+)
 from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
+
+
+class MintedToken(NamedTuple):
+    """One mint_join_token call. A NamedTuple so older tests' positional
+    assertions (minted[-1][2] is the can_publish flag) keep working."""
+
+    room: str
+    identity: str
+    can_publish: bool
+    name: str | None
+    attributes: dict[str, str] | None
+    ttl: timedelta
 
 
 class FakePostCallBus:
@@ -45,12 +71,8 @@ class FakePostCallBus:
 
 
 class FakeLiveKit(LiveKitGateway):
-    """Minimal LiveKitGateway stand-in for integration tests.
-
-    Records every room that was created so tests can assert on it without
-    a real LiveKit server.  `mint_join_token` returns a deterministic string
-    so tests can assert its structure without verifying a real JWT.
-    """
+    """Minimal LiveKitGateway stand-in: records created rooms and mints a
+    deterministic token so tests can assert without a real LiveKit server."""
 
     def __init__(self) -> None:
         # Skip the parent __init__ — we don't need real LiveKit credentials.
@@ -58,15 +80,19 @@ class FakeLiveKit(LiveKitGateway):
         self.dispatch_metadata: list[dict[str, object] | None] = []
         self.sip_calls: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
-        self.removed: list[tuple[str, str]] = []
         self.room_metadata: list[tuple[str, dict[str, object]]] = []
-        self.minted: list[tuple[str, str, bool]] = []
+        self.minted: list[MintedToken] = []
         self._url = "ws://fake:7880"
         # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
-        self.remove_not_found = False  # remove_participant raises TwirpError(not_found)
+        # room -> current participant identities; rooms absent from the map are
+        # "gone" (room_participant_identities returns None), mirroring LiveKit.
+        self.participants: dict[str, list[str]] = {}
+
+    async def room_participant_identities(self, room_name: str) -> list[str] | None:
+        return self.participants.get(room_name)
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
@@ -89,24 +115,20 @@ class FakeLiveKit(LiveKitGateway):
     async def delete_room(self, room_name: str) -> None:
         self.deleted.append(room_name)
 
-    async def remove_participant(self, room_name: str, identity: str) -> None:
-        # Mirrors LiveKitGateway.remove_participant's except-pattern: the knob
-        # simulates the underlying SDK raising a not-found TwirpError, and this
-        # swallows it the same way, so callers see the same idempotent no-op.
-        try:
-            if self.remove_not_found:
-                raise TwirpError(code="not_found", msg="participant not found", status=404)
-            self.removed.append((room_name, identity))
-        except TwirpError as exc:
-            if exc.code == "not_found":
-                return
-            raise
-
     async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
         self.room_metadata.append((room_name, metadata))
 
-    def mint_join_token(self, room_name: str, identity: str, *, can_publish: bool = True) -> str:
-        self.minted.append((room_name, identity, can_publish))
+    def mint_join_token(
+        self,
+        room_name: str,
+        identity: str,
+        *,
+        can_publish: bool = True,
+        name: str | None = None,
+        attributes: dict[str, str] | None = None,
+        ttl: timedelta = timedelta(minutes=5),
+    ) -> str:
+        self.minted.append(MintedToken(room_name, identity, can_publish, name, attributes, ttl))
         return f"faketoken:{room_name}:{identity}"
 
 
@@ -134,8 +156,16 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.known_trunks = set()
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
-    fake_livekit.remove_not_found = False
+    fake_livekit.participants = {}
     yield
+
+
+@pytest.fixture(autouse=True)
+async def drain_dispatch_tasks() -> AsyncIterator[None]:
+    """Drain detached post-commit dispatch tasks so none crosses a test boundary
+    (a stray task would insert rows mid-teardown or pollute the next tenant)."""
+    yield
+    await drain_pending()
 
 
 @pytest.fixture(scope="session")
@@ -143,18 +173,73 @@ def transcript_service() -> TranscriptService:
     return TranscriptService(InMemoryTranscriptStore())
 
 
+class _MemCallStreamStore:
+    """In-memory CallStreamStore fake, keyed by room_name. Session-scoped, so every
+    test must use a distinct room_name to avoid preloaded events bleeding across."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, list[tuple[str, CallStreamEvent]]] = {}
+        # (room_name, first_entry_deadline_s) per read() — lets tests pin which
+        # deadline each SSE branch passes down.
+        self.read_deadlines: list[tuple[str, float | None]] = []
+        # Every call_status published, surviving delete() — the fake has no reader,
+        # so closeout-announce assertions need a durable log.
+        self.status_log: list[tuple[str, object]] = []
+
+    async def publish(self, room_name: str, event: CallStreamEvent) -> None:
+        entries = self._entries.setdefault(room_name, [])
+        entries.append((f"{len(entries)}-0", event))
+        if event.type == "call_status":
+            self.status_log.append((room_name, event.data.get("status")))
+
+    async def mark_ended(self, room_name: str) -> None:
+        self._entries.setdefault(room_name, [])
+
+    async def delete(self, room_name: str) -> None:
+        self._entries.pop(room_name, None)
+
+    async def exists(self, room_name: str) -> bool:
+        return room_name in self._entries
+
+    async def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        # This fake replays a fixed snapshot and never blocks; the deadline is only
+        # recorded so endpoint tests can assert what was passed.
+        self.read_deadlines.append((room_name, first_entry_deadline_s))
+        for entry_id, event in list(self._entries.get(room_name, [])):
+            yield entry_id, event
+
+    async def read_all(self, room_name: str) -> list[CallStreamEvent]:
+        return [event for _entry_id, event in self._entries.get(room_name, [])]
+
+
+@pytest.fixture(scope="session")
+def call_stream_store() -> _MemCallStreamStore:
+    return _MemCallStreamStore()
+
+
+@pytest.fixture(scope="session")
+def call_stream_service(call_stream_store: _MemCallStreamStore) -> CallStreamService:
+    return CallStreamService(call_stream_store)
+
+
 class RBACWorld:
     def __init__(self, tenant_id: UUID, other_tenant_id: UUID) -> None:
         self.tenant_id = tenant_id
         self.other_tenant_id = other_tenant_id
-        # Filled once the admin AppUser row is created (see rbac_world).
+        # Filled once the admin/supervisor AppUser rows are created (see rbac_world).
         self.admin_id: UUID = UUID(int=0)
+        self.supervisor_id: UUID = UUID(int=0)
+        self.virtual_assistant_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
         self.ghost_token = ""
         self.supervisor_token = ""
         self.virtual_assistant_token = ""
+        # Holds ONLY calls:read (custom tenant role) — can watch, never intervene.
+        self.listener_token = ""
 
 
 async def _mint(store: InMemorySessionStore, *, user_id: UUID, tenant_id: UUID, email: str) -> str:
@@ -259,6 +344,7 @@ async def rbac_world(
         )
         admin_id, norole_id, virtual_assistant_id = admin.id, norole.id, virtual_assistant.id
         world.admin_id = admin_id
+        world.virtual_assistant_id = virtual_assistant_id
 
         supervisor_role = (
             await session.execute(
@@ -278,6 +364,31 @@ async def rbac_world(
             UserRole(tenant_id=tenant_id, app_user_id=supervisor.id, role_id=supervisor_role)
         )
         supervisor_id = supervisor.id
+        world.supervisor_id = supervisor_id
+
+        # Every system role with calls:read now also holds calls:intervene, so a
+        # custom LISTENER role is the only way to test read-without-intervene.
+        listener_role = Role(tenant_id=tenant_id, name="LISTENER", description="")
+        listener = AppUser(
+            tenant_id=tenant_id,
+            gcip_uid=None,
+            email="listener@test.example",
+            name="Listener",
+            status="active",
+        )
+        session.add_all([listener_role, listener])
+        await session.flush()
+        session.add(
+            RolePermission(
+                tenant_id=tenant_id,
+                role_id=listener_role.id,
+                permission_id=permission_ids["calls:read"],
+            )
+        )
+        session.add(
+            UserRole(tenant_id=tenant_id, app_user_id=listener.id, role_id=listener_role.id)
+        )
+        listener_id = listener.id
 
     world.admin_token = await _mint(
         session_store, user_id=admin_id, tenant_id=tenant_id, email="admin@test.example"
@@ -293,6 +404,9 @@ async def rbac_world(
         user_id=virtual_assistant_id,
         tenant_id=tenant_id,
         email="virtual_assistant@test.example",
+    )
+    world.listener_token = await _mint(
+        session_store, user_id=listener_id, tenant_id=tenant_id, email="listener@test.example"
     )
     # A valid session whose user_id has no app_user row -> "unknown user" deny.
     world.ghost_token = await _mint(
@@ -346,6 +460,7 @@ async def authz_app(
     fake_livekit: FakeLiveKit,
     fake_post_call_bus: FakePostCallBus,
     transcript_service: TranscriptService,
+    call_stream_service: CallStreamService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
     the whole request path, including the audit writer. The session store is the
@@ -363,6 +478,7 @@ async def authz_app(
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
         transcript_service=transcript_service,
+        call_stream_service=call_stream_service,
     )
     async with app.router.lifespan_context(app):
         app.state.post_call_bus = fake_post_call_bus
@@ -391,16 +507,12 @@ TRUNK_INTEGRATION_TYPE = "livekit_outbound_trunk_id"
 async def trunk_integration_type(
     admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
 ) -> AsyncIterator[None]:
-    """Ensure the `livekit_outbound_trunk_id` catalog type exists (it is seeded in real
-    deployments, but the integration tests run against a migrated, unseeded DB). Find-or-
-    create so it is safe whether or not the row is already present.
+    """Find-or-create the `livekit_outbound_trunk_id` catalog type (unseeded in the
+    integration DB).
 
-    Teardown is deliberately scoped to the **test tenant only** (rbac_world). The suite
-    shares the local dev database, so a blanket "delete every integration of this type"
-    would wipe a developer's real tenant credential — NEVER widen this delete beyond the
-    test tenant. The catalog type row is removed only if this fixture created it (so a
-    seeded/real DB keeps its row, and the per-tenant delete leaves other tenants' rows
-    untouched, satisfying the FK on the conditional type delete)."""
+    Teardown is scoped to the test tenant only: the suite shares the local dev DB,
+    so a blanket delete would wipe a developer's real credential — NEVER widen it.
+    The type row is dropped only if this fixture created it."""
     async with admin_sessionmaker() as session, session.begin():
         created = (
             await session.execute(
@@ -424,3 +536,69 @@ async def trunk_integration_type(
                 await session.execute(
                     delete(IntegrationType).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
                 )
+
+
+# The trunk id tests assert against when they check what got dialed.
+TEST_TRUNK_ID = "ST_test_trunk"
+
+
+async def seed_outbound_trunk(
+    sessionmaker: async_sessionmaker[AsyncSession], kms: KeyManagementService, tenant_id: UUID
+) -> None:
+    """Seal a `livekit_outbound_trunk_id` credential for `tenant_id` so any
+    outbound-dial seam resolves a trunk from the DB. Requires the
+    `trunk_integration_type` fixture."""
+    async with sessionmaker() as session, session.begin():
+        type_id = (
+            await session.execute(
+                select(IntegrationType.id).where(IntegrationType.name == TRUNK_INTEGRATION_TYPE)
+            )
+        ).scalar_one()
+        integration = Integration(
+            tenant_id=tenant_id,
+            integration_type_id=type_id,
+            status="active",
+        )
+        await seal_credentials(
+            kms, integration=integration, credentials={"trunk_id": TEST_TRUNK_ID}
+        )
+        session.add(integration)
+
+
+async def seed_call(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    form_id: UUID,
+    *,
+    initiated_by_id: UUID | None = None,
+    status: str = "initiated",
+    published: bool = False,
+) -> UUID:
+    """Insert a Call row directly, the way the dispatcher would. Mirrors
+    production: `started_at` is set once past the dialing phase."""
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        call = Call(
+            tenant_id=tenant_id,
+            form_id=form_id,
+            current_status=status,
+            initiated_by_id=initiated_by_id,
+            published=published,
+            started_at=None if status in ("initiated", "ringing", "ivr") else func.now(),
+        )
+        session.add(call)
+        await session.flush()
+        return call.id
+
+
+@pytest.fixture
+async def trunk_configured(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_integration_type: None,
+) -> None:
+    """Seal the test tenant's outbound-trunk credential so any dial seam (voice-lab,
+    the queueability gate) resolves it. Uses the same LocalDevKMS master key as the app
+    under test (`authz_app`), so `get_integration_credentials` can open what we seal."""
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from vera_core.schemas import CallSummary, JoinTokenResponse, StartCallRequest
+from vera_core.schemas import CallSummary, JoinTokenResponse
 
 
 def test_call_summary_grown_fields() -> None:
@@ -18,8 +18,6 @@ def test_call_summary_grown_fields() -> None:
     assert s.room_name == "call--t--c"
 
 
-def test_start_call_and_join_token_dtos() -> None:
-    fid = uuid4()
-    assert StartCallRequest(form_id=fid).form_id == fid
+def test_join_token_dto() -> None:
     jt = JoinTokenResponse(token="jwt", url="ws://x", room_name="call--t--c")
     assert jt.url == "ws://x"

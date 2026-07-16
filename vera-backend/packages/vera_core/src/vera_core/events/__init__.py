@@ -10,6 +10,8 @@ from vera_core.events.post_call import (
 from vera_core.events.worker import (
     WORKER_EVENTS_GROUP,
     WORKER_EVENTS_STREAM,
+    CallAnsweredEvent,
+    CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
     WorkerEvent,
@@ -22,6 +24,8 @@ __all__ = [
     "POST_CALL_STREAM",
     "WORKER_EVENTS_GROUP",
     "WORKER_EVENTS_STREAM",
+    "CallAnsweredEvent",
+    "CallEndedEvent",
     "CallFailedEvent",
     "CallFailureReason",
     "PostCallJob",

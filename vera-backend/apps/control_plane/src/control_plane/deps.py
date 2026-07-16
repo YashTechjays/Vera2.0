@@ -28,11 +28,13 @@ from control_plane.auth.session import SessionStore
 from control_plane.email import EmailSender
 from control_plane.idempotency import IdempotencyStore
 from vera_core.audit import AuditSink, AuthAuditSink
+from vera_core.call_stream import CallStreamService
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
 from vera_core.events import PostCallJobBus
 from vera_core.models.enums import AccountType
+from vera_core.plan_store import CallPlanService
 from vera_core.transcript import TranscriptService
 
 if TYPE_CHECKING:
@@ -91,6 +93,16 @@ def get_livekit(request: Request) -> LiveKitGateway:
 
 def get_transcript_service(request: Request) -> TranscriptService:
     service: TranscriptService = request.app.state.transcript_service
+    return service
+
+
+def get_call_stream_service(request: Request) -> CallStreamService:
+    service: CallStreamService = request.app.state.call_stream_service
+    return service
+
+
+def get_call_plans(request: Request) -> CallPlanService:
+    service: CallPlanService = request.app.state.call_plans
     return service
 
 

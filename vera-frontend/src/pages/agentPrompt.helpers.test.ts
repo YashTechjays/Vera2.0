@@ -3,7 +3,12 @@ import { pickInitialVersion } from "@/pages/agentPrompt.helpers"
 import type { PromptVersionSummary } from "@/lib/api/prompts"
 
 const v = (version: number, status: string): PromptVersionSummary => ({
-  id: `id-${version}`, version, status, created_at: "2026-06-29T00:00:00Z",
+  id: `id-${version}`,
+  version,
+  status,
+  created_at: "2026-06-29T00:00:00Z",
+  schema_version_id: "schema-1",
+  schema_version: 1,
 })
 
 describe("pickInitialVersion", () => {
