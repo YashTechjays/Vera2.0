@@ -26,8 +26,10 @@ describe("validateAll — requiredness", () => {
   })
 
   it("does not flag a required field with a declared default", () => {
-    // patient_gender is required but carries default "N/A"
-    expect(validateAll(schema, {})["sections.patient_information.patient_gender"]).toBeUndefined()
+    // appointment_type is required but carries default "N/A"
+    expect(
+      validateAll(schema, {})["sections.appointment_information.appointment_type"]
+    ).toBeUndefined()
   })
 
   it("applies conditional requiredness (spouse name only for Family coverage)", () => {

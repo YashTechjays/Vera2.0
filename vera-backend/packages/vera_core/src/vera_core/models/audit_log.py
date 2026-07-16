@@ -49,9 +49,6 @@ class AuditEvent(enum.StrEnum):
     # listen-only from day one; the full intervention feature (agent takeover
     # behavior) is still TODO.
     CALL_INTERVENE_JOIN = "call.intervene.join"
-    # The owner revoked a user's access to a published call (they can no longer
-    # see or join it). Ids only.
-    CALL_ACCESS_REVOKE = "call.access.revoke"
     # A VA ended a live call (LiveKit room torn down; the worker's call.ended
     # event drives the actual closeout). Ids only, never PHI.
     CALL_END = "call.end"
@@ -61,6 +58,14 @@ class AuditEvent(enum.StrEnum):
     # Queue expiry: the dispatcher marked a form expired because it exceeded the
     # tenant's queue_expiry_hours window. Records form id + tenant only.
     QUEUE_EXPIRED = "queue.expired"
+    # Recording lifecycle (call audio in GCS). Ids/hashes/sizes only — never audio,
+    # never PHI. RECORDING_DELETED is emitted twice per sweep: detail.phase="before"
+    # (object snapshot pre-delete) and "after" (verified-gone confirmation).
+    RECORDING_START_FAILED = "recording.start_failed"
+    RECORDING_FAILED = "recording.failed"
+    RECORDING_DISCARDED = "recording.discarded"
+    RECORDING_ACCESSED = "recording.accessed"
+    RECORDING_DELETED = "recording.deleted"
 
 
 class AuditLog(Base, TenantScopedMixin):

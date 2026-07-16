@@ -1,6 +1,5 @@
-// Typed wrappers over the verification-call endpoints, mirroring `voiceLab.ts`.
-// Each rides `apiRequest`, which injects the bearer token, unwraps the response
-// envelope, and throws `ApiError` on failure.
+// Typed wrappers over the verification-call endpoints; each rides `apiRequest` (bearer token,
+// envelope unwrap, throws `ApiError`). Calls are created by the queue dispatcher — no manual start-call endpoint.
 
 import { apiRequest } from "@/lib/api/client"
 
@@ -12,7 +11,7 @@ export type CallSummary = {
   status: string
   room_name: string
   patient_name: string | null
-  /** ISO-8601; null until the call actually starts. */
+  /** ISO-8601; null until the callee answers. */
   started_at: string | null
   created_at: string
   /** One-way, tenant-wide visibility. Once true it never returns to false. */
@@ -40,27 +39,15 @@ export function publishCall(callId: string): Promise<CallSummary> {
   })
 }
 
-/** GET /calls/{id}/join-token — listen-only by default; intervene mints a
- *  token that may publish audio (non-owners only for a published call). */
+/** GET /calls/{id}/join-token — listen-only by default; intervene mints a publish token
+ *  (needs calls:intervene; claims the single-intervener lock, 409 while another holds it). */
 export function getJoinToken(callId: string, intervene = false): Promise<JoinTokenResponse> {
   const query = intervene ? "?intervene=true" : ""
   return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
 }
 
-/** POST /calls/{id}/end — tear down the call's LiveKit room (hangs up the SIP
- *  leg, shuts the agent down); the backend pipeline then completes the call.
- *  Allowed for anyone who can watch/intervene on the call (owner, or a
- *  published call minus revoked users). */
+/** POST /calls/{id}/end — tears the room down; the worker's call.ended event drives closeout
+ *  (a user-requested end closes as canceled). Allowed for anyone who can watch the call. */
 export function endCall(callId: string): Promise<null> {
-  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/end`, {
-    method: "POST",
-  })
-}
-
-/** POST /calls/{id}/revoke-access — owner ejects an intervener from the room. */
-export function revokeAccess(callId: string, targetUserId: string): Promise<null> {
-  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/revoke-access`, {
-    method: "POST",
-    body: { target_user_id: targetUserId },
-  })
+  return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/end`, { method: "POST" })
 }

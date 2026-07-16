@@ -1,18 +1,17 @@
 """Verification-call endpoints: join-token, active-list, live event stream,
-publish, end, and revoke-access.
+publish, and end.
 
-Auth note (acknowledged stopgap): join-token / active-list guard with
-`require("calls:read")` for now — the SPA has no real auth yet, and the
-spec flags this. `publish` and `revoke-access` are owner-only actions
-gated on `require("calls:publish")`: the caller must hold the permission
-*and* be the call's `initiated_by_id`, enforced by an explicit 403 check
-in each handler.
+`publish` is owner-only: the caller must hold `calls:publish` *and* be the call's
+`initiated_by_id` (explicit 403 in-handler). A publish-capable join token
+(`?intervene=true`) additionally requires `calls:intervene`, checked after the
+visibility 404s, and claims the call's single-intervener lock.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -22,16 +21,24 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import (
+    AppSettings,
     Audit,
+    CallPlans,
     LiveKit,
     TenantId,
     TenantSession,
     emit_phi_read_audit,
 )
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.auth.rbac import (
+    PermissionResolver,
+    emit_authz_audit,
+    get_resolver,
+    require,
+)
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.deps import (
+    current_elevation,
     current_identity,
     get_call_stream_service,
     get_kms,
@@ -39,12 +46,14 @@ from control_plane.deps import (
 )
 from control_plane.dispatch import run_dispatch_pass
 from control_plane.exceptions import (
+    ConflictError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
 )
 from control_plane.post_call import resolve_ai_processing
+from control_plane.recording_storage import SigningUnavailable, parse_gcs_uri
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from control_plane.sse import frames_with_keepalive
@@ -58,11 +67,17 @@ from vera_core.call_stream import (
 )
 from vera_core.config.kms import KeyManagementService
 from vera_core.db.rls import tenant_session
-from vera_core.models import Call, PatientForm, Transcript
+from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallStatus
-from vera_core.observability.correlation import SUPERVISOR_IDENTITY_PREFIX, room_name_for_call
-from vera_core.schemas import CallSummary, JoinTokenResponse, RevokeAccessRequest
+from vera_core.models.enums import CallStatus, InterventionType, RecordingStatus
+from vera_core.observability.correlation import (
+    PARTICIPANT_MODE_ATTR,
+    PARTICIPANT_MODE_INTERVENER,
+    PARTICIPANT_MODE_LISTENER,
+    SUPERVISOR_IDENTITY_PREFIX,
+    room_name_for_call,
+)
+from vera_core.schemas import CallSummary, JoinTokenResponse, RecordingPlayback
 
 logger = logging.getLogger(__name__)
 
@@ -120,21 +135,34 @@ def _supervisor_identity(user_id: UUID) -> str:
     return f"{SUPERVISOR_IDENTITY_PREFIX}{user_id}"
 
 
+async def _holder_still_present(livekit: LiveKit, room_name: str, holder: UUID) -> bool:
+    """Is the lock holder still in the room? On timeout, assume yes (don't steal)."""
+    try:
+        async with asyncio.timeout(_PRESENCE_PROBE_TIMEOUT):
+            identities = (await livekit.room_participant_identities(room_name)) or []
+    except TimeoutError:
+        return True
+    return _supervisor_identity(holder) in identities
+
+
 def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
     """Whether *user_id* must NOT see this call (→ the same 404 as a missing row,
     so a private call is never revealed by enumeration).
 
-    The owner always sees their own call. A non-owner sees it only when it is
-    published or ownerless (dispatcher-created, joinable tenant-wide) AND they
-    have not been revoked; a revoked user gets the same 404 as a private call.
-    Shared by join-token and the event stream so the two visibility gates can
-    never diverge.
+    A non-owner sees it only when it is published or ownerless. Shared by
+    join-token, the event stream, and end so the visibility gates never diverge.
     """
     if call.initiated_by_id == user_id:
         return False
-    if str(user_id) in call.revoked_user_ids:
-        return True
     return call.initiated_by_id is not None and not call.published
+
+
+# A just-minted intervene token belongs to a user not yet connected to LiveKit, so
+# a presence probe would wrongly call the lock stale. Inside this window a held
+# lock is refused outright; past it, the holder must be in the room or it's stolen.
+_INTERVENE_CONNECT_GRACE = timedelta(seconds=30)
+_LISTEN_TOKEN_TTL = timedelta(minutes=5)  # listen-only can't publish, no race
+_PRESENCE_PROBE_TIMEOUT = 3.0  # cap the LiveKit probe so it can't hold the row lock
 
 
 def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
@@ -163,23 +191,86 @@ def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSumma
 async def join_token(
     call_id: UUID,
     request: Request,
+    response: Response,
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
     audit: Audit,
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
     intervene: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
-    call = (
-        await session.execute(select(Call).where(Call.id == call_id))
-    ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
+    response.headers["Cache-Control"] = "no-store"  # publish-capable JWT + email; never cache
+    # Intervening claims the single-intervener lock — the row lock serializes
+    # concurrent claims while the listen path stays lock-free.
+    stmt = select(Call).where(Call.id == call_id)
+    if intervene:
+        stmt = stmt.with_for_update()
+    call = (await session.execute(stmt)).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
     if _call_hidden_from(call, caller.user_id):
-        raise NotFoundError(message="call not found")  # don't reveal a private call
-    # Every join is audited — owner included (their join is a PHI access too), and
-    # the event name carries the mode: listen-only, or the publish-capable
-    # intervene join (whose full feature — agent takeover behavior — is still TODO).
+        raise NotFoundError(message="call not found")  # 404 not 403: don't reveal a private call
+    room_name = room_name_for_call(tenant_id, call.id)
+    stolen_from: UUID | None = None
+    if intervene:
+        # Checked AFTER the visibility 404s so a private call never turns into a 403.
+        user_id, permissions = await resolver.effective_permissions(
+            session, tenant_id, caller.user_id
+        )
+        allowed = "calls:intervene" in permissions
+        # Same audit shape as rbac.require (carries reason + elevation_session_id).
+        await emit_authz_audit(
+            audit,
+            request,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            actor_label=caller.email or caller.subject,
+            permission="calls:intervene",
+            allowed=allowed,
+        )
+        if not allowed:
+            raise CustomAPIException(
+                DefaultExceptionCode.FORBIDDEN, message="missing permission calls:intervene"
+            )
+        if call.current_status in TERMINAL_VALUES:
+            raise ConflictError(message="call already ended")
+
+        holder = call.intervener_user_id
+        if holder == caller.user_id:
+            # The holder reconnecting (tab refresh/crash) — refresh the claim only.
+            call.intervener_claimed_at = func.now()
+        else:
+            if holder is not None:
+                claimed_at = call.intervener_claimed_at
+                db_now = (await session.execute(select(func.now()))).scalar_one()
+                inside_grace = (
+                    claimed_at is not None and db_now - claimed_at < _INTERVENE_CONNECT_GRACE
+                )
+                if inside_grace or await _holder_still_present(livekit, room_name, holder):
+                    raise ConflictError(
+                        message="another supervisor is currently intervening on this call"
+                    )
+                stolen_from = holder  # claim aged past grace and holder left the room
+            call.intervener_user_id = caller.user_id
+            call.intervener_claimed_at = func.now()
+            # Intervention audit trail: a row = an intervention occurred (ADR §6).
+            session.add(
+                InterventionEvent(
+                    tenant_id=tenant_id,
+                    call_id=call.id,
+                    supervisor_id=caller.user_id,
+                    type=InterventionType.TAKEOVER.value,
+                    payload_ref={},
+                )
+            )
+    # Every join is audited (owner included — their join is a PHI access too); the
+    # event name carries the mode: listen-only or intervene.
+    detail: dict[str, object] = {
+        "owner_id": str(call.initiated_by_id) if call.initiated_by_id else None
+    }
+    if stolen_from is not None:
+        detail["stale_lock_released"] = str(stolen_from)
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
@@ -191,18 +282,27 @@ async def join_token(
             ).value,
             resource_type="call",
             resource_id=str(call.id),
-            permission_key="calls:read",
+            permission_key="calls:intervene" if intervene else "calls:read",
             decision="allow",
             request_id=current_request_id(request),
-            detail={"owner_id": str(call.initiated_by_id) if call.initiated_by_id else None},
+            detail=detail,
         )
     )
-    room_name = room_name_for_call(tenant_id, call.id)
     identity = _supervisor_identity(caller.user_id)
     # Watch-only tokens are server-side mute; only ?intervene=true may publish.
-    # NOTE: the intervention FEATURE is not implemented — the UI never sends
-    # intervene=true; this is dormant plumbing for the future mode.
-    token = livekit.mint_join_token(room_name=room_name, identity=identity, can_publish=intervene)
+    token = livekit.mint_join_token(
+        room_name=room_name,
+        identity=identity,
+        can_publish=intervene,
+        name=caller.email or caller.subject,
+        attributes={
+            PARTICIPANT_MODE_ATTR: (
+                PARTICIPANT_MODE_INTERVENER if intervene else PARTICIPANT_MODE_LISTENER
+            )
+        },
+        # Cap the intervene token at the grace so a stale token can't outlive a stolen lock.
+        ttl=_INTERVENE_CONNECT_GRACE if intervene else _LISTEN_TOKEN_TTL,
+    )
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 
 
@@ -218,9 +318,9 @@ async def stream_call_events(
 ) -> StreamingResponse:
     """Live per-call event stream (transcript turns, call_status frames; form-fill
     later) for Live Monitoring. Same visibility rule as join-token: owner, or a
-    published/ownerless call, minus revoked users. Authorization runs in a
-    SHORT-LIVED tenant session released before streaming (an SSE is long-lived and
-    must not pin a DB connection — mirrors voice_lab.stream_transcript)."""
+    published/ownerless call. Authorization runs in a SHORT-LIVED tenant session
+    released before streaming (an SSE is long-lived and must not pin a DB
+    connection — mirrors voice_lab.stream_transcript)."""
     if identity.account_type != "tenant" or identity.tenant_id is None:
         raise NotFoundError(message="call not found")
     tenant_id = identity.tenant_id
@@ -413,6 +513,7 @@ async def end_call(
     sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
     call_stream: Annotated[CallStreamService, Depends(get_call_stream_service)],
     kms: Annotated[KeyManagementService, Depends(get_kms)],
+    call_plans: CallPlans,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[None]:
     """End a call from Live Monitoring.
@@ -483,7 +584,9 @@ async def end_call(
             await resolve_ai_processing(
                 sessionmaker, audit, ref, trigger="user_end_call", actor_label=actor_label
             )
-            await run_dispatch_pass(sessionmaker, tenant_id, livekit, kms, audit)
+            await run_dispatch_pass(
+                sessionmaker, tenant_id, livekit, kms, audit, plan_service=call_plans
+            )
         return ok(None, message="Call canceled.")
     async with tenant_session(sessionmaker, tenant_id) as stamp_session:
         locked = (
@@ -544,53 +647,105 @@ async def list_calls(
     return ok([_summary(c, name, caller.user_id) for c, name in rows])
 
 
-@router.post(
-    "/calls/{call_id}/revoke-access",
-    response_model=ResponseModel[None],
+@router.get(
+    "/calls/{call_id}/recording",
+    response_model=ResponseModel[RecordingPlayback],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
     ),
 )
-async def revoke_access(
+async def get_recording_playback(
     call_id: UUID,
-    body: RevokeAccessRequest,
     request: Request,
+    response: Response,
     tenant_id: TenantId,
     session: TenantSession,
-    livekit: LiveKit,
     audit: Audit,
-    caller: VerifiedIdentity = require("calls:publish"),
-) -> ResponseModel[None]:
-    # Row lock: concurrent revokes must not overwrite each other's list append.
-    call = (
-        await session.execute(select(Call).where(Call.id == call_id).with_for_update())
-    ).scalar_one_or_none()
+    settings: AppSettings,
+    caller: VerifiedIdentity = require("recordings:read"),
+) -> ResponseModel[RecordingPlayback]:
+    """Mint a TTL-bounded signed URL for the call's recording.
+
+    Authorization is permission AND call visibility (spec decision 6): the
+    recording is never more visible than the call itself. Every issuance is a
+    PHI disclosure → RECORDING_ACCESSED on the append-only audit trail.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    call = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
-    if call.initiated_by_id != caller.user_id:
+    if _call_hidden_from(call, caller.user_id):
+        raise NotFoundError(message="call not found")  # don't reveal a private call
+
+    storage = request.app.state.recording_storage
+    if storage is None:
         raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN, message="only the owner can revoke access"
+            DefaultExceptionCode.CONFLICT, message="call recording is not configured"
         )
-    target = str(body.target_user_id)
-    if target not in call.revoked_user_ids:
-        call.revoked_user_ids = [*call.revoked_user_ids, target]
-    room_name = room_name_for_call(tenant_id, call.id)
-    await livekit.remove_participant(room_name, _supervisor_identity(body.target_user_id))
+
+    # Latest AVAILABLE wins: a newer FAILED/PENDING attempt must not shadow a
+    # playable recording (only its absence makes the call unplayable).
+    recording = (
+        await session.execute(
+            select(Recording)
+            .where(Recording.call_id == call_id)
+            .order_by(
+                (Recording.status == RecordingStatus.AVAILABLE.value).desc(),
+                Recording.created_at.desc(),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if recording is None:
+        raise NotFoundError(message="no recording for this call")
+    if recording.status != RecordingStatus.AVAILABLE.value:
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message=f"recording is not available (status: {recording.status})",
+        )
+
+    try:
+        bucket, object_path = parse_gcs_uri(recording.gcs_uri)
+    except ValueError as exc:
+        # A malformed stored pointer is an operational defect, not a caller error —
+        # surface a clean envelope instead of an unhandled 500. URI is UUID-only.
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT, message="recording pointer is invalid"
+        ) from exc
+    ttl = settings.recording_signed_url_ttl_seconds
+    try:
+        url = await storage.signed_url(bucket, object_path, ttl_seconds=ttl)
+    except SigningUnavailable as exc:
+        # User ADC / missing signBlob grant — a clean envelope, not a raw 500.
+        logger.error("signed-url minting failed (%s)", exc)
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message="recording storage cannot mint playback URLs in this environment",
+        ) from exc
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
             actor_type=ActorType.USER,
             actor_user_id=caller.user_id,
             actor_label=caller.email or caller.subject,
-            event_type=AuditEvent.CALL_ACCESS_REVOKE.value,
-            resource_type="call",
-            resource_id=str(call.id),
-            permission_key="calls:publish",
+            event_type=AuditEvent.RECORDING_ACCESSED.value,
+            resource_type="recording",
+            resource_id=str(recording.id),
+            permission_key="recordings:read",
             decision="allow",
             request_id=current_request_id(request),
-            detail={"target_user_id": str(body.target_user_id)},
+            elevation_session_id=current_elevation(request),
+            detail={"call_id": str(call_id), "ttl_seconds": ttl},
         )
     )
-    return ok(None, message="Access revoked.")
+    # expires_at is informational for the client; the URL's own signature is the
+    # enforcement (GCS rejects after expiry regardless of this field).
+    return ok(
+        RecordingPlayback(
+            url=url,
+            expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
+        )
+    )

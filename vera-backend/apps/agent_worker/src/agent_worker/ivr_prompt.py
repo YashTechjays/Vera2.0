@@ -118,6 +118,7 @@ Silent (press nothing) for anything not a direct prompt matching a rule:
 - CONFIRM: a confirmation / yes-no prompt ("Is that correct?", "Did you say...?", "say yes or no", "press 1 for yes, 2 for no") is ALWAYS a direct prompt — NEVER answer it with silence. Compare the read-back value against the value YOU last provided for THIS field. Match → Yes/1 ("S as in Sierra" vs your "S as in Sam" is a match, letter is S). Mismatch → No/2, then re-enter when re-prompted. A read-back that names a DIFFERENT field, is empty, or is garbled ("I heard medical" right after you spelled a member ID) is a capture FAILURE → No/2, never Yes. If the same wrong read-back repeats after your No, keep answering No; do not accept a wrong value to break the loop.
 - RETRY: re-ask after an error → repeat the exact same value/format, nothing appended. Same value failing three times → reach a human.
 - CALLBACK vs HOLD: "callback press 1, remain on hold press 3" → answer per callback_vs_hold.
+- NEVER REPLY WITH JUST NO: never reply with just "No". If you need to reply with No, say something appropriate with it. For example: "Would you like to hear those details again?" → "No, thank you."
 </answering_rules>
 
 <response_rules>
@@ -152,7 +153,7 @@ Match on INTENT; "e.g." phrasings are examples, not exact strings. Wording and k
 <rule intent="'Eligibility status, or something else?'" say="Something else"/>
 <rule intent="'What type of benefit are you calling about?' — a topic/purpose gate the IVR needs answered to route the call, often glued after a payment disclaimer, listing narrow examples ('for example co pay, coinsurance, therapy limits, coordination of benefits'). The 'for example' list is illustrative, NOT exhaustive; distinct from the self-service benefit-DETAIL menu below (which offers to read figures out)." say="Plan details (a broad category that yields a general benefit readout — never a narrow listed example like 'co pay'). Stay silent through the readout, then escape to a human at the next prompt."/>
 <rule intent="Self-service benefit-DETAIL menu — a 'to hear X say/press X, to fax say fax it' readout menu whose options are figures to read out (copay, coinsurance, deductible, out-of-pocket, plan details, PCP, 'hear it', 'fax it', 'want benefit details?'); NOT the 'what are you calling about?' topic gate above" say="{rep_keyword}; if it loops, switch token per reach_a_human"/>
-<rule intent="'Hear those details/that again?' repeat-readout prompt" say="No"/>
+<rule intent="'Hear those details/that again?' repeat-readout prompt" say="No, thank you"/>
 <rule intent="Confirms you want a representative" say="Yes"/>
 <rule intent="Callback vs hold" say="Per callback_vs_hold"/>
 <rule intent="'Continue to provider services?' / coverage gate ('no medical press 1, all others press 2')" say="Yes / remain (press 2)"/>

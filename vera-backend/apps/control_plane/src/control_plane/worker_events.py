@@ -11,7 +11,7 @@ import os
 import socket
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -41,6 +41,10 @@ from vera_core.events import (
 from vera_core.models import Call, CallEvent
 from vera_core.models.enums import CallEventType, CallStatus
 from vera_core.observability.correlation import parse_room_name
+from vera_core.plan_store import CallPlanService
+
+if TYPE_CHECKING:
+    from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger("control_plane.worker_events")
 
@@ -97,6 +101,8 @@ class WorkerEventConsumer:
         teardown_grace_ms: int = 1_500,
         consumer_name: str | None = None,
         form_auto_retry_enabled: bool = False,
+        recording: "RecordingConfig | None" = None,
+        call_plans: CallPlanService | None = None,
     ) -> None:
         self._redis = redis
         self._livekit = livekit
@@ -109,6 +115,8 @@ class WorkerEventConsumer:
         self._teardown_grace_ms = teardown_grace_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._form_auto_retry_enabled = form_auto_retry_enabled
+        self._recording = recording
+        self._call_plans = call_plans
         self._bus = WorkerEventBus(redis)
         self._handlers: dict[str, EventHandler] = {
             "call.failed": self._handle_call_failed,
@@ -329,5 +337,11 @@ class WorkerEventConsumer:
                     auto_retry_enabled=self._form_auto_retry_enabled,
                 )
             await run_dispatch_pass(
-                self._sessionmaker, ref.tenant_id, self._livekit, self._kms, self._audit
+                self._sessionmaker,
+                ref.tenant_id,
+                self._livekit,
+                self._kms,
+                self._audit,
+                recording=self._recording,
+                plan_service=self._call_plans,
             )
