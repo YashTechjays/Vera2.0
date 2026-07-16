@@ -470,6 +470,33 @@ class TestDateFormatRejectsTwoDigitYear:
             Validation(date_format="M/D/YY")
 
 
+class TestDateFormatRequiresOneOfEachToken:
+    """A `date_format` missing a token ("MM/YYYY" — `format_date` would silently
+    drop the day from every stored value) or repeating one ("M/M/YYYY" — renders
+    the month twice, and `parse_date_format` can never match it) is lossy, so it's
+    rejected at schema-authoring time, before any value can be corrupted."""
+
+    def test_each_complete_format_is_accepted(self) -> None:
+        for fmt in ["M/D/YYYY", "MM/DD/YYYY", "DD-MM-YYYY", "YYYY.MM.DD"]:
+            Validation(date_format=fmt)
+
+    def test_missing_day_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="MM/YYYY")
+
+    def test_missing_year_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="M/D")
+
+    def test_repeated_month_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="M/M/YYYY")
+
+    def test_repeated_day_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="D/DD/YYYY")
+
+
 class TestPromotedColumnParity:
     """PromotedFields (DSL contract), PromotedIdentifiers (intake value carrier) and
     PatientForm (the table) must agree on the promoted column set — a future column

@@ -181,10 +181,11 @@ def parse_date_format(text: str, date_format: str) -> date | None:
     try:
         match = re.fullmatch(pattern, text)
     except re.error:
-        # A grammar-legal but degenerate date_format (e.g. "M/M/YYYY" — DATE_FORMAT_RE
-        # doesn't forbid a repeated token) builds a pattern with a duplicate named
-        # group, which re.compile rejects. Not this function's contract to raise on
-        # a malformed schema — treat it as "doesn't parse," same as any other mismatch.
+        # A degenerate date_format with a repeated token (e.g. "M/M/YYYY") builds a
+        # pattern with a duplicate named group, which re.compile rejects. `Validation`
+        # rejects such formats at schema-authoring time, but this function can still be
+        # called directly with an unchecked format — so treat it as "doesn't parse,"
+        # same as any other mismatch, rather than raising on a malformed schema.
         return None
     if match is None:
         return None
@@ -233,11 +234,19 @@ class Validation(_Model):
                 re.compile(self.pattern)
             except re.error as exc:
                 raise ValueError(f"invalid pattern regex: {exc}") from exc
-        if self.date_format is not None and not DATE_FORMAT_RE.match(self.date_format):
-            raise ValueError(
-                "date_format must combine M/MM, D/DD, YYYY tokens with -/. separators "
-                "(no YY — a 2-digit year is ambiguous on a date field)"
-            )
+        if self.date_format is not None:
+            tokens = _DATE_TOKEN_RE.findall(self.date_format)
+            # Reduce each token to its kind via its first char (M/MM -> "M", D/DD -> "D",
+            # YYYY -> "Y") and require exactly one of each, rejecting a missing or
+            # repeated token.
+            token_kinds = sorted(token[0] for token in tokens)
+            if not DATE_FORMAT_RE.match(self.date_format) or token_kinds != ["D", "M", "Y"]:
+                raise ValueError(
+                    "date_format must contain exactly one M/MM, one D/DD and one YYYY "
+                    "token, joined by -/. separators (no YY — a 2-digit year is "
+                    "ambiguous on a date field; a missing or repeated token would "
+                    "silently drop part of every stored date)"
+                )
         return self
 
 
