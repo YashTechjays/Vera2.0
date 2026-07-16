@@ -127,7 +127,7 @@ def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> Prom
         _raise_422(exc)
 
 
-def _normalize_dates_or_422(
+def _normalize_date_answers_or_422(
     answers: list[tuple[str, Any]], doc: FormSchemaDoc
 ) -> list[tuple[str, Any]]:
     """`normalize_date_answers`, translated to the API's validation-error
@@ -140,9 +140,9 @@ def _normalize_dates_or_422(
         _raise_422(exc)
 
 
-def _normalize_date_or_422(value: Any, field_path: str, date_format: str | None) -> Any:
+def _normalize_date_value_or_422(value: Any, field_path: str, date_format: str | None) -> Any:
     """`normalize_date_value`, translated to the API's validation-error contract —
-    the single-leaf counterpart to `_normalize_dates_or_422`, used when a
+    the single-leaf counterpart to `_normalize_date_answers_or_422`, used when a
     dispute-resolve edit reformats one date leaf's answer to its declared format."""
     try:
         return normalize_date_value(value, field_path, date_format)
@@ -212,7 +212,7 @@ async def upload_patient_form(
                     data={"fields": unrecognized},
                 )
             answers = normalize_phone_answers(answers, doc)
-            answers = _normalize_dates_or_422(answers, doc)
+            answers = _normalize_date_answers_or_422(answers, doc)
             promoted = _promote_or_422(dict(answers).get, doc)
         else:
             answers = list(iter_leaf_answers(body.intake_payload))
@@ -732,7 +732,7 @@ async def resolve_disputes(
         if path in phone_paths:
             new_value = normalize_phone_prefix(new_value)
         if path in date_paths:
-            new_value = _normalize_date_or_422(new_value, path, date_paths[path])
+            new_value = _normalize_date_value_or_422(new_value, path, date_paths[path])
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).
