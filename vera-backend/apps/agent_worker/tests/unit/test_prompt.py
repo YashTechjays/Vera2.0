@@ -2,14 +2,36 @@ import logging
 
 import pytest
 
-from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, parse_persona_tweak
+from agent_worker.prompt import (
+    CARTESIA_MARKUP_GUIDE,
+    VOICE_LAB_GREETING,
+    build_voice_lab_instructions,
+    parse_persona_tweak,
+    resolve_voice_lab_greeting,
+)
 from vera_core.schemas import PersonaTweak
 
 
 def test_cartesia_guide_survives_plan_only() -> None:
-    # The monolithic SYSTEM_PROMPT is gone (plan-only), but the TTS markup guide
-    # stays — plan_runtime appends it so CPT codes keep <spell> wrapping.
+    # The real-call monolithic SYSTEM_PROMPT is gone (plan-only), but the TTS markup
+    # guide stays — plan_runtime appends it so CPT codes keep <spell> wrapping.
     assert "<spell>" in CARTESIA_MARKUP_GUIDE
+
+
+def test_voice_lab_instructions_carry_persona_and_markup_guide() -> None:
+    instructions = build_voice_lab_instructions()
+    assert "infertility" in instructions.lower()  # the preview persona
+    assert "<spell>" in instructions  # markup guide appended
+
+
+def test_voice_lab_instructions_append_tenant_extra() -> None:
+    instructions = build_voice_lab_instructions(PersonaTweak(extra_instructions="Be extra warm."))
+    assert "Be extra warm." in instructions
+
+
+def test_resolve_voice_lab_greeting_default_and_override() -> None:
+    assert resolve_voice_lab_greeting() == VOICE_LAB_GREETING
+    assert resolve_voice_lab_greeting(PersonaTweak(greeting="Custom.")) == "Custom."
 
 
 def test_parse_persona_tweak_fail_safe() -> None:

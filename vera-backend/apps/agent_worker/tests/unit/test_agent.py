@@ -14,7 +14,7 @@ from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
-from agent_worker.agent import VeraAgent, build_agent
+from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
@@ -27,6 +27,7 @@ from agent_worker.ivr_agent import (
 from agent_worker.ivr_prompt import SILENCE_TOKEN
 from agent_worker.plan_runtime import PlanRunController, PlanTaskAgent
 from vera_core.forms.call_plan import CallPlan, PlanSession, PlanTask
+from vera_core.schemas import PersonaTweak
 
 
 def _plan_controller() -> PlanRunController:
@@ -420,6 +421,39 @@ def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     assert (
         build_agent({"enable_ivr_navigation": False}, controller=controller) is controller.agents[0]
     )
+
+
+@pytest.mark.asyncio
+async def test_voice_lab_agent_greets_on_enter_and_carries_end_call() -> None:
+    agent = VoiceLabAgent(instructions="be helpful", greeting="Hi there, quick benefits check?")
+    tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
+    assert tool_names == ["end_call"]
+    assert agent.instructions == "be helpful"
+    mock_session = MagicMock()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        await agent.on_enter()
+    mock_session.say.assert_called_once_with("Hi there, quick benefits check?")
+
+
+def test_build_agent_no_controller_runs_voice_lab_fallback() -> None:
+    # Voice Lab preview: no CallPlan → the conversational VoiceLabAgent, not a hang-up.
+    agent = build_agent({}, controller=None)
+    assert isinstance(agent, VoiceLabAgent)
+    assert "infertility" in agent.instructions.lower()  # the preview persona
+
+
+def test_build_agent_no_controller_ivr_nav_verification_is_voice_lab() -> None:
+    # IVR-nav preview: the navigator runs, and its post-answer verification agent is a
+    # VoiceLabAgent (so IVR preview reaches a conversational agent, not a hang-up).
+    nav = build_agent({"enable_ivr_navigation": True}, controller=None)
+    assert isinstance(nav, IvrNavigatorAgent)
+    assert isinstance(nav._make_verification_agent(), VoiceLabAgent)
+
+
+def test_voice_lab_fallback_greeting_honors_tenant_tweak() -> None:
+    agent = build_agent({}, controller=None, tweak=PersonaTweak(greeting="Custom opener."))
+    assert isinstance(agent, VoiceLabAgent)
+    assert agent._greeting == "Custom opener."
 
 
 def test_build_agent_warns_on_agent_context_without_ivr_flag(

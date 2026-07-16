@@ -395,7 +395,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         "call plan for %s failed to build a runtime — failing fast", room_name
                     )
         else:
-            logger.warning("no use_call_plan flag for %s — failing fast", room_name)
+            logger.info("no use_call_plan for %s — voice-lab preview (plan-less)", room_name)
 
         session = build_session(
             vad=ctx.proc.userdata.get("vad"),
@@ -554,18 +554,20 @@ async def entrypoint(ctx: JobContext) -> None:
     # observability is the self-hosted Langfuse/OTel pipeline (configure_observability), which
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
-    # Plan-only: a plan-backed call runs the compiled agent chain. A call with no
-    # usable plan FAILS FAST — real calls never dispatch plan-less (the dispatcher
-    # skips a form whose plan can't be prepared), so no controller here is a
-    # Redis-loss race or a plan-less voice-lab session. Return without starting a
-    # session (never speak a fallback script); the shutdown callback emits
-    # call.failed for a use_call_plan call so the control plane re-dispatches it.
-    if controller is None:
+    # A REAL call that expected a plan (use_call_plan) but has no controller FAILS
+    # FAST — real calls never dispatch plan-less (the dispatcher skips a form whose
+    # plan can't be prepared), so this is a Redis-loss race / build failure. Return
+    # without starting a session; the shutdown callback emits call.failed so the
+    # control plane re-dispatches it (self-heal).
+    if controller is None and meta.get("use_call_plan"):
         logger.warning("no usable plan for %s — failing fast without a session", room_name)
         return
+    # build_agent picks the agent: the plan chain when a controller is present, or a
+    # conversational VoiceLabAgent for a Voice Lab preview (no plan) — see its docstring.
     agent: Agent = build_agent(
         meta,
         controller=controller,
+        tweak=tweak,
         # A successful IVR keypad press rides the live transcript as a dtmf turn
         # (evidence of the action); rooms with no stream enabled report nowhere.
         on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
