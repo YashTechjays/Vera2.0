@@ -116,14 +116,23 @@ function titleOf(schema: FormSchema, path: string): string {
   return titles.get(path) ?? path
 }
 
+/** Join clause texts, collapsing duplicates: branches over same-titled leaves
+ * render identically (e.g. 27 per-CPT "Prior Authorization Required" gates), and
+ * repeating the clause 27 times in a tooltip says nothing extra. */
+function joinUnique(clauses: string[], separator: string): string {
+  return [...new Set(clauses)].join(separator)
+}
+
 /** Render a condition (resolving `ref`s) as a short human-readable clause. */
 function describeCondition(cond: Condition, schema: FormSchema): string {
   if ("ref" in cond) {
     const target = schema.shared_conditions?.[cond.ref]
     return target ? describeCondition(target, schema) : cond.ref
   }
-  if ("all" in cond) return cond.all.map((c) => describeCondition(c, schema)).join(" and ")
-  if ("any" in cond) return cond.any.map((c) => describeCondition(c, schema)).join(" or ")
+  if ("all" in cond)
+    return joinUnique(cond.all.map((c) => describeCondition(c, schema)), " and ")
+  if ("any" in cond)
+    return joinUnique(cond.any.map((c) => describeCondition(c, schema)), " or ")
   if ("not" in cond) return `not (${describeCondition(cond.not, schema)})`
 
   const title = titleOf(schema, cond.field)
