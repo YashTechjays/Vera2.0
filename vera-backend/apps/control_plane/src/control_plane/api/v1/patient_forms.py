@@ -24,7 +24,14 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession, emit_phi_read_audit
+from control_plane.api.v1.common import (
+    AppSettings,
+    Kms,
+    LiveKit,
+    TenantId,
+    TenantSession,
+    emit_phi_read_audit,
+)
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -907,6 +914,7 @@ async def update_patient_form_status(
     tenant_id: TenantId,
     livekit: LiveKit,
     kms: Kms,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -1041,7 +1049,7 @@ async def update_patient_form_status(
             kms,
             audit,
             wait_for_form_id=form_id,
-            recording=recording_config_from(request.app.state.settings),
+            recording=recording_config_from(settings),
         )
 
     return ok(

@@ -38,11 +38,13 @@ _LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError)
 
 # Terminal-failure egress statuses used by get_egress_status. Members are plain
 # ints at runtime (protobuf enum wrapper); frozenset gives O(1) membership tests.
+# LIMIT_REACHED is deliberately NOT a failure: LiveKit ends the egress at its
+# duration/size cap but still uploads the output — the recording exists and must
+# enter the retention lifecycle, not be stranded as FAILED.
 _FAILED_EGRESS_STATUSES: frozenset[int] = frozenset(
     {
         api.EgressStatus.EGRESS_FAILED,
         api.EgressStatus.EGRESS_ABORTED,
-        api.EgressStatus.EGRESS_LIMIT_REACHED,
     }
 )
 
@@ -286,7 +288,8 @@ class LiveKitGateway:
         item = resp.items[0]
         file_result = item.file_results[0] if item.file_results else None
         return EgressState(
-            complete=item.status == api.EgressStatus.EGRESS_COMPLETE,
+            complete=item.status
+            in (api.EgressStatus.EGRESS_COMPLETE, api.EgressStatus.EGRESS_LIMIT_REACHED),
             failed=item.status in _FAILED_EGRESS_STATUSES,
             # proto duration / size are 0 when not yet reported; treat 0 as absent.
             duration_ms=(

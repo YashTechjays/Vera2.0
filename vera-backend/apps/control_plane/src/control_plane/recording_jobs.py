@@ -19,7 +19,7 @@ from uuid import UUID
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.livekit_gateway import LiveKitGateway
+from control_plane.livekit_gateway import EgressState, LiveKitGateway
 from control_plane.recording_storage import RecordingStorage, parse_gcs_uri
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db import tenant_session
@@ -32,6 +32,11 @@ from vera_core.services.recordings import RecordingConfig, recording_object_path
 logger = logging.getLogger("control_plane.recording_jobs")
 
 _DISCARD_CALL_STATUSES = frozenset({CallStatus.NO_ANSWER, CallStatus.BUSY})
+
+
+def _still_running(state: EgressState | None) -> bool:
+    """The egress is live or winding down — neither complete nor failed yet."""
+    return state is not None and not state.complete and not state.failed
 
 
 async def run_forever(
@@ -98,6 +103,12 @@ class RecordingVerifier:
         # object; None (recording disabled) turns orphan reconciliation off.
         self._recording_config = recording_config
         self._orphan_grace_ms = orphan_grace_seconds * 1000
+        # Orphans stopped in a previous tick, awaiting their terminal state before
+        # the object delete (StopEgress is async on LiveKit's side — the upload
+        # lands AFTER stop returns, so deleting immediately would race it and leak
+        # the object). In-memory only: a crash between phases leaves the object for
+        # the bucket lifecycle backstop (devops-todo #13).
+        self._stopped_orphans: dict[str, tuple[UUID, UUID]] = {}
 
     async def run(self) -> None:
         await run_forever("recording verifier", self.tick, self._interval)
@@ -122,6 +133,9 @@ class RecordingVerifier:
         config = self._recording_config
         if config is None:
             return
+        # Phase 2 first: delete objects of orphans stopped on an earlier tick, now
+        # that their egress has had a tick to reach a terminal state and upload.
+        await self._finish_stopped_orphans(config)
         active = await self._livekit.list_active_egresses()
         if not active:
             return
@@ -132,7 +146,7 @@ class RecordingVerifier:
         tracked = {row.egress_id for row in known_rows if row.egress_id is not None}
         now_ms = time.time() * 1000  # operational age check, not a persisted timestamp
         for egress in active:
-            if egress.egress_id in tracked:
+            if egress.egress_id in tracked or egress.egress_id in self._stopped_orphans:
                 continue
             ref = parse_room_name(egress.room_name)
             if ref is None:
@@ -142,33 +156,46 @@ class RecordingVerifier:
                 and now_ms - egress.started_at_ms < self._orphan_grace_ms
             ):
                 continue  # too new: its Recording row may still be committing
+            # Phase 1: stop only — the delete is deferred (see _stopped_orphans).
             try:
-                await self._reap_orphan(config, ref.tenant_id, ref.call_id, egress.egress_id)
+                await self._livekit.stop_egress(egress.egress_id)
+                self._stopped_orphans[egress.egress_id] = (ref.tenant_id, ref.call_id)
+                logger.warning(
+                    "stopped orphan egress %s for call %s (no recording row); "
+                    "object delete deferred until the egress reports terminal",
+                    egress.egress_id,
+                    ref.call_id,
+                )
             except Exception:
-                logger.exception("failed to reap orphan egress %s", egress.egress_id)
+                logger.exception("failed to stop orphan egress %s", egress.egress_id)
 
-    async def _reap_orphan(
-        self, config: RecordingConfig, tenant_id: UUID, call_id: UUID, egress_id: str
-    ) -> None:
-        await self._livekit.stop_egress(egress_id)
-        object_path = recording_object_path(config, tenant_id, call_id)
-        await self._storage.delete(config.bucket, object_path)
-        await self._audit.emit(
-            AuditRecord(
-                tenant_id=tenant_id,
-                actor_type=ActorType.SYSTEM,
-                actor_label="recording-verifier",
-                event_type=AuditEvent.RECORDING_DISCARDED.value,
-                resource_type="call",
-                resource_id=str(call_id),
-                detail={"reason": "orphaned_egress", "egress_id": egress_id},
-            )
-        )
-        logger.warning(
-            "reaped orphan egress %s for call %s (no recording row — stopped + object deleted)",
-            egress_id,
-            call_id,
-        )
+    async def _finish_stopped_orphans(self, config: RecordingConfig) -> None:
+        for egress_id, (tenant_id, call_id) in list(self._stopped_orphans.items()):
+            try:
+                state = await self._livekit.get_egress_status(egress_id)
+                if _still_running(state):
+                    continue  # still winding down (uploading) — check again next tick
+                object_path = recording_object_path(config, tenant_id, call_id)
+                await self._storage.delete(config.bucket, object_path)
+                del self._stopped_orphans[egress_id]
+                await self._audit.emit(
+                    AuditRecord(
+                        tenant_id=tenant_id,
+                        actor_type=ActorType.SYSTEM,
+                        actor_label="recording-verifier",
+                        event_type=AuditEvent.RECORDING_DISCARDED.value,
+                        resource_type="call",
+                        resource_id=str(call_id),
+                        detail={"reason": "orphaned_egress", "egress_id": egress_id},
+                    )
+                )
+                logger.warning(
+                    "reaped orphan egress %s for call %s (stopped earlier + object deleted)",
+                    egress_id,
+                    call_id,
+                )
+            except Exception:
+                logger.exception("failed to finish reaping orphan egress %s", egress_id)
 
     async def _pending_rows(self) -> list[PendingRow]:
         async with self._sessionmaker() as session:
@@ -181,13 +208,10 @@ class RecordingVerifier:
             return [PendingRow(*row) for row in result.all()]
 
     async def _verify_one(self, row: PendingRow) -> None:
-        if row.egress_id is None:  # FAILED-at-start rows never enter pending; guard anyway
+        if row.egress_id is None:  # excluded by recording_pending_work(); guard anyway
             return
         state = await self._livekit.get_egress_status(row.egress_id)
-        if state is None or state.failed:
-            await self._mark_failed(row, reason="egress_lost" if state is None else "egress_failed")
-            return
-        if not state.complete:
+        if _still_running(state):
             return  # still recording — next tick
 
         bucket, object_path = parse_gcs_uri(row.gcs_uri)
@@ -216,9 +240,23 @@ class RecordingVerifier:
                 row.call_id,
             )
 
+        if state is not None and state.failed:
+            # A failed egress may leave a partial object behind; the idempotent
+            # delete guarantees no untracked audio outlives the FAILED row (the
+            # sweeper only ever visits AVAILABLE rows) — no need to probe first.
+            await self._storage.delete(bucket, object_path)
+            await self._mark_failed(row, reason="egress_failed")
+            return
+
+        # complete, or state=None (LiveKit no longer lists the id — control-plane
+        # downtime outlived the egress-info retention). Decide by what actually
+        # landed in GCS: a lost egress may still have uploaded fine.
         digest = await self._storage.sha256_and_size(bucket, object_path)
         if digest is None:
-            return  # upload not visible in GCS yet — retry next tick
+            if state is None:
+                await self._mark_failed(row, reason="egress_lost")
+            # else: complete but the upload isn't visible yet — retry next tick
+            return
         sha256, size_bytes = digest
 
         days = await self._load_retention_days(row)
@@ -235,7 +273,7 @@ class RecordingVerifier:
                 "status": RecordingStatus.AVAILABLE.value,
                 "sha256": sha256,
                 "size_bytes": size_bytes,
-                "duration_ms": state.duration_ms,
+                "duration_ms": state.duration_ms if state is not None else None,
                 "retention_until": retention_until,
             },
         )

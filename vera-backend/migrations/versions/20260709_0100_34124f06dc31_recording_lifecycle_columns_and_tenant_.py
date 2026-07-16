@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "34124f06dc31"
-down_revision: str | None = "efa94eaaf3f9"
+down_revision: str | None = "888cddaeaa58"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -37,9 +37,20 @@ def upgrade() -> None:
         EXCEPTION WHEN duplicate_object THEN NULL; END $$
         """
     )
+    op.execute(
+        """
+        DO $$ BEGIN
+            ALTER TABLE tenant ADD CONSTRAINT ck_tenant_recording_retention_days_range
+                CHECK (recording_retention_days BETWEEN 1 AND 3650);
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$
+        """
+    )
 
 
 def downgrade() -> None:
+    op.execute(
+        "ALTER TABLE tenant DROP CONSTRAINT IF EXISTS ck_tenant_recording_retention_days_range"
+    )
     op.execute("ALTER TABLE recording DROP CONSTRAINT IF EXISTS ck_recording_status_valid")
     op.execute("ALTER TABLE recording DROP COLUMN IF EXISTS status")
     op.execute("ALTER TABLE recording DROP COLUMN IF EXISTS egress_id")

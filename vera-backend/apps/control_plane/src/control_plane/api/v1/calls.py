@@ -33,6 +33,7 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.deps import (
+    current_elevation,
     current_identity,
     get_call_stream_service,
     get_kms,
@@ -46,7 +47,7 @@ from control_plane.exceptions import (
     NotFoundError,
 )
 from control_plane.post_call import resolve_ai_processing
-from control_plane.recording_storage import parse_gcs_uri
+from control_plane.recording_storage import SigningUnavailable, parse_gcs_uri
 from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from control_plane.sse import frames_with_keepalive
@@ -642,25 +643,45 @@ async def get_recording_playback(
             DefaultExceptionCode.CONFLICT, message="call recording is not configured"
         )
 
+    # Latest AVAILABLE wins: a newer FAILED/PENDING attempt must not shadow a
+    # playable recording (only its absence makes the call unplayable).
     recording = (
         await session.execute(
             select(Recording)
             .where(Recording.call_id == call_id)
-            .order_by(Recording.created_at.desc())
+            .order_by(
+                (Recording.status == RecordingStatus.AVAILABLE.value).desc(),
+                Recording.created_at.desc(),
+            )
             .limit(1)
         )
     ).scalar_one_or_none()
     if recording is None:
         raise NotFoundError(message="no recording for this call")
-    if recording.status != RecordingStatus.AVAILABLE:
+    if recording.status != RecordingStatus.AVAILABLE.value:
         raise CustomAPIException(
             DefaultExceptionCode.CONFLICT,
             message=f"recording is not available (status: {recording.status})",
         )
 
-    bucket, object_path = parse_gcs_uri(recording.gcs_uri)
+    try:
+        bucket, object_path = parse_gcs_uri(recording.gcs_uri)
+    except ValueError as exc:
+        # A malformed stored pointer is an operational defect, not a caller error —
+        # surface a clean envelope instead of an unhandled 500. URI is UUID-only.
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT, message="recording pointer is invalid"
+        ) from exc
     ttl = settings.recording_signed_url_ttl_seconds
-    url = await storage.signed_url(bucket, object_path, ttl_seconds=ttl)
+    try:
+        url = await storage.signed_url(bucket, object_path, ttl_seconds=ttl)
+    except SigningUnavailable as exc:
+        # User ADC / missing signBlob grant — a clean envelope, not a raw 500.
+        logger.error("signed-url minting failed (%s)", exc)
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT,
+            message="recording storage cannot mint playback URLs in this environment",
+        ) from exc
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
@@ -673,6 +694,7 @@ async def get_recording_playback(
             permission_key="recordings:read",
             decision="allow",
             request_id=current_request_id(request),
+            elevation_session_id=current_elevation(request),
             detail={"call_id": str(call_id), "ttl_seconds": ttl},
         )
     )

@@ -255,6 +255,23 @@ async def test_revoked_user_on_published_call_is_404() -> None:
     assert resp.status_code == 404
 
 
+async def test_invisible_call_is_404_even_when_storage_is_unconfigured() -> None:
+    """Visibility runs BEFORE the storage-config probe: a caller who cannot see
+    the call must get the enumeration-safe 404, never the 409 that would reveal
+    recording-feature configuration (commit 965d618's ordering, pinned)."""
+    app = _build_app(
+        permissions=_READ,
+        call=_FakeCall(published=False),  # non-owner + unpublished → hidden
+        identity=_OTHER_IDENTITY,
+    )
+    app.state.recording_storage = None
+
+    async with _client(app) as c:
+        resp = await c.get(_PATH)
+
+    assert resp.status_code == 404
+
+
 async def test_pending_recording_returns_409() -> None:
     """PENDING recording → 409 Conflict (not yet available)."""
     app = _build_app(

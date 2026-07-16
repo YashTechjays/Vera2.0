@@ -102,6 +102,20 @@ async def test_get_egress_status_unknown_id_returns_none() -> None:
     assert await gw.get_egress_status("EG_GONE") is None
 
 
+async def test_limit_reached_is_complete_not_failed() -> None:
+    """LIMIT_REACHED ends the egress at its cap but still uploads the output —
+    classifying it as failed would strand a real recording outside the
+    retention lifecycle (never AVAILABLE, never swept)."""
+    item = SimpleNamespace(
+        status=api.EgressStatus.EGRESS_LIMIT_REACHED,
+        file_results=[SimpleNamespace(duration=3_600_000_000_000, size=999)],
+    )
+    gw = _gateway_with(_FakeEgress(list_items=[item]))
+    state = await gw.get_egress_status("EG_CAP")
+    assert state is not None
+    assert state.complete and not state.failed
+
+
 async def test_get_egress_status_maps_failed() -> None:
     item = SimpleNamespace(
         status=api.EgressStatus.EGRESS_FAILED,

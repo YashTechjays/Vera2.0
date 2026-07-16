@@ -8,7 +8,7 @@ the single source of truth. The defaults below are local-dev only.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -163,7 +163,10 @@ class Settings(BaseSettings):
     recording_bucket: str | None = None  # VERA_RECORDING_BUCKET
     recording_prefix: str = "recordings"  # VERA_RECORDING_PREFIX
     recording_retention_days_default: int = 90  # VERA_RECORDING_RETENTION_DAYS_DEFAULT
-    recording_signed_url_ttl_seconds: int = 600  # VERA_RECORDING_SIGNED_URL_TTL_SECONDS
+    # Bounded: a misconfigured env var must not mint day-long bearer URLs.
+    recording_signed_url_ttl_seconds: int = Field(
+        default=600, ge=60, le=3600
+    )  # VERA_RECORDING_SIGNED_URL_TTL_SECONDS
     recording_verify_interval_seconds: int = 30  # VERA_RECORDING_VERIFY_INTERVAL_SECONDS
     retention_sweep_interval_seconds: int = 3600  # VERA_RETENTION_SWEEP_INTERVAL_SECONDS
     # An orphan egress (no Recording row) is reaped only once it is older than this,

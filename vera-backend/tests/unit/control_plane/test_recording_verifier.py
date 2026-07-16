@@ -154,6 +154,44 @@ async def test_lost_or_failed_egress_marks_failed_and_audits(
     assert audit.records[0].event_type == "recording.failed"
 
 
+async def test_lost_egress_with_uploaded_object_recovers_to_available(
+    row: PendingRow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LiveKit no longer lists the egress (control-plane downtime outlived the
+    egress-info retention) but the upload landed — the recording is real and must
+    become AVAILABLE, not be stranded as FAILED (unswept, unplayable)."""
+    updates: list[dict[str, Any]] = []
+    storage = InMemoryRecordingStorage()
+    body = b"recovered-audio"
+    storage.objects[("bkt", "recordings/t/c.ogg")] = body
+    verifier = _verifier(_FakeGateway(None), storage, _FakeAudit(), monkeypatch, updates=updates)
+    await verifier._verify_one(row)
+    (update,) = updates
+    assert update["status"] == RecordingStatus.AVAILABLE.value
+    assert update["sha256"] == hashlib.sha256(body).hexdigest()
+    assert update["duration_ms"] is None  # no egress state left to report one
+
+
+async def test_failed_egress_partial_object_is_deleted(
+    row: PendingRow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FAILED egress may leave a partial upload behind; it must not outlive the
+    FAILED row as untracked audio (the sweeper only ever visits AVAILABLE rows)."""
+    updates: list[dict[str, Any]] = []
+    storage = InMemoryRecordingStorage()
+    storage.objects[("bkt", "recordings/t/c.ogg")] = b"partial"
+    verifier = _verifier(
+        _FakeGateway(EgressState(complete=False, failed=True, duration_ms=None, size_bytes=None)),
+        storage,
+        _FakeAudit(),
+        monkeypatch,
+        updates=updates,
+    )
+    await verifier._verify_one(row)
+    assert not await storage.exists("bkt", "recordings/t/c.ogg")
+    assert updates[0]["status"] == RecordingStatus.FAILED.value
+
+
 # --- orphan-egress reconciliation ------------------------------------------
 #
 # An egress starts BEFORE its PENDING Recording row commits (services/recordings.py),
@@ -167,15 +205,23 @@ _ANCIENT_MS = 1_000  # ~1970 — always older than the grace window
 
 
 class _ReconcileGateway:
-    def __init__(self, active: list[ActiveEgress]) -> None:
+    def __init__(
+        self, active: list[ActiveEgress], status_after_stop: EgressState | None = None
+    ) -> None:
         self._active = active
         self.stopped: list[str] = []
+        # What get_egress_status reports for a stopped orphan on the next tick:
+        # None (no longer listed) or a terminal state — either lets phase 2 delete.
+        self._status_after_stop = status_after_stop
 
     async def list_active_egresses(self) -> list[ActiveEgress]:
-        return self._active
+        return [e for e in self._active if e.egress_id not in self.stopped]
 
     async def stop_egress(self, egress_id: str) -> None:
         self.stopped.append(egress_id)
+
+    async def get_egress_status(self, egress_id: str) -> EgressState | None:
+        return self._status_after_stop
 
 
 def _reconcile_verifier(
@@ -203,12 +249,35 @@ async def test_reconcile_reaps_orphan_egress_with_no_row() -> None:
     audit = _FakeAudit()
     verifier = _reconcile_verifier(gateway, storage, audit)
 
+    # Two-phase reap: tick 1 only STOPS the egress (LiveKit uploads AFTER stop
+    # returns — an immediate delete would race the upload and leak the object).
     await verifier._reconcile_orphans([])  # no pending rows → egress is orphaned
-
     assert gateway.stopped == ["EG_ORPHAN"]
-    assert ("bkt", object_path) not in storage.objects  # partial object deleted
+    assert ("bkt", object_path) in storage.objects  # object NOT deleted yet
+    assert audit.records == []
+
+    # Tick 2: the stopped egress now reports terminal → delete + audit.
+    await verifier._reconcile_orphans([])
+    assert ("bkt", object_path) not in storage.objects  # object deleted after terminal
     assert audit.records[0].event_type == AuditEvent.RECORDING_DISCARDED.value
     assert audit.records[0].detail["reason"] == "orphaned_egress"
+
+
+async def test_reap_defers_delete_while_stopped_egress_still_winding_down() -> None:
+    tenant_id, call_id = uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    object_path = recording_object_path(_CONFIG, tenant_id, call_id)
+    storage = InMemoryRecordingStorage()
+    storage.objects[("bkt", object_path)] = b"uploading"
+    still_ending = EgressState(complete=False, failed=False, duration_ms=None, size_bytes=None)
+    gateway = _ReconcileGateway([ActiveEgress("EG_SLOW", room, _ANCIENT_MS)], still_ending)
+    audit = _FakeAudit()
+    verifier = _reconcile_verifier(gateway, storage, audit)
+
+    await verifier._reconcile_orphans([])  # phase 1: stop
+    await verifier._reconcile_orphans([])  # phase 2 blocked: not terminal yet
+    assert ("bkt", object_path) in storage.objects  # never deleted while winding down
+    assert audit.records == []
 
 
 async def test_reconcile_leaves_egress_that_has_a_pending_row() -> None:

@@ -18,6 +18,13 @@ _GCS_SCHEME = "gs://"
 _CHUNK = 1 << 20  # 1 MiB read chunks for hashing
 
 
+class SigningUnavailable(Exception):
+    """Signed-URL minting failed at the GCS/auth seam (user ADC instead of a
+    service account, missing signBlob grant, auth outage). Raised so routers can
+    map it to a clean envelope instead of catching raw google.auth errors —
+    same boundary discipline as the LiveKit gateway's domain errors."""
+
+
 def parse_gcs_uri(uri: str) -> tuple[str, str]:
     """Split "gs://bucket/path/to/object" into (bucket, object_path)."""
     if not uri.startswith(_GCS_SCHEME):
@@ -78,7 +85,13 @@ class GCSRecordingStorage:
         return bool(self._blob_sync(bucket, object_path).exists())
 
     async def signed_url(self, bucket: str, object_path: str, *, ttl_seconds: int) -> str:
-        return await asyncio.to_thread(self._signed_url_sync, bucket, object_path, ttl_seconds)
+        try:
+            return await asyncio.to_thread(self._signed_url_sync, bucket, object_path, ttl_seconds)
+        except Exception as exc:
+            # Broad ON PURPOSE — this is the adapter boundary: user ADC raises
+            # AttributeError (no service_account_email), auth raises its own
+            # hierarchy. Type name only (a raw repr could embed request detail).
+            raise SigningUnavailable(type(exc).__name__) from exc
 
     def _signed_url_sync(self, bucket: str, object_path: str, ttl_seconds: int) -> str:
         import google.auth

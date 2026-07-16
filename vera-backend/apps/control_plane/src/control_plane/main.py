@@ -168,6 +168,9 @@ def create_app(
         # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
         worker_events_redis: Redis | None = None
         worker_event_task: asyncio.Task[None] | None = None
+        # Derived once; None when the bucket is unset (recording disabled) — every
+        # consumer (dispatch refill, sweeper wake-up, verifier reap) shares it.
+        recording_config = recording_config_from(settings)
         sweeper_task: asyncio.Task[None] | None = None
         if settings.livekit_url is not None and app.state.livekit is not None:
             worker_events_redis = create_redis(settings.redis_url)
@@ -182,7 +185,7 @@ def create_app(
                 reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
                 form_auto_retry_enabled=settings.form_auto_retry_enabled,
-                recording=recording_config_from(settings),
+                recording=recording_config,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
@@ -201,7 +204,7 @@ def create_app(
                 stuck_grace_s=settings.call_stuck_grace_seconds,
                 max_call_duration_s=settings.call_max_duration_seconds,
                 form_auto_retry_enabled=settings.form_auto_retry_enabled,
-                recording=recording_config_from(settings),
+                recording=recording_config,
             )
             sweeper_task = asyncio.create_task(sweeper.run())
             sweeper_task.add_done_callback(_log_task_exit("pipeline sweeper"))
@@ -223,7 +226,7 @@ def create_app(
                 app.state.audit,
                 interval_seconds=settings.recording_verify_interval_seconds,
                 retention_days_default=settings.recording_retention_days_default,
-                recording_config=recording_config_from(settings),
+                recording_config=recording_config,
                 orphan_grace_seconds=settings.recording_orphan_grace_seconds,
             )
             verifier_task = asyncio.create_task(verifier.run())
