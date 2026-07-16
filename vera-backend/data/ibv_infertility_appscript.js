@@ -462,7 +462,7 @@ let missingCells = [];
 function getEnvWiseFormTypeId(sheet) {
   const value = sheet.getRange("BB6").getValue();
   if (value === "DEV") return "FORM_TYPE_ID_DEV";
-  if (value === "STAGING") return "FORM_TYPE_ID_STAGING";
+  if (value === "TEST") return "FORM_TYPE_ID_TEST";
   if (value === "LOCAL") return "FORM_TYPE_ID_LOCAL";
   return "";
 }
@@ -470,7 +470,7 @@ function getEnvWiseFormTypeId(sheet) {
 function getEnvWiseSchemaVersionId(sheet) {
   const value = sheet.getRange("BB6").getValue();
   if (value === "DEV") return "SCHEMA_VERSION_ID_DEV";
-  if (value === "STAGING") return "SCHEMA_VERSION_ID_STAGING";
+  if (value === "TEST") return "SCHEMA_VERSION_ID_TEST";
   if (value === "LOCAL") return "SCHEMA_VERSION_ID_LOCAL";
   return "";
 }
@@ -571,8 +571,8 @@ function getEnvWiseApiKey(sheet) {
   const value = sheet.getRange("BB6").getValue();
   if (value === "DEV") {
     return "EXTERNAL_DEV_API_KEY";
-  } else if (value === "STAGING") {
-    return "EXTERNAL_STAGE_API_KEY";
+  } else if (value === "TEST") {
+    return "EXTERNAL_TEST_API_KEY";
   } else if (value === "LOCAL") {
     return "EXTERNAL_LOCAL_API_KEY";
   }
@@ -583,8 +583,8 @@ function getEnvWiseHost(sheet) {
   const value = sheet.getRange("BB6").getValue();
   if (value === "DEV") {
     return "SC_DEV_HOST";
-  } else if (value === "STAGING") {
-    return "SC_STAGE_HOST";
+  } else if (value === "TEST") {
+    return "SC_TEST_HOST";
   } else if (value === "LOCAL") {
     return "SC_LOCAL_HOST";
   }
