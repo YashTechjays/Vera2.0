@@ -1,6 +1,11 @@
 """A supervisor takeover silences the agent permanently — it never resumes."""
 
-from agent_worker.intervention import AgentTakeoverController, intervener_present
+from agent_worker.intervention import (
+    AgentTakeoverController,
+    TakeoverState,
+    intervener_present,
+    takeover_engaged,
+)
 
 
 class _FakeAudio:
@@ -16,6 +21,7 @@ class _FakeSession:
         self.interrupts = 0
         self.input = _FakeAudio()
         self.output = _FakeAudio()
+        self.userdata = TakeoverState()
 
     def interrupt(self, *, force: bool = False) -> object:
         assert force is True
@@ -39,6 +45,18 @@ def test_engage_silences_the_agent_once() -> None:
     assert session.interrupts == 1
     assert session.input.calls == [False]
     assert session.output.calls == [False]
+
+
+def test_engage_publishes_the_flag_agents_read() -> None:
+    """The session's userdata is the single source of truth — the agents' guards and the
+    controller must never disagree (they read the same latch)."""
+    session = _FakeSession()
+    ctl = AgentTakeoverController(session)
+    assert takeover_engaged(session) is False
+
+    ctl.engage()
+    assert takeover_engaged(session) is True
+    assert ctl.engaged is takeover_engaged(session)
 
 
 def test_engage_is_idempotent_and_never_resumes() -> None:

@@ -6,6 +6,7 @@ never un-muted (leaving it un-mutable would revive the bot if the supervisor's t
 
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Protocol
 
 from vera_core.observability.correlation import PARTICIPANT_MODE_INTERVENER
@@ -13,15 +14,36 @@ from vera_core.observability.correlation import PARTICIPANT_MODE_INTERVENER
 logger = logging.getLogger("agent_worker")
 
 
+@dataclass(slots=True)
+class TakeoverState:
+    """One-way takeover latch (never reset), carried in AgentSession.userdata — the only
+    object both the plan runtime (built before the session exists) and the takeover
+    controller (created after it starts) can reach, via Agent.session.
+    """
+
+    engaged: bool = False
+
+
 def intervener_present(mode_attrs: Iterable[str | None]) -> bool:
     return any(mode == PARTICIPANT_MODE_INTERVENER for mode in mode_attrs)
+
+
+class _TakeoverSession(Protocol):
+    @property
+    def userdata(self) -> TakeoverState: ...
+
+
+def takeover_engaged(session: _TakeoverSession) -> bool:
+    """The guard every agent checks before speaking or hanging up. Protocol-typed so the
+    bool stays a bool for mypy (Agent.session is AgentSession[Any])."""
+    return session.userdata.engaged
 
 
 class _AudioToggle(Protocol):
     def set_audio_enabled(self, enable: bool) -> None: ...
 
 
-class _SilenceableSession(Protocol):
+class _SilenceableSession(_TakeoverSession, Protocol):
     def interrupt(self, *, force: bool = ...) -> object: ...
 
     @property
@@ -42,17 +64,17 @@ class AgentTakeoverController:
     ) -> None:
         self._session = session
         self._on_engage = on_engage
-        self._engaged = False
 
     @property
     def engaged(self) -> bool:
-        return self._engaged
+        return takeover_engaged(self._session)
 
     def engage(self) -> None:
         """Silence the agent, once. Safe to call on every room event."""
-        if self._engaged:
+        if self.engaged:
             return
-        self._engaged = True
+        # Set before interrupting: a tool call already in flight must see it as true.
+        self._session.userdata.engaged = True
         self._session.interrupt(force=True)
         self._session.input.set_audio_enabled(False)
         self._session.output.set_audio_enabled(False)

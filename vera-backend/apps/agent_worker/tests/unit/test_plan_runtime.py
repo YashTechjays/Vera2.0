@@ -11,6 +11,7 @@ from conftest import chat_ctx_texts
 from livekit.agents import Agent
 from livekit.agents.llm import FunctionTool
 
+from agent_worker.intervention import TakeoverState
 from agent_worker.plan_runtime import (
     WRAP_UP_TASK_KEY,
     PlanRunController,
@@ -85,6 +86,9 @@ def _tool(agent: Agent, name: str) -> FunctionTool:
 
 
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
+    # Real latch, not a MagicMock attribute — a bare mock reads truthy and trips the
+    # takeover guards. Takeover behaviour has its own suite (test_takeover_interlock).
+    mock_session.userdata = TakeoverState()
     return patch.object(type(agent), "session", new=property(lambda self: mock_session))
 
 

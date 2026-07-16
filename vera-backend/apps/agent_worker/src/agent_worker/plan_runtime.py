@@ -29,6 +29,7 @@ from livekit.agents import Agent, llm
 
 from agent_worker.agent import VeraAgent
 from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import takeover_engaged
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.conditions import evaluate
@@ -105,7 +106,11 @@ class PlanTaskAgent(Agent):
             "questions that are still answerable."
         ),
     )
-    async def _task_complete(self) -> Agent:
+    async def _task_complete(self) -> Agent | str:
+        if takeover_engaged(self.session):
+            # A plain str is a tool result — no handoff, so the plan parks here. Returning
+            # `self` would re-swap and re-fire on_enter, speaking the intro again.
+            return "A human supervisor has taken over this call. Stay silent."
         if self._task.outro:
             # Exit speech first; LiveKit drains queued speech through the swap.
             self.session.say(self._task.outro)
@@ -134,7 +139,10 @@ class WrapUpAgent(VeraAgent):
         )
 
     async def on_enter(self) -> None:
-        self._controller.note_wrap_up_entered()
+        self._controller.note_wrap_up_entered()  # the cursor still records where we parked
+        if takeover_engaged(self.session):
+            logger.info("wrap-up entered under supervisor takeover; skipping the goodbye")
+            return
         self.session.generate_reply(instructions=_WRAP_UP_DIRECTIVE)
 
 

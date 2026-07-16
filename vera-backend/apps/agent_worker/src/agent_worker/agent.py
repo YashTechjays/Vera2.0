@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from livekit.agents import Agent, llm
 
+from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_agent import IvrNavigatorAgent
 from agent_worker.ivr_prompt import parse_agent_context, parse_ivr_playbook
 from agent_worker.prompt import build_voice_lab_instructions, resolve_voice_lab_greeting
@@ -53,6 +54,13 @@ class VeraAgent(Agent):
     )
     async def _end_call(self) -> str:
         """Drain pending TTS audio then shut down the session."""
+        if takeover_engaged(self.session):
+            # Reachable via a tool call already in flight when engage() interrupted us.
+            logger.info("end_call refused: supervisor has taken over the call")
+            return (
+                "This call has been taken over by a human supervisor and will not be "
+                "ended. Do not speak and do not call any more tools."
+            )
         self.session.shutdown(drain=True)
         return "Call ended."
 

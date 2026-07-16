@@ -24,6 +24,7 @@ from livekit.agents import (
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
 from vera_core.schemas import IvrPlaybookConfig
@@ -176,6 +177,9 @@ class IvrNavigatorAgent(Agent):
     def _end_navigation(self, reason: str) -> None:
         """Hang up the call cleanly (drain pending audio), to bail out of an unresolvable IVR
         loop rather than thrash forever. Mirrors VeraAgent's end_call."""
+        if takeover_engaged(self.session):
+            logger.info("IVR end-navigation refused: supervisor has taken over the call")
+            return
         logger.warning("IVR navigator: ending call — %s", reason)
         self.session.shutdown(drain=True)
 

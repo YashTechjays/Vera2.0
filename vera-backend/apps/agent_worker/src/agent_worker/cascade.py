@@ -22,6 +22,8 @@ from livekit.agents import AgentSession
 from livekit.plugins import cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.english import EnglishModel
 
+from agent_worker.intervention import TakeoverState
+
 _VAD_SILENCE_DURATION = 0.4
 
 
@@ -56,8 +58,11 @@ def stt_kwargs(key_terms: list[str] | None) -> dict[str, Any]:
 
 def build_session(
     vad: Any | None = None, *, key_terms: list[str] | None = None
-) -> AgentSession[None]:
+) -> AgentSession[TakeoverState]:
+    # userdata carries the takeover latch: it must exist from session construction —
+    # agents read it before speaking/hanging up, and LiveKit raises on unset userdata.
     return AgentSession(
+        userdata=TakeoverState(),
         stt=deepgram.STTv2(
             model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms)
         ),
