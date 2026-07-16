@@ -176,6 +176,10 @@ class Settings(BaseSettings):
     def is_local(self) -> bool:
         return self.env == "local"
 
+    @property
+    def call_plan_ttl_seconds(self) -> int:
+        return self.call_max_duration_seconds + 3600
+
 
 @lru_cache
 def get_settings() -> Settings:

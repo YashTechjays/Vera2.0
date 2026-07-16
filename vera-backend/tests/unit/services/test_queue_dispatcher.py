@@ -11,9 +11,11 @@ PatientForm-without / InsuranceProvider) rather than assuming a fixed call
 order — this survives try_dispatch's queries being reordered.
 """
 
+import json
 import logging
 from collections import deque
 from datetime import time
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -22,19 +24,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
+from vera_core.forms.call_plan import CallPlan
+from vera_core.forms.call_plan import compile_call_plan as real_compile_call_plan
+from vera_core.forms.prompting import FACTORY_SESSION
 from vera_core.models import (
     Call,
     CallEvent,
     FieldAnswer,
     InsuranceProvider,
     PatientForm,
+    PromptVersion,
     SchemaVersion,
     Tenant,
 )
 from vera_core.models.enums import CallStatus, FormStatus
+from vera_core.plan_store import CallPlanService
 from vera_core.services import queue_dispatcher
 from vera_core.services.queue_dispatcher import is_within_working_hours, try_dispatch
 from vera_core.telephony import OutboundDialError
+
+IBV_SCHEMA_JSON: dict[str, Any] = json.loads(
+    (
+        Path(__file__).resolve().parents[3] / "data" / "form_schemas" / "ibv_form_standard_v2.json"
+    ).read_text(encoding="utf-8")
+)
 
 
 class TestIsWithinWorkingHours:
@@ -140,12 +153,19 @@ class FakeSession:
         candidates: list[PatientForm] | None = None,
         expired: list[PatientForm] | None = None,
         providers: dict[str, InsuranceProvider] | None = None,
+        schema_version: SchemaVersion | None = None,
+        prompt_version: PromptVersion | None = None,
+        field_answers: dict[Any, list[tuple[str, Any]]] | None = None,
     ) -> None:
         self.tenant = tenant
         self.active_count = active_count
         self.candidates = candidates or []
         self.expired = expired or []
         self.providers = providers or {}
+        self.schema_version = schema_version
+        self.prompt_version = prompt_version
+        # form_id -> [(field_path, stored value)] current field_answer rows
+        self.field_answers = field_answers or {}
         self.added: list[Any] = []
 
     async def execute(self, stmt: Any) -> _Result:
@@ -161,12 +181,23 @@ class FakeSession:
         if entity is PatientForm:
             rows = self.candidates if stmt._limit_clause is not None else self.expired
             return _Result(rows=rows)
-        # add_agent_context_metadata's schema load: None schema_json → it attaches no context
-        # (these tests don't exercise the agent-context path), so the field-answer read never runs.
+        # Serves BOTH the plan-staging reads and add_agent_context_metadata's schema
+        # load: the defaults (schema_version=None, field_answers={}) mean tests that
+        # exercise neither path attach no plan and no context.
         if entity is SchemaVersion:
-            return _Result(scalar=None)
+            # Two query shapes share this entity: the plan-template read selects the
+            # full row (name == "SchemaVersion"); the agent-context read selects only
+            # the schema_json column (name == "schema_json").
+            if stmt.column_descriptions[0].get("name") == "schema_json":
+                return _Result(
+                    scalar=self.schema_version.schema_json if self.schema_version else None
+                )
+            return _Result(scalar=self.schema_version)
+        if entity is PromptVersion:
+            return _Result(scalar=self.prompt_version)
         if entity is FieldAnswer:
-            return _Result(rows=[])
+            form_id = _bound_value(stmt, "form_id")
+            return _Result(rows=self.field_answers.get(form_id, []))
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
 
@@ -266,7 +297,13 @@ def _stub_credentials(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, An
     return creds
 
 
-async def _dispatch(session: FakeSession, tenant_id: Any, livekit: FakeLiveKit) -> int:
+async def _dispatch(
+    session: FakeSession,
+    tenant_id: Any,
+    livekit: FakeLiveKit,
+    *,
+    plan_service: Any = None,
+) -> int:
     """try_dispatch(), casting the fakes to their real types — mypy-strict clean,
     mirroring the `cast(AsyncSession, fake)` convention used elsewhere in the
     unit-test suite (e.g. tests/unit/control_plane/test_queueability.py)."""
@@ -275,6 +312,7 @@ async def _dispatch(session: FakeSession, tenant_id: Any, livekit: FakeLiveKit) 
         tenant_id,
         livekit,
         cast(KeyManagementService, object()),
+        plan_service=cast(CallPlanService | None, plan_service),
     )
 
 
@@ -435,3 +473,219 @@ async def test_pacing_applies_to_failed_dial_attempts(
     # But pacing should still have occurred between attempts, so sleeps == [1.0].
     assert dispatched == 1
     assert list(sleeps) == [1.0]
+
+
+# ---------------------------------------------------------------------------
+# Call-plan staging: compile + store the CallPlan at dispatch, stamp lineage.
+# ---------------------------------------------------------------------------
+
+
+class FakeCallPlanService:
+    """Records plan puts; `fail=True` simulates a Redis outage."""
+
+    def __init__(self) -> None:
+        self.puts: list[tuple[str, CallPlan]] = []
+        self.fail = False
+
+    async def put(self, room_name: str, plan: CallPlan) -> None:
+        if self.fail:
+            raise RuntimeError("redis down")
+        self.puts.append((room_name, plan))
+
+
+def _schema_version(schema_json: dict[str, Any]) -> SchemaVersion:
+    return SchemaVersion(
+        id=uuid7(),
+        schema_id=uuid7(),
+        version=1,
+        schema_json=schema_json,
+        status="published",
+    )
+
+
+def _prompt_version(sv: SchemaVersion) -> PromptVersion:
+    return PromptVersion(
+        id=uuid7(),
+        prompt_id=uuid7(),
+        schema_version_id=sv.id,
+        composite_json={
+            "kind": "prompt_document",
+            "session": {"persona": "P.", "goal": "G.", "base_instructions": "B."},
+        },
+        status="published",
+    )
+
+
+class TestCallPlanStaging:
+    async def test_published_prompt_version_stamps_lineage_and_stages_plan(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        metadata = livekit.dispatch_metadata[0]
+        assert metadata is not None and metadata["use_call_plan"] is True
+        room_name, plan = plans.puts[0]
+        assert room_name == livekit.created[0]
+        assert plan.schema_version_id == sv.id
+        assert plan.prompt_version_id == pv.id
+        assert plan.session.persona == "P."  # operator document, not factory
+        assert session.calls_added()[0].prompt_version_id == pv.id
+
+    async def test_no_published_prompt_version_falls_back_to_factory_session(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(tenant=tenant, candidates=[form], schema_version=sv)
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        metadata = livekit.dispatch_metadata[0]
+        assert metadata is not None and metadata["use_call_plan"] is True
+        _room, plan = plans.puts[0]
+        assert plan.prompt_version_id is None
+        assert plan.session.persona == FACTORY_SESSION.persona
+        assert session.calls_added()[0].prompt_version_id is None
+
+    async def test_v1_schema_is_skipped_and_marked_call_failed(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        # Plan-only fail-fast: a v1 schema compiles no plan, so the worker can't
+        # serve it — the form is NOT dispatched. It is marked CALL_FAILED (failed
+        # worklist) instead of looping IN_QUEUE; no call placed, no retry spent.
+        tenant = _tenant()
+        sv = _schema_version({"patient_information": {"required": []}})  # legacy v1
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(tenant=tenant, candidates=[form], schema_version=sv)
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 0  # no plan-less call placed
+        assert livekit.dispatch_metadata == []
+        assert plans.puts == []
+        assert form.status == FormStatus.CALL_FAILED.value
+        assert form.retry_count == 0  # not a retry — no budget spent
+
+    async def test_plan_store_failure_aborts_dispatch(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        # Fail-fast: a staging (Redis) failure aborts the dispatch — the Call is
+        # rolled back and the form reverts to IN_QUEUE; no call is placed.
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+        plans.fail = True
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 0  # the call does NOT go out
+        assert livekit.dispatch_metadata == []  # staging fails before create_call_room
+        assert form.status == FormStatus.IN_QUEUE.value  # reverted for retry
+
+    async def test_no_plan_service_keeps_legacy_metadata(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        tenant = _tenant()
+        form = _form(tenant.id)
+        session = FakeSession(tenant=tenant, candidates=[form])
+        livekit = FakeLiveKit()
+
+        dispatched = await _dispatch(session, tenant.id, livekit)
+
+        assert dispatched == 1
+        metadata = livekit.dispatch_metadata[0]
+        assert metadata is not None and "use_call_plan" not in metadata
+
+    async def test_prefill_values_are_fused_into_the_staged_plan(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        patient_name_path = IBV_SCHEMA_JSON["system_fields"]["patient_name"]
+        session = FakeSession(
+            tenant=tenant,
+            candidates=[form],
+            schema_version=sv,
+            field_answers={form.id: [(patient_name_path, {"value": "Jane Doe"})]},
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        _room, plan = plans.puts[0]
+        assert plan.prefilled == {patient_name_path: "Jane Doe"}
+        intro = next(t for t in plan.tasks if t.task_key == "introduction").intro
+        assert intro is not None and "Jane Doe" in intro
+        assert "{{patient_name}}" not in intro
+        assert plan.known_information is not None
+        assert "Patient Name: Jane Doe" in plan.known_information
+
+    async def test_template_compiles_once_per_schema_but_fuses_per_form(
+        self, _stub_credentials: dict[str, dict[str, Any] | None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tenant = _tenant(max_agents_per_va=5)
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        form_a = _form(tenant.id, schema_version_id=sv.id)
+        form_b = _form(tenant.id, schema_version_id=sv.id)
+        patient_name_path = IBV_SCHEMA_JSON["system_fields"]["patient_name"]
+        session = FakeSession(
+            tenant=tenant,
+            candidates=[form_a, form_b],
+            schema_version=sv,
+            field_answers={
+                form_a.id: [(patient_name_path, {"value": "Jane Doe"})],
+                form_b.id: [(patient_name_path, {"value": "John Roe"})],
+            },
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        compile_calls = {"count": 0}
+
+        def counting_compile(*args: Any, **kwargs: Any) -> Any:
+            compile_calls["count"] += 1
+            return real_compile_call_plan(*args, **kwargs)
+
+        monkeypatch.setattr(queue_dispatcher, "compile_call_plan", counting_compile)
+        monkeypatch.setattr(queue_dispatcher.asyncio, "sleep", _noop_sleep)  # type: ignore[attr-defined]
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 2
+        assert compile_calls["count"] == 1  # template memoized per schema version
+        fused_names = {
+            next(t for t in plan.tasks if t.task_key == "introduction").intro or ""
+            for _room, plan in plans.puts
+        }
+        assert any("Jane Doe" in intro for intro in fused_names)
+        assert any("John Roe" in intro for intro in fused_names)
+
+
+async def _noop_sleep(seconds: float) -> None:
+    return None

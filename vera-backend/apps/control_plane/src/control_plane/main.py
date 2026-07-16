@@ -34,6 +34,7 @@ from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_se
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.observability.otel import configure_observability
+from vera_core.plan_store import CallPlanService, RedisCallPlanStore
 from vera_core.redis import create_redis
 from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
@@ -71,6 +72,7 @@ def create_app(
     secrets: SecretProvider | None = None,
     transcript_service: TranscriptService | None = None,
     call_stream_service: CallStreamService | None = None,
+    call_plan_service: CallPlanService | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -140,6 +142,12 @@ def create_app(
                 )
             )
         app.state.call_stream_service = _call_stream_service
+        # Call-plan staging (dispatch writes, worker reads). One-shot SET/GET —
+        # no tailing/blocking reads — so the shared pool is fine.
+        _call_plans = call_plan_service or CallPlanService(
+            RedisCallPlanStore(_redis(), ttl_seconds=settings.call_plan_ttl_seconds)
+        )
+        app.state.call_plans = _call_plans
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)
@@ -168,6 +176,7 @@ def create_app(
                 reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
                 form_auto_retry_enabled=settings.form_auto_retry_enabled,
+                call_plans=_call_plans,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
@@ -186,6 +195,7 @@ def create_app(
                 stuck_grace_s=settings.call_stuck_grace_seconds,
                 max_call_duration_s=settings.call_max_duration_seconds,
                 form_auto_retry_enabled=settings.form_auto_retry_enabled,
+                call_plans=_call_plans,
             )
             sweeper_task = asyncio.create_task(sweeper.run())
             sweeper_task.add_done_callback(_log_task_exit("pipeline sweeper"))

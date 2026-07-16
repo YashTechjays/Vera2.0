@@ -7,10 +7,13 @@ conditions the dispatcher already handles at dial time (working hours, concurren
 are NOT re-checked here.
 """
 
-import re
 from typing import TYPE_CHECKING
 
 from control_plane.exceptions import CustomAPIException, DefaultExceptionCode
+
+# Single source of truth in vera_core.forms.intake. Used locally below and re-exported
+# (explicit `as`) for api/v1/voice_lab.py, which imports E164_RE from this module.
+from vera_core.forms.intake import E164_RE as E164_RE
 from vera_core.integrations.credentials import get_integration_credentials
 
 if TYPE_CHECKING:
@@ -18,9 +21,6 @@ if TYPE_CHECKING:
 
     from vera_core.config.kms import KeyManagementService
     from vera_core.models import PatientForm
-
-# E.164: a leading + and 1-15 digits, first digit non-zero. Shared with voice_lab.
-E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 
 TRUNK_INTEGRATION = "livekit_outbound_trunk_id"
 

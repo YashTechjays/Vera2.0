@@ -32,3 +32,17 @@ def test_cascade_latency_knobs() -> None:
     assert turn_handling["endpointing"]["min_delay"] == 0.3
     assert turn_handling["endpointing"]["max_delay"] == 0.6
     assert turn_handling["preemptive_generation"]["enabled"] is True
+
+
+def test_stt_kwargs_carry_plan_key_terms() -> None:
+    # The CallPlan's stt_key_terms feed Deepgram keyterm prompting verbatim.
+    from agent_worker.cascade import stt_kwargs
+
+    assert stt_kwargs(["Cigna", "copay"]) == {"keyterm": ["Cigna", "copay"]}
+
+
+def test_stt_kwargs_empty_without_key_terms() -> None:
+    from agent_worker.cascade import stt_kwargs
+
+    assert stt_kwargs(None) == {}
+    assert stt_kwargs([]) == {}

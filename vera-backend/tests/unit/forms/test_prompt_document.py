@@ -100,6 +100,14 @@ class TestContentValidation:
         )
         assert validate_prompt_document(doc, schema_doc()) == []
 
+    def test_reserved_runtime_tokens_are_exempt(self) -> None:
+        # {{value}} and {{current_year}} are resolved by the call-plan fuse, not
+        # field lookup — the validator must accept what the runtime hydrates.
+        doc = prompt_doc(
+            task_overrides={"main": {"intro": "It is {{current_year}}; I have {{value}}."}}
+        )
+        assert validate_prompt_document(doc, schema_doc()) == []
+
     def test_unknown_task_key(self) -> None:
         doc = prompt_doc(task_overrides={"ghost": {"prompt": "x"}})
         assert any("unknown task_key" in e for e in validate_prompt_document(doc, schema_doc()))

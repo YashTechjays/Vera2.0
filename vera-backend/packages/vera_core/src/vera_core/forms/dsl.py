@@ -29,6 +29,12 @@ KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # {{token}} placeholders in task-level text; token = a system_fields key or the
 # root-anchored path of a context-role leaf (2026-07-08 spec §4).
 PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
+# Reserved runtime tokens — exempt from placeholder-resolution validation and
+# handled by the call-plan fuse, not by field lookup: {{value}} is the agent's
+# recorded-value sentinel (kept verbatim in prompt text); {{current_year}} is
+# hydrated at fuse time. Every validator and the resolver consume THIS set so
+# they can never disagree about what counts as reserved.
+RESERVED_PLACEHOLDER_TOKENS: frozenset[str] = frozenset({"value", "current_year"})
 # A complete {{…}} pair whose innards did NOT parse as a token above — e.g.
 # "{{ member_id }}" (inner whitespace) or "{{patient-name}}" (bad chars). These
 # are operator typos that would otherwise reach the spoken prompt as literal
@@ -441,11 +447,6 @@ class FormSchemaDoc(_Model):
     # own `default` is still allowed to be absent from the payload (it counts as
     # filled either way).
     promoted_fields: PromotedFields
-    # Root-anchored leaf paths (sections.<key>…) that the platform treats as
-    # prerequisite fields for a call (e.g. appointment_date/type, callback_number).
-    # Empty list → omitted from the compiled artifact (exclude_defaults=True).
-    # Drives distinct UI color coding in the IBV renderer.
-    prerequisite_fields: list[str] = Field(default_factory=list)
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.
     stt_key_terms: list[str] | None = None
@@ -477,6 +478,12 @@ class FormSchemaDoc(_Model):
     def group_paths(self) -> set[str]:
         """Root-anchored paths of every group node."""
         return {path for path, field in self._iter_fields() if isinstance(field, Group)}
+
+    def section_to_task(self) -> dict[str, str]:
+        """section key -> owning task_key. Collect sections appear exactly once
+        (validated below); context/ui_only sections are absent. The prompt
+        renderer and the call-plan compiler both route leaves through this map."""
+        return {s: t.task_key for t in self.tasks for s in t.sections}
 
     def collection_paths(self, section_keys: list[str] | None = None) -> list[str]:
         """Voice-agent collection targets: role in (ask, confirm), optionally per section."""
@@ -606,7 +613,11 @@ class FormSchemaDoc(_Model):
             for attr in ("intro", "outro", "prompt"):
                 text: str | None = getattr(task, attr)
                 for token in PLACEHOLDER_RE.findall(text or ""):
-                    if token not in (self.system_fields or {}) and token not in context_paths:
+                    if (
+                        token not in RESERVED_PLACEHOLDER_TOKENS
+                        and token not in (self.system_fields or {})
+                        and token not in context_paths
+                    ):
                         errors.append(
                             f"task {task.task_key}.{attr}: unknown placeholder "
                             f"{{{{{token}}}}} (not a system_fields key or context-leaf path)"
@@ -677,11 +688,6 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
-
-        # prerequisite fields — every path must resolve to a defined leaf
-        for i, path in enumerate(self.prerequisite_fields):
-            if path not in leaves:
-                errors.append(f"prerequisite_fields[{i}]: {path!r} does not resolve to a leaf")
 
         # promoted fields — patient_form columns re-derived from the current answer at
         # dispute-resolve time too (not just intake). Column names are enforced by the
