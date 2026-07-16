@@ -22,8 +22,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from vera_core.audit import AuditSink
-    from vera_core.services.recordings import RecordingConfig
     from vera_core.plan_store import CallPlanService
+    from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger(__name__)
 

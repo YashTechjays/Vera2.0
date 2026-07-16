@@ -63,6 +63,7 @@ async def test_forwards_plan_service_to_try_dispatch(monkeypatch: Any) -> None:
         kms: Any,
         *,
         audit: Any = None,
+        recording: Any = None,
         plan_service: Any = None,
     ) -> int:
         seen["plan_service"] = plan_service
