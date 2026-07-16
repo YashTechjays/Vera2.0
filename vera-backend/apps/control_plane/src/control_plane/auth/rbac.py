@@ -30,7 +30,7 @@ from control_plane.deps import (
     tenant_scoped_session,
 )
 from control_plane.request_context import current_request_id
-from vera_core.audit import AuditRecord, AuthAuditSink, emit_auth_event
+from vera_core.audit import AuditRecord, AuditSink, AuthAuditSink, emit_auth_event
 from vera_core.models import AppUser, Permission, RolePermission, UserRole
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AuthEvent
@@ -95,6 +95,38 @@ def get_resolver(request: Request) -> PermissionResolver:
     return resolver
 
 
+async def emit_authz_audit(
+    audit: AuditSink,
+    request: Request,
+    *,
+    tenant_id: UUID,
+    user_id: UUID | None,
+    actor_label: str,
+    permission: str,
+    allowed: bool,
+    scope: ResourceScope = ResourceScope.TENANT,
+) -> None:
+    """Standard endpoint authz allow/deny audit — the shape require() writes, so an
+    endpoint that checks a permission itself doesn't drop reason / elevation_session_id."""
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=user_id,
+            actor_label=actor_label,
+            event_type=AuditEvent.AUTHZ_ALLOW.value if allowed else AuditEvent.AUTHZ_DENY.value,
+            resource_type="endpoint",
+            resource_id=request.url.path,
+            permission_key=permission,
+            decision="allow" if allowed else "deny",
+            reason="" if allowed else ("unknown user" if user_id is None else "not granted"),
+            request_id=current_request_id(request),
+            detail={"scope": scope.value},
+            elevation_session_id=current_elevation(request),
+        )
+    )
+
+
 def require(permission: str, scope: ResourceScope = ResourceScope.TENANT) -> Any:
     """Dependency factory: 403 unless the caller holds `permission` at `scope`
     in the tenant-context-resolved tenant. Audits allow AND deny."""
@@ -110,26 +142,15 @@ def require(permission: str, scope: ResourceScope = ResourceScope.TENANT) -> Any
             session, tenant_id, identity.user_id
         )
         allowed = permission in permissions
-        await get_audit(request).emit(
-            AuditRecord(
-                tenant_id=tenant_id,
-                actor_type=ActorType.USER,
-                actor_user_id=user_id,
-                actor_label=identity.email or identity.subject,
-                event_type=(
-                    AuditEvent.AUTHZ_ALLOW.value if allowed else AuditEvent.AUTHZ_DENY.value
-                ),
-                resource_type="endpoint",
-                resource_id=request.url.path,
-                permission_key=permission,
-                decision="allow" if allowed else "deny",
-                reason="" if allowed else ("unknown user" if user_id is None else "not granted"),
-                request_id=current_request_id(request),
-                detail={"scope": scope.value},
-                # Links an elevated SUPER_ADMIN's access back to its grant; None for
-                # an ordinary tenant request.
-                elevation_session_id=current_elevation(request),
-            )
+        await emit_authz_audit(
+            get_audit(request),
+            request,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            actor_label=identity.email or identity.subject,
+            permission=permission,
+            allowed=allowed,
+            scope=scope,
         )
         if not allowed:
             raise HTTPException(

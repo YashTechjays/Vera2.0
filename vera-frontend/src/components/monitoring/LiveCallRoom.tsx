@@ -142,9 +142,13 @@ function MicToggle({ canSpeak }: { canSpeak: boolean }) {
 function RoomView({
   microphone,
   onStatus,
+  ended,
+  onReconnect,
 }: {
   microphone: boolean
   onStatus?: (status: RoomStatus) => void
+  ended: boolean
+  onReconnect: () => void
 }) {
   const state = useConnectionState()
   const participants = useParticipants()
@@ -157,6 +161,8 @@ function RoomView({
   const phase = connectionPhase(state, everConnected)
   const otherIntervener = otherIntervenerPresent(likes)
   const supervisorLabel = intervenerLabel(likes)
+  // Our connection dropped, but the call itself isn't over (SSE, via `ended`) — offer a rejoin.
+  const connectionLost = phase === "ended" && !ended
 
   useEffect(() => {
     onStatus?.({ phase, otherIntervener, intervenerLabel: supervisorLabel })
@@ -174,6 +180,14 @@ function RoomView({
           <MicToggle canSpeak={microphone} />
         </div>
       </div>
+      {connectionLost && (
+        <div className="flex items-center justify-between gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          <span>Connection lost — the call may still be live.</span>
+          <button onClick={onReconnect} className="font-medium underline">
+            Reconnect
+          </button>
+        </div>
+      )}
       {isWaitingForCall(state, likes) && (
         <p className="text-muted-foreground">Waiting for the call…</p>
       )}
@@ -224,7 +238,7 @@ export function LiveCallRoom({
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [micFailed, setMicFailed] = useState(false)
+  const [reconnectNonce, setReconnectNonce] = useState(0)
 
   useEffect(() => {
     if (ended) return
@@ -246,7 +260,7 @@ export function LiveCallRoom({
     }
     // onJoinFailed is intentionally not a dep: modals pass a fresh closure each render, which would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callId, microphone, ended])
+  }, [callId, microphone, ended, reconnectNonce])
 
   if (ended) {
     return (
@@ -266,27 +280,30 @@ export function LiveCallRoom({
       </div>
     )
   }
-  // Publish the mic only when intervening AND the device is available.
-  const micActive = microphone && !micFailed
+  // While intervening, a blocked mic or connect error would leave a dead panel with the
+  // agent already silenced and the modal close-locked — fall back to listen-only instead.
+  const handleRoomError = (e: unknown) => {
+    if (microphone) onJoinFailed?.(e)
+    else setError(e instanceof Error ? e.message : "Call connection failed.")
+  }
+  const reconnect = () => {
+    setError(null)
+    setJoin(null)
+    setReconnectNonce((n) => n + 1)
+  }
   return (
     <LiveKitRoom
       serverUrl={join.url}
       token={join.token}
       connect
-      audio={micActive}
+      audio={microphone}
       video={false}
-      // A blocked mic must not kill the panel — fall back to listen-only.
-      onMediaDeviceFailure={() => setMicFailed(true)}
-      onError={(e) => setError(e.message)}
+      onMediaDeviceFailure={() => handleRoomError(new Error("microphone unavailable"))}
+      onError={handleRoomError}
       className="flex flex-1 flex-col"
     >
-      {micFailed && (
-        <p className="px-4 pt-3 text-xs text-amber-600">
-          Microphone unavailable — listening only.
-        </p>
-      )}
       <LiveActivityBeacon />
-      <RoomView microphone={micActive} onStatus={onStatus} />
+      <RoomView microphone={microphone} onStatus={onStatus} ended={ended} onReconnect={reconnect} />
     </LiveKitRoom>
   )
 }

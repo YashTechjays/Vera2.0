@@ -9,7 +9,10 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from control_plane.api.v1.calls import _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S
+from control_plane.api.v1.calls import (
+    _INTERVENE_CONNECT_GRACE,
+    _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S,
+)
 from tests.integration.control_plane.conftest import (
     FakeLiveKit,
     RBACWorld,
@@ -178,6 +181,7 @@ async def test_join_token_returns_room_scoped_token(
         headers=_auth(rbac_world.admin_token),
     )
     assert tok.status_code == 200, tok.text
+    assert tok.headers["cache-control"] == "no-store"  # token + email, never cache
     body = tok.json()["data"]
     assert body["room_name"] == room
     assert body["token"].startswith("faketoken:")
@@ -1089,11 +1093,12 @@ async def test_intervene_claims_lock_and_writes_intervention_event(
     assert events[0].type == "takeover"
     assert events[0].supervisor_id == rbac_world.supervisor_id
 
-    # The token carries the supervisor's email + intervener mode for the room UI.
+    # Token carries the supervisor's email + intervener mode; TTL capped at the grace.
     minted = fake_livekit.minted[-1]
     assert minted.can_publish is True
     assert minted.name == "supervisor@test.example"
     assert minted.attributes == {"vera.mode": "intervener"}
+    assert minted.ttl == _INTERVENE_CONNECT_GRACE
 
     rows = (
         await admin_session.execute(

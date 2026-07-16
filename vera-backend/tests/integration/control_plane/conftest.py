@@ -5,6 +5,7 @@ verify path (SessionVerifier -> tenant_guard -> require) without re-running the
 password/MFA dance, which has its own tests."""
 
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from datetime import timedelta
 from typing import NamedTuple
 from uuid import UUID
 
@@ -52,6 +53,7 @@ class MintedToken(NamedTuple):
     can_publish: bool
     name: str | None
     attributes: dict[str, str] | None
+    ttl: timedelta
 
 
 class FakeLiveKit(LiveKitGateway):
@@ -110,8 +112,9 @@ class FakeLiveKit(LiveKitGateway):
         can_publish: bool = True,
         name: str | None = None,
         attributes: dict[str, str] | None = None,
+        ttl: timedelta = timedelta(minutes=5),
     ) -> str:
-        self.minted.append(MintedToken(room_name, identity, can_publish, name, attributes))
+        self.minted.append(MintedToken(room_name, identity, can_publish, name, attributes, ttl))
         return f"faketoken:{room_name}:{identity}"
 
 

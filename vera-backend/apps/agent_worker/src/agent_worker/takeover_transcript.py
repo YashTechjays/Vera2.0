@@ -9,6 +9,7 @@ attribution (no diarization guessing).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
@@ -115,8 +116,9 @@ class TakeoverTranscriber:
             self._maybe_transcribe(track, participant)
 
     def _maybe_transcribe(self, track: rtc.Track, participant: rtc.RemoteParticipant) -> None:
-        if track.sid in self._tasks:
-            return
+        existing = self._tasks.get(track.sid)
+        if existing is not None and not existing.done():
+            return  # a finished task (resub with the same SID) is replaced below
         source = classify_source(
             participant.identity,
             participant.attributes.get(PARTICIPANT_MODE_ATTR),
@@ -139,6 +141,8 @@ class TakeoverTranscriber:
             logger.exception("takeover transcribe failed (source=%s)", source)
         finally:
             pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump  # let the pump stop before closing the stream under it
             await stream.aclose()
             await audio.aclose()
 

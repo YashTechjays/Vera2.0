@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   Maximize2,
   X,
@@ -76,9 +76,20 @@ export function LiveCallModal({
     sseMs: startedAtMs,
     startedAt: call?.startedAt,
   })
-  const callEnded = sseEnded || roomStatus?.phase === "ended"
+  // SSE is the sole source of truth for "call ended"; a room "ended" phase is the
+  // supervisor's own connection dropping (LiveCallRoom shows a connection-lost state).
+  const callEnded = sseEnded
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
+
+  // Tab close / refresh while intervening abandons the call with a silenced agent — warn.
+  // (The modal close-lock only covers Esc/overlay/X, not leaving the page.)
+  useEffect(() => {
+    if (mode !== "intervene") return
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault()
+    window.addEventListener("beforeunload", warn)
+    return () => window.removeEventListener("beforeunload", warn)
+  }, [mode])
 
   // Reset to listen-only on close; Radix routes Esc/overlay-click here too, so an intervener can't escape until the call ends.
   function handleOpenChange(next: boolean) {

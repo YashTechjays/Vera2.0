@@ -11,6 +11,9 @@ import {
 } from "@/lib/api/callEvents"
 
 type TurnStyle = { onRight: boolean; label: string; bubble: string }
+// The supervisor label is snapshotted when the turn arrives so a later intervener
+// (lock steal) can't retroactively relabel earlier turns.
+type StampedTurn = TranscriptTurn & { supervisorLabel: string }
 
 /** `source` (the actor) sets the side, label, and colour: the caller (rep) on the
  *  left, our side (Vera + supervisor) on the right. */
@@ -45,15 +48,17 @@ export function CallTranscript({
   /** Label for supervisor (takeover) turns — the intervener's email when known. */
   supervisorLabel?: string
 }) {
-  const [turns, setTurns] = useState<TranscriptTurn[]>([])
+  const [turns, setTurns] = useState<StampedTurn[]>([])
   const [error, setError] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  // The stream callback must always see the latest handler without re-opening
+  // The stream callback must always see the latest handler/label without re-opening
   // the SSE (the stream effect below deliberately depends on callId only).
   const onCallStatusRef = useRef(onCallStatus)
+  const supervisorLabelRef = useRef(supervisorLabel)
   useEffect(() => {
     onCallStatusRef.current = onCallStatus
-  }, [onCallStatus])
+    supervisorLabelRef.current = supervisorLabel
+  }, [onCallStatus, supervisorLabel])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -61,7 +66,8 @@ export function CallTranscript({
       signal: controller.signal,
       onEvent: (e) => {
         const turn = asTranscriptTurn(e)
-        if (turn) setTurns((prev) => [...prev, turn])
+        if (turn)
+          setTurns((prev) => [...prev, { ...turn, supervisorLabel: supervisorLabelRef.current }])
         const status = asCallStatus(e)
         if (status) onCallStatusRef.current?.(status, e.ts)
       },
@@ -95,7 +101,7 @@ export function CallTranscript({
     <div className="flex-1 space-y-2 overflow-y-auto p-4">
       {turns.map((t, i) => {
         // `role` decides the shape — speech renders as a bubble, a keypad press as an action chip.
-        const { onRight, label, bubble } = turnStyle(t.source, supervisorLabel)
+        const { onRight, label, bubble } = turnStyle(t.source, t.supervisorLabel)
         return (
           <div key={`${t.ts}-${i}`} className={cn("flex", onRight ? "justify-end" : "justify-start")}>
             {t.role === "dtmf" ? (

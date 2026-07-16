@@ -7,6 +7,7 @@ publish, and end.
 visibility 404s, and claims the call's single-intervener lock.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -27,7 +28,12 @@ from control_plane.api.v1.common import (
     emit_phi_read_audit,
 )
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.auth.rbac import (
+    PermissionResolver,
+    emit_authz_audit,
+    get_resolver,
+    require,
+)
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.deps import (
     current_identity,
@@ -125,6 +131,16 @@ def _supervisor_identity(user_id: UUID) -> str:
     return f"{SUPERVISOR_IDENTITY_PREFIX}{user_id}"
 
 
+async def _holder_still_present(livekit: LiveKit, room_name: str, holder: UUID) -> bool:
+    """Is the lock holder still in the room? On timeout, assume yes (don't steal)."""
+    try:
+        async with asyncio.timeout(_PRESENCE_PROBE_TIMEOUT):
+            identities = (await livekit.room_participant_identities(room_name)) or []
+    except TimeoutError:
+        return True
+    return _supervisor_identity(holder) in identities
+
+
 def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
     """Whether *user_id* must NOT see this call (→ the same 404 as a missing row,
     so a private call is never revealed by enumeration).
@@ -141,6 +157,8 @@ def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
 # a presence probe would wrongly call the lock stale. Inside this window a held
 # lock is refused outright; past it, the holder must be in the room or it's stolen.
 _INTERVENE_CONNECT_GRACE = timedelta(seconds=30)
+_LISTEN_TOKEN_TTL = timedelta(minutes=5)  # listen-only can't publish, no race
+_PRESENCE_PROBE_TIMEOUT = 3.0  # cap the LiveKit probe so it can't hold the row lock
 
 
 def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
@@ -169,6 +187,7 @@ def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSumma
 async def join_token(
     call_id: UUID,
     request: Request,
+    response: Response,
     tenant_id: TenantId,
     session: TenantSession,
     livekit: LiveKit,
@@ -177,6 +196,7 @@ async def join_token(
     intervene: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
+    response.headers["Cache-Control"] = "no-store"  # publish-capable JWT + email; never cache
     # Intervening claims the single-intervener lock — the row lock serializes
     # concurrent claims while the listen path stays lock-free.
     stmt = select(Call).where(Call.id == call_id)
@@ -195,23 +215,15 @@ async def join_token(
             session, tenant_id, caller.user_id
         )
         allowed = "calls:intervene" in permissions
-        # Endpoint-typed audit (like rbac.require) so the dedicated join rows below
-        # stay the only "call"-typed rows per join.
-        await audit.emit(
-            AuditRecord(
-                tenant_id=tenant_id,
-                actor_type=ActorType.USER,
-                actor_user_id=user_id,
-                actor_label=caller.email or caller.subject,
-                event_type=(
-                    AuditEvent.AUTHZ_ALLOW.value if allowed else AuditEvent.AUTHZ_DENY.value
-                ),
-                resource_type="endpoint",
-                resource_id=request.url.path,
-                permission_key="calls:intervene",
-                decision="allow" if allowed else "deny",
-                request_id=current_request_id(request),
-            )
+        # Same audit shape as rbac.require (carries reason + elevation_session_id).
+        await emit_authz_audit(
+            audit,
+            request,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            actor_label=caller.email or caller.subject,
+            permission="calls:intervene",
+            allowed=allowed,
         )
         if not allowed:
             raise CustomAPIException(
@@ -231,9 +243,7 @@ async def join_token(
                 inside_grace = (
                     claimed_at is not None and db_now - claimed_at < _INTERVENE_CONNECT_GRACE
                 )
-                if inside_grace or _supervisor_identity(holder) in (
-                    (await livekit.room_participant_identities(room_name)) or []
-                ):
+                if inside_grace or await _holder_still_present(livekit, room_name, holder):
                     raise ConflictError(
                         message="another supervisor is currently intervening on this call"
                     )
@@ -286,6 +296,8 @@ async def join_token(
                 PARTICIPANT_MODE_INTERVENER if intervene else PARTICIPANT_MODE_LISTENER
             )
         },
+        # Cap the intervene token at the grace so a stale token can't outlive a stolen lock.
+        ttl=_INTERVENE_CONNECT_GRACE if intervene else _LISTEN_TOKEN_TTL,
     )
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 

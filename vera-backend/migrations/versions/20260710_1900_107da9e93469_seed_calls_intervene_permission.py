@@ -15,7 +15,9 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _PERMISSION_CODE = "calls:intervene"
-_GRANTEE_ROLES = ("TENANT_ADMIN", "SUPERVISOR")
+# SUPER_ADMIN holds every permission (rbac_defaults) — grant it here too so a
+# migration-only DB matches seed.py.
+_GRANTEE_ROLES = ("SUPER_ADMIN", "TENANT_ADMIN", "SUPERVISOR")
 
 
 def upgrade() -> None:

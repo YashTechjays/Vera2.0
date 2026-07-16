@@ -178,17 +178,18 @@ class LiveKitGateway:
         can_publish: bool = True,
         name: str | None = None,
         attributes: dict[str, str] | None = None,
+        ttl: timedelta = timedelta(minutes=5),
     ) -> str:
-        # Short TTL: the token is used immediately; the SDK default (~6h) leaves a
-        # long replay window. can_publish=False is a server-side mute the client
-        # can't override. name/attributes are workforce identifiers only, never PHI.
+        # Short TTL vs the SDK default (~6h) replay window; the caller caps intervene
+        # tokens at the connect-grace. can_publish=False is a server-side mute the
+        # client can't override. name/attributes are workforce identifiers, never PHI.
         grants = api.VideoGrants(room_join=True, room=room_name, can_publish=can_publish)
         token = api.AccessToken(self._api_key, self._api_secret).with_identity(identity)
         if name is not None:
             token = token.with_name(name)
         if attributes:
             token = token.with_attributes(attributes)
-        return token.with_grants(grants).with_ttl(timedelta(minutes=5)).to_jwt()
+        return token.with_grants(grants).with_ttl(ttl).to_jwt()
 
 
 def build_livekit_gateway(settings: Settings, secrets: SecretProvider) -> LiveKitGateway:
