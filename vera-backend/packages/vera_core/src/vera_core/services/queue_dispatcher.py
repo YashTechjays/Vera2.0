@@ -311,19 +311,14 @@ async def try_dispatch(
             else None
         )
         # Fail fast (plan-only worker): a form whose plan can't be prepared can't be
-        # served, so drop it back out of the queue to its pre-enqueue status rather
-        # than looping it IN_QUEUE — an operator (or a schema fix) re-queues it, and
-        # a legacy-v1 schema (no compilable plan) never dispatches, by design. This
-        # is not a retry, so it spends no retry budget and clears enqueued_at.
+        # served, so mark it CALL_FAILED. An operator manually requeues (CALL_FAILED →
+        # IN_QUEUE); enqueued_at is left as-is (inert until then), matching the dial-
+        # failure path below.
         if plan_service is not None and staged_plan is None:
             logger.warning(
-                "dispatch: no usable call plan for form %s — reverting to READY_FOR_PROCESSING",
-                form.id,
+                "dispatch: no usable call plan for form %s — marking CALL_FAILED", form.id
             )
-            sm.transition(
-                form, FormStatus.READY_FOR_PROCESSING, tenant_max_retries=tenant.max_retries
-            )
-            form.enqueued_at = None
+            sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
             continue
 
         call_mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL

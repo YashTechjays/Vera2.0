@@ -19,11 +19,8 @@ from vera_core.models.enums import FormStatus
 # the form directly; it parks it in AI_PROCESSING for post-call resolution.
 ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE, FormStatus.EXCEPTION_REVIEW}),
-    # → READY_FOR_PROCESSING when the dispatcher can't prepare a call plan for a
-    #   queued form: it drops back out of the queue to its pre-enqueue status
-    #   (an operator / schema fix re-queues it) instead of looping IN_QUEUE.
     FormStatus.IN_QUEUE: frozenset(
-        {FormStatus.IN_CALL, FormStatus.EXPIRED, FormStatus.READY_FOR_PROCESSING}
+        {FormStatus.IN_CALL, FormStatus.EXPIRED, FormStatus.CALL_FAILED}
     ),
     FormStatus.IN_CALL: frozenset({FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED}),
     # → EXCEPTION_REVIEW when post-call processing finishes; → IN_QUEUE is the
