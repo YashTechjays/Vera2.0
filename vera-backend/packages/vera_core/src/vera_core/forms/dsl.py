@@ -198,6 +198,28 @@ def parse_date_format(text: str, date_format: str) -> date | None:
         return None
 
 
+def format_date(value: date, date_format: str) -> str:
+    """Render `value` in a leaf's declared display/entry `date_format` (e.g.
+    "M/D/YYYY" — see `Validation.date_format`) — the inverse of
+    `parse_date_format`. Used to normalize a date leaf's stored answer to one
+    consistent shape regardless of which format the submitter used (ISO from a
+    machine caller, or the declared format from a human editor)."""
+
+    def render_token(match: re.Match[str]) -> str:
+        token = match.group()
+        if token == "YYYY":
+            return f"{value.year:04d}"
+        if token == "MM":
+            return f"{value.month:02d}"
+        if token == "M":
+            return str(value.month)
+        if token == "DD":
+            return f"{value.day:02d}"
+        return str(value.day)  # token == "D"
+
+    return _DATE_TOKEN_RE.sub(render_token, date_format)
+
+
 class Validation(_Model):
     pattern: str | None = None
     range: Range | None = None

@@ -13,6 +13,7 @@ from vera_core.forms.dsl import (
     PromotedFields,
     Validation,
     compile_document,
+    format_date,
     load_document,
     parse_date_format,
 )
@@ -431,6 +432,30 @@ class TestParseDateFormat:
         # "M/M/YYYY" passes DATE_FORMAT_RE (repeated tokens aren't shape-illegal)
         # but would build a regex with two `month` groups — must not crash.
         assert parse_date_format("12/4/1999", "M/M/YYYY") is None
+
+
+class TestFormatDate:
+    """`format_date` — the inverse of `parse_date_format`: renders a parsed `date`
+    back into a leaf's declared display/entry `date_format`, so a date leaf's
+    stored answer always matches that format regardless of how it was submitted."""
+
+    def test_renders_m_d_yyyy_without_padding(self) -> None:
+        assert format_date(date(1999, 12, 4), "M/D/YYYY") == "12/4/1999"
+
+    def test_renders_single_digit_month_and_day_without_padding(self) -> None:
+        assert format_date(date(2026, 7, 1), "M/D/YYYY") == "7/1/2026"
+
+    def test_pads_to_mm_dd_yyyy(self) -> None:
+        assert format_date(date(2026, 7, 1), "MM/DD/YYYY") == "07/01/2026"
+
+    def test_renders_dd_mm_yyyy_with_dash_separator(self) -> None:
+        assert format_date(date(1990, 12, 4), "DD-MM-YYYY") == "04-12-1990"
+
+    def test_round_trips_through_parse_date_format(self) -> None:
+        for text, fmt in [("12/4/1999", "M/D/YYYY"), ("07/01/2026", "MM/DD/YYYY")]:
+            parsed = parse_date_format(text, fmt)
+            assert parsed is not None
+            assert format_date(parsed, fmt) == text
 
 
 class TestDateFormatRejectsTwoDigitYear:
