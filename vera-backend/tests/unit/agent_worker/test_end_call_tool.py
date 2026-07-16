@@ -27,7 +27,7 @@ def test_end_call_tool_is_registered() -> None:
 async def test_end_call_triggers_shutdown() -> None:
     agent = _make_agent()
     mock_session = MagicMock()
-    # Explicit: a bare MagicMock attribute is truthy, which would trip the takeover guard.
+    # A real latch: a bare MagicMock attribute reads truthy and trips the takeover guard.
     mock_session.userdata = TakeoverState(engaged=False)
 
     end_call_tool = next(t for t in _function_tools(agent) if t.info.name == "end_call")
@@ -41,8 +41,7 @@ async def test_end_call_triggers_shutdown() -> None:
 
 @pytest.mark.asyncio
 async def test_end_call_refuses_once_a_supervisor_has_taken_over() -> None:
-    """The call must never be hung up under a human takeover — reachable when the LLM's
-    end_call is already in flight as engage() interrupts it."""
+    """Reachable when the LLM's end_call is already in flight as engage() interrupts it."""
     agent = _make_agent()
     mock_session = MagicMock()
     mock_session.userdata = TakeoverState(engaged=True)

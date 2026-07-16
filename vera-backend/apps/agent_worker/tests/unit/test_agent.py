@@ -83,8 +83,7 @@ def _navigator(**kwargs: Any) -> IvrNavigatorAgent:
 
 
 def _mock_session() -> MagicMock:
-    """Real latch, not a MagicMock attribute — a bare mock reads truthy and trips the
-    takeover guards. Takeover behaviour has its own suite (test_takeover_interlock)."""
+    """A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards."""
     session = MagicMock()
     session.userdata = TakeoverState()
     return session

@@ -59,8 +59,7 @@ def stt_kwargs(key_terms: list[str] | None) -> dict[str, Any]:
 def build_session(
     vad: Any | None = None, *, key_terms: list[str] | None = None
 ) -> AgentSession[TakeoverState]:
-    # userdata carries the takeover latch: it must exist from session construction —
-    # agents read it before speaking/hanging up, and LiveKit raises on unset userdata.
+    # The latch must exist from construction: agents read it before speaking or hanging up.
     return AgentSession(
         userdata=TakeoverState(),
         stt=deepgram.STTv2(

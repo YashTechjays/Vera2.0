@@ -48,8 +48,7 @@ def test_engage_silences_the_agent_once() -> None:
 
 
 def test_engage_publishes_the_flag_agents_read() -> None:
-    """The session's userdata is the single source of truth — the agents' guards and the
-    controller must never disagree (they read the same latch)."""
+    """The controller and the agents' guards must never disagree: one latch, one truth."""
     session = _FakeSession()
     ctl = AgentTakeoverController(session)
     assert takeover_engaged(session) is False

@@ -1,12 +1,11 @@
 """A supervisor takeover must stop the plan from ending the call.
 
-Silencing the agent only mutes its audio — the plan runtime keeps advancing and would
-otherwise reach WrapUpAgent, whose directive tells the LLM to say goodbye and call
-end_call (session.shutdown), hanging up on the supervisor and rep mid-conversation.
+Silencing the agent only mutes its audio: the plan keeps advancing, reaches WrapUpAgent,
+and its goodbye directive calls end_call — hanging up on a live human conversation.
 
-These drive the takeover concurrently with the plan's final handoff, so the invariant
-holds for BOTH interleavings — we never depend on whether interrupt() cancels a tool
-call already in flight.
+The race test drives the takeover concurrently with the final handoff, so the invariant
+holds for both interleavings and never depends on whether interrupt() cancels a tool call
+already in flight.
 """
 
 import asyncio
@@ -103,12 +102,12 @@ async def test_takeover_racing_the_final_handoff_never_ends_the_call(
     result, _ = await asyncio.gather(_tool(last_task, "task_complete")(), takeover())
 
     # Either interleaving is legal. Speaking or hanging up is not.
-    if isinstance(result, Agent):  # the handoff won the race — wrap-up was entered
+    if isinstance(result, Agent):
         assert result is controller.wrap_up_agent
-        await result.on_enter()  # this is what would have issued the goodbye directive
+        await result.on_enter()  # the goodbye directive fires here, if anywhere
 
-    assert session.generate_reply_calls == []  # no goodbye
-    assert session.shutdown_calls == 0  # THE bug: the call must never be hung up
+    assert session.generate_reply_calls == []
+    assert session.shutdown_calls == 0  # the bug: never hang up under a takeover
     assert ctl.engaged is True
     await controller.drain_cursor_writes()
 
@@ -125,8 +124,8 @@ async def test_task_complete_does_not_advance_once_taken_over(
     result = await _tool(controller.agents[0], "task_complete")()
 
     assert not isinstance(result, Agent)  # a str tool-result → no handoff, plan parks
-    assert controller.generation == 0  # never advanced
-    assert session.said == []  # no outro spoken over the supervisor
+    assert controller.generation == 0
+    assert session.said == []  # the outro would speak over the supervisor
     await controller.drain_cursor_writes()
 
 

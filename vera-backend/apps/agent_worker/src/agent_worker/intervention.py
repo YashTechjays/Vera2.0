@@ -16,10 +16,9 @@ logger = logging.getLogger("agent_worker")
 
 @dataclass(slots=True)
 class TakeoverState:
-    """One-way takeover latch (never reset), carried in AgentSession.userdata — the only
-    object both the plan runtime (built before the session exists) and the takeover
-    controller (created after it starts) can reach, via Agent.session.
-    """
+    """One-way takeover latch, never reset. Lives in AgentSession.userdata: the only object
+    both the plan runtime (built before the session) and the takeover controller (created
+    after it starts) can reach."""
 
     engaged: bool = False
 
@@ -34,8 +33,7 @@ class _TakeoverSession(Protocol):
 
 
 def takeover_engaged(session: _TakeoverSession) -> bool:
-    """The guard every agent checks before speaking or hanging up. Protocol-typed so the
-    bool stays a bool for mypy (Agent.session is AgentSession[Any])."""
+    # Protocol-typed so the bool stays a bool for mypy (Agent.session is AgentSession[Any]).
     return session.userdata.engaged
 
 

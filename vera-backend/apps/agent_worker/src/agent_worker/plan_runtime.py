@@ -108,8 +108,8 @@ class PlanTaskAgent(Agent):
     )
     async def _task_complete(self) -> Agent | str:
         if takeover_engaged(self.session):
-            # A plain str is a tool result — no handoff, so the plan parks here. Returning
-            # `self` would re-swap and re-fire on_enter, speaking the intro again.
+            # A str is a tool result, so the plan parks here. Returning `self` would
+            # re-fire on_enter and speak the intro again.
             return "A human supervisor has taken over this call. Stay silent."
         if self._task.outro:
             # Exit speech first; LiveKit drains queued speech through the swap.

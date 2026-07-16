@@ -86,8 +86,7 @@ def _tool(agent: Agent, name: str) -> FunctionTool:
 
 
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
-    # Real latch, not a MagicMock attribute — a bare mock reads truthy and trips the
-    # takeover guards. Takeover behaviour has its own suite (test_takeover_interlock).
+    # A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards.
     mock_session.userdata = TakeoverState()
     return patch.object(type(agent), "session", new=property(lambda self: mock_session))
 
