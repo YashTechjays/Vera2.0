@@ -17,7 +17,7 @@ Every PHI response audits field **names** only (never values).
 import asyncio
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
@@ -47,6 +47,7 @@ from vera_core.forms.intake import (
     PromotedIdentifiers,
     iter_leaf_answers,
     missing_required,
+    normalize_date_answers,
     normalize_phone_answers,
     normalize_phone_prefix,
     phone_promoted_paths,
@@ -107,17 +108,34 @@ def _v2_doc(schema_json: dict[str, Any]) -> FormSchemaDoc | None:
     return FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
 
 
+def _raise_422(exc: InvalidIntakeValue) -> NoReturn:
+    raise CustomAPIException(
+        DefaultExceptionCode.VALIDATION_ERROR,
+        message="invalid field value",
+        data={"fields": [exc.field_path]},
+    ) from exc
+
+
 def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
     """`promote_columns`, translated to the API's validation-error contract — the
     error-wrapping shared by intake and dispute-resolve column promotion."""
     try:
         return promote_columns(get_value, doc)
     except InvalidIntakeValue as exc:
-        raise CustomAPIException(
-            DefaultExceptionCode.VALIDATION_ERROR,
-            message="invalid field value",
-            data={"fields": [exc.field_path]},
-        ) from exc
+        _raise_422(exc)
+
+
+def _normalize_dates_or_422(
+    answers: list[tuple[str, Any]], doc: FormSchemaDoc
+) -> list[tuple[str, Any]]:
+    """`normalize_date_answers`, translated to the API's validation-error
+    contract — every date-typed leaf's intake value gets reformatted to its
+    declared `date_format`, not just the promoted `patient_dob`/
+    `appointment_date` columns `_promote_or_422` covers."""
+    try:
+        return normalize_date_answers(answers, doc)
+    except InvalidIntakeValue as exc:
+        _raise_422(exc)
 
 
 @router.post(
@@ -182,6 +200,7 @@ async def upload_patient_form(
                     data={"fields": unrecognized},
                 )
             answers = normalize_phone_answers(answers, doc)
+            answers = _normalize_dates_or_422(answers, doc)
             promoted = _promote_or_422(dict(answers).get, doc)
         else:
             answers = list(iter_leaf_answers(body.intake_payload))
