@@ -30,7 +30,7 @@ INTAKE_PAYLOAD = {
     "insurance_information": {"policy_number": "POL-550411"},
     "insurance_reference_information": {
         "insurance_provider_name": "Demo Health Plan",
-        "insurance_phone_number": "+1 555 0100",
+        "insurance_phone_number": "+15550100",
     },
     "verification_information": {
         "verified_by": "Dr. Reyes",
@@ -199,7 +199,7 @@ async def test_upload_promotes_worklist_columns(
         },
         "insurance_reference_information": {
             "insurance_provider_name": "Blue Cross",
-            "insurance_phone_number": "+1 555 0100",
+            "insurance_phone_number": "+15550100",
         },
     }
     resp = await client.post(
@@ -221,7 +221,7 @@ async def test_upload_promotes_worklist_columns(
         assert form.appointment_type == "New Patient"
         assert form.member_id == "POL-550411"
         assert form.insurance_provider == "Blue Cross"
-        assert form.insurance_provider_phone_number == "+1 555 0100"
+        assert form.insurance_provider_phone_number == "+15550100"
 
 
 async def test_missing_required_returns_422_with_paths_no_phi(
@@ -407,7 +407,8 @@ async def _post_intake(
     ibv_schema: tuple[UUID, UUID],
     payload: dict[str, object],
 ) -> httpx.Response:
-    """POST a patient-form intake request; shared by the unknown-path 422 tests."""
+    """POST a patient-form intake request with the given payload; shared by the intake
+    payload-shape tests (unknown paths, phone auto-format/validation)."""
     form_type_id, version_id = ibv_schema
     token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
     return await client.post(
@@ -485,3 +486,103 @@ async def test_rls_isolation_other_tenant_cannot_see_row(
             await session.execute(select(PatientForm).where(PatientForm.id == form_id))
         ).scalar_one_or_none()
     assert found is None  # RLS hides tenant A's form from tenant B
+
+
+async def test_upload_auto_formats_missing_plus_on_insurance_phone(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """The clinic-submitted number has no leading '+' — it must be added before
+    storage, and both the promoted column and the raw field_answer must agree on the
+    fixed-up value (2026-07-15 design doc)."""
+    payload: dict[str, object] = {
+        **INTAKE_PAYLOAD,
+        "insurance_reference_information": {
+            "insurance_provider_name": "Demo Health Plan",
+            "insurance_phone_number": "15550100",  # no leading '+'
+        },
+    }
+    resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, payload)
+    assert resp.status_code == 200, resp.text
+    form_id = UUID(resp.json()["data"]["id"])
+
+    async with tenant_session(rls_sessionmaker, rbac_world.tenant_id) as session:
+        form = (
+            await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15550100"
+
+        answer = (
+            await session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == form_id,
+                    FieldAnswer.field_path
+                    == "sections.insurance_reference_information.insurance_phone_number",
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15550100"}
+
+
+async def test_upload_leaves_already_prefixed_phone_unchanged(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """A number that already has a leading '+' is left exactly as submitted — no
+    reformatting is applied beyond adding a missing '+' (2026-07-15 design doc)."""
+    payload: dict[str, object] = {
+        **INTAKE_PAYLOAD,
+        "insurance_reference_information": {
+            "insurance_provider_name": "Demo Health Plan",
+            "insurance_phone_number": "+15559990000",
+        },
+    }
+    resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, payload)
+    assert resp.status_code == 200, resp.text
+    form_id = UUID(resp.json()["data"]["id"])
+
+    async with tenant_session(rls_sessionmaker, rbac_world.tenant_id) as session:
+        form = (
+            await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15559990000"
+
+        answer = (
+            await session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == form_id,
+                    FieldAnswer.field_path
+                    == "sections.insurance_reference_information.insurance_phone_number",
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15559990000"}
+
+
+async def test_upload_rejects_invalid_phone_even_after_adding_plus(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    payload: dict[str, object] = {
+        **INTAKE_PAYLOAD,
+        "insurance_reference_information": {
+            "insurance_provider_name": "Demo Health Plan",
+            "insurance_phone_number": "555 000 1234",  # still invalid once '+' is added
+        },
+    }
+    resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, payload)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["data"]["fields"] == [
+        "sections.insurance_reference_information.insurance_phone_number"
+    ]

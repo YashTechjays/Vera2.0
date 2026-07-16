@@ -52,7 +52,7 @@ _OVERRIDES: dict[str, dict[str, str]] = {
         # Inert: `_build_payload` overwrites this per-status with the idempotency
         # marker (`_MARKER_CHART_NUMBER`); kept only so this demo dict reads complete.
         "chart_number": "CH-10293",
-        "patient_name": "Morgan Reyes",
+        "patient_name": "Test T",
         "patient_dob": "1991-04-12",
         "patient_gender": "Female",
     },
@@ -99,11 +99,11 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     },
     "insurance_reference_information": {
         "insurance_provider_name": "Demo Health Plan",
-        "insurance_phone_number": "+1 555 0100",
+        "insurance_phone_number": "+15550100",
     },
     "verification_information": {
         "verified_by": "Dr. Reyes",
-        "callback_number": "+1 555 0199",
+        "callback_number": "+15550199",
     },
 }
 
@@ -152,7 +152,7 @@ def _dummy_leaf_value(field_key: str, leaf: dict[str, Any]) -> str:
         "currency": "$25",
         "percent": "20%",
         "integer": "2",
-        "phone": "+1 555 0100",
+        "phone": "+15550100",
     }
     leaf_type = leaf.get("type")
     if isinstance(leaf_type, str) and leaf_type in placeholders:
