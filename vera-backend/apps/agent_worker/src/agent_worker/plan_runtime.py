@@ -142,8 +142,8 @@ class PlanRunController:
     """Owns the pre-built agent chain and the run's shared-state seam.
 
     All agents are constructed in ``__init__`` — before ``session.start`` — so a
-    malformed plan fails the build (and the worker runs the ApologyAgent, a
-    graceful exit) instead of exploding mid-conversation.
+    malformed plan fails the build (and the worker fails fast, hanging up) instead
+    of exploding mid-conversation.
     """
 
     def __init__(

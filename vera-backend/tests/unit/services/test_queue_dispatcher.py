@@ -14,7 +14,7 @@ order — this survives try_dispatch's queries being reordered.
 import json
 import logging
 from collections import deque
-from datetime import time
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -562,26 +562,32 @@ class TestCallPlanStaging:
         assert plan.session.persona == FACTORY_SESSION.persona
         assert session.calls_added()[0].prompt_version_id is None
 
-    async def test_v1_schema_dispatches_without_a_plan(
+    async def test_v1_schema_is_skipped_and_reverts_to_ready(
         self, _stub_credentials: dict[str, dict[str, Any] | None]
     ) -> None:
+        # Plan-only fail-fast: a v1 schema compiles no plan, so the worker can't
+        # serve it — the form is NOT dispatched. It drops back out of the queue to
+        # READY_FOR_PROCESSING (enqueued_at cleared) instead of looping IN_QUEUE.
         tenant = _tenant()
         sv = _schema_version({"patient_information": {"required": []}})  # legacy v1
-        form = _form(tenant.id, schema_version_id=sv.id)
+        form = _form(tenant.id, schema_version_id=sv.id, enqueued_at=datetime(2026, 1, 1))
         session = FakeSession(tenant=tenant, candidates=[form], schema_version=sv)
         livekit = FakeLiveKit()
         plans = FakeCallPlanService()
 
         dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
 
-        assert dispatched == 1
-        metadata = livekit.dispatch_metadata[0]
-        assert metadata is not None and "use_call_plan" not in metadata
+        assert dispatched == 0  # no plan-less call placed
+        assert livekit.dispatch_metadata == []
         assert plans.puts == []
+        assert form.status == FormStatus.READY_FOR_PROCESSING.value  # dropped out of the queue
+        assert form.enqueued_at is None
 
-    async def test_plan_store_failure_fails_open_to_legacy_path(
+    async def test_plan_store_failure_aborts_dispatch(
         self, _stub_credentials: dict[str, dict[str, Any] | None]
     ) -> None:
+        # Fail-fast: a staging (Redis) failure aborts the dispatch — the Call is
+        # rolled back and the form reverts to IN_QUEUE; no call is placed.
         tenant = _tenant()
         sv = _schema_version(IBV_SCHEMA_JSON)
         pv = _prompt_version(sv)
@@ -595,11 +601,9 @@ class TestCallPlanStaging:
 
         dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
 
-        assert dispatched == 1  # the call still goes out
-        metadata = livekit.dispatch_metadata[0]
-        assert metadata is not None and "use_call_plan" not in metadata
-        # lineage is only stamped when the plan actually reached the store
-        assert session.calls_added()[0].prompt_version_id is None
+        assert dispatched == 0  # the call does NOT go out
+        assert livekit.dispatch_metadata == []  # staging fails before create_call_room
+        assert form.status == FormStatus.IN_QUEUE.value  # reverted for retry
 
     async def test_no_plan_service_keeps_legacy_metadata(
         self, _stub_credentials: dict[str, dict[str, Any] | None]

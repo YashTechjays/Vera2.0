@@ -1,5 +1,5 @@
 """Tests for the cascade agents — the plan-only conversational path, the IVR
-navigator, the apology agent, and the metadata-driven selector."""
+navigator, and the metadata-driven selector."""
 
 import logging
 import uuid
@@ -14,7 +14,7 @@ from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
-from agent_worker.agent import APOLOGY_LINE, ApologyAgent, VeraAgent, build_agent
+from agent_worker.agent import VeraAgent, build_agent
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
@@ -105,16 +105,6 @@ def test_vera_agent_carries_only_the_end_call_tool() -> None:
     tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
     assert tool_names == ["end_call"]
     assert agent.instructions == "do things"
-
-
-@pytest.mark.asyncio
-async def test_apology_agent_speaks_one_line_and_hangs_up() -> None:
-    agent = ApologyAgent()
-    mock_session = MagicMock()
-    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
-        await agent.on_enter()
-    mock_session.say.assert_called_once_with(APOLOGY_LINE)
-    mock_session.shutdown.assert_called_once_with(drain=True)
 
 
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:

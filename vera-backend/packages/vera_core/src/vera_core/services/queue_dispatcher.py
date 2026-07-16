@@ -135,9 +135,10 @@ async def try_dispatch(
         Optional ``CallPlanService``. When provided and the form's pinned
         schema is DSL v2, the compiled CallPlan is staged in Redis for the
         worker, the call's ``prompt_version_id`` lineage is stamped, and the
-        dispatch metadata carries ``use_call_plan``. Fail-open: any staging
-        failure logs, and the call dispatches WITHOUT a plan (the worker then
-        serves it as an apology call — plan-only, no legacy script).
+        dispatch metadata carries ``use_call_plan``. Fail-fast: if the plan
+        can't be prepared or staged, the form is NOT dispatched (it stays
+        IN_QUEUE for a later pass) — the plan-only worker can't serve a
+        plan-less call, so we never place one.
     """
     # Serialize dispatch passes per tenant (consumer refill / sweeper / enqueue
     # tasks race otherwise and can over-allocate concurrency slots): the two-int
@@ -309,6 +310,21 @@ async def try_dispatch(
             if plan_service is not None
             else None
         )
+        # Fail fast (plan-only worker): a form whose plan can't be prepared can't be
+        # served, so drop it back out of the queue to its pre-enqueue status rather
+        # than looping it IN_QUEUE — an operator (or a schema fix) re-queues it, and
+        # a legacy-v1 schema (no compilable plan) never dispatches, by design. This
+        # is not a retry, so it spends no retry budget and clears enqueued_at.
+        if plan_service is not None and staged_plan is None:
+            logger.warning(
+                "dispatch: no usable call plan for form %s — reverting to READY_FOR_PROCESSING",
+                form.id,
+            )
+            sm.transition(
+                form, FormStatus.READY_FOR_PROCESSING, tenant_max_retries=tenant.max_retries
+            )
+            form.enqueued_at = None
+            continue
 
         call_mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL
         # Real-call dispatch metadata: the worker must wait for the SIP callee to
@@ -353,20 +369,17 @@ async def try_dispatch(
                 room_name = room_name_for_call(tenant_id, call.id)
                 if plan_service is not None and staged_plan is not None:
                     plan, plan_prompt_version_id = staged_plan
-                    try:
-                        await plan_service.put(room_name, plan)
-                    except Exception:
-                        logger.exception(
-                            "dispatch: call plan staging failed for form %s — no plan staged",
-                            form.id,
-                        )
-                    else:
-                        metadata["use_call_plan"] = True
-                        staged_plan_room = room_name  # for orphan cleanup on rollback
-                        # Lineage is stamped only when the plan actually reached
-                        # the store — a legacy-path call must not claim it ran a
-                        # prompt version it never loaded.
-                        call.prompt_version_id = plan_prompt_version_id
+                    # Fail fast: a staging failure aborts THIS dispatch — the raise
+                    # propagates to the except below, which rolls back the Call and
+                    # reverts the form to IN_QUEUE. Never place a call whose plan
+                    # didn't reach the store (the plan-only worker can't serve it).
+                    await plan_service.put(room_name, plan)
+                    metadata["use_call_plan"] = True
+                    staged_plan_room = room_name  # for orphan cleanup on rollback
+                    # Lineage rides the same failure path as the put above: a
+                    # staging raise aborts the dispatch, so a call never claims a
+                    # prompt version it didn't actually load.
+                    call.prompt_version_id = plan_prompt_version_id
                 if form.ivr_navigation_enabled and provider is not None:
                     await add_active_playbook_metadata(session, provider.id, metadata)
                 if form.ivr_navigation_enabled:
@@ -466,10 +479,9 @@ async def _resolve_call_plan(
     in (`PrefillFuser.fuse` — placeholders, the Known-information block, and the
     answers seed for gates/rules).
 
-    ``None`` = no plan: the pinned schema is legacy v1, or a stage failed —
-    fail-open (log + dispatch with no plan → apology call), because a broken
-    plan pipeline must
-    never block the call from going out.
+    ``None`` = no plan: the pinned schema is legacy v1, or a compile/fuse failed.
+    The caller fails fast on ``None`` (skips the form, leaving it IN_QUEUE) — the
+    plan-only worker can't serve a plan-less call.
     """
     template = await _resolve_plan_template(session, form, cache)
     if template is None:
@@ -499,9 +511,10 @@ async def _resolve_plan_template(
     tokens intact until fuse; the fuser precomputes the template-invariant
     lookups once).
 
-    ``None`` = legacy v1 schema or compile failure (fail-open). No published
-    prompt version is a documented fallback: the template compiles with
-    FACTORY_SESSION and lineage stays NULL.
+    ``None`` = legacy v1 schema or compile failure; the caller fails fast on it
+    (the form is not dispatched). No published prompt version is NOT a failure —
+    it's a documented fallback: the template compiles with FACTORY_SESSION and
+    lineage stays NULL.
     """
     if form.schema_version_id in cache:
         return cache[form.schema_version_id]

@@ -26,7 +26,7 @@ from livekit.agents import (
 from opentelemetry import trace
 from redis.asyncio import Redis
 
-from agent_worker.agent import ApologyAgent, build_agent
+from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.plan_runtime import PlanRunController
 from agent_worker.prompt import parse_persona_tweak
@@ -362,9 +362,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
         # Compiled Call Plan (dispatcher opt-in via use_call_plan): the control plane
         # staged it in Redis at dispatch. PLAN-ONLY — the compiled plan is the sole
-        # verification prompt source. If the plan can't be loaded/built, the call runs
-        # the ApologyAgent (a graceful exit) instead of any generic script; it never
-        # runs a verification without a plan.
+        # verification prompt source. If the plan can't be loaded/built, the call
+        # fails fast (hangs up) instead of running any generic script; it never runs
+        # a verification without a plan.
         plan_service: CallPlanService | None = None
         run_state: PlanRunStateService | None = None
         controller: PlanRunController | None = None
@@ -375,7 +375,7 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             plan = await plan_service.get(room_name)
             if plan is None:
-                logger.warning("use_call_plan set but no plan for %s — apology path", room_name)
+                logger.warning("use_call_plan set but no plan for %s — failing fast", room_name)
             else:
                 run_state = PlanRunStateService(
                     RedisPlanRunStateStore(plan_redis, ttl_seconds=settings.call_plan_ttl_seconds)
@@ -392,10 +392,10 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
                 except Exception:
                     logger.exception(
-                        "call plan for %s failed to build a runtime — apology path", room_name
+                        "call plan for %s failed to build a runtime — failing fast", room_name
                     )
         else:
-            logger.warning("no use_call_plan flag for %s — apology path", room_name)
+            logger.warning("no use_call_plan flag for %s — failing fast", room_name)
 
         session = build_session(
             vad=ctx.proc.userdata.get("vad"),
@@ -513,10 +513,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # Last: signal the terminal event. Normally call.ended (the consumer
             # completes the form and refills the slot). But when the dispatcher
             # staged a plan (use_call_plan) yet the worker couldn't build one, the
-            # call ran the ApologyAgent — that's an infra fault (plan missing from
-            # Redis / build failure), not a completed verification. Emit call.failed
-            # instead so the control plane RE-DISPATCHES it (re-staging the plan,
-            # which self-heals) rather than banking a completed-with-no-answers form.
+            # call failed fast without a session — that's an infra fault (plan
+            # missing from Redis / build failure), not a completed verification.
+            # Emit call.failed instead so the control plane RE-DISPATCHES it
+            # (re-staging the plan, which self-heals) rather than banking a
+            # completed-with-no-answers form.
             # A hard worker crash skips this — the pipeline sweeper reconciles that.
             now_ms = int(time.time() * 1000)
             if meta.get("use_call_plan") and controller is None and bus is not None:
@@ -553,19 +554,22 @@ async def entrypoint(ctx: JobContext) -> None:
     # observability is the self-hosted Langfuse/OTel pipeline (configure_observability), which
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
-    # Plan-only: a plan-backed call runs the compiled agent chain; a call with no
-    # usable plan runs the ApologyAgent (one polite line, then hang up) — never a
-    # generic verification script.
-    if controller is not None:
-        agent: Agent = build_agent(
-            meta,
-            controller=controller,
-            # A successful IVR keypad press rides the live transcript as a dtmf turn
-            # (evidence of the action); rooms with no stream enabled report nowhere.
-            on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
-        )
-    else:
-        agent = ApologyAgent()
+    # Plan-only: a plan-backed call runs the compiled agent chain. A call with no
+    # usable plan FAILS FAST — real calls never dispatch plan-less (the dispatcher
+    # skips a form whose plan can't be prepared), so no controller here is a
+    # Redis-loss race or a plan-less voice-lab session. Return without starting a
+    # session (never speak a fallback script); the shutdown callback emits
+    # call.failed for a use_call_plan call so the control plane re-dispatches it.
+    if controller is None:
+        logger.warning("no usable plan for %s — failing fast without a session", room_name)
+        return
+    agent: Agent = build_agent(
+        meta,
+        controller=controller,
+        # A successful IVR keypad press rides the live transcript as a dtmf turn
+        # (evidence of the action); rooms with no stream enabled report nowhere.
+        on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
+    )
     await session.start(
         agent=agent,
         room=ctx.room,

@@ -9,10 +9,10 @@ PHI tokenization was dropped (2026-07-13): agents are plain LiveKit agents (no
 stt/tts redact/hydrate seam).
 
 `build_agent()` picks the initial persona from dispatch metadata; it requires a
-`PlanRunController` (a real call always has a compiled plan). When no plan can be
-built the entrypoint runs `ApologyAgent` instead — a graceful exit, never a
-generic verification script. The IVR navigator (`ivr_agent.py`) hands off to the
-plan's first task agent once a live rep answers.
+`PlanRunController` (a real call always has a compiled plan — dispatch fails fast
+and never places a plan-less call). When no plan can be loaded the entrypoint
+fails fast (hangs up) instead of running any fallback script. The IVR navigator
+(`ivr_agent.py`) hands off to the plan's first task agent once a live rep answers.
 """
 
 import logging
@@ -30,14 +30,6 @@ if TYPE_CHECKING:
     from agent_worker.plan_runtime import PlanRunController
 
 logger = logging.getLogger("agent_worker")
-
-# Spoken when a call reaches a rep but has no usable plan (Redis miss / build
-# failure). One polite line, then hang up — never the verification script.
-APOLOGY_LINE = (
-    "Hi, I'm so sorry — we're having a technical issue on our end and can't "
-    "complete this verification right now. We'll call back. Thanks so much, and "
-    "have a good one."
-)
 
 
 class VeraAgent(Agent):
@@ -59,20 +51,6 @@ class VeraAgent(Agent):
         return "Call ended."
 
 
-class ApologyAgent(Agent):
-    """Graceful-exit agent for a call with no usable plan: speaks one fixed
-    apology line, then hangs up. NOT a verification fallback — it collects
-    nothing and runs no script. The LLM is bypassed (on_enter drives it
-    deterministically), so the `instructions` string is inert."""
-
-    def __init__(self) -> None:
-        super().__init__(instructions="Say the apology line exactly once, then end the call.")
-
-    async def on_enter(self) -> None:
-        self.session.say(APOLOGY_LINE)
-        self.session.shutdown(drain=True)
-
-
 def build_agent(
     meta: dict[str, object],
     *,
@@ -86,8 +64,8 @@ def build_agent(
     — a playbook without it is a producer inconsistency, logged and ignored.
 
     A `controller` is required: a real call always has a compiled CallPlan. The
-    no-plan case is handled upstream (the entrypoint runs ApologyAgent), so this
-    never falls back to a generic verification script."""
+    no-plan case is handled upstream (the entrypoint fails fast), so this never
+    falls back to a generic verification script."""
     if meta.get("enable_ivr_navigation"):
         return IvrNavigatorAgent(
             playbook=parse_ivr_playbook(meta),
