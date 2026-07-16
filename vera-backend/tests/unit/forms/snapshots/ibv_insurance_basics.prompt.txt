@@ -52,6 +52,3 @@ If "Doctor Inside Network" is "No" and "Facility Inside Network" is "No" and "Ou
 
 CONSISTENCY CHECK — small_group_self_insured_conflict:
 If "Employer Support Size" is "Small Group" and "Plan Fund Type" is "Self Insured": Small group plans are typically fully insured, not self-funded. Push back once, saying: "I want to make sure I have this right — I have the plan as self insured and the employer as a small group, but small group plans are typically fully insured. Could you double-check whether the plan is self insured or fully funded, and whether the employer group is small or large?" Then re-confirm: Plan Fund Type, Employer Support Size.
-
-CONSISTENCY CHECK — fully_funded_large_group_check:
-If "Plan Fund Type" is "Fully Funded" and "Employer Support Size" is "Large Group": Large group plans are typically self-funded, not fully insured — verify the plan fund type and employer group size. Push back once, saying: "I want to make sure I have this right — I have the plan as fully funded and the employer as a large group, but large group plans are typically self-funded. Could you double-check whether the plan is self insured or fully funded, and whether the employer group is small or large?" Then re-confirm: Plan Fund Type, Employer Support Size.
