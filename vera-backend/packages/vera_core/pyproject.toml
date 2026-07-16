@@ -17,6 +17,9 @@ dependencies = [
     # IANA tz data for zoneinfo on platforms without a system database (Windows);
     # queue_dispatcher pins its business-hours window to America/New_York.
     "tzdata>=2025.1",
+    # Fault-tolerant out-of-pipeline LLM calls (vera_core.llm.ResilientLLM) wrap
+    # livekit-agents' FallbackAdapter; google = Vertex Gemini, openai = GPT fallback.
+    "livekit-agents[google,openai]>=1.5.17",
 ]
 
 [build-system]
