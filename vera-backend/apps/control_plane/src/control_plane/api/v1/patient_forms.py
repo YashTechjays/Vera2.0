@@ -24,7 +24,14 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession, emit_phi_read_audit
+from control_plane.api.v1.common import (
+    CallPlans,
+    Kms,
+    LiveKit,
+    TenantId,
+    TenantSession,
+    emit_phi_read_audit,
+)
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -78,6 +85,7 @@ from vera_core.models.enums import (
     FormStatus,
     ProviderStatus,
 )
+from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
 router = APIRouter(tags=["patient-forms"])
@@ -733,16 +741,7 @@ async def resolve_disputes(
     # disputes only records the human answers/actions; re-asked fields are surfaced
     # in the audit for the worker, and re-queueing is a manual status change.
     await session.flush()
-    current_values: dict[str, Any] = {
-        path: unwrap_value(value)
-        for path, value in (
-            await session.execute(
-                select(FieldAnswer.field_path, FieldAnswer.value).where(
-                    FieldAnswer.form_id == form_id, FieldAnswer.is_current.is_(True)
-                )
-            )
-        ).all()
-    }
+    current_values: dict[str, Any] = await current_values_by_path(session, form_id)
     # doc/phone_paths already resolved above. Re-derive promoted patient_form columns
     # from the post-write current answers — any resolve call that changes a promoted
     # field's value (dispute or plain edit) keeps the worklist columns in sync, not
@@ -916,6 +915,7 @@ async def update_patient_form_status(
     tenant_id: TenantId,
     livekit: LiveKit,
     kms: Kms,
+    call_plans: CallPlans,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -1050,6 +1050,7 @@ async def update_patient_form_status(
             kms,
             audit,
             wait_for_form_id=form_id,
+            plan_service=call_plans,
         )
 
     return ok(

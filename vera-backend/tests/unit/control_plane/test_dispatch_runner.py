@@ -33,7 +33,13 @@ async def test_runs_try_dispatch_in_its_own_tenant_session(monkeypatch: Any) -> 
     monkeypatch.setattr(dispatch_mod, "tenant_session", lambda sm, tid: ctx)
 
     async def fake_try_dispatch(
-        session: Any, tenant_id: Any, livekit: Any, kms: Any, *, audit: Any = None
+        session: Any,
+        tenant_id: Any,
+        livekit: Any,
+        kms: Any,
+        *,
+        audit: Any = None,
+        plan_service: Any = None,
     ) -> int:
         seen.update(session=session, tenant_id=tenant_id)
         return 1
@@ -45,11 +51,40 @@ async def test_runs_try_dispatch_in_its_own_tenant_session(monkeypatch: Any) -> 
 
 
 @pytest.mark.asyncio
+async def test_forwards_plan_service_to_try_dispatch(monkeypatch: Any) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(dispatch_mod, "tenant_session", lambda sm, tid: _FakeSessionCtx())
+
+    async def fake_try_dispatch(
+        session: Any,
+        tenant_id: Any,
+        livekit: Any,
+        kms: Any,
+        *,
+        audit: Any = None,
+        plan_service: Any = None,
+    ) -> int:
+        seen["plan_service"] = plan_service
+        return 0
+
+    monkeypatch.setattr(dispatch_mod, "try_dispatch", fake_try_dispatch)
+    plans = object()
+    await run_dispatch_pass(object(), uuid4(), object(), object(), None, plan_service=plans)  # type: ignore
+    assert seen["plan_service"] is plans
+
+
+@pytest.mark.asyncio
 async def test_swallows_and_logs_dispatch_errors(monkeypatch: Any, caplog: Any) -> None:
     monkeypatch.setattr(dispatch_mod, "tenant_session", lambda sm, tid: _FakeSessionCtx())
 
     async def boom(
-        session: Any, tenant_id: Any, livekit: Any, kms: Any, *, audit: Any = None
+        session: Any,
+        tenant_id: Any,
+        livekit: Any,
+        kms: Any,
+        *,
+        audit: Any = None,
+        plan_service: Any = None,
     ) -> None:
         raise RuntimeError("livekit down")
 
@@ -64,7 +99,13 @@ async def test_schedule_dispatch_pass_runs_detached(monkeypatch: Any) -> None:
     monkeypatch.setattr(dispatch_mod, "tenant_session", lambda sm, tid: _FakeSessionCtx())
 
     async def fake_try_dispatch(
-        session: Any, tenant_id: Any, livekit: Any, kms: Any, *, audit: Any = None
+        session: Any,
+        tenant_id: Any,
+        livekit: Any,
+        kms: Any,
+        *,
+        audit: Any = None,
+        plan_service: Any = None,
     ) -> None:
         ran.append(tenant_id)
 
@@ -88,7 +129,13 @@ async def test_pass_survives_caller_cancellation(monkeypatch: Any) -> None:
     completed: list[object] = []
 
     async def slow_try_dispatch(
-        session: Any, tenant_id: Any, livekit: Any, kms: Any, *, audit: Any = None
+        session: Any,
+        tenant_id: Any,
+        livekit: Any,
+        kms: Any,
+        *,
+        audit: Any = None,
+        plan_service: Any = None,
     ) -> None:
         entered.set()
         await release.wait()
@@ -122,7 +169,13 @@ async def test_wait_for_form_barrier_runs_before_pass(monkeypatch: Any) -> None:
     dispatched_with: list[object] = []
 
     async def fake_try_dispatch(
-        session: Any, tenant_id: Any, livekit: Any, kms: Any, *, audit: Any = None
+        session: Any,
+        tenant_id: Any,
+        livekit: Any,
+        kms: Any,
+        *,
+        audit: Any = None,
+        plan_service: Any = None,
     ) -> None:
         dispatched_with.append(session)
 

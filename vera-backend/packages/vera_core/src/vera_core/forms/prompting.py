@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
     PLACEHOLDER_RE,
+    RESERVED_PLACEHOLDER_TOKENS,
     Codes,
     Condition,
     ConfirmInTask,
@@ -178,7 +179,7 @@ def render_task_prompts(
     shared = doc.shared_conditions or {}
     leaves = dict(doc.leaf_items())
     order = {path: i for i, path in enumerate(leaves)}
-    section_to_task = {s: t.task_key for t in doc.tasks for s in t.sections}
+    section_to_task = doc.section_to_task()
     titles = {path: field.title for path, field in doc._iter_fields()}
     task_titles = {t.task_key: t.title for t in doc.tasks}
 
@@ -448,13 +449,14 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
     """Content errors of a prompt document against its pinned schema (spec §4).
 
     Shape errors are pydantic's job; this checks the parts that need the schema:
-    task keys exist, overrides are non-empty, placeholders resolve. The exact
-    token `value` is exempt (field-level confirm namespace)."""
+    task keys exist, overrides are non-empty, placeholders resolve. Reserved
+    runtime tokens ({{value}}, {{current_year}}) are exempt — the call-plan
+    fuse handles them, not field lookup."""
     errors: list[str] = []
     valid_tokens = (
         set(schema_doc.system_fields or {})
         | {path for path, leaf in schema_doc.leaf_items() if leaf.role == "context"}
-        | {"value"}
+        | RESERVED_PLACEHOLDER_TOKENS
     )
     task_keys = {t.task_key for t in schema_doc.tasks}
     texts: list[tuple[str, str | None]] = [

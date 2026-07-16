@@ -48,9 +48,19 @@ def cascade_session_kwargs(turn_detector: Any) -> dict[str, Any]:
     }
 
 
-def build_session(vad: Any | None = None) -> AgentSession[None]:
+def stt_kwargs(key_terms: list[str] | None) -> dict[str, Any]:
+    """Optional Deepgram keyterm prompting — the CallPlan's session-wide
+    `stt_key_terms`, fed verbatim. Empty/None → no kwarg at all."""
+    return {"keyterm": key_terms} if key_terms else {}
+
+
+def build_session(
+    vad: Any | None = None, *, key_terms: list[str] | None = None
+) -> AgentSession[None]:
     return AgentSession(
-        stt=deepgram.STTv2(model="flux-general-en", eager_eot_threshold=0.5),
+        stt=deepgram.STTv2(
+            model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms)
+        ),
         llm=google.LLM(
             model="gemini-2.5-flash",
             vertexai=True,
