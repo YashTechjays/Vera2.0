@@ -62,6 +62,9 @@ class PostCallConsumer:
         audit: AuditSink,
         livekit: Any,
         *,
+        kms: Any = None,
+        recording: Any = None,
+        plan_service: Any = None,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
         review_floor: int = 60,
@@ -74,7 +77,15 @@ class PostCallConsumer:
         self._reclaim_idle_ms = reclaim_idle_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._bus = PostCallJobBus(redis)
-        self._deps = EvalDeps(llm=llm, audit=audit, livekit=livekit, floor=review_floor)
+        self._deps = EvalDeps(
+            llm=llm,
+            audit=audit,
+            livekit=livekit,
+            kms=kms,
+            recording=recording,
+            plan_service=plan_service,
+            floor=review_floor,
+        )
 
     async def run(self) -> None:
         group_ready = False

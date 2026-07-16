@@ -9,7 +9,7 @@ from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 
 @pytest.mark.asyncio
-async def test_build_turns_enumerates_snapshot():
+async def test_build_turns_enumerates_snapshot() -> None:
     store = InMemoryTranscriptStore()
     svc = TranscriptService(store)
     tenant_id, call_id = uuid4(), uuid4()

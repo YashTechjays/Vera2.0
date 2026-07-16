@@ -267,7 +267,7 @@ def create_app(
 
         post_call_redis: Redis | None = None
         post_call_task: asyncio.Task[None] | None = None
-        if livekit_ready and post_call_eval_ready:
+        if livekit_ready and settings.gcp_project is not None:
             post_call_redis = create_redis(settings.redis_url)
             llm = VertexLLMClient(
                 project=settings.gcp_project,
@@ -281,6 +281,9 @@ def create_app(
                 llm,
                 app.state.audit,
                 app.state.livekit,
+                kms=app.state.kms,
+                recording=recording_config,
+                plan_service=_call_plans,
                 block_ms=settings.post_call_block_ms,
                 reclaim_idle_ms=settings.post_call_reclaim_idle_ms,
                 review_floor=settings.post_call_review_floor,

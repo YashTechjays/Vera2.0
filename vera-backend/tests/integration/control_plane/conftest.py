@@ -27,8 +27,8 @@ from vera_core.call_stream import CallStreamEvent, CallStreamService
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
-from vera_core.events import PostCallJob
 from vera_core.db.rls import tenant_session
+from vera_core.events import PostCallJob
 from vera_core.integrations.credentials import seal_credentials
 from vera_core.models import (
     AppUser,

@@ -32,9 +32,9 @@ from vera_core.events import (
     CallFailureReason,
 )
 from vera_core.models import Call, PatientForm, Tenant
-from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer
 from vera_core.models.audit_log import AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
+from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer
 from vera_core.observability.correlation import room_name_for_call
 
 _VALID_ROOM = f"call--{uuid4()}--{uuid4()}"

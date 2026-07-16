@@ -12,20 +12,20 @@ from vera_core.integrations.llm import ExtractedField, TranscriptTurn
 _loads_response = VertexLLMClient._loads_response
 
 
-def test_extract_prompt_numbers_turns_and_lists_paths():
+def test_extract_prompt_numbers_turns_and_lists_paths() -> None:
     turns = [TranscriptTurn(0, "user", "hello"), TranscriptTurn(1, "agent", "in network")]
     prompt = build_extract_prompt(["sections.cov.network_status"], turns)
     assert "sections.cov.network_status" in prompt
     assert "[0]" in prompt and "[1]" in prompt  # evidence_seq anchors
 
 
-def test_parse_extract_response_maps_fields():
+def test_parse_extract_response_maps_fields() -> None:
     data = [{"field_path": "p", "value": "in-network", "confidence": 90, "evidence_seq": 1}]
     out = parse_extract_response(data)
     assert out[0].field_path == "p" and out[0].evidence_seq == 1
 
 
-def test_build_judge_prompt_includes_extracted_and_transcript():
+def test_build_judge_prompt_includes_extracted_and_transcript() -> None:
     extracted = [ExtractedField(field_path="a.b", value="yes", confidence=80, evidence_seq=0)]
     turns = [TranscriptTurn(0, "agent", "yes, covered")]
     prompt = build_judge_prompt(extracted, turns)
@@ -33,7 +33,7 @@ def test_build_judge_prompt_includes_extracted_and_transcript():
     assert "[0]" in prompt
 
 
-def test_parse_judge_response_maps_verdicts():
+def test_parse_judge_response_maps_verdicts() -> None:
     data = [{"field_path": "a.b", "supported": True, "confidence": 95, "evidence": "yes, covered"}]
     out = parse_judge_response(data)
     assert out[0].field_path == "a.b"
@@ -41,7 +41,7 @@ def test_parse_judge_response_maps_verdicts():
     assert out[0].evidence == "yes, covered"
 
 
-def test_build_judge_prompt_excludes_extractor_confidence():
+def test_build_judge_prompt_excludes_extractor_confidence() -> None:
     """Judge prompt must NOT leak extraction confidence—only value, field_path, evidence_seq.
     A distinctive confidence value (77) should NOT appear in the prompt."""
     extracted = [

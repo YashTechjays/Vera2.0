@@ -27,7 +27,6 @@ from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
-from vera_core.forms.review import unwrap_value
 from vera_core.events import (
     WORKER_EVENTS_GROUP,
     WORKER_EVENTS_STREAM,
@@ -43,9 +42,10 @@ from vera_core.events import (
 )
 from vera_core.models import Call, CallEvent
 from vera_core.models.enums import CallEventType, CallStatus
-from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer
+from vera_core.models.field_answer import CallFormSnapshot
 from vera_core.observability.correlation import parse_room_name
 from vera_core.plan_store import CallPlanService
+from vera_core.services.field_answers import current_values_by_path
 
 if TYPE_CHECKING:
     from vera_core.observability.correlation import RoomRef
@@ -371,25 +371,17 @@ class WorkerEventConsumer:
             if call is None:
                 return  # voice-lab room — no pipeline form
             form_id = call.form_id
-            values = (
-                await session.execute(
-                    select(FieldAnswer.field_path, FieldAnswer.value).where(
-                        FieldAnswer.form_id == form_id,
-                        FieldAnswer.is_current.is_(True),
-                    )
-                )
-            ).all()
             existing = (
                 await session.execute(
                     select(CallFormSnapshot.id).where(CallFormSnapshot.call_id == ref.call_id)
                 )
             ).scalar_one_or_none()
-            if existing is None:
+            if existing is None:  # redelivered closeout → snapshot already taken
                 session.add(
                     CallFormSnapshot(
                         tenant_id=ref.tenant_id,
                         call_id=ref.call_id,
-                        before_state={fp: unwrap_value(v) for fp, v in values},
+                        before_state=await current_values_by_path(session, form_id),
                         after_state={},
                     )
                 )

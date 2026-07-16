@@ -149,14 +149,7 @@ class InMemoryTranscriptStore:
             for entry_id, fields in self._entries.get(key, []):
                 if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
                     continue
-                out.append(
-                    (
-                        entry_id,
-                        TranscriptEvent(
-                            role=fields["role"], text=fields["text"], ts=int(fields["ts"])
-                        ),
-                    )
-                )
+                out.append((entry_id, _event_from_fields(fields)))
         return out
 
 
@@ -247,12 +240,7 @@ class RedisTranscriptStore:
         for entry_id, fields in entries:
             if fields.get(_ENDED_FIELD) == _ENDED_VALUE:
                 continue
-            out.append(
-                (
-                    entry_id,
-                    TranscriptEvent(role=fields["role"], text=fields["text"], ts=int(fields["ts"])),
-                )
-            )
+            out.append((entry_id, _event_from_fields(fields)))
         return out
 
 

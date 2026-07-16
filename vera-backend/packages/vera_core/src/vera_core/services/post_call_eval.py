@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import UUID
@@ -15,7 +16,6 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phi_codec.tokens.token import TOKEN_RE
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.forms import dsl
 from vera_core.forms.conditions import is_v2
@@ -35,7 +35,11 @@ logger = logging.getLogger("vera.post_call_eval")
 # A judge verdict below this confidence (or unsupported) routes the field to review.
 REVIEW_CONFIDENCE_FLOOR = 60
 
-PHI_TOKEN_RE = TOKEN_RE
+# Legacy de-identification token shape ("[[SSN_1]]"). The tokenization wall was
+# removed 2026-07-13 (phi_codec deleted; transcripts are plaintext in-boundary),
+# but a token-shaped extraction still means "not a real value" — quarantine it
+# to review rather than persisting it as an answer.
+PHI_TOKEN_RE = re.compile(r"\[\[([A-Z][A-Z_]*)_(\d+)\]\]")
 
 
 def has_phi_token(value: str) -> bool:
@@ -69,6 +73,9 @@ class EvalDeps:
     llm: LLMClient
     audit: AuditSink
     livekit: Any
+    kms: Any = None
+    recording: Any = None
+    plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
 
 
@@ -188,7 +195,15 @@ async def evaluate_call(
                 detail=detail,
             )
         )
-        await try_dispatch(session, tenant_id, deps.livekit, audit=deps.audit)
+        await try_dispatch(
+            session,
+            tenant_id,
+            deps.livekit,
+            deps.kms,
+            audit=deps.audit,
+            recording=deps.recording,
+            plan_service=deps.plan_service,
+        )
         return EvalOutcome(status=target, answers_written=written, reviewed_fields=reviewed)
 
     # (3) No transcript → route to EXCEPTION_REVIEW.
@@ -205,8 +220,7 @@ async def evaluate_call(
         doc = dsl.load_document(json.dumps(version.schema_json))
     except Exception as exc:
         logger.error(
-            "post_call_eval: unsupported schema for form %s — routing to EXCEPTION_REVIEW"
-            " (%s: %s)",
+            "post_call_eval: unsupported schema for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
             form_id,
             type(exc).__name__,
             exc,
