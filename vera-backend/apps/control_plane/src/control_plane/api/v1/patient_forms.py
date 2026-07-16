@@ -65,7 +65,8 @@ from vera_core.forms.review import (
     AnswerRow,
     adjudication_action,
     build_field_views,
-    form_completion_pct,
+    completion_pct,
+    completion_pct_v2,
     normalize_value,
     unwrap_value,
 )

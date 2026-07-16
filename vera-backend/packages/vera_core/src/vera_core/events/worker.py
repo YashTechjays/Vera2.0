@@ -10,7 +10,7 @@ never a phone number or transcript text.
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from vera_core.events.stream_bus import StreamBus
 

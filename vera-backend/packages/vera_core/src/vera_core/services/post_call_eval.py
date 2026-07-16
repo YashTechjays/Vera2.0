@@ -21,6 +21,7 @@ from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
     form_completion_pct,
     retryable_required_paths,
+    unsatisfied_required_paths,
 )
 from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -244,6 +245,10 @@ async def evaluate_call(
         )
     token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
     clean = [ef for ef in extracted if not has_phi_token(ef.value)]
+    # The LLM may emit the same field_path twice; keep the last occurrence. Two
+    # inserts for one path would violate the fa_current_uq partial unique index
+    # (the batch demote runs before the inserts) and poison-loop the job.
+    clean = list({ef.field_path: ef for ef in clean}.values())
     # Demote the outgoing current rows in one statement BEFORE adding their
     # replacements, so the merge invariant (one current row per path) holds at flush.
     await _demote_current(session, form_id, [ef.field_path for ef in clean])
@@ -326,14 +331,24 @@ async def evaluate_call(
             reason="token_value",
         )
     status_by_path = await load_field_status(session, form_id)
-    retryable = retryable_required_paths(status_by_path, version.schema_json, floor=deps.floor)
-    if not retryable:
+    # The authoritative decision evaluates gates against the REAL current values
+    # (in-session, never logged) — the dispatcher's PHI-free sentinel
+    # approximation is only for the retry-nudge labels. COMPLETED requires every
+    # required field of EVERY role satisfied: an unsatisfied non-askable field
+    # can't be fixed by a retry call, so it goes to review, never COMPLETED.
+    unsatisfied = unsatisfied_required_paths(
+        status_by_path, version.schema_json, floor=deps.floor, values=current_values
+    )
+    if not unsatisfied:
         return await _finish(FormStatus.COMPLETED, written=len(kept), reviewed=[])
-    if sm.can_retry(form, tenant_max_retries=tenant.max_retries):
+    retryable = retryable_required_paths(
+        status_by_path, version.schema_json, floor=deps.floor, values=current_values
+    )
+    if retryable and sm.can_retry(form, tenant_max_retries=tenant.max_retries):
         return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
     return await _finish(
         FormStatus.EXCEPTION_REVIEW,
         written=len(kept),
-        reviewed=retryable,
-        reason="retries_exhausted",
+        reviewed=unsatisfied,
+        reason="retries_exhausted" if retryable else "unsatisfied_unaskable",
     )

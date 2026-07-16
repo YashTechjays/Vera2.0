@@ -16,8 +16,8 @@ import os
 import subprocess
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from uuid import UUID
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text

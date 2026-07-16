@@ -4,22 +4,22 @@
 it is the single "current values of a form" query for snapshots and completion %.
 """
 
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vera_core.forms.review import FieldStatus, unwrap_value
+from vera_core.forms.review import FieldStatus
 from vera_core.models.field_answer import FieldAnswer, FieldEvaluation
 
 
 async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, FieldStatus]:
     """Return one FieldStatus per current field answer for *form_id*.
 
-    Selects only field_path, source, confidence, and the latest eval's supported
+    Selects only field_path, source, confidences, and the latest eval's supported
     flag — no value or evidence columns, so this query is PHI-free. An answer with
-    no evaluation yields ai_supported=None.
+    no evaluation yields ai_supported=None; ai_confidence is the judge's score
+    when an evaluation exists (the satisfaction gate's input), else the extractor's.
 
     The latest evaluation per answer is resolved in-DB via a subquery on
     MAX(created_at) so that multiple evaluations (e.g. LLM retries) never produce
@@ -42,6 +42,7 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
                 FieldAnswer.source,
                 FieldAnswer.confidence,
                 FieldEvaluation.supported,
+                FieldEvaluation.confidence.label("eval_confidence"),
             )
             .outerjoin(
                 latest_eval,
@@ -56,7 +57,14 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
         )
     ).all()
     return {
-        path: FieldStatus(source=source, ai_supported=supported, ai_confidence=confidence)
-        for path, source, confidence, supported in rows
+        # The satisfaction floor gates on the JUDGE's confidence (design: "judge-
+        # supported, confidence >= floor"); the extractor's self-reported score is
+        # only the fallback for an answer that has no evaluation yet — where
+        # ai_supported=None already fails the gate.
+        path: FieldStatus(
+            source=source,
+            ai_supported=supported,
+            ai_confidence=eval_confidence if eval_confidence is not None else confidence,
+        )
+        for path, source, confidence, supported, eval_confidence in rows
     }
-
