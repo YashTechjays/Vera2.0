@@ -16,6 +16,7 @@ from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
 from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
@@ -81,6 +82,13 @@ def _navigator(**kwargs: Any) -> IvrNavigatorAgent:
     return IvrNavigatorAgent(**kwargs)
 
 
+def _mock_session() -> MagicMock:
+    """A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards."""
+    session = MagicMock()
+    session.userdata = TakeoverState()
+    return session
+
+
 @pytest.mark.asyncio
 async def test_carry_chat_ctx_copies_spoken_turns_not_instructions() -> None:
     # A tool-returned agent starts with an empty chat_ctx and LiveKit does not auto-carry
@@ -131,7 +139,7 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
 async def test_give_up_ends_the_call() -> None:
     # give_up is the navigator's bail-out for an unresolvable IVR loop — it hangs up cleanly.
     agent = _navigator()
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     give_up_tool = next(
         t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "give_up"
     )
@@ -148,7 +156,7 @@ async def test_turn_cap_grants_one_grace_turn_before_ending() -> None:
     # hung up on. So the first over-cap turn neither shuts down nor raises StopResponse.
     agent = _navigator()
     agent._turns = _IVR_MAX_TURNS  # the next completed turn trips the cap
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         await agent.on_user_turn_completed(MagicMock(), MagicMock())  # grace turn
     mock_session.shutdown.assert_not_called()
@@ -161,7 +169,7 @@ async def test_turn_cap_backstop_ends_the_call_after_the_grace_turn() -> None:
     agent = _navigator()
     agent._turns = _IVR_MAX_TURNS
     agent._final_turn_used = True  # grace turn already spent
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with (
         patch.object(type(agent), "session", new=property(lambda self: mock_session)),
         pytest.raises(StopResponse),
@@ -173,7 +181,7 @@ async def test_turn_cap_backstop_ends_the_call_after_the_grace_turn() -> None:
 @pytest.mark.asyncio
 async def test_under_the_turn_cap_does_not_end_the_call() -> None:
     agent = _navigator()
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         # one normal turn well under the cap — no shutdown, no StopResponse
         await agent.on_user_turn_completed(MagicMock(), MagicMock())
@@ -429,7 +437,7 @@ async def test_voice_lab_agent_greets_on_enter_and_carries_end_call() -> None:
     tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
     assert tool_names == ["end_call"]
     assert agent.instructions == "be helpful"
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         await agent.on_enter()
     mock_session.say.assert_called_once_with("Hi there, quick benefits check?")

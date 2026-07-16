@@ -1,12 +1,9 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   Maximize2,
   X,
-  Volume2,
   Grid3x3,
-  Loader2,
   MessageSquare,
-  Copy,
   ChevronDown,
   ChevronUp,
 } from "lucide-react"
@@ -18,10 +15,19 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { usePermission } from "@/lib/auth/permissions"
+import { ApiError } from "@/lib/api/client"
+import { endCall } from "@/lib/api/calls"
+import {
+  interveneButtonState,
+  shouldAllowClose,
+  type LiveCallMode,
+  type RoomStatus,
+} from "@/lib/monitoring/liveCallView"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
+import { CallTranscript } from "./CallTranscript"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
-import { CallTranscript } from "./CallTranscript"
 import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
@@ -33,53 +39,99 @@ function confidenceColor(score: number): string {
 }
 
 /**
- * Live-call detail overview (matches smart-caller-fe's ViewLiveModal):
- *  - left: collapsible "Patient Information Form" summary + call controls
- *  - right: live transcripts
- *  - footer: End Call · Intervene · Show Summary
- * Intervene opens the next (intervention) modal; the maximize icon opens the
- * full Patient Information form.
+ * The live-call modal: auto-connects listen-only, and upgrades in place to publish via
+ * Intervene for calls:intervene holders. Mode is part of LiveCallRoom's key — LiveKit
+ * ignores a token swap while connected, so a mode switch remounts. Intervening is one-way:
+ * no close until the call ends.
+ *
+ * "Call ended" comes from the events stream's terminal call_status or the room dying
+ * (End Call deletes it server-side).
  */
-export function CallOverviewModal({
+export function LiveCallModal({
   call,
   open,
   onOpenChange,
   onExpand,
-  onIntervene,
-  onEndCall,
-  ending,
-  onShowSummary,
 }: {
   call: LiveCall | null
   open: boolean
   onOpenChange: (open: boolean) => void
   onExpand: () => void
-  onIntervene: () => void
-  /** Ends the call for real (backend room teardown), not just closes the modal. */
-  onEndCall: () => void
-  /** True while the end-call request is in flight — disables the button. */
-  ending: boolean
-  onShowSummary?: () => void
 }) {
+  const canIntervene = usePermission("calls:intervene")
+  const [mode, setMode] = useState<LiveCallMode>("listen")
+  const [roomStatus, setRoomStatus] = useState<RoomStatus | null>(null)
+  const [ending, setEnding] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
-  const { startedAtMs, callEnded, terminalStatus, onCallStatus } = useCallStatus(call?.id)
   const progress = call?.formProgress ?? 0
 
-  const { label: duration, running } = useLiveDuration({
+  const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
+    call?.id,
+  )
+  const duration = useLiveDuration({
     open,
-    ended: callEnded,
+    ended: sseEnded,
     sseMs: startedAtMs,
     startedAt: call?.startedAt,
   })
+  // SSE is the sole source of truth for "call ended"; a room "ended" phase is the
+  // supervisor's own connection dropping (LiveCallRoom shows a connection-lost state).
+  const callEnded = sseEnded
+  const closeAllowed = shouldAllowClose(mode, callEnded, false)
+  const intervene = interveneButtonState(canIntervene, roomStatus)
+
+  // Tab close / refresh while intervening abandons the call with a silenced agent — warn.
+  // (The modal close-lock only covers Esc/overlay/X, not leaving the page.)
+  useEffect(() => {
+    if (mode !== "intervene") return
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault()
+    window.addEventListener("beforeunload", warn)
+    return () => window.removeEventListener("beforeunload", warn)
+  }, [mode])
+
+  // Reset to listen-only on close; Radix routes Esc/overlay-click here too, so an intervener can't escape until the call ends.
+  function handleOpenChange(next: boolean) {
+    if (!shouldAllowClose(mode, callEnded, next)) return
+    if (!next) {
+      setMode("listen")
+      setRoomStatus(null)
+      setActionError(null)
+    }
+    onOpenChange(next)
+  }
+
+  async function handleEndCall() {
+    if (!call?.id) return
+    setEnding(true)
+    try {
+      await endCall(call.id)
+      // The room is torn down server-side; SSE terminal status / disconnect flips callEnded and unlocks the modal.
+      setMode("listen")
+      setRoomStatus(null)
+      setActionError(null)
+      onOpenChange(false)
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.message : "Could not end the call.")
+    } finally {
+      setEnding(false)
+    }
+  }
+
+  // An intervene token can be refused (e.g. 409 if someone took the mic first) — fall back to listening.
+  function handleJoinFailed(error: unknown) {
+    if (mode !== "intervene") return
+    setMode("listen")
+    setActionError(error instanceof ApiError ? error.message : "Could not intervene.")
+  }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         showCloseButton={false}
         className="flex max-h-[92vh] w-[96vw] max-w-[1100px] flex-col gap-0 p-0"
       >
-        {/* Header */}
         <div className="border-b border-border p-4">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -97,14 +149,16 @@ export function CallOverviewModal({
               >
                 <Maximize2 className="size-4" />
               </button>
-              <button
-                type="button"
-                onClick={() => onOpenChange(false)}
-                title="Close"
-                className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
-              >
-                <X className="size-4" />
-              </button>
+              {closeAllowed && (
+                <button
+                  type="button"
+                  onClick={() => handleOpenChange(false)}
+                  title="Close"
+                  className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
+                >
+                  <X className="size-4" />
+                </button>
+              )}
             </div>
           </div>
 
@@ -126,11 +180,8 @@ export function CallOverviewModal({
           </div>
         </div>
 
-        {/* Body — two columns */}
         <div className="flex min-h-[360px] flex-1 gap-4 overflow-hidden bg-[#f8f9fa] p-4">
-          {/* Left — form summary + call controls */}
           <div className="flex flex-1 flex-col gap-3 overflow-auto">
-            {/* Form summary bar */}
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-white px-4 py-3">
               <button
                 type="button"
@@ -174,59 +225,55 @@ export function CallOverviewModal({
               </div>
             </div>
 
-            {/* Inline form (when expanded) */}
             {formExpanded && (
               <div className="overflow-auto rounded-lg border border-border bg-white p-4">
                 <SchemaForm />
               </div>
             )}
 
-            {/* Call status / controls bar */}
+            {/* Timer starts on the SSE "active" event (callee answered) and freezes on a terminal status. */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
               <span className="flex items-center gap-2 text-sm font-semibold tabular-nums">
                 <span
                   className={cn(
                     "size-2 rounded-full",
-                    running ? "bg-emerald-500" : "bg-amber-500",
+                    duration.running && !callEnded ? "bg-emerald-500" : "bg-amber-500",
                   )}
                 />
-                {duration}
+                {duration.label}
               </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
-                  title="Audio"
-                >
-                  <Volume2 className="size-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setKeypadOpen(true)}
-                  className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
-                  title="Keypad"
-                >
-                  <Grid3x3 className="size-4" />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setKeypadOpen(true)}
+                className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
+                title="Keypad"
+              >
+                <Grid3x3 className="size-4" />
+              </button>
             </div>
           </div>
 
-          {/* Right — live transcripts */}
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
             <div className="flex items-center justify-between bg-[#f3f5f7] px-4 py-3">
               <h3 className="font-semibold text-foreground">Live Transcripts</h3>
-              <Button variant="outline" size="sm" className="gap-1.5">
-                <Copy className="size-3.5" />
-                Copy
-              </Button>
             </div>
             {call?.id ? (
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div className="shrink-0 border-b border-border">
-                  <LiveCallRoom key={call.id} callId={call.id} ended={callEnded} endedStatus={terminalStatus} />
-                </div>
-                <CallTranscript key={`t-${call.id}`} callId={call.id} onCallStatus={onCallStatus} />
+              <div className="flex flex-1 flex-col overflow-hidden">
+                <LiveCallRoom
+                  key={`${call.id}:${mode}`}
+                  callId={call.id}
+                  microphone={mode === "intervene"}
+                  ended={sseEnded}
+                  endedStatus={terminalStatus}
+                  onStatus={setRoomStatus}
+                  onJoinFailed={handleJoinFailed}
+                />
+                <CallTranscript
+                  key={`t-${call.id}`}
+                  callId={call.id}
+                  onCallStatus={onCallStatus}
+                  supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
+                />
               </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
@@ -237,26 +284,37 @@ export function CallOverviewModal({
           </div>
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-between gap-4 border-t border-border p-4">
-          <Button
-            onClick={onEndCall}
-            disabled={ending || callEnded}
-            className="bg-red-500 text-white hover:bg-red-600"
-          >
-            {ending && <Loader2 className="size-4 animate-spin" />}
-            {callEnded ? "Call Ended" : ending ? "Ending…" : "End Call"}
-          </Button>
           <div className="flex items-center gap-3">
+            {!callEnded && (
+              <Button
+                onClick={() => void handleEndCall()}
+                disabled={ending}
+                className="bg-red-500 text-white hover:bg-red-600"
+              >
+                {ending ? "Ending…" : "End Call"}
+              </Button>
+            )}
+            {(mode === "listen" || callEnded) && (
+              <Button variant="outline" onClick={() => handleOpenChange(false)}>
+                Close
+              </Button>
+            )}
+            {actionError && <span className="text-sm text-destructive">{actionError}</span>}
+          </div>
+          {intervene.visible && mode === "listen" && !callEnded && (
             <Button
-              onClick={onIntervene}
-              disabled={callEnded}
+              onClick={() => {
+                setActionError(null)
+                setMode("intervene")
+              }}
+              disabled={intervene.disabled}
+              title={intervene.title}
               className="bg-orange-500 text-white hover:bg-orange-600"
             >
               Intervene
             </Button>
-            <Button onClick={onShowSummary}>Show Summary</Button>
-          </div>
+          )}
         </div>
 
         <Keypad open={keypadOpen} onOpenChange={setKeypadOpen} />

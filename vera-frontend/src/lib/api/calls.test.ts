@@ -22,7 +22,6 @@ import {
   getJoinToken,
   listCalls,
   publishCall,
-  revokeAccess,
   type CallSummary,
   type JoinTokenResponse,
 } from "./calls"
@@ -75,24 +74,17 @@ describe("calls API client", () => {
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token?intervene=true")
   })
 
-  it("revokes access with the target user id in the body", async () => {
-    vi.mocked(apiRequest).mockResolvedValue(null)
-    await revokeAccess("c1", "u2")
-    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/revoke-access", {
-      method: "POST",
-      body: { target_user_id: "u2" },
-    })
-  })
-
   it("ends a call (POST, no body)", async () => {
     vi.mocked(apiRequest).mockResolvedValue(null)
     await endCall("c1")
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/end", { method: "POST" })
   })
 
-  it("propagates ApiError when ending a hidden call (404)", async () => {
-    vi.mocked(apiRequest).mockRejectedValue(new ApiError(404, "NOT_FOUND", "call not found"))
-    await expect(endCall("c1")).rejects.toBeInstanceOf(ApiError)
+  it("propagates ApiError when intervene hits the single-intervener lock (409)", async () => {
+    vi.mocked(apiRequest).mockRejectedValue(
+      new ApiError(409, "CONFLICT", "another supervisor is currently intervening on this call"),
+    )
+    await expect(getJoinToken("c1", true)).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when a non-owner tries to publish (403)", async () => {
@@ -100,6 +92,11 @@ describe("calls API client", () => {
       new ApiError(403, "FORBIDDEN", "only the owner can publish"),
     )
     await expect(publishCall("c1")).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it("propagates ApiError when ending an unknown call (404)", async () => {
+    vi.mocked(apiRequest).mockRejectedValue(new ApiError(404, "NOT_FOUND", "call not found"))
+    await expect(endCall("c1")).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when joining a private call (404)", async () => {

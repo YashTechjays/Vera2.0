@@ -21,10 +21,6 @@ class CallSummary(BaseModel):
     is_owner: bool = False
 
 
-class RevokeAccessRequest(BaseModel):
-    target_user_id: UUID
-
-
 class JoinTokenResponse(BaseModel):
     token: str
     url: str
