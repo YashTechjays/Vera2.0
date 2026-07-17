@@ -29,7 +29,7 @@ import {
   type LiveCallMode,
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
-import { healthTone, type HealthTone } from "@/lib/monitoring/health"
+import { healthTone, healthToneClass } from "@/lib/monitoring/health"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
@@ -38,13 +38,6 @@ import { LiveCallRoom } from "./LiveCallRoom"
 import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
-
-const healthColor: Record<HealthTone, string> = {
-  good: "text-emerald-600",
-  warn: "text-amber-600",
-  bad: "text-red-600",
-  unknown: "text-muted-foreground",
-}
 
 /**
  * The live-call modal: auto-connects listen-only, and upgrades in place to publish via
@@ -202,7 +195,7 @@ export function LiveCallModal({
             </div>
             <div className="text-right">
               <div className="text-xs text-muted-foreground">Call Health</div>
-              <div className={cn("font-semibold", healthColor[healthTone(healthScore)])}>
+              <div className={cn("font-semibold", healthToneClass[healthTone(healthScore)])}>
                 {healthScore === null ? "Assessing…" : `${healthScore}%`}
               </div>
             </div>

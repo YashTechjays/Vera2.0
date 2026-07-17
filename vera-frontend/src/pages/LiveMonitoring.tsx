@@ -33,7 +33,7 @@ import {
 import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
 import { elapsed } from "@/lib/monitoring/liveTimer"
-import { healthDisplay, type HealthTone } from "@/lib/monitoring/health"
+import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
 import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
@@ -74,13 +74,6 @@ const badgeStyle: Record<CallCategory, string> = {
   processing: "bg-amber-100 text-amber-800",
   completed: "bg-emerald-100 text-emerald-700",
 }
-const healthText: Record<HealthTone, string> = {
-  good: "text-emerald-600",
-  warn: "text-amber-600",
-  bad: "text-red-600",
-  unknown: "text-muted-foreground",
-}
-
 /** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
  *  (confidence, form %) are placeholders. */
 function toLiveCall(c: CallSummary, now: number): LiveCall {
@@ -121,7 +114,7 @@ function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
     <span
       className={cn(
         "font-semibold tabular-nums",
-        health.stale ? "text-muted-foreground" : healthText[health.tone],
+        health.stale ? "text-muted-foreground" : healthToneClass[health.tone],
       )}
       title={flag}
     >

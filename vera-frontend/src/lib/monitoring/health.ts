@@ -2,6 +2,14 @@
 
 export type HealthTone = "good" | "warn" | "bad" | "unknown"
 
+/** Tailwind text color per tone — shared by the monitoring list and the live-call modal. */
+export const healthToneClass: Record<HealthTone, string> = {
+  good: "text-emerald-600",
+  warn: "text-amber-600",
+  bad: "text-red-600",
+  unknown: "text-muted-foreground",
+}
+
 /** 3x the observer's analysis interval (15s): older than this means the
  *  observer has gone quiet (LLM outage / silence) — gray out, don't assert. */
 const STALE_AFTER_MS = 45_000

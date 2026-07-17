@@ -10,7 +10,6 @@ call-related). The stream tails from "now": current state is always recovered
 from the REST API on (re)connect; this pipe is an accelerant, never the record.
 """
 
-import logging
 from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import UUID
@@ -31,8 +30,6 @@ from vera_core.db.rls import tenant_session
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AccountType
 from vera_core.notifications import Notification, NotificationAudience, NotificationService
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["notifications"])
 
