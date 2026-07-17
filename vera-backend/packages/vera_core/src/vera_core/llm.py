@@ -123,7 +123,24 @@ class ResilientLLM:
         if self._chain is None:
             from livekit.agents.llm import FallbackAdapter
 
-            self._llms = [self._registry[s.provider](s, self._secrets) for s in self._specs]
+            # A provider whose client can't even be constructed (e.g. its API key
+            # secret is absent in this environment) is dropped from the chain with
+            # a warning — a misconfigured FALLBACK must not take down a healthy
+            # primary. Only an empty chain is fatal.
+            llms: list[LLM[Any]] = []
+            for spec in self._specs:
+                try:
+                    llms.append(self._registry[spec.provider](spec, self._secrets))
+                except Exception as exc:  # secret/config errors; message may be sensitive
+                    logger.warning(
+                        "LLM provider %s (%s) unavailable at construction: %s",
+                        spec.provider,
+                        spec.model,
+                        type(exc).__name__,
+                    )
+            if not llms:
+                raise LLMUnavailableError
+            self._llms = llms
             self._chain = FallbackAdapter(
                 self._llms,
                 attempt_timeout=self._options.attempt_timeout,

@@ -99,6 +99,39 @@ async def test_primary_failure_falls_back() -> None:
     assert fallback.calls == 1
 
 
+def _raising_factory(spec, secrets):
+    raise LookupError("secret not found: OPENAI_API_KEY")
+
+
+@pytest.mark.asyncio
+async def test_fallback_construction_failure_does_not_break_primary() -> None:
+    """A fallback whose client can't be built (e.g. its API key secret is absent)
+    is dropped from the chain — the healthy primary still serves."""
+    primary = _StubLLM(text="primary answer")
+    registry = {**_registry_for(primary), "broken": _raising_factory}
+    client = ResilientLLM(
+        _specs(1)[0],
+        [LLMSpec(provider="broken", model="m")],
+        registry=registry,
+    )
+    try:
+        assert await client.complete(system="s", user="u") == "primary answer"
+    finally:
+        await client.aclose()
+    assert primary.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_all_constructions_failing_raises_unavailable() -> None:
+    client = ResilientLLM(
+        LLMSpec(provider="broken", model="m"),
+        registry={"broken": _raising_factory},
+    )
+    with pytest.raises(LLMUnavailableError):
+        await client.complete(system="s", user="u")
+    await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_all_providers_failing_raises_unavailable() -> None:
     specs = _specs(2)
