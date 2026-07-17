@@ -37,6 +37,7 @@ from control_plane.auth.rbac import (
     require,
 )
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
+from control_plane.call_summary import transcript_role
 from control_plane.deps import (
     current_elevation,
     current_identity,
@@ -100,14 +101,6 @@ _ACTIVE_STATUSES = (
 # XREAD BLOCK window, so worst-case termination latency is deadline + block_ms
 # (~185s with the store's default 5s block).
 _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S: float = 180
-
-# Transcript.source ("rep"/"bot") -> envelope role, used only when the row's own
-# `role` is blank (older rows / a source the worker didn't stamp a role for).
-_SOURCE_TO_ROLE = {"rep": "user", "bot": "agent"}
-
-
-def _transcript_role(row: Transcript) -> str:
-    return row.role or _SOURCE_TO_ROLE.get(row.source, row.source)
 
 
 def _epoch_ms(dt: datetime | None) -> int:
@@ -387,7 +380,7 @@ async def stream_call_events(
                 CallStreamEvent(
                     type=TYPE_TRANSCRIPT,
                     data={
-                        "role": _transcript_role(row),
+                        "role": transcript_role(row),
                         "source": row.source,
                         "text": row.message,
                     },
