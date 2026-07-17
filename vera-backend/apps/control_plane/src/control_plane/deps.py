@@ -35,6 +35,7 @@ from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
 from vera_core.llm import ResilientLLM
 from vera_core.models.enums import AccountType
+from vera_core.notifications import NotificationService
 from vera_core.plan_store import CallPlanService
 
 if TYPE_CHECKING:
@@ -93,6 +94,11 @@ def get_livekit(request: Request) -> LiveKitGateway:
 
 def get_call_stream_service(request: Request) -> CallStreamService:
     service: CallStreamService = request.app.state.call_stream_service
+    return service
+
+
+def get_notification_service(request: Request) -> NotificationService:
+    service: NotificationService = request.app.state.notifications
     return service
 
 
