@@ -157,6 +157,9 @@ class Settings(BaseSettings):
     summary_attempt_timeout_seconds: float = 8.0  # VERA_SUMMARY_ATTEMPT_TIMEOUT_SECONDS
     # Short cache so tab-flipping supervisors reuse one summary; staleness cap.
     summary_cache_ttl_seconds: int = 5  # VERA_SUMMARY_CACHE_TTL_SECONDS
+    # Overall request budget for the summarizer chain (cache + fallback attempts);
+    # bounds the worst-case wait before the endpoint gives up and returns 503.
+    summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
 
     @field_validator("summary_fallback_models", mode="before")
     @classmethod

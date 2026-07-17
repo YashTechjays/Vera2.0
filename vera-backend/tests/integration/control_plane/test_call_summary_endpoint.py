@@ -230,6 +230,22 @@ async def test_summary_403_when_visible_but_unpermitted(
     )
     assert resp.status_code == 403
 
+    # PHI-access audit recorded the denial too (same resource, decision="deny").
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.resource_type == "call_summary",
+                        AuditLog.resource_id == str(call_id),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert any(r.decision == "deny" for r in rows)
+
 
 @pytest.mark.asyncio
 async def test_summary_llm_unavailable_returns_503(

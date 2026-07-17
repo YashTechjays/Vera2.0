@@ -479,19 +479,19 @@ async def get_call_summary(
     call = await _authorize_call_read(
         call_id, request, identity, sessionmaker, resolver, audit, resource_type="call_summary"
     )
-    assert identity.tenant_id is not None  # _authorize_call_read guaranteed it
     response.headers["Cache-Control"] = "no-store"
     try:
-        result = await summarize_call(
-            llm=summary_llm,
-            cache=summary_cache,
-            stream=stream,
-            sessionmaker=sessionmaker,
-            tenant_id=identity.tenant_id,
-            call_id=call.id,
-            ttl_seconds=settings.summary_cache_ttl_seconds,
-        )
-    except LLMUnavailableError as exc:
+        async with asyncio.timeout(settings.summary_total_timeout_seconds):
+            result = await summarize_call(
+                llm=summary_llm,
+                cache=summary_cache,
+                stream=stream,
+                sessionmaker=sessionmaker,
+                tenant_id=call.tenant_id,
+                call_id=call.id,
+                ttl_seconds=settings.summary_cache_ttl_seconds,
+            )
+    except (LLMUnavailableError, TimeoutError) as exc:
         raise CustomAPIException(
             DefaultExceptionCode.SERVICE_UNAVAILABLE,
             message="summary temporarily unavailable",

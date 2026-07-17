@@ -174,7 +174,10 @@ async def summarize_call(
     except Exception as exc:  # cache outage degrades to fresh compute
         logger.warning("summary cache get failed: %s", type(exc).__name__)
     if cached is not None:
-        return CallSummaryResponse.model_validate_json(cached)
+        try:
+            return CallSummaryResponse.model_validate_json(cached)
+        except Exception as exc:  # corrupt/schema-skewed payload degrades to fresh compute
+            logger.warning("summary cache payload invalid: %s", type(exc).__name__)
 
     turns = await snapshot_turns(stream, sessionmaker, tenant_id, call_id)
     generated_at = int(time.time() * 1000)

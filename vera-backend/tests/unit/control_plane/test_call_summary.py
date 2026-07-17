@@ -188,3 +188,25 @@ async def test_cache_failure_degrades_to_fresh_compute() -> None:
     result = await _summarize(events, _BrokenCache(), llm)
     assert result.status == "ready"
     assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_invalid_payload_degrades_to_fresh_compute() -> None:
+    """A corrupt/schema-skewed cached payload must not raise pydantic ValidationError
+    up to the global handler (whose repr would leak the cached summary text as PHI) —
+    it's treated as a cache miss instead."""
+    cache, llm = _DictCache(), _StubLLM()
+    tenant_id, call_id = uuid7(), uuid7()
+    cache.data[room_name_for_call(tenant_id, call_id)] = "not json"
+    events = [_turn_event("bot", "agent", "hi"), _turn_event("rep", "user", "hello")]
+    result = await summarize_call(
+        llm=llm,
+        cache=cache,
+        stream=CallStreamService(_FakeStreamStore(events)),
+        sessionmaker=None,
+        tenant_id=tenant_id,
+        call_id=call_id,
+        ttl_seconds=5,
+    )
+    assert result.status == "ready"
+    assert llm.calls == 1
