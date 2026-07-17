@@ -215,12 +215,15 @@ async def test_cache_invalid_payload_degrades_to_fresh_compute() -> None:
 
 @pytest.mark.asyncio
 async def test_summarize_parses_json_sections_and_flattens_summary() -> None:
-    cache, llm = _DictCache(), _StubLLM(
-        text=(
-            '{"participants": "Vera and payer IVR", "purpose": "verify benefits",'
-            ' "facts": ["member ID confirmed"], "open_items": ["awaiting DOB"],'
-            ' "next_step": "provide DOB"}'
-        )
+    cache, llm = (
+        _DictCache(),
+        _StubLLM(
+            text=(
+                '{"participants": "Vera and payer IVR", "purpose": "verify benefits",'
+                ' "facts": ["member ID confirmed"], "open_items": ["awaiting DOB"],'
+                ' "next_step": "provide DOB"}'
+            )
+        ),
     )
     events = [_turn_event("bot", "agent", "hi"), _turn_event("rep", "user", "hello")]
     result = await _summarize(events, cache, llm)
