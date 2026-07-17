@@ -23,6 +23,12 @@ export type CallSummary = {
   published: boolean
   /** True when the current caller owns the call (its initiated_by). */
   is_owner: boolean
+  /** Latest observer health score (0-100); null = never assessed (render neutrally, never 0). */
+  health_score: number | null
+  /** "none" or an intervention category; null = never assessed. */
+  health_flag: string | null
+  /** ISO-8601 time of the latest assessment; drives the staleness gray-out. */
+  health_analyzed_at: string | null
 }
 
 /** LiveKit join details for a call room. */

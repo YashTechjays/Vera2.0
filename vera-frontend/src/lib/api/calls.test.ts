@@ -43,6 +43,9 @@ const call: CallSummary = {
   created_at: "2026-07-04T09:59:00Z",
   published: false,
   is_owner: true,
+  health_score: null,
+  health_flag: null,
+  health_analyzed_at: null,
 }
 
 const joinToken: JoinTokenResponse = {
