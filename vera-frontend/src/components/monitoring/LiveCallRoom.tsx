@@ -300,8 +300,7 @@ export function LiveCallRoom({
       video={false}
       onMediaDeviceFailure={() => handleRoomError(new Error("microphone unavailable"))}
       onError={handleRoomError}
-      // !h-auto: LiveKit's own .lk-room-container sets height:100%, which would
-      // swallow the whole column and collapse the transcript below to 0px.
+      // !h-auto: .lk-room-container's height:100% would collapse the transcript below.
       className="flex !h-auto flex-col"
     >
       <LiveActivityBeacon />
