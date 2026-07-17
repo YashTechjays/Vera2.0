@@ -103,7 +103,7 @@ function CallIndicator({ category }: { category: CallCategory }) {
 }
 
 export function LiveMonitoring() {
-  const { openForm } = useIbv()
+  const { openFormById } = useIbv()
   const canPublish = usePermission("calls:publish")
   // PHI (patient_name) stays in component state so it's discarded on unmount.
   const [calls, setCalls] = useState<CallSummary[]>([])
@@ -335,7 +335,9 @@ export function LiveMonitoring() {
         call={modalCall}
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
-        onExpand={() => openForm()}
+        onExpand={() => {
+          if (selected) openFormById(selected.form_id)
+        }}
       />
     </div>
   )

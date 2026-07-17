@@ -7,6 +7,8 @@ import { apiRequest } from "@/lib/api/client"
 export type CallSummary = {
   id: string
   tenant_id: string
+  /** The patient form this call fills — opens the real form from the monitoring UI. */
+  form_id: string
   /** current_status — e.g. "initiated" | "active" | "critical" | … (backend enum). */
   status: string
   room_name: string

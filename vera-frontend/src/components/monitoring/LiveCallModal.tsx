@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import {
   Maximize2,
+  Minimize2,
   X,
   Grid3x3,
   MessageSquare,
@@ -65,6 +66,8 @@ export function LiveCallModal({
   const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
+  // Full-width/height presentation of this modal (the header ⛶), not the IBV form.
+  const [maximized, setMaximized] = useState(false)
   const progress = call?.formProgress ?? 0
 
   const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
@@ -98,6 +101,7 @@ export function LiveCallModal({
       setMode("listen")
       setRoomStatus(null)
       setActionError(null)
+      setMaximized(false)
     }
     onOpenChange(next)
   }
@@ -130,7 +134,12 @@ export function LiveCallModal({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="flex max-h-[92vh] w-[96vw] max-w-[1100px] flex-col gap-0 p-0"
+        className={cn(
+          "flex flex-col gap-0 p-0",
+          maximized
+            ? "h-[98vh] max-h-[98vh] w-[98vw] max-w-none"
+            : "max-h-[92vh] w-[96vw] max-w-[1100px]",
+        )}
       >
         <div className="border-b border-border p-4">
           <div className="flex items-start justify-between gap-4">
@@ -143,11 +152,11 @@ export function LiveCallModal({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={onExpand}
-                title="Open full form"
+                onClick={() => setMaximized((v) => !v)}
+                title={maximized ? "Restore size" : "Expand"}
                 className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
               >
-                <Maximize2 className="size-4" />
+                {maximized ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
               </button>
               {closeAllowed && (
                 <button

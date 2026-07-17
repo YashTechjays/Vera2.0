@@ -9,13 +9,10 @@ import {
 
 import { validateAll, type ValidationErrors } from "@/lib/ibv/validation"
 import { allLeaves, isApplicable, isRequired, parseSchema } from "@/lib/ibv/schema"
-import { demoSchema, mockValues } from "@/lib/ibv/mock"
 import {
   activeDisputeValue,
   applyAllFlags,
   defaultFlags,
-  mockDisputes,
-  seedValues,
   toggleApplied,
   toggleSwapped,
   type Dispute,
@@ -91,8 +88,6 @@ type IbvContextValue = {
   /** Increments after each successful save — worklists watch it to refetch. */
   savedTick: number
   modalOpen: boolean
-  /** Open the form with demo data (Live Monitoring). */
-  openForm: () => void
   /** Open a real patient form by id, loaded from the API. */
   openFormById: (formId: string) => void
   closeForm: () => void
@@ -203,24 +198,7 @@ export function IbvProvider({
     [],
   )
 
-  // Demo path (Live Monitoring): seed from the bundled mock + dev-fixture schema.
-  const openForm = useCallback(() => {
-    setMode("mock")
-    setFormId(null)
-    setError(null)
-    setLoading(false)
-    setStatus(null)
-    setStatusError(null)
-    setInsuranceType(null)
-    setIvrNavigation(true)
-    setProviders([])
-    setProviderId("")
-    setSchema(demoSchema)
-    seed({ ...mockValues, ...seedValues(mockDisputes) }, mockDisputes, "Demo Patient")
-    setModalOpen(true)
-  }, [seed])
-
-  // Real path: load a patient form by id from the API. setState happens in the
+  // Load a patient form by id from the API. setState happens in the
   // event handler + async callbacks, never synchronously inside an effect.
   const openFormById = useCallback(
     (id: string) => {
@@ -435,7 +413,6 @@ export function IbvProvider({
     insuranceType,
     savedTick,
     modalOpen,
-    openForm,
     openFormById,
     closeForm,
   }
