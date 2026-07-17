@@ -169,7 +169,7 @@ function RoomView({
   }, [onStatus, phase, otherIntervener, supervisorLabel])
 
   return (
-    <div className="flex flex-1 flex-col gap-3 p-4 text-sm">
+    <div className="flex flex-col gap-3 p-4 text-sm">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Radio className={`size-4 ${PHASE_ICON_CLASS[phase]}`} />
@@ -264,18 +264,18 @@ export function LiveCallRoom({
 
   if (ended) {
     return (
-      <div className="flex flex-1 items-center gap-2 p-4 text-sm">
+      <div className="flex items-center gap-2 p-4 text-sm">
         <PhoneOff className="size-4 text-red-500" />
         <span className="font-medium text-foreground">{terminalStatusMessage(endedStatus)}</span>
       </div>
     )
   }
   if (error) {
-    return <div className="flex flex-1 items-center justify-center p-6 text-sm text-destructive">{error}</div>
+    return <div className="flex items-center justify-center p-6 text-sm text-destructive">{error}</div>
   }
   if (loading || !join) {
     return (
-      <div className="flex flex-1 items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
+      <div className="flex items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
         <Loader2 className="size-4 animate-spin" /> Connecting…
       </div>
     )
@@ -300,7 +300,7 @@ export function LiveCallRoom({
       video={false}
       onMediaDeviceFailure={() => handleRoomError(new Error("microphone unavailable"))}
       onError={handleRoomError}
-      className="flex flex-1 flex-col"
+      className="flex flex-col"
     >
       <LiveActivityBeacon />
       <RoomView microphone={microphone} onStatus={onStatus} ended={ended} onReconnect={reconnect} />

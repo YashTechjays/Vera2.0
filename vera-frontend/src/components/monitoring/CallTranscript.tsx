@@ -15,16 +15,16 @@ type TurnStyle = { onRight: boolean; label: string; bubble: string }
 // (lock steal) can't retroactively relabel earlier turns.
 type StampedTurn = TranscriptTurn & { supervisorLabel: string }
 
-/** `source` (the actor) sets the side, label, and colour: the caller (rep) on the
- *  left, our side (Vera + supervisor) on the right. */
+/** `source` (the actor) sets the side, label, and colour: our side (Vera + supervisor)
+ *  on the left, the caller (rep) on the right. */
 function turnStyle(source: TranscriptTurnSource, supervisorLabel: string): TurnStyle {
   switch (source) {
     case "bot":
-      return { onRight: true, label: "Vera", bubble: "bg-muted text-foreground" }
+      return { onRight: false, label: "Vera", bubble: "bg-muted text-foreground" }
     case "supervisor":
-      return { onRight: true, label: supervisorLabel, bubble: "bg-blue-500/10 text-foreground" }
+      return { onRight: false, label: supervisorLabel, bubble: "bg-blue-500/10 text-foreground" }
     case "rep":
-      return { onRight: false, label: "Rep", bubble: "bg-primary/10 text-foreground" }
+      return { onRight: true, label: "Rep", bubble: "bg-primary/10 text-foreground" }
   }
 }
 
