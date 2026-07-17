@@ -78,7 +78,7 @@ from vera_core.db.rls import tenant_session
 from vera_core.llm import LLMUnavailableError, ResilientLLM
 from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallStatus, InterventionType, RecordingStatus
+from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     PARTICIPANT_MODE_INTERVENER,
@@ -321,7 +321,7 @@ async def _authorize_call_read(
     tenant caller + calls:read + owner-or-published visibility, with the folded
     authz+PHI audit record both endpoints must emit. Raises the same 404/403
     shapes as stream_call_events."""
-    if identity.account_type != "tenant" or identity.tenant_id is None:
+    if identity.account_type is not AccountType.TENANT or identity.tenant_id is None:
         raise NotFoundError(message="call not found")
     tenant_id = identity.tenant_id
     async with tenant_session(sessionmaker, tenant_id) as session:
