@@ -1,5 +1,5 @@
 """Tests for the cascade agents — the plan-only conversational path, the IVR
-navigator, the apology agent, and the metadata-driven selector."""
+navigator, and the metadata-driven selector."""
 
 import logging
 import uuid
@@ -14,8 +14,9 @@ from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
-from agent_worker.agent import APOLOGY_LINE, ApologyAgent, VeraAgent, build_agent
+from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
 from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
@@ -27,6 +28,7 @@ from agent_worker.ivr_agent import (
 from agent_worker.ivr_prompt import SILENCE_TOKEN
 from agent_worker.plan_runtime import PlanRunController, PlanTaskAgent
 from vera_core.forms.call_plan import CallPlan, PlanSession, PlanTask
+from vera_core.schemas import PersonaTweak
 
 
 def _plan_controller() -> PlanRunController:
@@ -80,6 +82,13 @@ def _navigator(**kwargs: Any) -> IvrNavigatorAgent:
     return IvrNavigatorAgent(**kwargs)
 
 
+def _mock_session() -> MagicMock:
+    """A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards."""
+    session = MagicMock()
+    session.userdata = TakeoverState()
+    return session
+
+
 @pytest.mark.asyncio
 async def test_carry_chat_ctx_copies_spoken_turns_not_instructions() -> None:
     # A tool-returned agent starts with an empty chat_ctx and LiveKit does not auto-carry
@@ -107,16 +116,6 @@ def test_vera_agent_carries_only_the_end_call_tool() -> None:
     assert agent.instructions == "do things"
 
 
-@pytest.mark.asyncio
-async def test_apology_agent_speaks_one_line_and_hangs_up() -> None:
-    agent = ApologyAgent()
-    mock_session = MagicMock()
-    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
-        await agent.on_enter()
-    mock_session.say.assert_called_once_with(APOLOGY_LINE)
-    mock_session.shutdown.assert_called_once_with(drain=True)
-
-
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     agent = _navigator()
     # navigator carries the generic eligibility/benefits instructions
@@ -140,7 +139,7 @@ def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
 async def test_give_up_ends_the_call() -> None:
     # give_up is the navigator's bail-out for an unresolvable IVR loop — it hangs up cleanly.
     agent = _navigator()
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     give_up_tool = next(
         t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "give_up"
     )
@@ -157,7 +156,7 @@ async def test_turn_cap_grants_one_grace_turn_before_ending() -> None:
     # hung up on. So the first over-cap turn neither shuts down nor raises StopResponse.
     agent = _navigator()
     agent._turns = _IVR_MAX_TURNS  # the next completed turn trips the cap
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         await agent.on_user_turn_completed(MagicMock(), MagicMock())  # grace turn
     mock_session.shutdown.assert_not_called()
@@ -170,7 +169,7 @@ async def test_turn_cap_backstop_ends_the_call_after_the_grace_turn() -> None:
     agent = _navigator()
     agent._turns = _IVR_MAX_TURNS
     agent._final_turn_used = True  # grace turn already spent
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with (
         patch.object(type(agent), "session", new=property(lambda self: mock_session)),
         pytest.raises(StopResponse),
@@ -182,7 +181,7 @@ async def test_turn_cap_backstop_ends_the_call_after_the_grace_turn() -> None:
 @pytest.mark.asyncio
 async def test_under_the_turn_cap_does_not_end_the_call() -> None:
     agent = _navigator()
-    mock_session = MagicMock()
+    mock_session = _mock_session()
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
         # one normal turn well under the cap — no shutdown, no StopResponse
         await agent.on_user_turn_completed(MagicMock(), MagicMock())
@@ -430,6 +429,39 @@ def test_build_agent_selects_by_ivr_navigation_flag() -> None:
     assert (
         build_agent({"enable_ivr_navigation": False}, controller=controller) is controller.agents[0]
     )
+
+
+@pytest.mark.asyncio
+async def test_voice_lab_agent_greets_on_enter_and_carries_end_call() -> None:
+    agent = VoiceLabAgent(instructions="be helpful", greeting="Hi there, quick benefits check?")
+    tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
+    assert tool_names == ["end_call"]
+    assert agent.instructions == "be helpful"
+    mock_session = _mock_session()
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        await agent.on_enter()
+    mock_session.say.assert_called_once_with("Hi there, quick benefits check?")
+
+
+def test_build_agent_no_controller_runs_voice_lab_fallback() -> None:
+    # Voice Lab preview: no CallPlan → the conversational VoiceLabAgent, not a hang-up.
+    agent = build_agent({}, controller=None)
+    assert isinstance(agent, VoiceLabAgent)
+    assert "infertility" in agent.instructions.lower()  # the preview persona
+
+
+def test_build_agent_no_controller_ivr_nav_verification_is_voice_lab() -> None:
+    # IVR-nav preview: the navigator runs, and its post-answer verification agent is a
+    # VoiceLabAgent (so IVR preview reaches a conversational agent, not a hang-up).
+    nav = build_agent({"enable_ivr_navigation": True}, controller=None)
+    assert isinstance(nav, IvrNavigatorAgent)
+    assert isinstance(nav._make_verification_agent(), VoiceLabAgent)
+
+
+def test_voice_lab_fallback_greeting_honors_tenant_tweak() -> None:
+    agent = build_agent({}, controller=None, tweak=PersonaTweak(greeting="Custom opener."))
+    assert isinstance(agent, VoiceLabAgent)
+    assert agent._greeting == "Custom opener."
 
 
 def test_build_agent_warns_on_agent_context_without_ivr_flag(

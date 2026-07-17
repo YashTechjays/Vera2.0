@@ -9,6 +9,7 @@ import type {
   PatientFormDetail,
   PatientFormStatus,
   PatientFormStatusResult,
+  ProviderOption,
   ResolveDisputesPayload,
   SchemaVersionDetail,
 } from "./types"
@@ -17,13 +18,15 @@ import type {
 export function listPatientForms(
   params: ListPatientFormsParams = {},
 ): Promise<PaginatedPatientForms> {
-  const { page = 1, page_size = 20, status, q } = params
+  const { page = 1, page_size = 20, status, q, sort_by, sort_dir } = params
   const qs = new URLSearchParams({
     page: String(page),
     page_size: String(page_size),
   })
   if (status) qs.set("status", status)
   if (q) qs.set("q", q)
+  if (sort_by) qs.set("sort_by", sort_by)
+  if (sort_dir) qs.set("sort_dir", sort_dir)
   return apiRequest<PaginatedPatientForms>(`/patient-forms?${qs}`)
 }
 
@@ -52,14 +55,22 @@ export function resolveDisputes(
   )
 }
 
+/** GET /patient-forms/insurance-providers — active providers for the send-to-queue
+ *  picker (non-PHI catalog reference data). */
+export function listInsuranceProviders(): Promise<ProviderOption[]> {
+  return apiRequest<ProviderOption[]>(`/patient-forms/insurance-providers`)
+}
+
 /** PUT /patient-forms/{id}/status — change lifecycle status (status only).
  *  Rejects illegal transitions (422) and completing with open disputes (409).
- *  `enableIvrNavigation` rides only with an in_queue change (voice-lab-style
- *  toggle); omitted → the backend keeps the form's stored choice. */
+ *  `enableIvrNavigation` and `insuranceProviderId` ride only with an in_queue
+ *  change: the toggle picks the navigator (voice-lab-style; omitted → the backend
+ *  keeps the form's stored choice), and the provider id canonicalizes the form's
+ *  insurance_provider so dispatch resolves the right playbook. */
 export function updatePatientFormStatus(
   formId: string,
   status: PatientFormStatus,
-  opts?: { enableIvrNavigation?: boolean },
+  opts?: { enableIvrNavigation?: boolean; insuranceProviderId?: string },
 ): Promise<PatientFormStatusResult> {
   return apiRequest<PatientFormStatusResult>(
     `/patient-forms/${encodeURIComponent(formId)}/status`,
@@ -69,6 +80,9 @@ export function updatePatientFormStatus(
         status,
         ...(opts?.enableIvrNavigation !== undefined
           ? { enable_ivr_navigation: opts.enableIvrNavigation }
+          : {}),
+        ...(opts?.insuranceProviderId
+          ? { insurance_provider_id: opts.insuranceProviderId }
           : {}),
       },
     },

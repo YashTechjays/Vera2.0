@@ -12,6 +12,7 @@ from livekit.agents import Agent
 from livekit.agents.llm import FunctionTool
 
 from agent_worker.directives import ReAsk, SkipToTask, Terminate
+from agent_worker.intervention import TakeoverState
 from agent_worker.plan_runtime import (
     WRAP_UP_TASK_KEY,
     PlanRunController,
@@ -86,6 +87,8 @@ def _tool(agent: Agent, name: str) -> FunctionTool:
 
 
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
+    # A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards.
+    mock_session.userdata = TakeoverState()
     return patch.object(type(agent), "session", new=property(lambda self: mock_session))
 
 
@@ -272,6 +275,7 @@ def _attach_ordered_session(controller: PlanRunController) -> tuple[MagicMock, l
     bot was interrupted (went silent) BEFORE the redirect."""
     order: list[Any] = []
     session = MagicMock()
+    session.userdata.engaged = False  # no supervisor takeover
     session.interrupt = AsyncMock(side_effect=lambda: order.append("interrupt"))
     session.update_agent = MagicMock(side_effect=lambda a: order.append(("update_agent", a)))
     session.generate_reply = MagicMock(side_effect=lambda **k: order.append(("generate_reply", k)))
@@ -341,10 +345,21 @@ class TestDirectiveIntervention:
         controller, _ = _controller()
         controller.note_task_entered(0)
         session = MagicMock()
+        session.userdata.engaged = False
         session.interrupt = AsyncMock(side_effect=RuntimeError("boom"))
         controller.attach_session(session)
         # a redirect failure must never bubble into the Observer / drop the call
         await controller.apply_directive_now(Terminate(rule_key="t"))
+
+    @pytest.mark.asyncio
+    async def test_no_op_while_supervisor_has_taken_over(self) -> None:
+        # Under a live human takeover the rule engine must not yank the agent around.
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        session, order = _attach_ordered_session(controller)
+        session.userdata.engaged = True  # supervisor is driving the call
+        await controller.apply_directive_now(Terminate(rule_key="t"))
+        assert order == []  # no interrupt, no swap
 
 
 class TestPrefill:

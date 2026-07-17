@@ -10,8 +10,9 @@ import { getToken } from "@/lib/auth/storage"
 
 export type CallStreamEvent = { type: string; data: Record<string, unknown>; ts: number }
 
-/** Who acted (the constrained actor set — drives which side a turn renders on). */
-export type TranscriptTurnSource = "rep" | "bot"
+/** Who acted (the constrained actor set — drives which side a turn renders on).
+ *  "supervisor" is a human who took over the call (transcribed post-intervene). */
+export type TranscriptTurnSource = "rep" | "bot" | "supervisor"
 /** What kind of turn it was ("dtmf" = a keypad press whose text is the digits sent). */
 export type TranscriptTurnRole = "user" | "agent" | "dtmf"
 export type TranscriptTurn = {
@@ -32,6 +33,10 @@ function isTurnRole(role: unknown): role is TranscriptTurnRole {
   return role === "user" || role === "agent" || role === "dtmf"
 }
 
+function isTurnSource(source: unknown): source is TranscriptTurnSource {
+  return source === "rep" || source === "bot" || source === "supervisor"
+}
+
 /** Narrow an envelope to a transcript turn; null for other/malformed event types. */
 export function asTranscriptTurn(e: CallStreamEvent): TranscriptTurn | null {
   if (e.type !== "transcript") return null
@@ -39,7 +44,7 @@ export function asTranscriptTurn(e: CallStreamEvent): TranscriptTurn | null {
   if (!isTurnRole(role) || typeof text !== "string") return null
   return {
     role,
-    source: source === "rep" || source === "bot" ? source : SOURCE_BY_ROLE[role],
+    source: isTurnSource(source) ? source : SOURCE_BY_ROLE[role],
     text,
     ts: e.ts,
   }

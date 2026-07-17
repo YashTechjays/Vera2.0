@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react"
-import { ArrowUp, Check } from "lucide-react"
+import {
+  AlertCircle,
+  ArrowUp,
+  Check,
+  CheckCircle2,
+  Phone,
+  PhoneCall,
+  type LucideIcon,
+} from "lucide-react"
 
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -15,27 +23,33 @@ import {
 import { cn } from "@/lib/utils"
 import { useIbv } from "@/components/ibv/IbvProvider"
 import { usePermission } from "@/lib/auth/permissions"
-import { endCall, listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
+import {
+  getCallStats,
+  listCalls,
+  publishCall,
+  type CallStats,
+  type CallSummary,
+} from "@/lib/api/calls"
+import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
 import { elapsed } from "@/lib/monitoring/liveTimer"
-import { CallOverviewModal } from "@/components/monitoring/CallOverviewModal"
-import { InterveneModal } from "@/components/monitoring/InterveneModal"
-import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
+import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
+import type { CallCategory, LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
 
-type TabKey = "active" | "critical"
-// No Completed tab: GET /calls only carries live calls; history is a follow-up.
+type TabKey = "active" | "critical" | "completed"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "active", label: "Active" },
   { key: "critical", label: "Critical" },
+  { key: "completed", label: "Completed" },
 ]
 
 function categoryOf(status: string): CallCategory {
   const s = status.toLowerCase()
   if (s === "critical") return "critical"
-  if (s === "completed" || s === "failed") return "completed"
+  if (isTerminalCallStatus(s)) return "completed"
   if (s === "waiting" || s === "ivr") return "processing"
   return "active"
 }
@@ -59,9 +73,8 @@ const badgeStyle: Record<CallCategory, string> = {
   completed: "bg-emerald-100 text-emerald-700",
 }
 
-/** Adapt a real call into the shape the overview/intervene modals render. The
- *  `id` is the real call id so the modal can mint a join token. Fields the API
- *  doesn't provide yet (insurance, confidence, form %) are placeholders. */
+/** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
+ *  (insurance, confidence, form %) are placeholders. */
 function toLiveCall(c: CallSummary, now: number): LiveCall {
   return {
     id: c.id,
@@ -90,32 +103,40 @@ function CallIndicator({ category }: { category: CallCategory }) {
 }
 
 export function LiveMonitoring() {
-  const { openForm } = useIbv()
+  const { openFormById } = useIbv()
   const canPublish = usePermission("calls:publish")
   // PHI (patient_name) stays in component state so it's discarded on unmount.
   const [calls, setCalls] = useState<CallSummary[]>([])
+  const [history, setHistory] = useState<CallSummary[]>([])
+  const [stats, setStats] = useState<CallStats | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<TabKey>("active")
   const [now, setNow] = useState(() => Date.now())
   const [publishing, setPublishing] = useState<string | null>(null)
   const [selected, setSelected] = useState<CallSummary | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
-  const [interveneOpen, setInterveneOpen] = useState(false)
-  const [ending, setEnding] = useState(false)
 
   // Load + poll (skip while the tab is hidden).
   useEffect(() => {
     let cancelled = false
     async function load() {
-      try {
-        const items = await listCalls()
-        if (!cancelled) {
-          setCalls(items)
-          setError(null)
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load calls.")
+      // allSettled: a stats/history hiccup must not stall the live list (and vice versa).
+      const [items, counts, past] = await Promise.allSettled([
+        listCalls(),
+        getCallStats(),
+        tab === "completed" ? listCalls("history") : Promise.resolve(null),
+      ])
+      if (cancelled) return
+      if (items.status === "fulfilled") {
+        setCalls(items.value)
+        setError(null)
+      } else {
+        setError(
+          items.reason instanceof ApiError ? items.reason.message : "Could not load calls.",
+        )
       }
+      if (counts.status === "fulfilled") setStats(counts.value)
+      if (past.status === "fulfilled" && past.value) setHistory(past.value)
     }
     void load()
     const id = setInterval(() => {
@@ -125,7 +146,7 @@ export function LiveMonitoring() {
       cancelled = true
       clearInterval(id)
     }
-  }, [])
+  }, [tab])
 
   // Tick so Duration advances between polls.
   useEffect(() => {
@@ -135,12 +156,26 @@ export function LiveMonitoring() {
 
   const rows = useMemo(() => {
     if (tab === "critical") return calls.filter((c) => categoryOf(c.status) === "critical")
+    if (tab === "completed") return history
     return calls
-  }, [tab, calls])
+  }, [tab, calls, history])
 
-  // The open modal renders the freshest polled row (started_at lands only once the
-  // callee answers), falling back to the click-time snapshot after the call leaves
-  // the active list so an ended call keeps its header while the modal is open.
+  // Stat cards from GET /calls/stats (same visibility as the list); zeros until it loads.
+  const statCards = useMemo(() => {
+    const cards: { label: string; value: number; icon: LucideIcon; tone?: "critical" }[] = [
+      { label: "Total Calls Today", value: stats?.total_today ?? 0, icon: Phone },
+      { label: "Active Calls", value: stats?.live ?? 0, icon: PhoneCall },
+      {
+        label: "Running Smoothly",
+        value: (stats?.live ?? 0) - (stats?.critical ?? 0),
+        icon: CheckCircle2,
+      },
+      { label: "Critical Alerts", value: stats?.critical ?? 0, icon: AlertCircle, tone: "critical" },
+    ]
+    return cards
+  }, [stats])
+
+  // Render the freshest polled row, falling back to the click-time snapshot once the call leaves the active list so its header survives while the modal is open.
   const modalCall = useMemo(() => {
     if (!selected) return null
     const fresh = calls.find((c) => c.id === selected.id) ?? selected
@@ -164,33 +199,12 @@ export function LiveMonitoring() {
     setOverviewOpen(true)
   }
 
-  // Ends the call for real: the backend deletes the LiveKit room (hanging up the
-  // SIP leg and shutting the agent down) and its pipeline completes the call.
-  // Optimistically drop the row on success (the poll re-syncs); either way close
-  // the modals, so a failure's error banner is visible behind them.
-  async function onEndCall() {
-    const id = modalCall?.id
-    if (!id || ending) return
-    setEnding(true)
-    try {
-      await endCall(id)
-      setCalls((cs) => cs.filter((c) => c.id !== id))
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not end the call.")
-    } finally {
-      setEnding(false)
-      setOverviewOpen(false)
-      setInterveneOpen(false)
-    }
-  }
-
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold tracking-tight">Live Monitoring</h1>
 
-      {/* Stat cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map(({ label, value, icon: Icon, tone }) => (
+        {statCards.map(({ label, value, icon: Icon, tone }) => (
           <Card key={label}>
             <div className="flex items-center gap-3 px-4">
               <div className="flex size-11 shrink-0 items-center justify-center rounded-md bg-muted">
@@ -269,7 +283,8 @@ export function LiveMonitoring() {
                   <TableCell className="text-muted-foreground">—</TableCell>
                   <TableCell className="text-muted-foreground">—</TableCell>
                   <TableCell className={cn("font-semibold tabular-nums", durationColor[cat])}>
-                    {elapsed(call.started_at, now)}
+                    {/* Ended calls show their fixed duration, not a still-running timer. */}
+                    {elapsed(call.started_at, call.ended_at ? Date.parse(call.ended_at) : now)}
                   </TableCell>
                   <TableCell>
                     <span
@@ -300,7 +315,8 @@ export function LiveMonitoring() {
                       variant={call.is_owner ? "default" : "outline"}
                       onClick={() => openOverview(call)}
                     >
-                      {call.is_owner ? "View Live" : "Intervene"}
+                      {/* Terminal calls open the same modal as a transcript replay. */}
+                      {cat === "completed" ? "View" : call.is_owner ? "View Live" : "Intervene"}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -317,25 +333,13 @@ export function LiveMonitoring() {
         </Table>
       </Card>
 
-      <CallOverviewModal
+      <LiveCallModal
         call={modalCall}
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
-        onExpand={() => openForm()}
-        onIntervene={() => {
-          setOverviewOpen(false)
-          setInterveneOpen(true)
+        onExpand={() => {
+          if (selected) openFormById(selected.form_id)
         }}
-        onEndCall={onEndCall}
-        ending={ending}
-      />
-
-      <InterveneModal
-        call={modalCall}
-        open={interveneOpen}
-        onOpenChange={setInterveneOpen}
-        onEndCall={onEndCall}
-        ending={ending}
       />
     </div>
   )

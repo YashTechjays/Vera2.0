@@ -7,7 +7,28 @@ import {
   asTranscriptTurn,
   streamCallEvents,
   type TranscriptTurn,
+  type TranscriptTurnSource,
 } from "@/lib/api/callEvents"
+import { transcriptText, turnLabel } from "@/lib/monitoring/transcriptText"
+
+type TurnStyle = { onRight: boolean; label: string; bubble: string }
+// The supervisor label is snapshotted when the turn arrives so a later intervener
+// (lock steal) can't retroactively relabel earlier turns.
+type StampedTurn = TranscriptTurn & { supervisorLabel: string }
+
+/** `source` (the actor) sets the side, label, and colour: our side (Vera + supervisor)
+ *  on the left, the caller (rep) on the right. */
+function turnStyle(source: TranscriptTurnSource, supervisorLabel: string): TurnStyle {
+  const label = turnLabel(source, supervisorLabel)
+  switch (source) {
+    case "bot":
+      return { onRight: false, label, bubble: "bg-muted text-foreground" }
+    case "supervisor":
+      return { onRight: false, label, bubble: "bg-blue-500/10 text-foreground" }
+    case "rep":
+      return { onRight: true, label, bubble: "bg-primary/10 text-foreground" }
+  }
+}
 
 /**
  * Live transcript feed for a call, from the /calls/{id}/events SSE.
@@ -19,22 +40,37 @@ import {
 export function CallTranscript({
   callId,
   onCallStatus,
+  onTextChange,
+  supervisorLabel = "Supervisor",
 }: {
   callId: string
   /** Fires for every call_status envelope on the stream ("active", "ended", or a
    *  terminal CallStatus value on DB replay) with the event's timestamp — the
    *  modal lifts this into its call-started timer and call-ended indication. */
   onCallStatus?: (status: string, ts: number) => void
+  /** The transcript as plain text, re-emitted per turn — feeds the modal's
+   *  copy button. Same PHI hygiene: component state only, gone on unmount. */
+  onTextChange?: (text: string) => void
+  /** Label for supervisor (takeover) turns — the intervener's email when known. */
+  supervisorLabel?: string
 }) {
-  const [turns, setTurns] = useState<TranscriptTurn[]>([])
+  const [turns, setTurns] = useState<StampedTurn[]>([])
   const [error, setError] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  // The stream callback must always see the latest handler without re-opening
+  // The stream callback must always see the latest handler/label without re-opening
   // the SSE (the stream effect below deliberately depends on callId only).
   const onCallStatusRef = useRef(onCallStatus)
+  const onTextChangeRef = useRef(onTextChange)
+  const supervisorLabelRef = useRef(supervisorLabel)
   useEffect(() => {
     onCallStatusRef.current = onCallStatus
-  }, [onCallStatus])
+    onTextChangeRef.current = onTextChange
+    supervisorLabelRef.current = supervisorLabel
+  }, [onCallStatus, onTextChange, supervisorLabel])
+
+  useEffect(() => {
+    onTextChangeRef.current?.(transcriptText(turns))
+  }, [turns])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -42,7 +78,8 @@ export function CallTranscript({
       signal: controller.signal,
       onEvent: (e) => {
         const turn = asTranscriptTurn(e)
-        if (turn) setTurns((prev) => [...prev, turn])
+        if (turn)
+          setTurns((prev) => [...prev, { ...turn, supervisorLabel: supervisorLabelRef.current }])
         const status = asCallStatus(e)
         if (status) onCallStatusRef.current?.(status, e.ts)
       },
@@ -75,12 +112,10 @@ export function CallTranscript({
   return (
     <div className="flex-1 space-y-2 overflow-y-auto p-4">
       {turns.map((t, i) => {
-        // `source` (the actor) decides the side and label; `role` decides the shape —
-        // speech renders as a bubble, a keypad press as an action chip.
-        const isBot = t.source === "bot"
-        const label = isBot ? "Vera" : "Rep"
+        // `role` decides the shape — speech renders as a bubble, a keypad press as an action chip.
+        const { onRight, label, bubble } = turnStyle(t.source, t.supervisorLabel)
         return (
-          <div key={`${t.ts}-${i}`} className={cn("flex", isBot ? "justify-start" : "justify-end")}>
+          <div key={`${t.ts}-${i}`} className={cn("flex", onRight ? "justify-end" : "justify-start")}>
             {t.role === "dtmf" ? (
               <div className="flex items-center gap-1.5 rounded-full border border-dashed border-muted-foreground/40 px-3 py-1 text-xs text-muted-foreground">
                 <Hash className="size-3" aria-hidden />
@@ -89,12 +124,7 @@ export function CallTranscript({
                 </span>
               </div>
             ) : (
-              <div
-                className={cn(
-                  "max-w-[85%] rounded-lg px-3 py-2 text-sm",
-                  isBot ? "bg-muted text-foreground" : "bg-primary/10 text-foreground",
-                )}
-              >
+              <div className={cn("max-w-[85%] rounded-lg px-3 py-2 text-sm", bubble)}>
                 <span className="mb-0.5 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   {label}
                 </span>

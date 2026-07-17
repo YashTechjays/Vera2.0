@@ -21,10 +21,38 @@ const DATE_TOKEN_RE: Record<string, string> = {
   D: "\\d{1,2}",
 }
 
+// Longest-first alternation over the token vocabulary (key order above).
+const DATE_TOKEN_ALTERNATION = Object.keys(DATE_TOKEN_RE).join("|")
+const DATE_TOKEN_ONLY_RE = new RegExp(DATE_TOKEN_ALTERNATION, "g")
+const DATE_TOKEN_OR_CHAR_RE = new RegExp(`${DATE_TOKEN_ALTERNATION}|.`, "g")
+
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/**
+ * Reformat an ISO date ("1982-02-23") into the DSL date_format ("M/D/YYYY" →
+ * "2/23/1982"). Machine intake stores dates as ISO while the review UI displays,
+ * validates, and submits the schema's declared format — convert on the way in.
+ * Anything that isn't a bare ISO date passes through unchanged.
+ */
+export function isoToDateFormat(value: string, format: string): string {
+  const match = ISO_DATE_RE.exec(value.trim())
+  if (!match) return value
+  const [, year, month, day] = match
+  const part: Record<string, string> = {
+    YYYY: year,
+    YY: year.slice(2),
+    MM: month,
+    M: String(Number(month)),
+    DD: day,
+    D: String(Number(day)),
+  }
+  return format.replace(DATE_TOKEN_ONLY_RE, (token) => part[token])
+}
+
 /** Compile a DSL date_format ("M/D/YYYY") into an anchored value regex. */
 function dateFormatRegex(format: string): RegExp {
   const source = format.replace(
-    /YYYY|YY|MM|M|DD|D|./g,
+    DATE_TOKEN_OR_CHAR_RE,
     (token) => DATE_TOKEN_RE[token] ?? token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   )
   return new RegExp(`^${source}$`)

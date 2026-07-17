@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CallSummary(BaseModel):
@@ -12,17 +12,24 @@ class CallSummary(BaseModel):
 
     id: UUID
     tenant_id: UUID
+    # The patient form this call verifies — lets the UI open the real form.
+    form_id: UUID
     status: str
     room_name: str
     patient_name: str | None = None
     started_at: datetime | None = None
+    ended_at: datetime | None = None
     created_at: datetime
     published: bool = False
     is_owner: bool = False
 
 
-class RevokeAccessRequest(BaseModel):
-    target_user_id: UUID
+class CallStats(BaseModel):
+    """Live Monitoring stat cards — counts over the calls visible to the caller."""
+
+    total_today: int
+    live: int
+    critical: int
 
 
 class JoinTokenResponse(BaseModel):
@@ -49,3 +56,26 @@ class VoiceSessionResponse(BaseModel):
     url: str  # settings.livekit_url, for the browser SDK
     token: str  # browser join JWT
     mode: str
+
+
+class RetentionPolicy(BaseModel):
+    """Tenant recording-retention knob. retention_days=None → the platform
+    default applies (surfaced as default_days so the UI can render the
+    effective value); otherwise bounded to 1 day..10 years."""
+
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+    default_days: int
+
+
+class RetentionPolicyUpdate(BaseModel):
+    """PATCH body: None retention_days reverts the tenant to the platform default."""
+
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class RecordingPlayback(BaseModel):
+    """A short-lived signed URL for one recording. The URL itself is the
+    credential — never logged, never cached (Cache-Control: no-store)."""
+
+    url: str
+    expires_at: datetime

@@ -6,6 +6,7 @@ import pytest
 from livekit.agents.llm import FunctionTool
 
 from agent_worker.agent import VeraAgent
+from agent_worker.intervention import TakeoverState
 
 
 def _make_agent() -> VeraAgent:
@@ -26,6 +27,8 @@ def test_end_call_tool_is_registered() -> None:
 async def test_end_call_triggers_shutdown() -> None:
     agent = _make_agent()
     mock_session = MagicMock()
+    # A real latch: a bare MagicMock attribute reads truthy and trips the takeover guard.
+    mock_session.userdata = TakeoverState(engaged=False)
 
     end_call_tool = next(t for t in _function_tools(agent) if t.info.name == "end_call")
 
@@ -34,3 +37,19 @@ async def test_end_call_triggers_shutdown() -> None:
         await end_call_tool()
 
     mock_session.shutdown.assert_called_once_with(drain=True)
+
+
+@pytest.mark.asyncio
+async def test_end_call_refuses_once_a_supervisor_has_taken_over() -> None:
+    """Reachable when the LLM's end_call is already in flight as engage() interrupts it."""
+    agent = _make_agent()
+    mock_session = MagicMock()
+    mock_session.userdata = TakeoverState(engaged=True)
+
+    end_call_tool = next(t for t in _function_tools(agent) if t.info.name == "end_call")
+
+    with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
+        result = await end_call_tool()
+
+    mock_session.shutdown.assert_not_called()
+    assert result != "Call ended."

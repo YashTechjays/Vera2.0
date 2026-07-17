@@ -31,6 +31,7 @@ from livekit.agents import Agent, AgentSession, llm
 from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import TakeoverState, takeover_engaged
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.conditions import evaluate
@@ -107,7 +108,11 @@ class PlanTaskAgent(Agent):
             "questions that are still answerable."
         ),
     )
-    async def _task_complete(self) -> Agent:
+    async def _task_complete(self) -> Agent | str:
+        if takeover_engaged(self.session):
+            # A str is a tool result, so the plan parks here. Returning `self` would
+            # re-fire on_enter and speak the intro again.
+            return "A human supervisor has taken over this call. Stay silent."
         if self._task.outro:
             # Exit speech first; LiveKit drains queued speech through the swap.
             self.session.say(self._task.outro)
@@ -136,7 +141,10 @@ class WrapUpAgent(VeraAgent):
         )
 
     async def on_enter(self) -> None:
-        self._controller.note_wrap_up_entered()
+        self._controller.note_wrap_up_entered()  # the cursor still records where we parked
+        if takeover_engaged(self.session):
+            logger.info("wrap-up entered under supervisor takeover; skipping the goodbye")
+            return
         self.session.generate_reply(instructions=_WRAP_UP_DIRECTIVE)
 
 
@@ -144,8 +152,8 @@ class PlanRunController:
     """Owns the pre-built agent chain and the run's shared-state seam.
 
     All agents are constructed in ``__init__`` — before ``session.start`` — so a
-    malformed plan fails the build (and the worker runs the ApologyAgent, a
-    graceful exit) instead of exploding mid-conversation.
+    malformed plan fails the build (and the worker fails fast, hanging up) instead
+    of exploding mid-conversation.
     """
 
     def __init__(
@@ -174,9 +182,12 @@ class PlanRunController:
         # Serializes handoffs against rule-engine directives so a directive and an
         # in-flight `task_complete` handoff can never double-swap the active agent.
         self.lock = asyncio.Lock()
+        # Counts task advances; a takeover interlock reads it to assert the plan did
+        # NOT advance while a supervisor was in control (test_takeover_interlock).
+        self.generation = 0
         # The live AgentSession, attached after session.start (see attach_session).
         # apply_directive_now drives it to interrupt/swap the bot on a rule fire.
-        self._session: AgentSession[None] | None = None
+        self._session: AgentSession[TakeoverState] | None = None
         # Fire-and-forget cursor writes: strong refs (a bare create_task result
         # can be GC'd mid-flight), drained in tests via drain_cursor_writes.
         self._cursor_writes: set[asyncio.Task[None]] = set()
@@ -191,6 +202,7 @@ class PlanRunController:
 
     async def advance_from(self, index: int) -> Agent:
         async with self.lock:
+            self.generation += 1
             return self._agent_at(self._next_applicable(index + 1))
 
     def opening_line(self, intro: str | None) -> str | None:
@@ -212,7 +224,7 @@ class PlanRunController:
 
     # -- Phase-2 seams ----------------------------------------------------------
 
-    def attach_session(self, session: AgentSession[None]) -> None:
+    def attach_session(self, session: AgentSession[TakeoverState]) -> None:
         """Hand the controller the live session (after session.start) so a rule-engine
         directive can interrupt/swap the bot."""
         self._session = session
@@ -228,8 +240,9 @@ class PlanRunController:
 
         Serialized on the controller lock against a `task_complete` handoff; a skip whose
         target is no longer ahead of the active task is dropped. Never raises into the
-        caller — a redirect must not drop the call."""
-        if self._session is None:
+        caller — a redirect must not drop the call. No-op while a human supervisor has taken
+        over — the rule engine must not yank the agent around under a live takeover."""
+        if self._session is None or takeover_engaged(self._session):
             return
         try:
             async with self.lock:

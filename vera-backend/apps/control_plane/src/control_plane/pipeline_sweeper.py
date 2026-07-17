@@ -30,7 +30,7 @@ statuses, and counts only.
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -51,6 +51,9 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.plan_store import CallPlanService
+
+if TYPE_CHECKING:
+    from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger("control_plane.pipeline_sweeper")
 
@@ -109,6 +112,7 @@ class PipelineSweeper:
         stuck_grace_s: int,
         max_call_duration_s: int,
         form_auto_retry_enabled: bool = False,
+        recording: "RecordingConfig | None" = None,
         call_plans: CallPlanService | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
@@ -120,6 +124,7 @@ class PipelineSweeper:
         self._stuck_grace_s = stuck_grace_s
         self._max_call_duration_s = max_call_duration_s
         self._form_auto_retry_enabled = form_auto_retry_enabled
+        self._recording = recording
         self._call_plans = call_plans
         # Rooms observed GONE on the previous tick (per-process memory for the
         # two-tick confirmation; room names embed the tenant id). Replicas each
@@ -273,5 +278,6 @@ class PipelineSweeper:
                 self._livekit,
                 self._kms,
                 self._audit,
+                recording=self._recording,
                 plan_service=self._call_plans,
             )

@@ -53,7 +53,9 @@ class CallAnsweredEvent(BaseModel):
 
 class CallEndedEvent(BaseModel):
     """Emitted from the worker's shutdown callback — the session finished after
-    the call was live (hangup by either side, or the agent's end_call tool)."""
+    the call was live (hangup by either side, or the agent's end_call tool).
+    Written AFTER the transcript ended-sentinel, so it doubles as the control
+    plane's trigger to persist the tokenized transcript to Postgres."""
 
     type: Literal["call.ended"] = "call.ended"
     room_name: str

@@ -25,6 +25,7 @@ from control_plane.auth.elevation import active_grant_for_operator
 from control_plane.auth.identity import InvalidTokenError, TokenVerifier, VerifiedIdentity
 from control_plane.auth.invitations import InvitationStore
 from control_plane.auth.session import SessionStore
+from control_plane.call_summary import SummaryCache
 from control_plane.email import EmailSender
 from control_plane.idempotency import IdempotencyStore
 from vera_core.audit import AuditSink, AuthAuditSink
@@ -32,6 +33,7 @@ from vera_core.call_stream import CallStreamService
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
+from vera_core.llm import ResilientLLM
 from vera_core.models.enums import AccountType
 from vera_core.plan_store import CallPlanService
 from vera_core.transcript import TranscriptService
@@ -98,6 +100,16 @@ def get_transcript_service(request: Request) -> TranscriptService:
 def get_call_stream_service(request: Request) -> CallStreamService:
     service: CallStreamService = request.app.state.call_stream_service
     return service
+
+
+def get_summary_llm(request: Request) -> ResilientLLM:
+    llm: ResilientLLM = request.app.state.summary_llm
+    return llm
+
+
+def get_summary_cache(request: Request) -> SummaryCache:
+    cache: SummaryCache = request.app.state.summary_cache
+    return cache
 
 
 def get_call_plans(request: Request) -> CallPlanService:

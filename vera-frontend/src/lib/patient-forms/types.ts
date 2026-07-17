@@ -75,9 +75,19 @@ export type PatientFormDetail = {
   patient_name: string | null
   chart_number: string | null
   appointment_date: string | null
+  /** The form's current insurance provider — the send-to-queue picker pre-selects
+   *  the matching catalog provider from this string. */
+  insurance_provider: string | null
   fields: PatientFormField[]
   /** Stored queue-time choice: run the IVR navigator on this form's calls. */
   ivr_navigation_enabled: boolean
+}
+
+/** Active insurance-provider option for the send-to-queue picker
+ *  (GET /patient-forms/insurance-providers). Non-PHI catalog reference. */
+export type ProviderOption = {
+  id: string
+  name: string
 }
 
 /** Paginated worklist envelope `data`. */
@@ -88,6 +98,16 @@ export type PaginatedPatientForms = {
   total: number
 }
 
+/** Server-side sort columns the worklist endpoint whitelists. */
+export type PatientFormSortKey =
+  | "appointment_date"
+  | "appointment_type"
+  | "patient_name"
+  | "member_id"
+  | "insurance_provider"
+  | "status"
+  | "created_at"
+
 export type ListPatientFormsParams = {
   page?: number
   page_size?: number
@@ -95,6 +115,9 @@ export type ListPatientFormsParams = {
   status?: PatientFormStatus
   /** case-insensitive substring match on patient_name */
   q?: string
+  /** server-side sort; the backend defaults to created_at desc, nulls last */
+  sort_by?: PatientFormSortKey
+  sort_dir?: "asc" | "desc"
 }
 
 /** Request body for POST /patient-forms/{id}/disputes:resolve. Mirrors the

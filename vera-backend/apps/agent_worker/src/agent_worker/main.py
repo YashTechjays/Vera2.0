@@ -23,14 +23,17 @@ from livekit.agents import (
     WorkerOptions,
     cli,
 )
+from livekit.plugins import deepgram
 from opentelemetry import trace
 from redis.asyncio import Redis
 
-from agent_worker.agent import ApologyAgent, build_agent
+from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.intervention import AgentTakeoverController, intervener_present
 from agent_worker.observer import GeminiAnswerExtractor, ObserverManager
 from agent_worker.plan_runtime import PlanRunController
 from agent_worker.prompt import parse_persona_tweak
+from agent_worker.takeover_transcript import TakeoverTranscriber
 from agent_worker.transcript_publisher import (
     FanOutTurnPublisher,
     ReorderingEmitter,
@@ -47,6 +50,7 @@ from vera_core.events import (
     WorkerEventBus,
 )
 from vera_core.observability.correlation import (
+    PARTICIPANT_MODE_ATTR,
     call_trace_attributes,
     is_observer_identity,
     parse_room_name,
@@ -364,9 +368,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
         # Compiled Call Plan (dispatcher opt-in via use_call_plan): the control plane
         # staged it in Redis at dispatch. PLAN-ONLY — the compiled plan is the sole
-        # verification prompt source. If the plan can't be loaded/built, the call runs
-        # the ApologyAgent (a graceful exit) instead of any generic script; it never
-        # runs a verification without a plan.
+        # verification prompt source. If the plan can't be loaded/built, the call
+        # fails fast (hangs up) instead of running any generic script; it never runs
+        # a verification without a plan.
         plan_service: CallPlanService | None = None
         run_state: PlanRunStateService | None = None
         controller: PlanRunController | None = None
@@ -378,7 +382,7 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             plan = await plan_service.get(room_name)
             if plan is None:
-                logger.warning("use_call_plan set but no plan for %s — apology path", room_name)
+                logger.warning("use_call_plan set but no plan for %s — failing fast", room_name)
             else:
                 run_state = PlanRunStateService(
                     RedisPlanRunStateStore(plan_redis, ttl_seconds=settings.call_plan_ttl_seconds)
@@ -395,10 +399,10 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
                 except Exception:
                     logger.exception(
-                        "call plan for %s failed to build a runtime — apology path", room_name
+                        "call plan for %s failed to build a runtime — failing fast", room_name
                     )
         else:
-            logger.warning("no use_call_plan flag for %s — apology path", room_name)
+            logger.info("no use_call_plan for %s — voice-lab preview (plan-less)", room_name)
 
         session = build_session(
             vad=ctx.proc.userdata.get("vad"),
@@ -468,9 +472,19 @@ async def entrypoint(ctx: JobContext) -> None:
         if turn_sink is not None:
             turn_emitter = attach_transcript_publisher(session, turn_sink, room_name)
 
+        # After a supervisor takes over, the bot's STT is muted; a dedicated per-track
+        # STT transcribes the caller + supervisor so the live transcript keeps going.
+        takeover_transcriber: TakeoverTranscriber | None = None
         if call_stream is not None and speaker is not None:
             # the callee already answered during wait_for_speaker
             await call_stream.publish_status(room_name, "active", ts=int(time.time() * 1000))
+            takeover_transcriber = TakeoverTranscriber(
+                ctx.room,
+                call_stream,
+                room_name,
+                stt_factory=lambda: deepgram.STT(model="nova-3"),
+                callee_identity=speaker.identity,
+            )
 
         async def _flush_turn_emitter() -> None:
             # Order is load-bearing: flush held turns BEFORE any service's end(). end()
@@ -550,6 +564,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # the plan run's Redis keys. Each step inside the helpers is best-effort (own
             # try/except), so a failure never skips the rest.
             await _flush_turn_emitter()
+            if takeover_transcriber is not None:
+                try:
+                    await takeover_transcriber.aclose()  # before end(): flush its turns first
+                except Exception:
+                    logger.exception("failed to close takeover transcriber for %s", room_name)
             await _end_transcript_stream()
             await _end_observer()
             await _end_call_stream()
@@ -558,10 +577,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # Last: signal the terminal event. Normally call.ended (the consumer
             # completes the form and refills the slot). But when the dispatcher
             # staged a plan (use_call_plan) yet the worker couldn't build one, the
-            # call ran the ApologyAgent — that's an infra fault (plan missing from
-            # Redis / build failure), not a completed verification. Emit call.failed
-            # instead so the control plane RE-DISPATCHES it (re-staging the plan,
-            # which self-heals) rather than banking a completed-with-no-answers form.
+            # call failed fast without a session — that's an infra fault (plan
+            # missing from Redis / build failure), not a completed verification.
+            # Emit call.failed instead so the control plane RE-DISPATCHES it
+            # (re-staging the plan, which self-heals) rather than banking a
+            # completed-with-no-answers form.
             # A hard worker crash skips this — the pipeline sweeper reconciles that.
             now_ms = int(time.time() * 1000)
             if meta.get("use_call_plan") and controller is None and bus is not None:
@@ -601,25 +621,48 @@ async def entrypoint(ctx: JobContext) -> None:
     # observability is the self-hosted Langfuse/OTel pipeline (configure_observability), which
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
-    # Plan-only: a plan-backed call runs the compiled agent chain; a call with no
-    # usable plan runs the ApologyAgent (one polite line, then hang up) — never a
-    # generic verification script.
-    if controller is not None:
-        agent: Agent = build_agent(
-            meta,
-            controller=controller,
-            # A successful IVR keypad press rides the live transcript as a dtmf turn
-            # (evidence of the action); rooms with no stream enabled report nowhere.
-            on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
-        )
-    else:
-        agent = ApologyAgent()
+    # A REAL call that expected a plan (use_call_plan) but has no controller FAILS
+    # FAST — real calls never dispatch plan-less (the dispatcher skips a form whose
+    # plan can't be prepared), so this is a Redis-loss race / build failure. Return
+    # without starting a session; the shutdown callback emits call.failed so the
+    # control plane re-dispatches it (self-heal).
+    if controller is None and meta.get("use_call_plan"):
+        logger.warning("no usable plan for %s — failing fast without a session", room_name)
+        return
+    # build_agent picks the agent: the plan chain when a controller is present, or a
+    # conversational VoiceLabAgent for a Voice Lab preview (no plan) — see its docstring.
+    agent: Agent = build_agent(
+        meta,
+        controller=controller,
+        tweak=tweak,
+        # A successful IVR keypad press rides the live transcript as a dtmf turn
+        # (evidence of the action); rooms with no stream enabled report nowhere.
+        on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
+    )
     await session.start(
         agent=agent,
         room=ctx.room,
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
         record=False,
     )
+
+    # Supervisor takeover: the first time a participant carries the intervene mode
+    # attribute, silence the agent for the rest of the call (one-way, never resumes)
+    # and start transcribing the human conversation.
+    takeover_ctl = AgentTakeoverController(
+        session,
+        on_engage=takeover_transcriber.start if takeover_transcriber is not None else None,
+    )
+
+    def _check_takeover(*_args: object) -> None:
+        if intervener_present(
+            p.attributes.get(PARTICIPANT_MODE_ATTR) for p in ctx.room.remote_participants.values()
+        ):
+            takeover_ctl.engage()
+
+    ctx.room.on("participant_connected", _check_takeover)
+    ctx.room.on("participant_attributes_changed", _check_takeover)
+    _check_takeover()  # an intervener may already be present
 
 
 def build_worker_options() -> WorkerOptions:

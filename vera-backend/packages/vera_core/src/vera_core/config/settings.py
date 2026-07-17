@@ -8,8 +8,16 @@ the single source of truth. The defaults below are local-dev only.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _split_csv(value: object) -> object:
+    """Accept a comma-separated string for a list field (friendlier than JSON in
+    .env); pass anything else through untouched for pydantic to validate."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return value
 
 
 class Settings(BaseSettings):
@@ -33,13 +41,11 @@ class Settings(BaseSettings):
     # Live-transcript Redis stream lifetime (Voice Lab / SSE). The rolling backstop
     # TTL is refreshed on every publish so an abandoned stream self-clears; the end
     # grace TTL lets connected readers drain the `ended` sentinel before it clears.
+    # The grace window is also the persistence-finalizer's durability budget: the
+    # control plane must consume call.ended and drain the stream before it expires,
+    # so it is sized to ride out a control-plane restart, not just an SSE drain.
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
-    transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
-
-    # Call Plan blob + plan-run state (vera_core.plan_store). Backstop only — the
-    # worker clears both keys at shutdown; the TTL must outlive the longest call
-    # (call_max_duration_seconds is 3h, plus queue-to-answer lag), not the SSE grace.
-    call_plan_ttl_seconds: int = 4 * 3600  # VERA_CALL_PLAN_TTL_SECONDS
+    transcript_end_grace_seconds: int = 900  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
     # Worker→control-plane event bus (Redis Streams + consumer group). Stream is
     # MAXLEN-trimmed; the consumer blocks for block_ms, reclaims entries a crashed
@@ -143,13 +149,30 @@ class Settings(BaseSettings):
     # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
     livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
 
+    # --- live-call summary (control plane) -----------------------------------
+    # Fault-tolerant summarizer chain, "provider:model" selectors resolved by
+    # vera_core.llm (google = Vertex Gemini; openai = GPT under the OpenAI BAA).
+    summary_primary_model: str = "google:gemini-3.1-flash-lite"  # VERA_SUMMARY_PRIMARY_MODEL
+    summary_fallback_models: list[str] = ["openai:gpt-5.4-mini"]  # VERA_SUMMARY_FALLBACK_MODELS
+    summary_attempt_timeout_seconds: float = 8.0  # VERA_SUMMARY_ATTEMPT_TIMEOUT_SECONDS
+    # Short cache so tab-flipping supervisors reuse one summary; staleness cap.
+    summary_cache_ttl_seconds: int = 5  # VERA_SUMMARY_CACHE_TTL_SECONDS
+    # Overall request budget for the summarizer chain (cache + fallback attempts);
+    # bounds the worst-case wait before the endpoint gives up and returns 503.
+    summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
+
+    @field_validator("summary_fallback_models", mode="before")
+    @classmethod
+    def _split_fallback_models(cls, value: object) -> object:
+        return _split_csv(value)
+
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
     # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:
     # lower if answers arrive late/out-of-sequence, raise if the bot answers into
     # a mid-prompt pause. Patient by default (a machine pauses mid-readout more than
     # a person does), well above the snappy human-cascade delays.
-    ivr_endpointing_min_delay: float = 0.6  # VERA_IVR_ENDPOINTING_MIN_DELAY
+    ivr_endpointing_min_delay: float = 0.8  # VERA_IVR_ENDPOINTING_MIN_DELAY
     ivr_endpointing_max_delay: float = 1.5  # VERA_IVR_ENDPOINTING_MAX_DELAY
 
     # --- audit anchoring (WORM bucket) -------------------------------------
@@ -159,6 +182,21 @@ class Settings(BaseSettings):
     audit_anchor_bucket: str | None = None
     audit_anchor_prefix: str = "audit-anchors"
     audit_anchor_local_dir: str = ".audit-anchors"
+    # --- call recording (LiveKit composite egress → GCS) --------------------
+    # Unset bucket → recording disabled end-to-end (no egress started, no
+    # Recording rows, playback 409s) — mirrors the langfuse_host no-op switch.
+    recording_bucket: str | None = None  # VERA_RECORDING_BUCKET
+    recording_prefix: str = "recordings"  # VERA_RECORDING_PREFIX
+    recording_retention_days_default: int = 90  # VERA_RECORDING_RETENTION_DAYS_DEFAULT
+    # Bounded: a misconfigured env var must not mint day-long bearer URLs.
+    recording_signed_url_ttl_seconds: int = Field(
+        default=600, ge=60, le=3600
+    )  # VERA_RECORDING_SIGNED_URL_TTL_SECONDS
+    recording_verify_interval_seconds: int = 30  # VERA_RECORDING_VERIFY_INTERVAL_SECONDS
+    retention_sweep_interval_seconds: int = 3600  # VERA_RETENTION_SWEEP_INTERVAL_SECONDS
+    # An orphan egress (no Recording row) is reaped only once it is older than this,
+    # so a just-started recording whose row is still committing is never killed.
+    recording_orphan_grace_seconds: int = 300  # VERA_RECORDING_ORPHAN_GRACE_SECONDS
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require
@@ -172,14 +210,15 @@ class Settings(BaseSettings):
     @field_validator("cors_allow_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
-        # Accept a comma-separated string (friendlier than JSON in .env).
-        if isinstance(value, str):
-            return [origin.strip() for origin in value.split(",") if origin.strip()]
-        return value
+        return _split_csv(value)
 
     @property
     def is_local(self) -> bool:
         return self.env == "local"
+
+    @property
+    def call_plan_ttl_seconds(self) -> int:
+        return self.call_max_duration_seconds + 3600
 
 
 @lru_cache
