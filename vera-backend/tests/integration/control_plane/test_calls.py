@@ -1092,6 +1092,40 @@ async def test_end_call_locked_to_active_intervener(
     assert allowed.status_code == 200, allowed.text
 
 
+@pytest.mark.asyncio
+async def test_end_call_allowed_when_intervener_lock_is_stale(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_livekit: FakeLiveKit,
+) -> None:
+    """A crashed intervener (claim past the grace, holder gone from the room)
+    must not lock the call forever — a non-holder's end goes through."""
+    call_id = await _seed_published_active_call(admin_sessionmaker, rbac_world, seeded_form_id)
+    claim = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert claim.status_code == 200, claim.text
+
+    # Age the claim past the grace window and drop the holder from the room: stale lock.
+    await admin_session.execute(
+        update(Call)
+        .where(Call.id == call_id)
+        .values(intervener_claimed_at=text("now() - interval '5 minutes'"))
+    )
+    await admin_session.commit()
+    room_name = room_name_for_call(rbac_world.tenant_id, call_id)
+    fake_livekit.participants[room_name] = []
+
+    ended = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert ended.status_code == 200, ended.text
+
+
 async def _intervention_events(session: AsyncSession, call_id: UUID) -> list[InterventionEvent]:
     result = await session.execute(
         select(InterventionEvent).where(InterventionEvent.call_id == call_id)
