@@ -65,10 +65,13 @@ class FallbackOptions:
 
 def _build_google(spec: LLMSpec, secrets: SecretProvider | None) -> LLM[Any]:
     # Vertex AI path (ADC / Workload Identity creds) — same in-boundary route as
-    # the live pipeline's cascade LLM.
+    # the live pipeline's cascade LLM. Default to the `global` endpoint: newer
+    # publisher models (gemini-3.1-flash-lite) are not exposed in the plugin's
+    # regional default (us-central1); override via spec.extra when a model needs
+    # a specific region.
     from livekit.plugins import google
 
-    return google.LLM(model=spec.model, vertexai=True, **spec.extra)
+    return google.LLM(model=spec.model, vertexai=True, **{"location": "global", **spec.extra})
 
 
 def _build_openai(spec: LLMSpec, secrets: SecretProvider | None) -> LLM[Any]:
