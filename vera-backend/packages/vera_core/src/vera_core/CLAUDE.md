@@ -18,6 +18,19 @@ layer (Cloud SQL + Memorystore). Application-level column envelope encryption (`
 `reveal`, `*_ct` columns) is **deferred to a later decision** — do not introduce it here
 until that decision is made.
 
+## Out-of-pipeline LLM calls go through `vera_core.llm.ResilientLLM` — always
+
+Any LLM call outside the live voice cascade (summaries, analytics, extraction,
+post-call processing) MUST be made through `vera_core.llm.ResilientLLM` with
+`LLMSpec` provider/model selectors — never by instantiating a provider SDK or a
+LiveKit plugin LLM client directly at a call site. ResilientLLM wraps
+livekit-agents' FallbackAdapter (ordered provider chain, per-attempt timeout,
+retries) and is the single place provider construction, secret resolution
+(`OPENAI_API_KEY` via SecretProvider), and PHI-safe error logging live. Adding a
+provider means one entry in `vera_core.llm.PROVIDERS`, nothing else. The live
+cascade's LLM (the agent worker's AgentSession) is separate and stays in
+`apps/agent_worker` — do not route it through ResilientLLM.
+
 ## Envelope encryption (`vera_core.config.kms`)
 
 TOTP seeds are envelope-encrypted: AES-256-GCM under a per-user DEK, DEK wrapped by a
