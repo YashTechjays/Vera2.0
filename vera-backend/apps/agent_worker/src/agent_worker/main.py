@@ -323,6 +323,7 @@ async def entrypoint(ctx: JobContext) -> None:
     call_stream_redis: Redis | None = None
     plan_redis: Redis | None = None
     observer_redis: Redis | None = None
+    observer_manager: ObserverManager | None = None
     extract_llm: ResilientLLM | None = None
 
     try:
@@ -378,7 +379,6 @@ async def entrypoint(ctx: JobContext) -> None:
         plan_service: CallPlanService | None = None
         run_state: PlanRunStateService | None = None
         controller: PlanRunController | None = None
-        observer_manager: ObserverManager | None = None
         if meta.get("use_call_plan"):
             plan_redis = create_redis(settings.redis_url)
             plan_service = CallPlanService(
@@ -636,6 +636,10 @@ async def entrypoint(ctx: JobContext) -> None:
         if plan_redis is not None:
             with contextlib.suppress(Exception):
                 await plan_redis.aclose()
+        if observer_manager is not None:
+            # Cancel/drain the tail task BEFORE closing the client it reads from.
+            with contextlib.suppress(Exception):
+                await observer_manager.aclose()
         if observer_redis is not None:
             with contextlib.suppress(Exception):
                 await observer_redis.aclose()
