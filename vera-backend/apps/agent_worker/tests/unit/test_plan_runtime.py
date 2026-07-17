@@ -352,6 +352,20 @@ class TestDirectiveIntervention:
         await controller.apply_directive_now(Terminate(rule_key="t"))
 
     @pytest.mark.asyncio
+    async def test_no_directive_fires_after_wrap_up_entered(self) -> None:
+        # A rule fired late (the outgoing observer's final drain) must not re-enter
+        # wrap-up (double goodbye), yank the call back into a task, or interrupt the
+        # goodbye with a re-ask — once no task is active, every directive is a no-op.
+        controller, _ = _controller()
+        controller.note_wrap_up_entered()
+        session, order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(SkipToTask(rule_key="late", task_key="intro_task"))
+        await controller.apply_directive_now(Terminate(rule_key="late"))
+        await controller.apply_directive_now(ReAsk(rule_key="late", reason="x"))
+        assert order == []  # no interrupt, no swap, no reply
+        session.generate_reply.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_op_while_supervisor_has_taken_over(self) -> None:
         # Under a live human takeover the rule engine must not yank the agent around.
         controller, _ = _controller()

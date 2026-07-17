@@ -246,6 +246,15 @@ class PlanRunController:
             return
         try:
             async with self.lock:
+                if self.active_task_index is None:
+                    # IVR or wrap-up: no active task → no redirects. A rule fired late
+                    # (the outgoing observer's final drain) must not re-enter wrap-up
+                    # (double goodbye), yank the call back out of it, or interrupt the
+                    # goodbye with a re-ask. (The narrow window between advance_from
+                    # returning wrap-up and its on_enter clearing the index is benign:
+                    # skip-forward past the last task already targets None, and
+                    # terminate targets the wrap-up agent being entered anyway.)
+                    return
                 if isinstance(directive, ReAsk):
                     await self._session.interrupt()
                     self._session.generate_reply(instructions=self._reask_instruction(directive))
