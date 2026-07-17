@@ -176,12 +176,14 @@ class TaskObserver:
         self._running = False
         self._pending = False
         self._closed = False
+        self._dirty = False
         self._passes: set[asyncio.Task[None]] = set()
 
     def feed(self, turn: _Turn) -> None:
         if self._closed:
             return
         self._window.append(_render_turn(turn))
+        self._dirty = True
         if turn.role == ROLE_USER:  # a rep turn is the only new evidence worth a pass
             self._latest_rep_seq = turn.seq
             self._schedule_pass()
@@ -214,8 +216,9 @@ class TaskObserver:
             self._running = False
 
     async def _one_pass(self) -> None:
-        if not self._window:
-            return
+        if not self._window or not self._dirty:
+            return  # nothing new since the last pass — skip the redundant LLM call
+        self._dirty = False
         transcript = "\n".join(self._window)
         rep_seq = self._latest_rep_seq
         for answer in await self._extractor.extract(self._task, transcript):
@@ -224,8 +227,9 @@ class TaskObserver:
             await self._record(answer, rep_seq)
 
     async def aclose(self) -> None:
-        """Stop taking turns, drain in-flight passes, then run one guaranteed final pass so
-        a turn finalized just before the handoff is still extracted."""
+        """Stop taking turns, drain in-flight passes, then run one final pass IF any turn
+        arrived since the last pass (so a turn finalized just before the handoff is still
+        extracted, without a redundant LLM call when nothing is new)."""
         self._closed = True
         while self._passes:
             await asyncio.gather(*list(self._passes), return_exceptions=True)
@@ -308,7 +312,7 @@ class ObserverManager:
                 if item is None:
                     continue  # idle keepalive tick
                 try:
-                    self._ingest(item[1])
+                    self.ingest(item[1])
                 except Exception as exc:  # one bad turn must not stop the tail
                     logger.warning(
                         "observer manager %s: ingest failed (%s)", self._room, type(exc).__name__
@@ -320,7 +324,7 @@ class ObserverManager:
                 "observer manager %s: tail loop failed (%s)", self._room, type(exc).__name__
             )
 
-    def _ingest(self, event: TranscriptEvent) -> None:
+    def ingest(self, event: TranscriptEvent) -> None:
         seq, self._seq = self._seq, self._seq + 1  # matches transcript.seq numbering
         index = self._controller.active_task_index
         if index != self._active_index:
@@ -352,7 +356,10 @@ class ObserverManager:
 
     async def _record(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
         if self._answers.get(answer.field_path) == answer.value:
-            return  # unchanged — do not re-write or re-emit
+            # Unchanged — do not re-write or re-emit. INTENTIONALLY covers the intake
+            # prefill seed too: a rep merely confirming a prefilled value leaves no
+            # ai_call row (the INTAKE row stays current; 
+            return
         ts = self._now_ms()
         await self._run_state.record_answer(
             self._room,
@@ -387,13 +394,23 @@ class ObserverManager:
         stream's end() sentinel is written (so the tail drains the final turns) and BEFORE
         the plan-run state is cleared. The tail normally exits on the sentinel; bounded so a
         never-written sentinel can't hang shutdown."""
+        cancelled = False
         if self._tail_task is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(self._tail_task), _TAIL_DRAIN_TIMEOUT_S)
-            except (TimeoutError, asyncio.CancelledError):
+            except TimeoutError:  # sentinel never came (crashed writer) — force-stop the tail
+                self._tail_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._tail_task
+            except asyncio.CancelledError:
+                # aclose ITSELF was cancelled (wait_for unwraps the shield): stop the
+                # tail, finish the drain below, then honor the cancellation.
+                cancelled = True
                 self._tail_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._tail_task
         self._rotate(None)  # close the active Observer with a final drain pass
         while self._closing:
             await asyncio.gather(*list(self._closing), return_exceptions=True)
+        if cancelled:
+            raise asyncio.CancelledError

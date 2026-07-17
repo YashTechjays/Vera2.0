@@ -77,7 +77,6 @@ def test_contradiction_fires_and_rearms_on_new_values() -> None:
         rule_key="ded_conflict",
         reason="Deductible is met but a remaining balance was given.",
         clarify="Which is correct?",
-        fields=("sections.a.ded_met", "sections.a.ded_remaining"),
     )
     # same conflicting values → do not badger the rep again
     assert engine.evaluate({"sections.a.ded_met": "Yes", "sections.a.ded_remaining": "500"}) is None

@@ -53,6 +53,5 @@ class RuleEngine:
                     rule_key=contradiction.rule_key,
                     reason=contradiction.reason,
                     clarify=contradiction.clarify,
-                    fields=tuple(contradiction.fields),
                 )
         return None

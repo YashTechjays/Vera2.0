@@ -136,7 +136,7 @@ def _manager(
 
 
 async def _feed(manager: ObserverManager, event: TranscriptEvent) -> None:
-    manager._ingest(event)
+    manager.ingest(event)
     await _settle()
 
 
@@ -201,6 +201,39 @@ class TestRouting:
         controller.active_task_index = 1  # now on task t2
         await _feed(manager, _rep("answer for b"))
         assert run_state.records == [(ROOM, "sections.b.y", "B", 0)]  # rep turn is seq 0
+
+    @pytest.mark.asyncio
+    async def test_close_skips_final_pass_when_nothing_new(self) -> None:
+        # The last pass already covered the window → close must not spend a redundant
+        # LLM call on an identical transcript.
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _rep("yes"))
+        assert extractor.calls == 1
+        await manager.aclose()
+        assert extractor.calls == 1  # no redundant final drain
+
+    @pytest.mark.asyncio
+    async def test_aclose_reraises_an_outer_cancellation(self) -> None:
+        # Cancelling shutdown mid-drain must clean up AND honor the cancellation —
+        # not swallow it and report a clean close.
+        class HangingTranscript:
+            async def read(self, room_name: str) -> AsyncIterator[None]:
+                while True:
+                    yield None
+                    await asyncio.sleep(0)
+
+        manager, _, _, _ = _manager(
+            _plan(),
+            FakeExtractor([]),
+            transcript=HangingTranscript(),  # type: ignore[arg-type]
+        )
+        manager.start()
+        closer = asyncio.create_task(manager.aclose())
+        await _settle()  # let aclose enter the bounded wait on the hanging tail
+        closer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closer
 
     @pytest.mark.asyncio
     async def test_close_drains_a_trailing_turn(self) -> None:

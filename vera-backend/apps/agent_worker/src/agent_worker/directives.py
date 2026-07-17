@@ -6,7 +6,7 @@ Observer hands it to `PlanRunController.apply_directive_now`, which interrupts t
 Serialized on the controller lock against an in-flight `task_complete` handoff.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +32,6 @@ class ReAsk:
     rule_key: str
     reason: str
     clarify: str | None = None
-    fields: tuple[str, ...] = field(default_factory=tuple)
 
 
 type Directive = Terminate | SkipToTask | ReAsk

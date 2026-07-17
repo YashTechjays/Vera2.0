@@ -1,7 +1,7 @@
 """Pin evidence_seq ↔ transcript.seq parity (the Observer↔finalizer contract).
 
 The Observer counts entries of `vera:transcript:{room}` to stamp `evidence_seq`
-(observer.py `_ingest`); the finalizer numbers `transcript.seq` over the rows it
+(observer.py `ingest`); the finalizer numbers `transcript.seq` over the rows it
 persists from `vera:call-events:{room}` (`_build_rows`). Both streams are fed the
 same ordered turns by the same fan-out emitter, but their skip rules differ:
 non-transcript envelopes (call_status) exist only on the call-events side and
@@ -45,7 +45,7 @@ class _RecordingObserver:
 
 
 class _Null:
-    """Inert stand-in for the manager's collaborators (never touched by _ingest)."""
+    """Inert stand-in for the manager's collaborators (never touched by ingest)."""
 
     def __getattr__(self, name: str) -> Any:  # pragma: no cover - safety net
         raise AssertionError(f"unexpected collaborator access: {name}")
@@ -74,7 +74,7 @@ def _manager_with_recorder() -> tuple[ObserverManager, _RecordingObserver]:
         room_name=ROOM,
     )
     recorder = _RecordingObserver()
-    # Pin the active observer so _ingest routes every turn to the recorder without
+    # Pin the active observer so ingest routes every turn to the recorder without
     # rotating (active_task_index stays 0 == _active_index).
     manager._active_index = 0
     manager._active = recorder  # type: ignore[assignment]
@@ -85,7 +85,7 @@ def test_observer_seq_matches_finalizer_transcript_seq() -> None:
     # (a) The Observer's view: the same turns as vera:transcript entries.
     manager, recorder = _manager_with_recorder()
     for role, source, text in _TURNS:
-        manager._ingest(
+        manager.ingest(
             TranscriptEvent.model_validate({"role": role, "source": source, "text": text, "ts": 1})
         )
 

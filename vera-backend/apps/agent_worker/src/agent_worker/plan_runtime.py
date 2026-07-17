@@ -225,8 +225,10 @@ class PlanRunController:
     # -- Phase-2 seams ----------------------------------------------------------
 
     def attach_session(self, session: AgentSession[TakeoverState]) -> None:
-        """Hand the controller the live session (after session.start) so a rule-engine
-        directive can interrupt/swap the bot."""
+        """Hand the controller the session so a rule-engine directive can interrupt/swap
+        the bot. Wired during entrypoint setup, BEFORE session.start — this only stores
+        the reference; nothing drives the session until the Observer extracts an answer,
+        which requires a started session producing transcript turns."""
         self._session = session
 
     def update_answers(self, answers: dict[str, Any]) -> None:
@@ -247,13 +249,6 @@ class PlanRunController:
         try:
             async with self.lock:
                 if self.active_task_index is None:
-                    # IVR or wrap-up: no active task → no redirects. A rule fired late
-                    # (the outgoing observer's final drain) must not re-enter wrap-up
-                    # (double goodbye), yank the call back out of it, or interrupt the
-                    # goodbye with a re-ask. (The narrow window between advance_from
-                    # returning wrap-up and its on_enter clearing the index is benign:
-                    # skip-forward past the last task already targets None, and
-                    # terminate targets the wrap-up agent being entered anyway.)
                     return
                 if isinstance(directive, ReAsk):
                     await self._session.interrupt()

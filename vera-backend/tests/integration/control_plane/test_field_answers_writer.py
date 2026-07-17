@@ -1,10 +1,13 @@
 """The ai_call answer writer against REAL Postgres — the `fa_current_uq` invariant.
 
-The worker's `call.answer_recorded` path takes NO form-level lock (unlike the human
-resolve endpoint); the partial-unique index `fa_current_uq` (one current row per
-(form_id, field_path)) is its sole serialization (`patient_forms.py` documents this).
-These tests pin that posture where fakes can't: on the real index, under commit
-ordering and a genuine two-session race. Skips without Postgres (`just up`)."""
+The consumer handler locks the form row FOR UPDATE around `record_answer`, which
+serializes writers within one control-plane replica — but the partial-unique index
+`fa_current_uq` (one current row per (form_id, field_path)) is the backstop that must
+hold for ANY pair of writers the row lock doesn't cover (e.g. across replicas, or the
+human resolve path racing the worker). These tests pin that backstop where fakes can't:
+`record_answer` is exercised bare (no form lock, like a cross-replica race) on the real
+index, under commit ordering and a genuine two-session race. Skips without Postgres
+(`just up`)."""
 
 import asyncio
 from collections.abc import AsyncGenerator

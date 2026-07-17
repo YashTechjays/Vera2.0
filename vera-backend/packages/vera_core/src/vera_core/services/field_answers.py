@@ -58,8 +58,7 @@ async def record_answer(
     identical (source, call_id, value) that is already current is a no-op (returns False).
 
     Demote-then-flush-then-insert keeps the `fa_current_uq` partial-unique index (one
-    current row per field) satisfied through the swap; that index is also the sole
-    serialization for concurrent worker writes (no form-level lock on this path)."""
+    current row per field) satisfied through the swap."""
     current = (
         await session.execute(
             select(FieldAnswer).where(
