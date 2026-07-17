@@ -110,6 +110,13 @@ describe("calls API client", () => {
     const summary: LiveCallSummary = {
       status: "ready",
       summary: "Vera is verifying benefits; member ID confirmed.",
+      sections: {
+        participants: "Vera and payer IVR",
+        purpose: "verify benefits",
+        facts: ["member ID confirmed"],
+        open_items: [],
+        next_step: "provide DOB",
+      },
       generated_at: 1752000000000,
       turn_count: 12,
     }

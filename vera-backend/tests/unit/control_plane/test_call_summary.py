@@ -10,6 +10,7 @@ from control_plane.call_summary import (
     CallSummaryResponse,
     SummaryCache,
     SummaryLLM,
+    SummarySections,
     TranscriptTurn,
     format_diarized,
     snapshot_turns,
@@ -210,3 +211,37 @@ async def test_cache_invalid_payload_degrades_to_fresh_compute() -> None:
     )
     assert result.status == "ready"
     assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_summarize_parses_json_sections_and_flattens_summary() -> None:
+    cache, llm = _DictCache(), _StubLLM(
+        text=(
+            '{"participants": "Vera and payer IVR", "purpose": "verify benefits",'
+            ' "facts": ["member ID confirmed"], "open_items": ["awaiting DOB"],'
+            ' "next_step": "provide DOB"}'
+        )
+    )
+    events = [_turn_event("bot", "agent", "hi"), _turn_event("rep", "user", "hello")]
+    result = await _summarize(events, cache, llm)
+    assert result.status == "ready"
+    assert result.sections == SummarySections(
+        participants="Vera and payer IVR",
+        purpose="verify benefits",
+        facts=["member ID confirmed"],
+        open_items=["awaiting DOB"],
+        next_step="provide DOB",
+    )
+    assert result.summary is not None
+    assert "Established:" in result.summary
+    assert "- member ID confirmed" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_summarize_non_json_reply_falls_back_to_raw_text() -> None:
+    cache, llm = _DictCache(), _StubLLM(text="just prose, not JSON")
+    events = [_turn_event("bot", "agent", "hi"), _turn_event("rep", "user", "hello")]
+    result = await _summarize(events, cache, llm)
+    assert result.status == "ready"
+    assert result.sections is None
+    assert result.summary == "just prose, not JSON"

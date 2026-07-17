@@ -3,13 +3,72 @@ import { FileText, RefreshCw } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
-import { getCallSummary, type LiveCallSummary } from "@/lib/api/calls"
+import {
+  getCallSummary,
+  type LiveCallSummary,
+  type LiveCallSummarySections,
+} from "@/lib/api/calls"
 
 function errorMessage(e: unknown): string {
   if (e instanceof ApiError && e.httpStatus === 503) {
     return "Summary temporarily unavailable — try again shortly."
   }
   return e instanceof ApiError ? e.message : "Could not load the summary."
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section>
+      <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </h4>
+      {children}
+    </section>
+  )
+}
+
+/** The skimmable layout: labeled sections with real bullet lists, the next step
+ *  called out last since it's what a supervisor taking over needs first. */
+function SectionedSummary({ sections }: { sections: LiveCallSummarySections }) {
+  return (
+    <div className="space-y-4 text-sm leading-relaxed text-foreground">
+      {sections.participants && (
+        <Section title="Participants">
+          <p>{sections.participants}</p>
+        </Section>
+      )}
+      {sections.purpose && (
+        <Section title="Purpose">
+          <p>{sections.purpose}</p>
+        </Section>
+      )}
+      {sections.facts.length > 0 && (
+        <Section title="Established so far">
+          <ul className="list-disc space-y-1 pl-5">
+            {sections.facts.map((fact) => (
+              <li key={fact}>{fact}</li>
+            ))}
+          </ul>
+        </Section>
+      )}
+      {sections.open_items.length > 0 && (
+        <Section title="Open items">
+          <ul className="list-disc space-y-1 pl-5">
+            {sections.open_items.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </Section>
+      )}
+      {sections.next_step && (
+        <Section title="Next step">
+          <p className="rounded-md border-l-2 border-primary bg-primary/5 px-3 py-2 font-medium">
+            {sections.next_step}
+          </p>
+        </Section>
+      )}
+    </div>
+  )
 }
 
 /**
@@ -83,6 +142,10 @@ export function CallSummaryPanel({ callId }: { callId: string }) {
         </div>
       )
     }
+    if (result?.sections) {
+      return <SectionedSummary sections={result.sections} />
+    }
+    // The LLM ignored the JSON contract — the plain-text summary still reads fine.
     return (
       <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
         {result?.summary}

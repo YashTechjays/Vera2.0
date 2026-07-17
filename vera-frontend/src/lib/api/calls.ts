@@ -52,12 +52,24 @@ export function endCall(callId: string): Promise<null> {
   return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/end`, { method: "POST" })
 }
 
+/** Skimmable sections of the handoff summary (the backend's parsed LLM contract). */
+export type LiveCallSummarySections = {
+  participants: string | null
+  purpose: string | null
+  facts: string[]
+  open_items: string[]
+  next_step: string | null
+}
+
 /** On-demand supervisor-handoff summary of a call's transcript so far. */
 export type LiveCallSummary = {
   /** "pending" while the call is too young to summarize (fewer than 2 speech turns). */
   status: "ready" | "pending"
-  /** The handoff briefing; null while status is "pending". */
+  /** The handoff briefing as plain text; null while status is "pending". */
   summary: string | null
+  /** Structured view of `summary`; null when the LLM reply didn't parse
+   *  (render the plain-text `summary` instead). */
+  sections: LiveCallSummarySections | null
   /** Epoch milliseconds the summary was generated (server clock). */
   generated_at: number
   turn_count: number

@@ -11,6 +11,7 @@ the payload is PHI).
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -39,14 +40,20 @@ _MIN_SPEECH_TURNS = 2
 SUMMARY_SYSTEM_PROMPT = """\
 You are briefing a human supervisor who is about to take over or monitor a live
 insurance-verification phone call mid-flight. From the diarized transcript,
-write a handoff summary covering:
-- who is on the call and its purpose;
-- what has been established so far (facts confirmed, answers collected);
-- anything unresolved, contentious, or in progress;
-- the likely next step.
-Be concise (under 150 words), factual, and neutral. Do not invent details that
-are not in the transcript. Write plain text only — no markdown, no asterisks,
-no headings; short labeled lines are fine."""
+produce a handoff summary.
+
+Respond with ONLY a JSON object — no markdown fences, no prose around it — in
+exactly this shape:
+{
+  "participants": "<who is on the call, one short line>",
+  "purpose": "<why the call is happening, one short line>",
+  "facts": ["<one confirmed fact per item, e.g. an ID that was accepted>"],
+  "open_items": ["<one unresolved/in-progress item per item>"],
+  "next_step": "<the single most likely next action, one short line>"
+}
+Keep every string short and skimmable (under 15 words). Use empty arrays or
+null when a section has nothing. Be factual and neutral; do not invent details
+that are not in the transcript."""
 
 # Transcript.source ("rep"/"bot") -> envelope role, used only when the row's own
 # `role` is blank (older rows / a source the worker didn't stamp a role for).
@@ -149,9 +156,61 @@ class SummaryLLM(Protocol):
     async def complete(self, *, system: str, user: str) -> str: ...
 
 
+class SummarySections(BaseModel):
+    """The handoff summary broken into skimmable sections (the LLM's JSON
+    contract). Every field is optional — the model omits what the transcript
+    doesn't support."""
+
+    participants: str | None = None
+    purpose: str | None = None
+    facts: list[str] = []
+    open_items: list[str] = []
+    next_step: str | None = None
+
+
+_JSON_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+
+
+def parse_sections(text: str) -> SummarySections | None:
+    """Parse the LLM's JSON handoff into sections; None when the model ignored
+    the contract (the caller then falls back to the raw text). Content is PHI —
+    parse failures log the exception type only."""
+    raw = text.strip()
+    fenced = _JSON_FENCE.match(raw)
+    if fenced:
+        raw = fenced.group(1)
+    try:
+        return SummarySections.model_validate_json(raw)
+    except Exception as exc:
+        logger.warning("summary sections parse failed: %s", type(exc).__name__)
+        return None
+
+
+def flatten_sections(sections: SummarySections) -> str:
+    """Deterministic plain-text rendering of the sections — keeps the `summary`
+    field human-readable for any consumer that doesn't render sections."""
+    lines: list[str] = []
+    if sections.participants:
+        lines.append(f"Participants: {sections.participants}")
+    if sections.purpose:
+        lines.append(f"Purpose: {sections.purpose}")
+    if sections.facts:
+        lines.append("Established:")
+        lines.extend(f"- {fact}" for fact in sections.facts)
+    if sections.open_items:
+        lines.append("Open items:")
+        lines.extend(f"- {item}" for item in sections.open_items)
+    if sections.next_step:
+        lines.append(f"Next step: {sections.next_step}")
+    return "\n".join(lines)
+
+
 class CallSummaryResponse(BaseModel):
     status: Literal["ready", "pending"]
     summary: str | None
+    # Structured view of `summary` for the tabbed UI; None when the LLM's reply
+    # didn't parse (the plain-text `summary` is then the raw reply).
+    sections: SummarySections | None = None
     generated_at: int  # epoch milliseconds
     turn_count: int
 
@@ -188,9 +247,14 @@ async def summarize_call(
             status="pending", summary=None, generated_at=generated_at, turn_count=len(turns)
         )
 
-    summary = await llm.complete(system=SUMMARY_SYSTEM_PROMPT, user=format_diarized(turns))
+    reply = await llm.complete(system=SUMMARY_SYSTEM_PROMPT, user=format_diarized(turns))
+    sections = parse_sections(reply)
     response = CallSummaryResponse(
-        status="ready", summary=summary, generated_at=generated_at, turn_count=len(turns)
+        status="ready",
+        summary=flatten_sections(sections) if sections is not None else reply,
+        sections=sections,
+        generated_at=generated_at,
+        turn_count=len(turns),
     )
     try:
         await cache.set(room_name, response.model_dump_json(), ttl_seconds)
