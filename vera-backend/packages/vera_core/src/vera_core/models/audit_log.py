@@ -33,6 +33,10 @@ class AuditEvent(enum.StrEnum):
     # Inbound API-key intake: a machine caller created a patient_form + its
     # INTAKE-source field_answer rows (a PHI write). Field names/counts only.
     FORM_INTAKE = "form.intake"
+    # The Observer extracted an answer from a live call and the worker-event
+    # consumer wrote it as an ai_call field_answer (a PHI write). Field path +
+    # call id only — never the value.
+    FORM_AI_ANSWER = "form.ai_answer"
     # A reviewer adjudicated disputed fields on a patient_form (accept/override/
     # correct + re-ask). Field names/counts only — never the values.
     DISPUTE_RESOLVE = "dispute.resolve"

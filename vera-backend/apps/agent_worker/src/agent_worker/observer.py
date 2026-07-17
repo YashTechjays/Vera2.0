@@ -1,0 +1,397 @@
+"""Observer runtime: extract answers from the live transcript, one Observer per task.
+
+A single ``ObserverManager`` tails the transcript Redis stream (decoupled from the voice
+pipeline — it reads the stream the emitter writes, it is not a fan-out sink). It never runs
+during the IVR phase or wrap-up: it routes each finalized turn to the Observer for
+``controller.active_task_index``, and when that index is ``None`` (IVR, wrap-up) the turn is
+dropped — extraction only happens on the conversation path.
+
+Each task gets its OWN ``TaskObserver``, bound to exactly that task's field whitelist:
+* It can only ever write its own task's fields — an answer for another task's field is
+  dropped, so a handoff can never mis-attribute or lose an answer.
+* On a task change the manager rotates: the outgoing Observer is closed with a final drain
+  pass (catching a trailing turn finalized during the outro) while the incoming one takes
+  over. The drain runs in the background so the turn pipeline is never blocked on an LLM call.
+
+Side effects are centralized in the manager's ``record`` callback (the single answers
+writer): ``run_state.record_answer`` → ``bus.emit`` → dedup → (on a rule fire)
+``apply_directive_now`` redirects the live call. The call-scoped
+``RuleEngine`` and the accumulated answers snapshot live on the manager, so a flow rule that
+depends on an earlier task's answer still fires.
+
+The whole runtime is best-effort: every extraction pass is wrapped so a raising LLM (or a
+Redis blip) logs its type, kills that pass, and the call continues.
+"""
+
+import asyncio
+import contextlib
+import json
+import logging
+import time
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
+
+from google.genai.types import ThinkingConfig
+from livekit.agents import llm
+from livekit.plugins import google
+
+from agent_worker.rule_engine import RuleEngine
+from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
+from vera_core.forms.call_plan import CallPlan, PlanTask
+from vera_core.plan_store import PlanRunStateService
+from vera_core.transcript import (
+    ROLE_USER,
+    SOURCE_BOT,
+    SOURCE_REP,
+    TranscriptEvent,
+    TurnRole,
+    TurnSource,
+)
+
+if TYPE_CHECKING:
+    from agent_worker.plan_runtime import PlanRunController
+
+logger = logging.getLogger("agent_worker")
+
+# Cap the transcript window fed to the extractor: the last N finalized turns of the
+# current task. Bounds the prompt size and memory; a task rarely spans more.
+_MAX_WINDOW_TURNS = 24
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractedAnswer:
+    field_path: str
+    value: str
+    confidence: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Turn:
+    role: TurnRole
+    text: str
+    source: TurnSource | None
+    ts: int
+    seq: int
+
+
+class AnswerExtractor(Protocol):
+    """Pulls answers for one task out of a rendered transcript window. Injectable so the
+    Observer's routing/debounce/lifecycle is testable without a real Gemini call."""
+
+    async def extract(self, task: PlanTask, transcript: str) -> list[ExtractedAnswer]: ...
+
+
+type RecordFn = Callable[[ExtractedAnswer, int | None], Awaitable[None]]
+
+
+class GeminiAnswerExtractor:
+    """Standalone Gemini-Flash extraction (own LLM, separate from the conversation's),
+    emitting strict JSON. Same model posture as the cascade: vertexai, thinking_budget=0."""
+
+    def __init__(self) -> None:
+        self._llm = google.LLM(
+            model="gemini-2.5-flash",
+            vertexai=True,
+            thinking_config=ThinkingConfig(thinking_budget=0),
+        )
+
+    async def extract(self, task: PlanTask, transcript: str) -> list[ExtractedAnswer]:
+        ctx = llm.ChatContext.empty()
+        ctx.add_message(role="system", content=_extraction_instructions(task))
+        ctx.add_message(role="user", content=transcript)
+        response = await self._llm.chat(chat_ctx=ctx).collect()
+        return _parse_extraction(response.text)
+
+
+def _extraction_instructions(task: PlanTask) -> str:
+    lines = [
+        "You extract answers from a phone call between an insurance-verification agent and "
+        "a payer representative. Return ONLY the fields below that the representative has "
+        "clearly answered in the transcript. Output a JSON array of "
+        '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
+        "Omit a field entirely if it is not yet answered. Use only these field_path values:",
+    ]
+    for f in task.fields:
+        allowed = f" (one of: {', '.join(f.values)})" if f.values else ""
+        lines.append(f"- {f.path}: {f.title}{allowed}")
+    return "\n".join(lines)
+
+
+def _parse_extraction(text: str) -> list[ExtractedAnswer]:
+    """Tolerant strict-JSON parse: a bad payload skips the whole pass (returns [])."""
+    payload = text.strip()
+    if payload.startswith("```"):  # strip an accidental code fence
+        payload = payload.strip("`").removeprefix("json").strip()
+    try:
+        rows = json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    answers: list[ExtractedAnswer] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path, value = row.get("field_path"), row.get("value")
+        if not isinstance(path, str) or value is None:
+            continue
+        answers.append(
+            ExtractedAnswer(
+                field_path=path,
+                value=str(value),
+                confidence=_clamp_confidence(row.get("confidence")),
+            )
+        )
+    return answers
+
+
+def _clamp_confidence(raw: Any) -> int | None:
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return None
+    return max(0, min(100, int(raw)))
+
+
+class TaskObserver:
+    """The extraction loop for ONE task. `feed` is synchronous and non-blocking; each rep
+    turn schedules a debounced pass (coalesced single-flight while one is in flight)."""
+
+    def __init__(
+        self,
+        task: PlanTask,
+        *,
+        whitelist: frozenset[str],
+        extractor: AnswerExtractor,
+        record: RecordFn,
+    ) -> None:
+        self._task = task
+        self._whitelist = whitelist
+        self._extractor = extractor
+        self._record = record
+        self._window: deque[str] = deque(maxlen=_MAX_WINDOW_TURNS)
+        self._latest_rep_seq: int | None = None
+        self._running = False
+        self._pending = False
+        self._closed = False
+        self._passes: set[asyncio.Task[None]] = set()
+
+    def feed(self, turn: _Turn) -> None:
+        if self._closed:
+            return
+        self._window.append(_render_turn(turn))
+        if turn.role == ROLE_USER:  # a rep turn is the only new evidence worth a pass
+            self._latest_rep_seq = turn.seq
+            self._schedule_pass()
+
+    def _schedule_pass(self) -> None:
+        task = asyncio.create_task(self._run_passes())
+        self._passes.add(task)
+        task.add_done_callback(self._passes.discard)
+
+    async def _run_passes(self) -> None:
+        # Single-flight + coalesce: a pass arriving mid-flight just marks `_pending`; the
+        # active runner loops until no more turns have queued up.
+        if self._running:
+            self._pending = True
+            return
+        self._running = True
+        try:
+            while True:
+                self._pending = False
+                await self._one_pass()
+                if not self._pending:
+                    return
+        except Exception as exc:  # a raising LLM kills the pass, never the call
+            logger.warning(
+                "observer task %s: extraction pass failed (%s)",
+                self._task.task_key,
+                type(exc).__name__,
+            )
+        finally:
+            self._running = False
+
+    async def _one_pass(self) -> None:
+        if not self._window:
+            return
+        transcript = "\n".join(self._window)
+        rep_seq = self._latest_rep_seq
+        for answer in await self._extractor.extract(self._task, transcript):
+            if answer.field_path not in self._whitelist:
+                continue  # another task's field — never ours to write
+            await self._record(answer, rep_seq)
+
+    async def aclose(self) -> None:
+        """Stop taking turns, drain in-flight passes, then run one guaranteed final pass so
+        a turn finalized just before the handoff is still extracted."""
+        self._closed = True
+        while self._passes:
+            await asyncio.gather(*list(self._passes), return_exceptions=True)
+        try:
+            await self._one_pass()
+        except Exception as exc:
+            logger.warning(
+                "observer task %s: final drain failed (%s)",
+                self._task.task_key,
+                type(exc).__name__,
+            )
+
+
+_SPEAKER_LABELS = {SOURCE_REP: "Representative", SOURCE_BOT: "Agent"}
+
+
+def _render_turn(turn: _Turn) -> str:
+    speaker = _SPEAKER_LABELS.get(turn.source or "", turn.role)
+    return f"{speaker}: {turn.text}"
+
+
+class TranscriptSource(Protocol):
+    """A tailable transcript stream — `RedisTranscriptStore` in production, a fake in tests.
+    `read` replays from the start then blocks-and-tails, yielding `None` on an idle window
+    and returning when the call ends (the end sentinel, or the stream key disappearing)."""
+
+    def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]: ...
+
+
+# Bound how long shutdown waits for the tail loop to drain to the end sentinel before it
+# force-cancels (a crashed writer may never write the sentinel).
+_TAIL_DRAIN_TIMEOUT_S = 5.0
+
+
+class ObserverManager:
+    """Tails the transcript Redis stream, routes each turn to the active task's Observer, and
+    owns the call-scoped answer/rule state. It is NOT a fan-out sink — it reads the stream the
+    emitter writes, decoupled from the voice pipeline, and filters to rep turns client-side."""
+
+    def __init__(
+        self,
+        plan: CallPlan,
+        *,
+        controller: "PlanRunController",
+        run_state: PlanRunStateService,
+        bus: WorkerEventBus,
+        extractor: AnswerExtractor,
+        transcript: TranscriptSource,
+        room_name: str,
+        now_ms: Callable[[], int] | None = None,
+    ) -> None:
+        self._plan = plan
+        self._controller = controller
+        self._run_state = run_state
+        self._bus = bus
+        self._extractor = extractor
+        self._transcript = transcript
+        self._room = room_name
+        self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self._rule_engine = RuleEngine(plan)
+        # Call-scoped answer snapshot (seeded with intake prefill), the dedup key and the
+        # rule engine's input. Grows across tasks — a flow rule may span them.
+        self._answers: dict[str, Any] = dict(plan.prefilled)
+        self._seq = 0
+        self._active_index: int | None = None
+        self._active: TaskObserver | None = None
+        self._closing: set[asyncio.Task[None]] = set()
+        self._tail_task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        """Begin tailing the transcript stream in the background."""
+        self._tail_task = asyncio.create_task(self.run())
+
+    async def run(self) -> None:
+        """Tail the stream to end-of-call, feeding each turn to the active Observer. Returns
+        when `read` returns (end sentinel / stream gone). A per-turn error keeps the loop
+        alive; a fatal tail error kills observation but never the call."""
+        try:
+            async for item in self._transcript.read(self._room):
+                if item is None:
+                    continue  # idle keepalive tick
+                try:
+                    self._ingest(item[1])
+                except Exception as exc:  # one bad turn must not stop the tail
+                    logger.warning(
+                        "observer manager %s: ingest failed (%s)", self._room, type(exc).__name__
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "observer manager %s: tail loop failed (%s)", self._room, type(exc).__name__
+            )
+
+    def _ingest(self, event: TranscriptEvent) -> None:
+        seq, self._seq = self._seq, self._seq + 1  # matches transcript.seq numbering
+        index = self._controller.active_task_index
+        if index != self._active_index:
+            self._rotate(index)
+        if self._active is not None:
+            self._active.feed(
+                _Turn(role=event.role, text=event.text, source=event.source, ts=event.ts, seq=seq)
+            )
+
+    def _rotate(self, index: int | None) -> None:
+        if self._active is not None:
+            self._schedule_close(self._active)  # background final drain, non-blocking
+        self._active_index = index
+        if index is None:
+            self._active = None
+            return
+        task = self._plan.tasks[index]
+        self._active = TaskObserver(
+            task,
+            whitelist=frozenset(f.path for f in task.fields),
+            extractor=self._extractor,
+            record=self._record,
+        )
+
+    def _schedule_close(self, observer: TaskObserver) -> None:
+        task = asyncio.create_task(observer.aclose())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    async def _record(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
+        if self._answers.get(answer.field_path) == answer.value:
+            return  # unchanged — do not re-write or re-emit
+        ts = self._now_ms()
+        await self._run_state.record_answer(
+            self._room,
+            answer.field_path,
+            value=answer.value,
+            ts=ts,
+            confidence=answer.confidence,
+            evidence_seq=evidence_seq,
+        )
+        await self._bus.emit(
+            CallAnswerRecordedEvent(
+                room_name=self._room,
+                field_path=answer.field_path,
+                value=answer.value,
+                confidence=answer.confidence,
+                evidence_seq=evidence_seq,
+                ts=ts,
+            )
+        )
+        # Mark dedup only after the write+emit land, so a failed emit is retried on the
+        # next pass (the CP consumer is idempotent under the redelivery).
+        self._answers[answer.field_path] = answer.value
+        self._controller.update_answers(self._answers)
+        directive = self._rule_engine.evaluate(self._answers)
+        if directive is not None:
+            # Redirect the live call NOW: interrupt the bot + swap/re-ask (the controller
+            # serializes it against an in-flight task_complete handoff).
+            await self._controller.apply_directive_now(directive)
+
+    async def aclose(self) -> None:
+        """Stop tailing and drain. Call in the entrypoint shutdown AFTER the transcript
+        stream's end() sentinel is written (so the tail drains the final turns) and BEFORE
+        the plan-run state is cleared. The tail normally exits on the sentinel; bounded so a
+        never-written sentinel can't hang shutdown."""
+        if self._tail_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(self._tail_task), _TAIL_DRAIN_TIMEOUT_S)
+            except (TimeoutError, asyncio.CancelledError):
+                self._tail_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._tail_task
+        self._rotate(None)  # close the active Observer with a final drain pass
+        while self._closing:
+            await asyncio.gather(*list(self._closing), return_exceptions=True)
