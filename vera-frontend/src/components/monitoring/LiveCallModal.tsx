@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
+  Check,
+  Copy,
   Maximize2,
+  Minimize2,
   X,
   Grid3x3,
   MessageSquare,
@@ -15,6 +18,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { copyText } from "@/lib/clipboard"
 import { usePermission } from "@/lib/auth/permissions"
 import { ApiError } from "@/lib/api/client"
 import { endCall } from "@/lib/api/calls"
@@ -66,6 +70,13 @@ export function LiveCallModal({
   const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
+  // Full-width/height presentation of this modal (the header ⛶), not the IBV form.
+  const [maximized, setMaximized] = useState(false)
+  // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
+  const [transcript, setTranscript] = useState("")
+  const [transcriptCopied, setTranscriptCopied] = useState(false)
+  const copiedTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const progress = call?.formProgress ?? 0
 
@@ -100,6 +111,9 @@ export function LiveCallModal({
       setMode("listen")
       setRoomStatus(null)
       setActionError(null)
+      setMaximized(false)
+      setTranscript("")
+      setTranscriptCopied(false)
       setRightTab("transcript")
     }
     onOpenChange(next)
@@ -133,7 +147,12 @@ export function LiveCallModal({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="flex max-h-[92vh] w-[96vw] max-w-[1100px] flex-col gap-0 p-0"
+        className={cn(
+          "flex flex-col gap-0 p-0",
+          maximized
+            ? "h-[98vh] max-h-[98vh] w-[98vw] max-w-none"
+            : "max-h-[92vh] w-[96vw] max-w-[1100px]",
+        )}
       >
         <div className="border-b border-border p-4">
           <div className="flex items-start justify-between gap-4">
@@ -146,11 +165,11 @@ export function LiveCallModal({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={onExpand}
-                title="Open full form"
+                onClick={() => setMaximized((v) => !v)}
+                title={maximized ? "Restore size" : "Expand"}
                 className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
               >
-                <Maximize2 className="size-4" />
+                {maximized ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
               </button>
               {closeAllowed && (
                 <button
@@ -257,27 +276,50 @@ export function LiveCallModal({
           </div>
 
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
-            <div className="flex items-center gap-1 bg-[#f3f5f7] px-2 py-2">
-              {(
-                [
-                  ["transcript", "Transcription"],
-                  ["summary", "Summary"],
-                ] as const
-              ).map(([tab, label]) => (
-                <button
-                  key={tab}
-                  type="button"
-                  onClick={() => setRightTab(tab)}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
-                    rightTab === tab
-                      ? "bg-white text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
+            <div className="flex items-center justify-between bg-[#f3f5f7] px-2 py-2">
+              <div className="flex items-center gap-1">
+                {(
+                  [
+                    ["transcript", "Transcription"],
+                    ["summary", "Summary"],
+                  ] as const
+                ).map(([tab, label]) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setRightTab(tab)}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
+                      rightTab === tab
+                        ? "bg-white text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={!transcript}
+                title={transcriptCopied ? "Copied" : "Copy transcript"}
+                aria-label={transcriptCopied ? "Copied" : "Copy transcript"}
+                className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+                onClick={() => {
+                  void copyText(transcript).then((ok) => {
+                    if (!ok) return
+                    setTranscriptCopied(true)
+                    window.clearTimeout(copiedTimer.current)
+                    copiedTimer.current = window.setTimeout(() => setTranscriptCopied(false), 2000)
+                  })
+                }}
+              >
+                {transcriptCopied ? (
+                  <Check className="size-4 text-emerald-600" />
+                ) : (
+                  <Copy className="size-4" />
+                )}
+              </button>
             </div>
             {call?.id ? (
               <div className="flex flex-1 flex-col overflow-hidden">
@@ -302,6 +344,7 @@ export function LiveCallModal({
                     key={`t-${call.id}`}
                     callId={call.id}
                     onCallStatus={onCallStatus}
+                    onTextChange={setTranscript}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                   />
                 </div>

@@ -12,12 +12,12 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import (
@@ -86,7 +86,7 @@ from vera_core.observability.correlation import (
     SUPERVISOR_IDENTITY_PREFIX,
     room_name_for_call,
 )
-from vera_core.schemas import CallSummary, JoinTokenResponse, RecordingPlayback
+from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
 
 logger = logging.getLogger(__name__)
 
@@ -170,13 +170,26 @@ def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSumma
     return CallSummary(
         id=call.id,
         tenant_id=call.tenant_id,
+        form_id=call.form_id,
         status=call.current_status,
         room_name=room_name_for_call(call.tenant_id, call.id),
         patient_name=patient_name,
         started_at=call.started_at,
+        ended_at=call.ended_at,
         created_at=call.created_at,
         published=call.published,
         is_owner=call.initiated_by_id == caller_id,
+    )
+
+
+def _visible_to(caller_id: UUID) -> ColumnElement[bool]:
+    """Calls the caller may see: their own, published ones, and ownerless
+    (pre-ownership dispatcher) calls — hidden, those would have no monitoring
+    and no owner to ever publish them."""
+    return or_(
+        Call.initiated_by_id == caller_id,
+        Call.published.is_(True),
+        Call.initiated_by_id.is_(None),
     )
 
 
@@ -684,26 +697,31 @@ async def list_calls(
     tenant_id: TenantId,
     session: TenantSession,
     audit: Audit,
+    scope: Literal["live", "history"] = "live",
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[list[CallSummary]]:
+    """`scope=live` (default) lists in-flight calls — unbounded unless `limit`
+    is passed (capping it by default could silently hide live calls from
+    monitoring); `scope=history` returns the most recent terminal calls,
+    capped at `limit` (default 50)."""
     response.headers["Cache-Control"] = "no-store"
-    rows = (
-        await session.execute(
-            select(Call, PatientForm.patient_name)
-            .join(PatientForm, PatientForm.id == Call.form_id)
-            .where(Call.current_status.in_(list(_ACTIVE_STATUSES)))
-            # Ownerless (pre-ownership dispatcher) calls are tenant-visible —
-            # hidden, they'd have no monitoring and no owner to ever publish them.
-            .where(
-                or_(
-                    Call.initiated_by_id == caller.user_id,
-                    Call.published.is_(True),
-                    Call.initiated_by_id.is_(None),
-                )
-            )
-            .order_by(Call.created_at.desc())
-        )
-    ).all()
+    status_cond = (
+        Call.current_status.in_(list(_ACTIVE_STATUSES))
+        if scope == "live"
+        else Call.current_status.in_(TERMINAL_VALUES)
+    )
+    query = (
+        select(Call, PatientForm.patient_name)
+        .join(PatientForm, PatientForm.id == Call.form_id)
+        .where(status_cond)
+        .where(_visible_to(caller.user_id))
+        .order_by(Call.created_at.desc())
+    )
+    effective_limit = (limit or 50) if scope == "history" else limit
+    if effective_limit is not None:
+        query = query.limit(effective_limit)
+    rows = (await session.execute(query)).all()
     # PHI disclosure (patient_name) — audit field names, mirroring list_patient_forms.
     await emit_phi_read_audit(
         audit,
@@ -715,6 +733,42 @@ async def list_calls(
         fields=["patient_name"],
     )
     return ok([_summary(c, name, caller.user_id) for c, name in rows])
+
+
+@router.get(
+    "/calls/stats",
+    response_model=ResponseModel[CallStats],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def call_stats(
+    response: Response,
+    tenant_id: TenantId,
+    session: TenantSession,
+    caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[CallStats]:
+    """Counts for the Live Monitoring stat cards, over the same calls the list
+    shows the caller. Pure counts (no PHI), so no disclosure audit; "today" is
+    the DB clock's UTC day."""
+    response.headers["Cache-Control"] = "no-store"
+    # Structural UTC "today": date_trunc truncates in the session TimeZone, so
+    # shift to UTC, truncate, then re-anchor the naive result as UTC.
+    utc_midnight = func.timezone("UTC", func.date_trunc("day", func.timezone("UTC", func.now())))
+    row = (
+        await session.execute(
+            select(
+                func.count().filter(Call.created_at >= utc_midnight),
+                func.count().filter(Call.current_status.in_(list(_ACTIVE_STATUSES))),
+                func.count().filter(Call.current_status == CallStatus.CRITICAL),
+            )
+            .select_from(Call)
+            .where(_visible_to(caller.user_id))
+        )
+    ).one()
+    total_today, live, critical = row
+    return ok(CallStats(total_today=total_today, live=live, critical=critical))
 
 
 @router.get(

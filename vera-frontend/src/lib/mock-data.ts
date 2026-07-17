@@ -1,26 +1,3 @@
-import {
-  Phone,
-  PhoneCall,
-  CheckCircle2,
-  AlertCircle,
-  type LucideIcon,
-} from "lucide-react"
-
-export type Stat = {
-  label: string
-  value: string
-  icon: LucideIcon
-  /** "critical" renders the value + icon in red */
-  tone?: "default" | "critical"
-}
-
-export const stats: Stat[] = [
-  { label: "Total Calls", value: "248", icon: Phone },
-  { label: "Active Calls", value: "5", icon: PhoneCall },
-  { label: "Running Smoothly", value: "3", icon: CheckCircle2 },
-  { label: "Critical Alerts", value: "2", icon: AlertCircle, tone: "critical" },
-]
-
 /** Visual category — drives the row tint, indicator, duration color, and badge. */
 export type CallCategory = "critical" | "active" | "processing" | "completed"
 export type CallAction = "intervene" | "view" | "add-info"

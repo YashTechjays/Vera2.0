@@ -19,10 +19,12 @@ vi.mock("@/lib/api/client", () => {
 import { apiRequest, ApiError } from "@/lib/api/client"
 import {
   endCall,
+  getCallStats,
   getCallSummary,
   getJoinToken,
   listCalls,
   publishCall,
+  type CallStats,
   type CallSummary,
   type JoinTokenResponse,
   type LiveCallSummary,
@@ -31,10 +33,12 @@ import {
 const call: CallSummary = {
   id: "c1",
   tenant_id: "t1",
+  form_id: "f1",
   status: "active",
   room_name: "call--t1--c1",
   patient_name: "Jane Doe",
   started_at: "2026-07-04T10:00:00Z",
+  ended_at: null,
   created_at: "2026-07-04T09:59:00Z",
   published: false,
   is_owner: true,
@@ -54,6 +58,22 @@ describe("calls API client", () => {
     const out = await listCalls()
     expect(out).toEqual([call])
     expect(apiRequest).toHaveBeenCalledWith("/calls")
+  })
+
+  it("lists terminal calls with GET /calls?scope=history", async () => {
+    const done = { ...call, status: "completed", ended_at: "2026-07-04T10:05:00Z" }
+    vi.mocked(apiRequest).mockResolvedValue([done])
+    const out = await listCalls("history")
+    expect(out).toEqual([done])
+    expect(apiRequest).toHaveBeenCalledWith("/calls?scope=history")
+  })
+
+  it("fetches stat-card counts with GET /calls/stats", async () => {
+    const stats: CallStats = { total_today: 4, live: 2, critical: 1 }
+    vi.mocked(apiRequest).mockResolvedValue(stats)
+    const out = await getCallStats()
+    expect(out).toEqual(stats)
+    expect(apiRequest).toHaveBeenCalledWith("/calls/stats")
   })
 
   it("publishes a call (POST, no body)", async () => {

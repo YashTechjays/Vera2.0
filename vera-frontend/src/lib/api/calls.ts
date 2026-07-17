@@ -7,12 +7,16 @@ import { apiRequest } from "@/lib/api/client"
 export type CallSummary = {
   id: string
   tenant_id: string
+  /** The patient form this call fills — opens the real form from the monitoring UI. */
+  form_id: string
   /** current_status — e.g. "initiated" | "active" | "critical" | … (backend enum). */
   status: string
   room_name: string
   patient_name: string | null
   /** ISO-8601; null until the callee answers. */
   started_at: string | null
+  /** ISO-8601; set once the call reaches a terminal status. */
+  ended_at: string | null
   created_at: string
   /** One-way, tenant-wide visibility. Once true it never returns to false. */
   published: boolean
@@ -27,9 +31,24 @@ export type JoinTokenResponse = {
   room_name: string
 }
 
-/** GET /calls — active calls the caller owns or that are published, newest first. */
-export function listCalls(): Promise<CallSummary[]> {
-  return apiRequest<CallSummary[]>("/calls")
+/** Live Monitoring stat-card counts, over the same calls the list shows the caller. */
+export type CallStats = {
+  /** Calls created today (UTC), any status. */
+  total_today: number
+  /** In-flight (non-terminal) calls right now. */
+  live: number
+  critical: number
+}
+
+/** GET /calls — calls the caller owns or that are published, newest first.
+ *  scope "live" (default) is the in-flight list; "history" the most recent terminal calls. */
+export function listCalls(scope: "live" | "history" = "live"): Promise<CallSummary[]> {
+  return apiRequest<CallSummary[]>(scope === "history" ? "/calls?scope=history" : "/calls")
+}
+
+/** GET /calls/stats — counts for the Live Monitoring stat cards. */
+export function getCallStats(): Promise<CallStats> {
+  return apiRequest<CallStats>("/calls/stats")
 }
 
 /** POST /calls/{id}/publish — owner-only, one-way, idempotent. */

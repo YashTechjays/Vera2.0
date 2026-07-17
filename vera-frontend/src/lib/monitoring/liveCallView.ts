@@ -51,7 +51,7 @@ export const PARTICIPANT_MODE_BADGE: Record<ParticipantMode, string> = {
   intervener: "Intervening",
   listener: "Listening",
   agent: "AI Agent",
-  callee: "Caller",
+  callee: "Insurance Rep",
 }
 
 /** Kind beats identity beats attribute; an unknown identity falls back to agent (self-hosted workers may lack ParticipantKind.Agent). */
@@ -68,7 +68,7 @@ export function participantMode(p: ParticipantLike): ParticipantMode {
 export function participantLabel(p: ParticipantLike): string {
   const mode = participantMode(p)
   if (mode === "agent") return "Vera Agent"
-  if (mode === "callee") return "Caller"
+  if (mode === "callee") return "Insurance Rep"
   return p.name || p.identity
 }
 
