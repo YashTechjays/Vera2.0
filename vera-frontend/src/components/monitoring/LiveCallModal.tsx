@@ -364,7 +364,12 @@ export function LiveCallModal({
             {!callEnded && (
               <Button
                 onClick={() => void handleEndCall()}
-                disabled={ending}
+                disabled={ending || roomStatus?.otherIntervener}
+                title={
+                  roomStatus?.otherIntervener
+                    ? "Only the intervening supervisor can end this call"
+                    : undefined
+                }
                 className="bg-red-500 text-white hover:bg-red-600"
               >
                 {ending ? "Ending…" : "End Call"}

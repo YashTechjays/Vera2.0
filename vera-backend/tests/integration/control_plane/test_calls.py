@@ -157,6 +157,7 @@ async def test_list_calls_empty_then_populated(
     assert row is not None
     assert row["status"] == "initiated"
     assert parse_room_name(row["room_name"]) is not None
+    assert "insurance_provider" in row
 
 
 @pytest.mark.asyncio
@@ -423,7 +424,7 @@ async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
         .first()
     )
     assert row is not None
-    assert row.detail == {"fields": ["patient_name"]}
+    assert row.detail == {"fields": ["patient_name", "insurance_provider"]}
 
 
 @pytest.mark.asyncio
@@ -1060,6 +1061,35 @@ async def _seed_published_active_call(
         status="active",
         published=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_end_call_locked_to_active_intervener(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_livekit: FakeLiveKit,
+) -> None:
+    """While a takeover is live (claim inside the connect grace), only the
+    intervener may end the call; the intervener's own end goes through."""
+    call_id = await _seed_published_active_call(admin_sessionmaker, rbac_world, seeded_form_id)
+    claim = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert claim.status_code == 200, claim.text
+
+    denied = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert denied.status_code == 409, denied.text
+    assert "intervening supervisor" in denied.json()["message"]
+
+    allowed = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token)
+    )
+    assert allowed.status_code == 200, allowed.text
 
 
 async def _intervention_events(session: AsyncSession, call_id: UUID) -> list[InterventionEvent]:

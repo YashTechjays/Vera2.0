@@ -13,6 +13,7 @@ export type CallSummary = {
   status: string
   room_name: string
   patient_name: string | null
+  insurance_provider: string | null
   /** ISO-8601; null until the callee answers. */
   started_at: string | null
   /** ISO-8601; set once the call reaches a terminal status. */
