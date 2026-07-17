@@ -16,7 +16,7 @@ from datetime import date
 from typing import Any
 
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, parse_date_format
+from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, format_date, parse_date_format
 
 # Legacy v1 section the required-fields fallback reads structurally.
 _PATIENT_INFO = "patient_information"
@@ -208,6 +208,52 @@ def _parse_date(value: Any, field_path: str, date_format: str | None = None) -> 
         if parsed is not None:
             return parsed
     raise InvalidIntakeValue(field_path, "expected an ISO date or the field's configured format")
+
+
+def date_leaf_paths(doc: FormSchemaDoc) -> dict[str, str | None]:
+    """Root-anchored paths of every `type: "date"` leaf in `doc`, mapped to that
+    leaf's declared `validation.date_format` (`None` if the leaf declares none) —
+    the dynamic, schema-driven set `normalize_date_answers` reformats. Covers
+    every date leaf, not just the promoted `patient_dob`/`appointment_date`
+    columns `promote_columns` special-cases (mirrors `phone_promoted_paths`,
+    which is deliberately scoped to promoted columns only — dates need the wider
+    set because every IBV catalog schema has date leaves outside the promoted
+    eight, e.g. `spouse_partner_dob`, `verified_at`)."""
+    return {
+        path: (leaf.validation.date_format if leaf.validation else None)
+        for path, leaf in doc.leaf_items()
+        if leaf.type == "date"
+    }
+
+
+def normalize_date_value(value: Any, field_path: str, date_format: str | None) -> Any:
+    """Validate `value` as a date (ISO or `date_format` — `_parse_date`'s rule)
+    and reformat it to `date_format`, or to ISO if the leaf declares none — so a
+    date leaf's stored answer is in one consistent shape regardless of which
+    format the submitter used. Empty/blank/`None` values pass through untouched
+    (a dispute-resolve caller can still submit "" to clear a date leaf). Raises
+    `InvalidIntakeValue` on an unparseable value."""
+    parsed = _parse_date(value, field_path, date_format)
+    if parsed is None:
+        return value
+    return format_date(parsed, date_format) if date_format is not None else parsed.isoformat()
+
+
+def normalize_date_answers(
+    answers: list[tuple[str, Any]], doc: FormSchemaDoc
+) -> list[tuple[str, Any]]:
+    """Reformat every flattened `(path, value)` answer whose path is a date-typed
+    leaf (`date_leaf_paths`) to that leaf's declared format — applied before
+    `field_answer` rows are built, mirroring `normalize_phone_answers`. Non-date
+    paths pass through untouched. Raises `InvalidIntakeValue` (offending path
+    only, never the value) on the first unparseable date."""
+    date_paths = date_leaf_paths(doc)
+    if not date_paths:
+        return answers
+    return [
+        (path, normalize_date_value(raw, path, date_paths[path]) if path in date_paths else raw)
+        for path, raw in answers
+    ]
 
 
 def unknown_payload_paths(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> list[str]:

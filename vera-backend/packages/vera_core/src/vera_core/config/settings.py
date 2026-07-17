@@ -12,6 +12,14 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _split_csv(value: object) -> object:
+    """Accept a comma-separated string for a list field (friendlier than JSON in
+    .env); pass anything else through untouched for pydantic to validate."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return value
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="VERA_",
@@ -148,6 +156,23 @@ class Settings(BaseSettings):
     # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
     livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
 
+    # --- live-call summary (control plane) -----------------------------------
+    # Fault-tolerant summarizer chain, "provider:model" selectors resolved by
+    # vera_core.llm (google = Vertex Gemini; openai = GPT under the OpenAI BAA).
+    summary_primary_model: str = "google:gemini-3.1-flash-lite"  # VERA_SUMMARY_PRIMARY_MODEL
+    summary_fallback_models: list[str] = ["openai:gpt-5.4-mini"]  # VERA_SUMMARY_FALLBACK_MODELS
+    summary_attempt_timeout_seconds: float = 8.0  # VERA_SUMMARY_ATTEMPT_TIMEOUT_SECONDS
+    # Short cache so tab-flipping supervisors reuse one summary; staleness cap.
+    summary_cache_ttl_seconds: int = 5  # VERA_SUMMARY_CACHE_TTL_SECONDS
+    # Overall request budget for the summarizer chain (cache + fallback attempts);
+    # bounds the worst-case wait before the endpoint gives up and returns 503.
+    summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
+
+    @field_validator("summary_fallback_models", mode="before")
+    @classmethod
+    def _split_fallback_models(cls, value: object) -> object:
+        return _split_csv(value)
+
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
     # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:
@@ -192,10 +217,7 @@ class Settings(BaseSettings):
     @field_validator("cors_allow_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
-        # Accept a comma-separated string (friendlier than JSON in .env).
-        if isinstance(value, str):
-            return [origin.strip() for origin in value.split(",") if origin.strip()]
-        return value
+        return _split_csv(value)
 
     @property
     def is_local(self) -> bool:

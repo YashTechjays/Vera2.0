@@ -180,6 +180,65 @@ async def test_upload_creates_form_and_intake_answers(
         assert all(a.source == "intake" and a.is_current and a.call_id is None for a in answers)
 
 
+async def test_upload_stores_date_answers_in_the_leafs_declared_format(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """Apps Script sends ISO ("yyyy-MM-dd") for every date field; ibv_standard
+    declares "M/D/YYYY" as the display/entry format for all of them. Regression:
+    `field_answer.value` must store the leaf's declared format — matching what
+    the review UI's edit-form validator expects when it re-populates a date leaf
+    from the stored value — not the raw ISO string as submitted."""
+    form_type_id, version_id = ibv_schema
+    token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
+    resp = await client.post(
+        "/api/v1/patient-forms",
+        json={
+            "form_type_id": str(form_type_id),
+            "schema_version_id": str(version_id),
+            "intake_payload": INTAKE_PAYLOAD,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    form_id = UUID(resp.json()["data"]["id"])
+
+    async with tenant_session(rls_sessionmaker, rbac_world.tenant_id) as session:
+        answers = {
+            a.field_path: a.value
+            for a in (
+                await session.execute(select(FieldAnswer).where(FieldAnswer.form_id == form_id))
+            ).scalars()
+        }
+        assert answers["sections.patient_information.patient_dob"] == {"value": "4/12/1990"}
+        assert answers["sections.appointment_information.appointment_date"] == {"value": "8/3/2026"}
+
+
+async def test_upload_rejects_invalid_date_on_a_non_promoted_date_leaf(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """spouse_partner_dob isn't one of the eight promoted columns — proves the
+    fix validates every date leaf, not just patient_dob/appointment_date."""
+    payload: dict[str, object] = {
+        **INTAKE_PAYLOAD,
+        "patient_information": {
+            **INTAKE_PAYLOAD["patient_information"],
+            "spouse_partner_dob": "not-a-date",
+        },
+    }
+    resp = await _post_intake(client, admin_sessionmaker, rbac_world, ibv_schema, payload)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["data"]["fields"] == ["sections.patient_information.spouse_partner_dob"]
+
+
 async def test_upload_promotes_worklist_columns(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
