@@ -23,6 +23,11 @@ class CallSummary(BaseModel):
     created_at: datetime
     published: bool = False
     is_owner: bool = False
+    # Latest call-health-observer assessment. NULL score = never assessed (the
+    # UI renders it neutrally, never as 0). analyzed_at drives staleness display.
+    health_score: int | None = None
+    health_flag: str | None = None
+    health_analyzed_at: datetime | None = None
 
 
 class CallStats(BaseModel):

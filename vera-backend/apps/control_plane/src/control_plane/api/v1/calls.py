@@ -193,6 +193,9 @@ def _summary(
         created_at=call.created_at,
         published=call.published,
         is_owner=call.initiated_by_id == caller_id,
+        health_score=call.health_score,
+        health_flag=call.health_flag,
+        health_analyzed_at=call.health_analyzed_at,
     )
 
 
