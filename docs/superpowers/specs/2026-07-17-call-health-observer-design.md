@@ -160,7 +160,12 @@ Per `call.health` event, in order:
    Rules (evaluated before step 4's column update):
    - **Not in episode, incoming flagged → open episode (immediate):** append
      `CallEvent(event_type=HEALTH, event_value=<flag>, detail={score, reason,
-     turn_count})`; flip `ACTIVE → CRITICAL` (+ STATUS `CallEvent`, existing pattern);
+     turn_count})`; flip **any non-terminal, non-`CRITICAL` status → `CRITICAL`** (+
+     STATUS `CallEvent`, existing pattern) — not conditioned on `current_status ==
+     ACTIVE`, so a `call.health` event that races `call.answered`'s commit (still
+     `INITIATED`/`RINGING`/`IVR`/`WAITING`) still opens the episode instead of being
+     silently dropped (amendment, 2026-07-17; `_handle_call_answered` already treats
+     `CRITICAL` as "already live" and skips its own `ACTIVE` flip in that case);
      publish notification.
    - **In episode, incoming flag ≠ episode category (and ≠ none) → category change:**
      append HEALTH event with the new category; status stays CRITICAL; publish

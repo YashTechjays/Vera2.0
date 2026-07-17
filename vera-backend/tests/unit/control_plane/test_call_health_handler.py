@@ -1,7 +1,7 @@
 """_handle_call_health: guards, column updates, the episode state machine with
 asymmetric hysteresis, and transition-only notifications (spec §4.3, §5)."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -80,7 +80,6 @@ class _Wired:
     consumer: WorkerEventConsumer
     session: _FakeSession
     notifications: _SpyNotifications
-    added_health: list[CallEvent] = field(default_factory=list)
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, session: _FakeSession) -> _Wired:
@@ -162,6 +161,32 @@ async def test_published_call_notifies_tenant_wide(monkeypatch: pytest.MonkeyPat
     await wired.consumer._handle_call_health(_event())
     [(_tid, n)] = wired.notifications.published
     assert n.audience.kind == "tenant"
+
+
+@pytest.mark.asyncio
+async def test_ownerless_call_notifies_tenant_wide(monkeypatch: pytest.MonkeyPatch) -> None:
+    call = _call_row(initiated_by_id=None, published=False)
+    wired = _wire(monkeypatch, _FakeSession(call=call))
+    await wired.consumer._handle_call_health(_event())
+    [(_tid, n)] = wired.notifications.published
+    assert n.audience.kind == "tenant"  # ownerless -> tenant-visible in the list
+
+
+@pytest.mark.asyncio
+async def test_escalation_flips_from_non_active_non_terminal_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reorder race: call.health arrives before call.answered committed the ACTIVE
+    flip, so current_status is still INITIATED when the episode opens. The flip
+    guard must not require ACTIVE — any non-terminal, non-CRITICAL status is safe
+    to promote straight to CRITICAL (spec amendment 2026-07-17)."""
+    call = _call_row(current_status=CallStatus.INITIATED.value)
+    wired = _wire(monkeypatch, _FakeSession(call=call))
+    await wired.consumer._handle_call_health(_event())
+    assert call.current_status == CallStatus.CRITICAL.value
+    assert [r.event_value for r in _health_rows(wired.session)] == ["conversation_loop"]
+    assert [r.event_value for r in _status_rows(wired.session)] == [CallStatus.CRITICAL.value]
+    assert len(wired.notifications.published) == 1
 
 
 @pytest.mark.asyncio

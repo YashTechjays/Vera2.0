@@ -442,16 +442,22 @@ class WorkerEventConsumer:
             transition_flag: str | None = None
             if flagged and not in_episode:
                 transition_flag = event.flag  # open an episode (escalation: immediate)
-                if call.current_status == CallStatus.ACTIVE.value:
-                    call.current_status = CallStatus.CRITICAL.value
-                    session.add(
-                        CallEvent(
-                            tenant_id=ref.tenant_id,
-                            call_id=call.id,
-                            event_type=CallEventType.STATUS.value,
-                            event_value=CallStatus.CRITICAL.value,
-                        )
+                # Always flip, regardless of current_status: the terminal guard above
+                # already dropped terminal statuses, and `in_episode` already excludes
+                # CRITICAL, so whatever reaches here (normally ACTIVE, but also
+                # INITIATED/RINGING/IVR/WAITING if call.health races call.answered's
+                # commit) is safe to promote. This closes the health-before-answered
+                # reorder race — `_handle_call_answered` already treats CRITICAL as
+                # "already live" and skips the ACTIVE flip in that case.
+                call.current_status = CallStatus.CRITICAL.value
+                session.add(
+                    CallEvent(
+                        tenant_id=ref.tenant_id,
+                        call_id=call.id,
+                        event_type=CallEventType.STATUS.value,
+                        event_value=CallStatus.CRITICAL.value,
                     )
+                )
             elif flagged and in_episode:
                 # Compare against the EPISODE category (the last HEALTH row), not
                 # the per-analysis flag — a single healthy blip must not make the
