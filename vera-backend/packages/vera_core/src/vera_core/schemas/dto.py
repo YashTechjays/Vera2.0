@@ -16,9 +16,18 @@ class CallSummary(BaseModel):
     room_name: str
     patient_name: str | None = None
     started_at: datetime | None = None
+    ended_at: datetime | None = None
     created_at: datetime
     published: bool = False
     is_owner: bool = False
+
+
+class CallStats(BaseModel):
+    """Live Monitoring stat cards — counts over the calls visible to the caller."""
+
+    total_today: int
+    live: int
+    critical: int
 
 
 class JoinTokenResponse(BaseModel):

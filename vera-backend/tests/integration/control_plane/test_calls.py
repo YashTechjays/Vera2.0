@@ -315,6 +315,90 @@ async def test_list_scopes_to_owner_or_published(
 
 
 @pytest.mark.asyncio
+async def test_list_calls_history_scope_returns_terminal_calls_only(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    live_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+    )
+    done_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+
+    history = await client.get(
+        "/api/v1/calls",
+        params={"scope": "history"},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert history.status_code == 200, history.text
+    ids = [c["id"] for c in history.json()["data"]]
+    assert str(done_id) in ids
+    assert str(live_id) not in ids
+    # Summaries carry ended_at so the UI can render a fixed duration.
+    assert "ended_at" in history.json()["data"][0]
+
+    live = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
+    live_ids = [c["id"] for c in live.json()["data"]]
+    assert str(live_id) in live_ids
+    assert str(done_id) not in live_ids
+
+
+@pytest.mark.asyncio
+async def test_call_stats_counts_todays_visible_calls(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """total_today counts today's calls (any status), live/critical the in-flight
+    ones — all restricted to what the caller could see in the list (a stranger's
+    private call is invisible to the stats too). One in-flight call max per form
+    (uq_call_active_form), so today's set is 1 critical + 2 completed."""
+    for status in (CallStatus.CRITICAL, CallStatus.COMPLETED, CallStatus.COMPLETED):
+        await seed_call(
+            admin_sessionmaker,
+            rbac_world.tenant_id,
+            seeded_form_id,
+            initiated_by_id=rbac_world.admin_id,
+            status=status.value,
+        )
+    # An old call must not count toward today.
+    old_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+    await admin_session.execute(
+        update(Call).where(Call.id == old_id).values(created_at=text("now() - interval '2 days'"))
+    )
+    await admin_session.commit()
+
+    resp = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("cache-control") == "no-store"
+    data = resp.json()["data"]
+    assert data == {"total_today": 3, "live": 1, "critical": 1}
+
+    # The supervisor sees none of the admin's private calls.
+    other = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.supervisor_token))
+    assert other.json()["data"] == {"total_today": 0, "live": 0, "critical": 0}
+
+
+@pytest.mark.asyncio
 async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
