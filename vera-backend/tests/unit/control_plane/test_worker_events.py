@@ -21,6 +21,7 @@ import control_plane.call_closeout as call_closeout
 import control_plane.post_call as post_call
 import control_plane.transcript_finalizer as transcript_finalizer
 import control_plane.worker_events as worker_events
+from control_plane.call_closeout import TERMINAL_VALUES
 from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import AuditRecord
@@ -943,3 +944,38 @@ async def test_dispatch_serializes_within_a_room_but_parallel_across(
     # within room A, a1 precedes a2 (stream order preserved)
     assert order.index("a1") < order.index("a2")
     assert set(order) == {"a1", "a2", "b1"}
+
+
+# ---------------------------------------------------------------------------
+# Task 8: CRITICAL-interplay — the health observer's status flip must survive
+# a redelivered call.answered, and a CRITICAL call must still close normally.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_answered_redelivery_does_not_clobber_critical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.CRITICAL.value)
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=_FakeSession(call=call))
+    ev = CallAnsweredEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_answered(ev)
+    assert call.current_status == CallStatus.CRITICAL.value  # health flip survives
+    assert wired.session.added == []
+
+
+@pytest.mark.asyncio
+async def test_call_ended_closes_a_critical_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.CRITICAL.value)
+    form = _form_row(tenant_id, form_id)
+    session = _FakeSession(call=call, form=form, tenant=_tenant(id=tenant_id))
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=session)
+    ev = CallEndedEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_ended(ev)
+    assert call.current_status in TERMINAL_VALUES  # CRITICAL closes like any active status
