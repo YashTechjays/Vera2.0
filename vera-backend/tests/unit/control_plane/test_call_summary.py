@@ -2,10 +2,14 @@
 cache orchestration. The DB-fallback branch of snapshot_turns needs live
 Postgres and is covered by the endpoint integration tests."""
 
+from collections.abc import AsyncIterator
+
 import pytest
 
 from control_plane.call_summary import (
     CallSummaryResponse,
+    SummaryCache,
+    SummaryLLM,
     TranscriptTurn,
     format_diarized,
     snapshot_turns,
@@ -30,13 +34,17 @@ class _FakeStreamStore:
     async def read_all(self, room_name: str) -> list[CallStreamEvent]:
         return self._events
 
-    async def publish(self, room_name, event): ...
-    async def mark_ended(self, room_name): ...
-    async def delete(self, room_name): ...
-    async def exists(self, room_name) -> bool:
+    async def publish(self, room_name: str, event: CallStreamEvent) -> None: ...
+    async def mark_ended(self, room_name: str) -> None: ...
+    async def delete(self, room_name: str) -> None: ...
+    async def exists(self, room_name: str) -> bool:
         return bool(self._events)
 
-    def read(self, room_name, *, first_entry_deadline_s=None): ...
+    async def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
+        return
+        yield  # pragma: no cover — never invoked; read_all is this fake's only reader
 
 
 class _DictCache:
@@ -107,7 +115,9 @@ async def test_snapshot_prefers_live_stream_and_filters_non_transcript() -> None
     ]
 
 
-async def _summarize(stream_events, cache, llm, ttl: int = 5) -> CallSummaryResponse:
+async def _summarize(
+    stream_events: list[CallStreamEvent], cache: SummaryCache, llm: SummaryLLM, ttl: int = 5
+) -> CallSummaryResponse:
     tenant_id, call_id = uuid7(), uuid7()
     return await summarize_call(
         llm=llm,
