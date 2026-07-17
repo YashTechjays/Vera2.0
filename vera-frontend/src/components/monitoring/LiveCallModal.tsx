@@ -22,12 +22,14 @@ import { copyText } from "@/lib/clipboard"
 import { usePermission } from "@/lib/auth/permissions"
 import { ApiError } from "@/lib/api/client"
 import { endCall } from "@/lib/api/calls"
+import type { CallHealth } from "@/lib/api/callEvents"
 import {
   interveneButtonState,
   shouldAllowClose,
   type LiveCallMode,
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
+import { healthTone, type HealthTone } from "@/lib/monitoring/health"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
@@ -37,10 +39,11 @@ import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
-function confidenceColor(score: number): string {
-  if (score >= 85) return "text-emerald-600"
-  if (score >= 70) return "text-amber-600"
-  return "text-red-600"
+const healthColor: Record<HealthTone, string> = {
+  good: "text-emerald-600",
+  warn: "text-amber-600",
+  bad: "text-red-600",
+  unknown: "text-muted-foreground",
 }
 
 /**
@@ -78,7 +81,10 @@ export function LiveCallModal({
   const copiedTimer = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
+  const [liveHealth, setLiveHealth] = useState<CallHealth | null>(null)
   const progress = call?.formProgress ?? 0
+  // Prefer the live SSE score; fall back to the polled list value until the first envelope.
+  const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
   const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
     call?.id,
@@ -115,6 +121,7 @@ export function LiveCallModal({
       setTranscript("")
       setTranscriptCopied(false)
       setRightTab("transcript")
+      setLiveHealth(null)
     }
     onOpenChange(next)
   }
@@ -194,9 +201,9 @@ export function LiveCallModal({
               <div className="font-semibold">{call?.insurance ?? "—"}</div>
             </div>
             <div className="text-right">
-              <div className="text-xs text-muted-foreground">Confidence</div>
-              <div className={cn("font-semibold", confidenceColor(call?.confidence ?? 0))}>
-                {call?.confidence ?? 0}%
+              <div className="text-xs text-muted-foreground">Call Health</div>
+              <div className={cn("font-semibold", healthColor[healthTone(healthScore)])}>
+                {healthScore === null ? "Assessing…" : `${healthScore}%`}
               </div>
             </div>
           </div>
@@ -345,6 +352,7 @@ export function LiveCallModal({
                     callId={call.id}
                     onCallStatus={onCallStatus}
                     onTextChange={setTranscript}
+                    onHealth={setLiveHealth}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                   />
                 </div>

@@ -99,6 +99,7 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     formProgress: 0,
     callTime: elapsed(c.started_at, now),
     startedAt: c.started_at,
+    healthScore: c.health_score,
   }
 }
 
