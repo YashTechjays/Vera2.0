@@ -166,7 +166,20 @@ _LISTEN_TOKEN_TTL = timedelta(minutes=5)  # listen-only can't publish, no race
 _PRESENCE_PROBE_TIMEOUT = 3.0  # cap the LiveKit probe so it can't hold the row lock
 
 
-def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
+async def _intervener_lock_live(
+    session: AsyncSession, livekit: LiveKit, room_name: str, call: Call, holder: UUID
+) -> bool:
+    """Whether the claim still counts: inside the connect grace, or the holder is in the room."""
+    claimed_at = call.intervener_claimed_at
+    db_now = (await session.execute(select(func.now()))).scalar_one()
+    if claimed_at is not None and db_now - claimed_at < _INTERVENE_CONNECT_GRACE:
+        return True
+    return await _holder_still_present(livekit, room_name, holder)
+
+
+def _summary(
+    call: Call, patient_name: str | None, caller_id: UUID, insurance_provider: str | None = None
+) -> CallSummary:
     return CallSummary(
         id=call.id,
         tenant_id=call.tenant_id,
@@ -174,6 +187,7 @@ def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSumma
         status=call.current_status,
         room_name=room_name_for_call(call.tenant_id, call.id),
         patient_name=patient_name,
+        insurance_provider=insurance_provider,
         started_at=call.started_at,
         ended_at=call.ended_at,
         created_at=call.created_at,
@@ -256,12 +270,7 @@ async def join_token(
             call.intervener_claimed_at = func.now()
         else:
             if holder is not None:
-                claimed_at = call.intervener_claimed_at
-                db_now = (await session.execute(select(func.now()))).scalar_one()
-                inside_grace = (
-                    claimed_at is not None and db_now - claimed_at < _INTERVENE_CONNECT_GRACE
-                )
-                if inside_grace or await _holder_still_present(livekit, room_name, holder):
+                if await _intervener_lock_live(session, livekit, room_name, call, holder):
                     raise ConflictError(
                         message="another supervisor is currently intervening on this call"
                     )
@@ -560,11 +569,14 @@ async def publish_call(
         )
     # Same row shape as list_calls — a None patient_name blanks the UI's
     # Patient cell until the next poll.
-    patient_name = (
+    row = (
         await session.execute(
-            select(PatientForm.patient_name).where(PatientForm.id == call.form_id)
+            select(PatientForm.patient_name, PatientForm.insurance_provider).where(
+                PatientForm.id == call.form_id
+            )
         )
-    ).scalar_one_or_none()
+    ).one_or_none()
+    patient_name, insurance_provider = row if row else (None, None)
     await emit_phi_read_audit(
         audit,
         request,
@@ -572,9 +584,9 @@ async def publish_call(
         caller=caller,
         resource_type="call",
         resource_id=str(call.id),
-        fields=["patient_name"],
+        fields=["patient_name", "insurance_provider"],
     )
-    return ok(_summary(call, patient_name, caller.user_id))
+    return ok(_summary(call, patient_name, caller.user_id, insurance_provider))
 
 
 @router.post(
@@ -584,6 +596,7 @@ async def publish_call(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
     ),
 )
 async def end_call(
@@ -614,7 +627,8 @@ async def end_call(
     already terminal and no-op).
 
     Visibility matches join-token (`_call_hidden_from`): anyone who may watch
-    the call may end it; a hidden call 404s so it is never revealed.
+    the call may end it; a hidden call 404s so it is never revealed. While a
+    takeover is live, only the intervening supervisor may end the call.
     """
     call = (
         await session.execute(select(Call).where(Call.id == call_id))
@@ -623,6 +637,16 @@ async def end_call(
         raise NotFoundError(message="call not found")
     if call.current_status in TERMINAL_VALUES:
         return ok(None, message="Call already ended.")  # idempotent no-op
+    room_name = room_name_for_call(tenant_id, call.id)
+    # Lock-free read by design: holding the row lock across the presence probe is worse
+    # than the benign race with a fresh claim (worst case: a moments-ago-legal end).
+    holder = call.intervener_user_id
+    if (
+        holder is not None
+        and holder != caller.user_id
+        and await _intervener_lock_live(session, livekit, room_name, call, holder)
+    ):
+        raise ConflictError(message="only the intervening supervisor can end this call")
     pre_answer = call.started_at is None
     actor_label = caller.email or caller.subject
     await audit.emit(
@@ -643,7 +667,6 @@ async def end_call(
             },
         )
     )
-    room_name = room_name_for_call(tenant_id, call.id)
     if pre_answer:
         closed = await close_call(
             sessionmaker,
@@ -712,7 +735,7 @@ async def list_calls(
         else Call.current_status.in_(TERMINAL_VALUES)
     )
     query = (
-        select(Call, PatientForm.patient_name)
+        select(Call, PatientForm.patient_name, PatientForm.insurance_provider)
         .join(PatientForm, PatientForm.id == Call.form_id)
         .where(status_cond)
         .where(_visible_to(caller.user_id))
@@ -722,7 +745,7 @@ async def list_calls(
     if effective_limit is not None:
         query = query.limit(effective_limit)
     rows = (await session.execute(query)).all()
-    # PHI disclosure (patient_name) — audit field names, mirroring list_patient_forms.
+    # PHI disclosure — audit field names, mirroring list_patient_forms.
     await emit_phi_read_audit(
         audit,
         request,
@@ -730,9 +753,9 @@ async def list_calls(
         caller=caller,
         resource_type="call",
         resource_id="list",
-        fields=["patient_name"],
+        fields=["patient_name", "insurance_provider"],
     )
-    return ok([_summary(c, name, caller.user_id) for c, name in rows])
+    return ok([_summary(c, name, caller.user_id, provider) for c, name, provider in rows])
 
 
 @router.get(

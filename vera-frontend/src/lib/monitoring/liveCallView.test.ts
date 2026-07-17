@@ -11,6 +11,7 @@ import {
   otherIntervenerPresent,
   participantLabel,
   participantMode,
+  rosterVisible,
   shouldAllowClose,
   speakerButtonState,
   type ParticipantLike,
@@ -127,6 +128,16 @@ describe("intervenerLabel", () => {
     const intervening = supervisor({ attributes: { "vera.mode": "intervener" } })
     expect(intervenerLabel([intervening])).toBe("va@tenant.example")
     expect(intervenerLabel([supervisor()])).toBeNull()
+  })
+})
+
+describe("rosterVisible", () => {
+  it("hides only the agent, and only while a takeover is live", () => {
+    const agent: ParticipantLike = { identity: "x", isAgent: true }
+    expect(rosterVisible(agent, true)).toBe(false)
+    expect(rosterVisible(agent, false)).toBe(true)
+    expect(rosterVisible(supervisor(), true)).toBe(true)
+    expect(rosterVisible({ identity: "phone-callee" }, true)).toBe(true)
   })
 })
 

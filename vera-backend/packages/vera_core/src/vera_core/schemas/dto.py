@@ -17,6 +17,7 @@ class CallSummary(BaseModel):
     status: str
     room_name: str
     patient_name: str | None = None
+    insurance_provider: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     created_at: datetime

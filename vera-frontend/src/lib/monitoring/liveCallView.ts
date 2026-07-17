@@ -87,6 +87,11 @@ export function intervenerLabel(participants: ParticipantLike[]): string | null 
   return intervener ? participantLabel(intervener) : null
 }
 
+/** Roster row visibility: the silenced agent is hidden while a takeover is live. */
+export function rosterVisible(p: ParticipantLike, takeoverLive: boolean): boolean {
+  return !(takeoverLive && participantMode(p) === "agent")
+}
+
 /** Connected but the AI agent hasn't entered the room yet. */
 export function isWaitingForCall(state: string, participants: ParticipantLike[]): boolean {
   return state === "connected" && !agentJoined(participants)

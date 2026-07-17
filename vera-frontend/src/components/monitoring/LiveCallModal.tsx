@@ -364,7 +364,7 @@ export function LiveCallModal({
             {!callEnded && (
               <Button
                 onClick={() => void handleEndCall()}
-                disabled={ending}
+                disabled={ending || roomStatus?.otherIntervener}
                 className="bg-red-500 text-white hover:bg-red-600"
               >
                 {ending ? "Ending…" : "End Call"}
@@ -376,6 +376,12 @@ export function LiveCallModal({
               </Button>
             )}
             {actionError && <span className="text-sm text-destructive">{actionError}</span>}
+            {/* Helper text, not a title: the disabled button swallows hover events. */}
+            {!actionError && !callEnded && roomStatus?.otherIntervener && (
+              <span className="text-sm text-muted-foreground">
+                Only the intervening supervisor can end this call
+              </span>
+            )}
           </div>
           {intervene.visible && mode === "listen" && !callEnded && (
             <Button

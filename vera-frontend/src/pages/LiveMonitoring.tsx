@@ -74,7 +74,7 @@ const badgeStyle: Record<CallCategory, string> = {
 }
 
 /** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
- *  (insurance, confidence, form %) are placeholders. */
+ *  (confidence, form %) are placeholders. */
 function toLiveCall(c: CallSummary, now: number): LiveCall {
   return {
     id: c.id,
@@ -86,7 +86,7 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     category: categoryOf(c.status),
     visible: c.published,
     action: c.is_owner ? "view" : "intervene",
-    insurance: "—",
+    insurance: c.insurance_provider || "—",
     confidence: 0,
     formProgress: 0,
     callTime: elapsed(c.started_at, now),
