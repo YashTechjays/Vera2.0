@@ -698,11 +698,13 @@ async def list_calls(
     session: TenantSession,
     audit: Audit,
     scope: Literal["live", "history"] = "live",
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[list[CallSummary]]:
-    """`scope=live` (default) is the unbounded in-flight list; `scope=history`
-    returns the most recent terminal calls, capped at `limit`."""
+    """`scope=live` (default) lists in-flight calls — unbounded unless `limit`
+    is passed (capping it by default could silently hide live calls from
+    monitoring); `scope=history` returns the most recent terminal calls,
+    capped at `limit` (default 50)."""
     response.headers["Cache-Control"] = "no-store"
     status_cond = (
         Call.current_status.in_(list(_ACTIVE_STATUSES))
@@ -716,8 +718,9 @@ async def list_calls(
         .where(_visible_to(caller.user_id))
         .order_by(Call.created_at.desc())
     )
-    if scope == "history":
-        query = query.limit(limit)
+    effective_limit = (limit or 50) if scope == "history" else limit
+    if effective_limit is not None:
+        query = query.limit(effective_limit)
     rows = (await session.execute(query)).all()
     # PHI disclosure (patient_name) — audit field names, mirroring list_patient_forms.
     await emit_phi_read_audit(
@@ -750,10 +753,13 @@ async def call_stats(
     shows the caller. Pure counts (no PHI), so no disclosure audit; "today" is
     the DB clock's UTC day."""
     response.headers["Cache-Control"] = "no-store"
+    # Structural UTC "today": date_trunc truncates in the session TimeZone, so
+    # shift to UTC, truncate, then re-anchor the naive result as UTC.
+    utc_midnight = func.timezone("UTC", func.date_trunc("day", func.timezone("UTC", func.now())))
     row = (
         await session.execute(
             select(
-                func.count().filter(Call.created_at >= func.date_trunc("day", func.now())),
+                func.count().filter(Call.created_at >= utc_midnight),
                 func.count().filter(Call.current_status.in_(list(_ACTIVE_STATUSES))),
                 func.count().filter(Call.current_status == CallStatus.CRITICAL),
             )

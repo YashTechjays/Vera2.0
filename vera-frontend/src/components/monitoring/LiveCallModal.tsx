@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Check,
   Copy,
@@ -75,6 +75,8 @@ export function LiveCallModal({
   // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
   const [transcript, setTranscript] = useState("")
   const [transcriptCopied, setTranscriptCopied] = useState(false)
+  const copiedTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const progress = call?.formProgress ?? 0
 
@@ -307,7 +309,8 @@ export function LiveCallModal({
                   void copyText(transcript).then((ok) => {
                     if (!ok) return
                     setTranscriptCopied(true)
-                    setTimeout(() => setTranscriptCopied(false), 2000)
+                    window.clearTimeout(copiedTimer.current)
+                    copiedTimer.current = window.setTimeout(() => setTranscriptCopied(false), 2000)
                   })
                 }}
               >

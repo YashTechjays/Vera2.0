@@ -120,21 +120,23 @@ export function LiveMonitoring() {
   useEffect(() => {
     let cancelled = false
     async function load() {
-      try {
-        const [items, counts, past] = await Promise.all([
-          listCalls(),
-          getCallStats(),
-          tab === "completed" ? listCalls("history") : Promise.resolve(null),
-        ])
-        if (!cancelled) {
-          setCalls(items)
-          setStats(counts)
-          if (past) setHistory(past)
-          setError(null)
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load calls.")
+      // allSettled: a stats/history hiccup must not stall the live list (and vice versa).
+      const [items, counts, past] = await Promise.allSettled([
+        listCalls(),
+        getCallStats(),
+        tab === "completed" ? listCalls("history") : Promise.resolve(null),
+      ])
+      if (cancelled) return
+      if (items.status === "fulfilled") {
+        setCalls(items.value)
+        setError(null)
+      } else {
+        setError(
+          items.reason instanceof ApiError ? items.reason.message : "Could not load calls.",
+        )
       }
+      if (counts.status === "fulfilled") setStats(counts.value)
+      if (past.status === "fulfilled" && past.value) setHistory(past.value)
     }
     void load()
     const id = setInterval(() => {
