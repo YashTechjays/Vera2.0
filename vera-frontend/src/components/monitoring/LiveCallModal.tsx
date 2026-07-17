@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react"
 import {
+  Check,
+  Copy,
   Maximize2,
   Minimize2,
   X,
@@ -16,6 +18,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { copyText } from "@/lib/clipboard"
 import { usePermission } from "@/lib/auth/permissions"
 import { ApiError } from "@/lib/api/client"
 import { endCall } from "@/lib/api/calls"
@@ -68,6 +71,9 @@ export function LiveCallModal({
   const [formExpanded, setFormExpanded] = useState(false)
   // Full-width/height presentation of this modal (the header ⛶), not the IBV form.
   const [maximized, setMaximized] = useState(false)
+  // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
+  const [transcript, setTranscript] = useState("")
+  const [transcriptCopied, setTranscriptCopied] = useState(false)
   const progress = call?.formProgress ?? 0
 
   const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
@@ -102,6 +108,8 @@ export function LiveCallModal({
       setRoomStatus(null)
       setActionError(null)
       setMaximized(false)
+      setTranscript("")
+      setTranscriptCopied(false)
     }
     onOpenChange(next)
   }
@@ -265,6 +273,26 @@ export function LiveCallModal({
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
             <div className="flex items-center justify-between bg-[#f3f5f7] px-4 py-3">
               <h3 className="font-semibold text-foreground">Live Transcripts</h3>
+              <button
+                type="button"
+                disabled={!transcript}
+                title={transcriptCopied ? "Copied" : "Copy transcript"}
+                aria-label={transcriptCopied ? "Copied" : "Copy transcript"}
+                className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+                onClick={() => {
+                  void copyText(transcript).then((ok) => {
+                    if (!ok) return
+                    setTranscriptCopied(true)
+                    setTimeout(() => setTranscriptCopied(false), 2000)
+                  })
+                }}
+              >
+                {transcriptCopied ? (
+                  <Check className="size-4 text-emerald-600" />
+                ) : (
+                  <Copy className="size-4" />
+                )}
+              </button>
             </div>
             {call?.id ? (
               <div className="flex flex-1 flex-col overflow-hidden">
@@ -281,6 +309,7 @@ export function LiveCallModal({
                   key={`t-${call.id}`}
                   callId={call.id}
                   onCallStatus={onCallStatus}
+                  onTextChange={setTranscript}
                   supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                 />
               </div>
