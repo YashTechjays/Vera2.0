@@ -1,17 +1,19 @@
 """Worker→control-plane event bus over Redis Streams + a consumer group.
 
 The agent worker is DB-less; this is its first-class channel to signal domain
-events (call failures, the answered/ended call-status transitions that drive the
-consumer's closeout, and — since the Observer runtime — the answers extracted
-from the live call) to the control plane.
+events (call failures, the answered/ended call-status transitions that drive
+the consumer's closeout, the answers extracted from the live call by the
+Observer runtime, and the call-health observer's periodic assessments) to the
+control plane.
 
 Most events are PHI-free by construction: only a room_name (tenant+call UUIDs),
-an enum, and a timestamp. The one exception is ``CallAnswerRecordedEvent``, which
-carries an extracted answer value so the control plane can persist it: this rides
-Memorystore Redis (BAA-covered, CMEK at rest) under the SAME posture as
-``vera:transcript:*`` — a call-answer value, tokenized by contract and raw today
-under passthrough, never logged. Adding any further value-bearing event is a
-compliance decision, not a routine change.
+an enum, and a timestamp. Two exceptions carry PHI and rely on the stream
+being in-boundary Redis (BAA-covered, CMEK at rest) under the SAME posture as
+``vera:transcript:*`` — never logged, never echoed by any handler:
+``CallAnswerRecordedEvent``, whose extracted answer value is tokenized by
+contract and raw today under passthrough; and ``CallHealthEvent``, whose
+``reason`` sentence is derived from the conversation. Adding any further
+value-bearing event is a compliance decision, not a routine change.
 """
 
 from enum import StrEnum
@@ -77,10 +79,25 @@ class CallAnswerRecordedEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
-type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent
+class CallHealthEvent(BaseModel):
+    """Emitted by the worker's call-health observer after each assessable
+    analysis. `reason` is PHI (see module docstring) — never log it."""
+
+    type: Literal["call.health"] = "call.health"
+    room_name: str
+    score: int  # 0-100 (clamped at the producer)
+    flag: str  # a CallHealthFlag value ("none" = healthy)
+    reason: str  # PHI — never log
+    turn_count: int
+    ts: int  # analyzed_at, epoch milliseconds — the consumer's idempotency key
+
+
+type WorkerEvent = (
+    CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent | CallHealthEvent
+)
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
     Annotated[
-        CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent,
+        CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent | CallHealthEvent,
         Field(discriminator="type"),
     ]
 )
