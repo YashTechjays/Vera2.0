@@ -37,12 +37,20 @@ from control_plane.auth.rbac import (
     require,
 )
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
+from control_plane.call_summary import (
+    CallSummaryResponse,
+    SummaryCache,
+    summarize_call,
+    transcript_role,
+)
 from control_plane.deps import (
     current_elevation,
     current_identity,
     get_call_stream_service,
     get_kms,
     get_sessionmaker,
+    get_summary_cache,
+    get_summary_llm,
 )
 from control_plane.dispatch import run_dispatch_pass
 from control_plane.exceptions import (
@@ -58,7 +66,7 @@ from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from control_plane.sse import frames_with_keepalive
 from control_plane.transcript_finalizer import finalize_transcript
-from vera_core.audit import AuditRecord
+from vera_core.audit import AuditRecord, AuditSink
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
     TYPE_TRANSCRIPT,
@@ -67,9 +75,10 @@ from vera_core.call_stream import (
 )
 from vera_core.config.kms import KeyManagementService
 from vera_core.db.rls import tenant_session
+from vera_core.llm import LLMUnavailableError, ResilientLLM
 from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallStatus, InterventionType, RecordingStatus
+from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     PARTICIPANT_MODE_INTERVENER,
@@ -100,14 +109,6 @@ _ACTIVE_STATUSES = (
 # XREAD BLOCK window, so worst-case termination latency is deadline + block_ms
 # (~185s with the store's default 5s block).
 _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S: float = 180
-
-# Transcript.source ("rep"/"bot") -> envelope role, used only when the row's own
-# `role` is blank (older rows / a source the worker didn't stamp a role for).
-_SOURCE_TO_ROLE = {"rep": "user", "bot": "agent"}
-
-
-def _transcript_role(row: Transcript) -> str:
-    return row.role or _SOURCE_TO_ROLE.get(row.source, row.source)
 
 
 def _epoch_ms(dt: datetime | None) -> int:
@@ -306,6 +307,56 @@ async def join_token(
     return ok(JoinTokenResponse(token=token, url=livekit.url, room_name=room_name))
 
 
+async def _authorize_call_read(
+    call_id: UUID,
+    request: Request,
+    identity: VerifiedIdentity,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    resolver: PermissionResolver,
+    audit: AuditSink,
+    *,
+    resource_type: str,
+) -> Call:
+    """Shared read gate for the live-monitoring surfaces (event stream, summary):
+    tenant caller + calls:read + owner-or-published visibility, with the folded
+    authz+PHI audit record both endpoints must emit. Raises the same 404/403
+    shapes as stream_call_events."""
+    if identity.account_type is not AccountType.TENANT or identity.tenant_id is None:
+        raise NotFoundError(message="call not found")
+    tenant_id = identity.tenant_id
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        user_id, permissions = await resolver.effective_permissions(
+            session, tenant_id, identity.user_id
+        )
+        call = (
+            await session.execute(select(Call).where(Call.id == call_id))
+        ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
+    if call is None:
+        raise NotFoundError(message="call not found")
+    if _call_hidden_from(call, user_id):
+        raise NotFoundError(message="call not found")  # don't reveal a private call
+    allowed = "calls:read" in permissions
+    await audit.emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=user_id,
+            actor_label=identity.email or identity.subject,
+            event_type=AuditEvent.PHI_ACCESS.value,
+            resource_type=resource_type,
+            resource_id=str(call_id),
+            permission_key="calls:read",
+            decision="allow" if allowed else "deny",
+            request_id=current_request_id(request),
+        )
+    )
+    if not allowed:
+        raise CustomAPIException(
+            DefaultExceptionCode.FORBIDDEN, message="missing permission calls:read"
+        )
+    return call
+
+
 @router.get("/calls/{call_id}/events")
 async def stream_call_events(
     call_id: UUID,
@@ -321,41 +372,10 @@ async def stream_call_events(
     published/ownerless call. Authorization runs in a SHORT-LIVED tenant session
     released before streaming (an SSE is long-lived and must not pin a DB
     connection — mirrors voice_lab.stream_transcript)."""
-    if identity.account_type != "tenant" or identity.tenant_id is None:
-        raise NotFoundError(message="call not found")
-    tenant_id = identity.tenant_id
-    async with tenant_session(sessionmaker, tenant_id) as session:
-        user_id, permissions = await resolver.effective_permissions(
-            session, tenant_id, identity.user_id
-        )
-        call = (
-            await session.execute(select(Call).where(Call.id == call_id))
-        ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
-    if call is None:
-        raise NotFoundError(message="call not found")
-    if _call_hidden_from(call, user_id):
-        raise NotFoundError(message="call not found")  # don't reveal a private call
-    allowed = "calls:read" in permissions
-    # Transcript text is tokenized/de-identified, but the disclosure is still audited
-    # (mirrors the voice-lab transcript endpoint).
-    await audit.emit(
-        AuditRecord(
-            tenant_id=tenant_id,
-            actor_type=ActorType.USER,
-            actor_user_id=user_id,
-            actor_label=identity.email or identity.subject,
-            event_type=AuditEvent.PHI_ACCESS.value,
-            resource_type="call_events",
-            resource_id=str(call_id),
-            permission_key="calls:read",
-            decision="allow" if allowed else "deny",
-            request_id=current_request_id(request),
-        )
+    call = await _authorize_call_read(
+        call_id, request, identity, sessionmaker, resolver, audit, resource_type="call_events"
     )
-    if not allowed:
-        raise CustomAPIException(
-            DefaultExceptionCode.FORBIDDEN, message="missing permission calls:read"
-        )
+    tenant_id = call.tenant_id
     room_name = room_name_for_call(tenant_id, call.id)
 
     # Task 16 persists transcripts to the DB and deletes the stream at closeout, so
@@ -387,7 +407,7 @@ async def stream_call_events(
                 CallStreamEvent(
                     type=TYPE_TRANSCRIPT,
                     data={
-                        "role": _transcript_role(row),
+                        "role": transcript_role(row),
                         "source": row.source,
                         "text": row.message,
                     },
@@ -427,6 +447,56 @@ async def stream_call_events(
             _sse_frame,
         )
     )
+
+
+@router.get(
+    "/calls/{call_id}/summary",
+    response_model=ResponseModel[CallSummaryResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.SERVICE_UNAVAILABLE,
+    ),
+)
+async def get_call_summary(
+    call_id: UUID,
+    request: Request,
+    response: Response,
+    identity: Annotated[VerifiedIdentity, Depends(current_identity)],
+    sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
+    audit: Audit,
+    stream: Annotated[CallStreamService, Depends(get_call_stream_service)],
+    summary_llm: Annotated[ResilientLLM, Depends(get_summary_llm)],
+    summary_cache: Annotated[SummaryCache, Depends(get_summary_cache)],
+    settings: AppSettings,
+) -> ResponseModel[CallSummaryResponse]:
+    """On-demand supervisor-handoff summary of the call's transcript so far
+    (Live Monitoring's Summary tab). Same visibility/authz/audit gate as the
+    event stream; result is cached a few seconds (settings.summary_cache_ttl_seconds)
+    so repeated tab flips don't fan out LLM calls."""
+    call = await _authorize_call_read(
+        call_id, request, identity, sessionmaker, resolver, audit, resource_type="call_summary"
+    )
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        async with asyncio.timeout(settings.summary_total_timeout_seconds):
+            result = await summarize_call(
+                llm=summary_llm,
+                cache=summary_cache,
+                stream=stream,
+                sessionmaker=sessionmaker,
+                tenant_id=call.tenant_id,
+                call_id=call.id,
+                ttl_seconds=settings.summary_cache_ttl_seconds,
+            )
+    except (LLMUnavailableError, TimeoutError) as exc:
+        raise CustomAPIException(
+            DefaultExceptionCode.SERVICE_UNAVAILABLE,
+            message="summary temporarily unavailable",
+        ) from exc
+    return ok(result)
 
 
 @router.post(
