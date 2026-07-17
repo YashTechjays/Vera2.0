@@ -638,6 +638,8 @@ async def end_call(
     if call.current_status in TERMINAL_VALUES:
         return ok(None, message="Call already ended.")  # idempotent no-op
     room_name = room_name_for_call(tenant_id, call.id)
+    # Lock-free read by design: holding the row lock across the presence probe is worse
+    # than the benign race with a fresh claim (worst case: a moments-ago-legal end).
     holder = call.intervener_user_id
     if (
         holder is not None

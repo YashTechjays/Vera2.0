@@ -163,7 +163,7 @@ function RoomView({
   const otherIntervener = otherIntervenerPresent(likes)
   const supervisorLabel = intervenerLabel(likes)
   const takeoverLive = microphone || otherIntervener
-  const roster = participants.filter((_, i) => rosterVisible(likes[i], takeoverLive))
+  const roster = participants.filter((p) => rosterVisible(toParticipantLike(p), takeoverLive))
   // Our connection dropped, but the call itself isn't over (SSE, via `ended`) — offer a rejoin.
   const connectionLost = phase === "ended" && !ended
 
