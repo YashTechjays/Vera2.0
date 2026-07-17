@@ -96,6 +96,7 @@ from vera_core.services.call_provenance import (
     load_field_provenance,
 )
 from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
 
@@ -705,14 +706,14 @@ async def list_form_calls(
     if form is None:
         raise NotFoundError(message="patient form not found")
     attempts = await load_call_attempts(session, form_id)
-    await get_audit(request).emit(
-        _audit_phi_read(
-            request,
-            tenant_id,
-            caller,
-            str(form_id),
-            sorted({p for a in attempts for p in a.changed_paths}),
-        )
+    await emit_phi_read_audit(
+        get_audit(request),
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="patient_form",
+        resource_id=str(form_id),
+        fields=sorted({p for a in attempts for p in a.changed_paths}),
     )
     return ok([_call_attempt_view(a) for a in attempts])
 

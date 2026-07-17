@@ -1542,12 +1542,15 @@ async def review_form_id(
     schema_version_id: UUID,
     cleanup_forms: None,
 ) -> UUID:
-    """A plain EXCEPTION_REVIEW form with no disputes — used for review_reason tests."""
+    """A plain EXCEPTION_REVIEW form with no disputes — used for review_reason tests.
+    Carries a valid E.164 provider phone: the requeue test drives it back to
+    IN_QUEUE, which the queueability gate refuses without one."""
     return await _make_plain_form(
         admin_sessionmaker,
         tenant_id=rbac_world.tenant_id,
         schema_version_id=schema_version_id,
         status=FormStatus.EXCEPTION_REVIEW,
+        phone="+15551234567",
     )
 
 
@@ -1557,8 +1560,13 @@ async def test_requeue_clears_review_reason(
     rbac_world: RBACWorld,
     review_form_id: UUID,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
+    trunk_integration_type: None,
 ) -> None:
     """Leaving EXCEPTION_REVIEW by hand nulls review_reason."""
+    # Requeue runs the queueability gate — the tenant needs an outbound trunk.
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
     # Seed the reason directly (the pipeline normally stamps it).
     async with admin_sessionmaker() as session, session.begin():
         await session.execute(

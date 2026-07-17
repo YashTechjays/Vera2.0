@@ -28,7 +28,6 @@ from vera_core.models import (
 from vera_core.models.enums import (
     AnswerSource,
     CallStatus,
-    ExportFormat,
     InsuranceType,
     VersionStatus,
 )
@@ -182,7 +181,8 @@ async def cleanup_world(
             ExportArtifact(
                 tenant_id=tenant.id,
                 form_id=stale.id,
-                format=ExportFormat.PDF,
+                format="xlsx",
+                sha256="0" * 64,
                 gcs_uri="gs://test/promoted-cleanup",
             )
         )

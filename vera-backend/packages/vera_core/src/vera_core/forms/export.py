@@ -103,6 +103,21 @@ def build_workbook(
             ]
         )
 
+    _neutralize_formulas(wb)
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _neutralize_formulas(wb: Workbook) -> None:
+    """Force every cell to be data, never a live formula. openpyxl types any
+    string starting with "=" as a formula (data_type "f"), and form values come
+    from LLM extraction of rep speech, the intake API, and human edits — all
+    attacker-influenceable. A value like '=HYPERLINK(...)' must open in Excel
+    as inert text (PHI exfiltration surface), so retype it as a string; the
+    stored text is unchanged."""
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.data_type == "f":
+                    cell.data_type = "s"

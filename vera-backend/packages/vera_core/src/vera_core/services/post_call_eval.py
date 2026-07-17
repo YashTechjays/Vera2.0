@@ -224,7 +224,10 @@ async def evaluate_call(
             exc,
         )
         return await _finish(
-            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.UNSUPPORTED_SCHEMA
+            FormStatus.EXCEPTION_REVIEW,
+            written=0,
+            reviewed=[],
+            reason=ReviewReason.UNSUPPORTED_SCHEMA,
         )
     paths = doc.collection_paths()
 

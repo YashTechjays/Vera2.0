@@ -4,6 +4,7 @@
 it is the single "current values of a form" query for snapshots and completion %.
 """
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select

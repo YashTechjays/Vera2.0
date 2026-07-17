@@ -49,6 +49,13 @@ def upgrade() -> None:
     )
     # Drop the old disclosed_at column if it exists (provisioned DBs only).
     op.execute("ALTER TABLE export_artifact DROP COLUMN IF EXISTS disclosed_at")
+    # Converge provisioned DBs on the model's shape (all no-ops on fresh DBs, and
+    # the draft table never shipped a writer, so provisioned tables are empty):
+    # sha256 is NOT NULL in the model; format is String(8); the form_id index name
+    # comes from index=True (fresh DBs) — rename the old hand-named one to match.
+    op.execute("ALTER TABLE export_artifact ALTER COLUMN sha256 SET NOT NULL")
+    op.execute("ALTER TABLE export_artifact ALTER COLUMN format TYPE VARCHAR(8)")
+    op.execute("ALTER INDEX IF EXISTS ix_export_artifact_form RENAME TO ix_export_artifact_form_id")
     # Drop old check constraint (provisioned DBs have 'xlsx','pdf'; new allows only 'xlsx').
     # DROP CONSTRAINT IF EXISTS is natively idempotent — no DO block needed.
     op.execute(
