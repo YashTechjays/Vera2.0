@@ -12,8 +12,17 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
 
 ## Build, test & layout (`just` runs everything; see README.md for detail)
 
-- `just check` — the full CI gate: `lint` (ruff) + `typecheck` (mypy --strict) + `test` (pytest).
-  Run it before claiming work is done.
+- `just check` — the full CI gate: `lint` (ruff **check + format --check**) + `typecheck`
+  (mypy --strict) + `test` (pytest). Run it before claiming work is done, and re-run it after
+  ANY later commit (a fixup, an appended test, a formatting pass) — the last run must be on the
+  exact tree you push. **Run `just check` verbatim — never a hand-picked subset of its steps.**
+  Partial reconstructions silently drop steps: `ruff check` (lint) and `ruff format --check`
+  (formatting) are DIFFERENT gates, and running only the former is exactly how a
+  formatting-only failure reached dev CI post-merge (PR #105 → hotfix PR #107). If a gate step
+  fails on something you believe predates your branch: prove it (run the same check on the
+  merge-base), verify your own changed files pass that check in isolation
+  (`git diff --name-only <base>...HEAD | xargs uv run ruff format --check`), and say so in the
+  PR body — never wave a red step through as "pre-existing" on say-so.
 - **After every implementation, run the `/simplify` skill** on the change (reuse /
   simplification / efficiency / altitude cleanup — quality only, not bug-hunting), then
   re-run `just check`, before claiming done or committing. Skip only for truly trivial edits

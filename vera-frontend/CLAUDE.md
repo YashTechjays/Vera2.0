@@ -49,6 +49,15 @@ boundary and is the last place PHI can leak.
 A blocked task is recoverable; a PHI disclosure is not. When you cannot tell whether
 something is PHI, treat it as PHI, and defer the call to compliance review.
 
+## The check gate
+
+The frontend CI-equivalent gate is **four** commands, all green before a PR:
+`npx tsc -b` + `npx eslint .` + `npm test` + `npm run build`. Run all four on the exact
+tree you push — re-run after ANY later commit, and never substitute a subset (each catches
+failures the others don't: eslint passes code that tsc rejects, tests pass code that the
+build rejects). If a step fails on something that predates your branch, prove it against
+the merge-base and note it in the PR body — don't wave it through as "pre-existing".
+
 ## Dependency changes
 
 - The npm version is pinned via the `packageManager` field in `package.json` and enforced
