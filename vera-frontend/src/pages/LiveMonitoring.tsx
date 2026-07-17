@@ -33,8 +33,10 @@ import {
 import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
 import { elapsed } from "@/lib/monitoring/liveTimer"
+import { healthDisplay, type HealthTone } from "@/lib/monitoring/health"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
-import type { CallCategory, LiveCall } from "@/lib/mock-data"
+import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
+import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
@@ -72,6 +74,12 @@ const badgeStyle: Record<CallCategory, string> = {
   processing: "bg-amber-100 text-amber-800",
   completed: "bg-emerald-100 text-emerald-700",
 }
+const healthText: Record<HealthTone, string> = {
+  good: "text-emerald-600",
+  warn: "text-amber-600",
+  bad: "text-red-600",
+  unknown: "text-muted-foreground",
+}
 
 /** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
  *  (confidence, form %) are placeholders. */
@@ -102,6 +110,26 @@ function CallIndicator({ category }: { category: CallCategory }) {
   return <Check className="size-4 text-emerald-500" strokeWidth={2.5} />
 }
 
+function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
+  const health = healthDisplay(call.health_score, call.health_analyzed_at, now)
+  const flag =
+    call.health_flag && call.health_flag !== "none"
+      ? call.health_flag.replaceAll("_", " ")
+      : undefined
+  return (
+    <span
+      className={cn(
+        "font-semibold tabular-nums",
+        health.stale ? "text-muted-foreground" : healthText[health.tone],
+      )}
+      title={flag}
+    >
+      {health.text}
+      {health.stale && " (stale)"}
+    </span>
+  )
+}
+
 export function LiveMonitoring() {
   const { openFormById } = useIbv()
   const canPublish = usePermission("calls:publish")
@@ -116,7 +144,8 @@ export function LiveMonitoring() {
   const [selected, setSelected] = useState<CallSummary | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
 
-  // Load + poll (skip while the tab is hidden).
+  // Load + poll (skip while the tab is hidden); a realtime notification
+  // (intervention alert) refetches immediately instead of waiting the poll out.
   useEffect(() => {
     let cancelled = false
     async function load() {
@@ -142,9 +171,12 @@ export function LiveMonitoring() {
     const id = setInterval(() => {
       if (document.visibilityState === "visible") void load()
     }, POLL_MS)
+    const onNotification = () => void load()
+    window.addEventListener(NOTIFICATION_EVENT, onNotification)
     return () => {
       cancelled = true
       clearInterval(id)
+      window.removeEventListener(NOTIFICATION_EVENT, onNotification)
     }
   }, [tab])
 
@@ -264,6 +296,7 @@ export function LiveMonitoring() {
               <TableHead>Type</TableHead>
               <TableHead>Agent</TableHead>
               <TableHead>Duration</TableHead>
+              <TableHead>Call Health</TableHead>
               <TableHead>Call Status</TableHead>
               <TableHead>Visible To All</TableHead>
               <TableHead>Action</TableHead>
@@ -285,6 +318,9 @@ export function LiveMonitoring() {
                   <TableCell className={cn("font-semibold tabular-nums", durationColor[cat])}>
                     {/* Ended calls show their fixed duration, not a still-running timer. */}
                     {elapsed(call.started_at, call.ended_at ? Date.parse(call.ended_at) : now)}
+                  </TableCell>
+                  <TableCell>
+                    <CallHealthCell call={call} now={now} />
                   </TableCell>
                   <TableCell>
                     <span
@@ -324,7 +360,7 @@ export function LiveMonitoring() {
             })}
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                   No calls in this view.
                 </TableCell>
               </TableRow>
