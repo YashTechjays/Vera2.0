@@ -15,6 +15,7 @@ from control_plane.auth.invitations import InvitationStore, RedisInvitationStore
 from control_plane.auth.permission_cache import PermissionCache, RedisPermissionCache
 from control_plane.auth.rbac import PermissionResolver
 from control_plane.auth.session import RedisSessionStore, SessionStore, SessionVerifier
+from control_plane.call_summary import RedisSummaryCache, SummaryCache
 from control_plane.dispatch import drain_pending
 from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
@@ -38,6 +39,7 @@ from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_se
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.events import PostCallJobBus
+from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.observability.otel import configure_observability
 from vera_core.plan_store import CallPlanService, RedisCallPlanStore
 from vera_core.redis import create_redis
@@ -90,6 +92,8 @@ def create_app(
     transcript_service: TranscriptService | None = None,
     call_stream_service: CallStreamService | None = None,
     call_plan_service: CallPlanService | None = None,
+    summary_llm: ResilientLLM | None = None,
+    summary_cache: SummaryCache | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -132,6 +136,17 @@ def create_app(
             if settings.livekit_url is not None
             else None
         )
+        # Fault-tolerant summarizer chain. Construction is lazy inside
+        # ResilientLLM (no provider client until first use), so this is safe
+        # even when the OpenAI key is absent in an env that never summarizes.
+        owns_summary_llm = summary_llm is None
+        app.state.summary_llm = summary_llm or ResilientLLM(
+            LLMSpec.parse(settings.summary_primary_model),
+            [LLMSpec.parse(selector) for selector in settings.summary_fallback_models],
+            options=FallbackOptions(attempt_timeout=settings.summary_attempt_timeout_seconds),
+            secrets=app.state.secrets,
+        )
+        app.state.summary_cache = summary_cache or RedisSummaryCache(_redis())
         # A DEDICATED Redis client (separate pool) for transcript streaming: a tailing
         # SSE stream holds a connection for its lifetime, so it must not draw from the
         # shared pool that serves session/permission/idempotency Redis (auth DoS risk).
@@ -299,6 +314,8 @@ def create_app(
         await _cancel_task(verifier_task)
         await _cancel_task(sweeper_task)
         await _cancel_task(worker_event_task)
+        if owns_summary_llm:
+            await app.state.summary_llm.aclose()
         # Detached dispatch tasks (post-commit enqueue / consumer refill) must finish
         # before the engine goes away — they hold their own sessions off this engine.
         await drain_pending()

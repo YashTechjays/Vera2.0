@@ -25,6 +25,7 @@ import {
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
+import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
@@ -65,6 +66,7 @@ export function LiveCallModal({
   const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
+  const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const progress = call?.formProgress ?? 0
 
   const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
@@ -98,6 +100,7 @@ export function LiveCallModal({
       setMode("listen")
       setRoomStatus(null)
       setActionError(null)
+      setRightTab("transcript")
     }
     onOpenChange(next)
   }
@@ -254,8 +257,27 @@ export function LiveCallModal({
           </div>
 
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
-            <div className="flex items-center justify-between bg-[#f3f5f7] px-4 py-3">
-              <h3 className="font-semibold text-foreground">Live Transcripts</h3>
+            <div className="flex items-center gap-1 bg-[#f3f5f7] px-2 py-2">
+              {(
+                [
+                  ["transcript", "Transcription"],
+                  ["summary", "Summary"],
+                ] as const
+              ).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setRightTab(tab)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
+                    rightTab === tab
+                      ? "bg-white text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
             {call?.id ? (
               <div className="flex flex-1 flex-col overflow-hidden">
@@ -268,12 +290,22 @@ export function LiveCallModal({
                   onStatus={setRoomStatus}
                   onJoinFailed={handleJoinFailed}
                 />
-                <CallTranscript
-                  key={`t-${call.id}`}
-                  callId={call.id}
-                  onCallStatus={onCallStatus}
-                  supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
-                />
+                {/* The transcript stays mounted (hidden) on the Summary tab — its SSE
+                    also drives the call timer and call-ended state. */}
+                <div
+                  className={cn(
+                    "flex flex-1 flex-col overflow-hidden",
+                    rightTab !== "transcript" && "hidden",
+                  )}
+                >
+                  <CallTranscript
+                    key={`t-${call.id}`}
+                    callId={call.id}
+                    onCallStatus={onCallStatus}
+                    supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
+                  />
+                </div>
+                {rightTab === "summary" && <CallSummaryPanel callId={call.id} />}
               </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
