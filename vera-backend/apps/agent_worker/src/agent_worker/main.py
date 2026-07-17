@@ -10,8 +10,9 @@ import contextlib
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from google.genai.types import ThinkingConfig
 from livekit import rtc
 from livekit.agents import (
     NOT_GIVEN,
@@ -30,7 +31,7 @@ from redis.asyncio import Redis
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
 from agent_worker.intervention import AgentTakeoverController, intervener_present
-from agent_worker.observer import GeminiAnswerExtractor, ObserverManager
+from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
 from agent_worker.prompt import parse_persona_tweak
 from agent_worker.takeover_transcript import TakeoverTranscriber
@@ -41,6 +42,7 @@ from agent_worker.transcript_publisher import (
     attach_transcript_publisher,
 )
 from vera_core.call_stream import CallStreamService, RedisCallStreamStore
+from vera_core.config import EnvSecretProvider
 from vera_core.config.settings import get_settings
 from vera_core.events import (
     CallAnsweredEvent,
@@ -49,6 +51,7 @@ from vera_core.events import (
     CallFailureReason,
     WorkerEventBus,
 )
+from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     call_trace_attributes,
@@ -320,6 +323,7 @@ async def entrypoint(ctx: JobContext) -> None:
     call_stream_redis: Redis | None = None
     plan_redis: Redis | None = None
     observer_redis: Redis | None = None
+    extract_llm: ResilientLLM | None = None
 
     try:
         # Attach correlation attributes to the active OTel span so every pipeline
@@ -446,12 +450,29 @@ async def entrypoint(ctx: JobContext) -> None:
         if controller is not None and run_state is not None and bus is not None:
             controller.attach_session(session)
             observer_redis = create_redis(settings.redis_url)
+            # Out-of-pipeline extraction chain (Gemini primary → OpenAI fallback), the
+            # mandated seam for non-cascade LLM calls. thinking_budget=0 is pinned on a
+            # Gemini primary to keep extraction low-latency (ignored by the OpenAI fallback);
+            # a missing OPENAI_API_KEY safely degrades the chain to Gemini-only.
+            extract_primary = LLMSpec.parse(settings.observer_extract_primary_model)
+            if extract_primary.provider == "google":
+                extract_primary = replace(
+                    extract_primary, extra={"thinking_config": ThinkingConfig(thinking_budget=0)}
+                )
+            extract_llm = ResilientLLM(
+                extract_primary,
+                [LLMSpec.parse(s) for s in settings.observer_extract_fallback_models],
+                options=FallbackOptions(
+                    attempt_timeout=settings.observer_extract_attempt_timeout_seconds
+                ),
+                secrets=EnvSecretProvider(),
+            )
             observer_manager = ObserverManager(
                 controller.plan,
                 controller=controller,
                 run_state=run_state,
                 bus=bus,
-                extractor=GeminiAnswerExtractor(),
+                extractor=ResilientAnswerExtractor(extract_llm),
                 transcript=RedisTranscriptStore(
                     observer_redis,
                     ttl_seconds=settings.transcript_stream_ttl_seconds,
@@ -534,6 +555,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     await observer_redis.aclose()
                 except Exception:
                     logger.exception("failed to close observer redis for %s", room_name)
+            if extract_llm is not None:
+                try:
+                    await extract_llm.aclose()  # close the provider chain's aiohttp sessions
+                except Exception:
+                    logger.exception("failed to close extract llm for %s", room_name)
 
         async def _end_plan_run() -> None:
             # Best-effort cleanup of the plan blob + run state; the rolling TTL is
@@ -613,6 +639,9 @@ async def entrypoint(ctx: JobContext) -> None:
         if observer_redis is not None:
             with contextlib.suppress(Exception):
                 await observer_redis.aclose()
+        if extract_llm is not None:
+            with contextlib.suppress(Exception):
+                await extract_llm.aclose()
         raise
     # record=False disables livekit-agents session recording. Left unset it defers to the
     # server's enable_recording flag, which uploads a session report — including call AUDIO

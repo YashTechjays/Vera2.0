@@ -33,13 +33,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from google.genai.types import ThinkingConfig
-from livekit.agents import llm
-from livekit.plugins import google
-
 from agent_worker.rule_engine import RuleEngine
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
+from vera_core.llm import LLMUnavailableError
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
     ROLE_USER,
@@ -86,23 +83,28 @@ class AnswerExtractor(Protocol):
 type RecordFn = Callable[[ExtractedAnswer, int | None], Awaitable[None]]
 
 
-class GeminiAnswerExtractor:
-    """Standalone Gemini-Flash extraction (own LLM, separate from the conversation's),
-    emitting strict JSON. Same model posture as the cascade: vertexai, thinking_budget=0."""
+class _CompletionLLM(Protocol):
+    """The `vera_core.llm.ResilientLLM` surface the extractor needs — injectable so the
+    extractor's own request/parse logic is testable without a real provider chain."""
 
-    def __init__(self) -> None:
-        self._llm = google.LLM(
-            model="gemini-2.5-flash",
-            vertexai=True,
-            thinking_config=ThinkingConfig(thinking_budget=0),
-        )
+    async def complete(self, *, system: str, user: str) -> str: ...
+
+
+class ResilientAnswerExtractor:
+    """Extraction via the out-of-pipeline fault-tolerant chain (Gemini primary → OpenAI
+    fallback, `vera_core.llm.ResilientLLM`) — the mandated seam for non-cascade LLM calls.
+    Strict JSON is enforced by the prompt + defensive parse (no provider JSON mode)."""
+
+    def __init__(self, llm: _CompletionLLM) -> None:
+        self._llm = llm
 
     async def extract(self, task: PlanTask, transcript: str) -> list[ExtractedAnswer]:
-        ctx = llm.ChatContext.empty()
-        ctx.add_message(role="system", content=_extraction_instructions(task))
-        ctx.add_message(role="user", content=transcript)
-        response = await self._llm.chat(chat_ctx=ctx).collect()
-        return _parse_extraction(response.text)
+        try:
+            reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
+        except LLMUnavailableError:
+            # Whole chain exhausted — skip this pass; the call continues (best-effort).
+            return []
+        return _parse_extraction(reply)
 
 
 def _extraction_instructions(task: PlanTask) -> str:

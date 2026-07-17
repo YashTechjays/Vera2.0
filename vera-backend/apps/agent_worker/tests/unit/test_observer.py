@@ -9,10 +9,16 @@ from typing import Any
 import pytest
 
 from agent_worker.directives import Terminate
-from agent_worker.observer import ExtractedAnswer, ObserverManager, _parse_extraction
+from agent_worker.observer import (
+    ExtractedAnswer,
+    ObserverManager,
+    ResilientAnswerExtractor,
+    _parse_extraction,
+)
 from vera_core.events.worker import CallAnswerRecordedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, FlowRule
+from vera_core.llm import LLMUnavailableError
 from vera_core.transcript import TranscriptEvent
 
 ROOM = "call--t--c"
@@ -250,6 +256,40 @@ class TestCrashIsolation:
         await _feed(manager, _rep("boom"))  # must not raise
         await manager.aclose()  # must not raise
         assert run_state.records == []
+
+
+class FakeCompletionLLM:
+    """Stands in for vera_core.llm.ResilientLLM's `complete` surface."""
+
+    def __init__(self, reply: str = "[]", *, raises: bool = False) -> None:
+        self.reply = reply
+        self.raises = raises
+        self.calls: list[tuple[str, str]] = []
+
+    async def complete(self, *, system: str, user: str) -> str:
+        self.calls.append((system, user))
+        if self.raises:
+            raise LLMUnavailableError
+        return self.reply
+
+
+class TestResilientExtractor:
+    @pytest.mark.asyncio
+    async def test_completion_is_parsed_into_answers(self) -> None:
+        reply = '[{"field_path": "sections.a.x", "value": "Yes", "confidence": 90}]'
+        llm = FakeCompletionLLM(reply)
+        out = await ResilientAnswerExtractor(llm).extract(_plan().tasks[0], "Representative: yes")
+        assert out == [ExtractedAnswer("sections.a.x", "Yes", 90)]
+        # the task's fields drive the system prompt, the window is the user message
+        assert "sections.a.x" in llm.calls[0][0]
+        assert llm.calls[0][1] == "Representative: yes"
+
+    @pytest.mark.asyncio
+    async def test_chain_exhausted_returns_empty(self) -> None:
+        out = await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
+            _plan().tasks[0], "anything"
+        )
+        assert out == []  # LLMUnavailableError → skip the pass, call continues
 
 
 class TestParsing:
