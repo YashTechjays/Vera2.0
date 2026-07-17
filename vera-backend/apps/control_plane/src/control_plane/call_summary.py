@@ -45,7 +45,8 @@ write a handoff summary covering:
 - anything unresolved, contentious, or in progress;
 - the likely next step.
 Be concise (under 150 words), factual, and neutral. Do not invent details that
-are not in the transcript."""
+are not in the transcript. Write plain text only — no markdown, no asterisks,
+no headings; short labeled lines are fine."""
 
 # Transcript.source ("rep"/"bot") -> envelope role, used only when the row's own
 # `role` is blank (older rows / a source the worker didn't stamp a role for).
