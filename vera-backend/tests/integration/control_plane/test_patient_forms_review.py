@@ -715,6 +715,55 @@ async def test_resolve_accepts_a_date_in_the_leafs_declared_format(
         assert form.patient_dob == date(1999, 12, 4)
 
 
+async def test_resolve_reformats_a_non_promoted_date_leaf_to_its_declared_format(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """spouse_partner_dob is a date leaf but NOT one of the eight promoted
+    columns — proves the fix isn't scoped to patient_dob/appointment_date:
+    resolve must reformat ANY date leaf's ISO-submitted value to the leaf's
+    declared date_format ("M/D/YYYY" for ibv_standard), matching what the review
+    UI's edit-form validator expects when it re-populates from the stored value."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.spouse_partner_dob": "1999-12-04"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        current = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == "sections.patient_information.spouse_partner_dob",
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert current.value == {"value": "12/4/1999"}
+
+
+async def test_resolve_with_invalid_non_promoted_date_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    """Same 422 contract as the promoted-column case
+    (`test_resolve_with_invalid_promoted_date_returns_422`), now for a date leaf
+    that isn't one of the eight promoted columns."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.spouse_partner_dob": "not-a-date"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["data"]["fields"] == ["sections.patient_information.spouse_partner_dob"]
+
+
 async def test_resolve_auto_formats_missing_plus_on_insurance_phone(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

@@ -70,3 +70,33 @@ export function getJoinToken(callId: string, intervene = false): Promise<JoinTok
 export function endCall(callId: string): Promise<null> {
   return apiRequest<null>(`/calls/${encodeURIComponent(callId)}/end`, { method: "POST" })
 }
+
+/** Skimmable sections of the handoff summary (the backend's parsed LLM contract). */
+export type LiveCallSummarySections = {
+  participants: string | null
+  purpose: string | null
+  facts: string[]
+  open_items: string[]
+  next_step: string | null
+}
+
+/** On-demand supervisor-handoff summary of a call's transcript so far. */
+export type LiveCallSummary = {
+  /** "pending" while the call is too young to summarize (fewer than 2 speech turns). */
+  status: "ready" | "pending"
+  /** The handoff briefing as plain text; null while status is "pending". */
+  summary: string | null
+  /** Structured view of `summary`; null when the LLM reply didn't parse
+   *  (render the plain-text `summary` instead). */
+  sections: LiveCallSummarySections | null
+  /** Epoch milliseconds the summary was generated (server clock). */
+  generated_at: number
+  turn_count: number
+}
+
+/** GET /calls/{id}/summary — short handoff summary of the transcript so far (needs
+ *  calls:read; same visibility as the event stream). The server caches it briefly,
+ *  so repeated calls are cheap; 503 SERVICE_UNAVAILABLE when every LLM provider fails. */
+export function getCallSummary(callId: string): Promise<LiveCallSummary> {
+  return apiRequest<LiveCallSummary>(`/calls/${encodeURIComponent(callId)}/summary`)
+}

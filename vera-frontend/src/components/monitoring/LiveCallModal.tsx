@@ -29,6 +29,7 @@ import {
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
+import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
@@ -74,6 +75,7 @@ export function LiveCallModal({
   // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
   const [transcript, setTranscript] = useState("")
   const [transcriptCopied, setTranscriptCopied] = useState(false)
+  const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const progress = call?.formProgress ?? 0
 
   const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
@@ -110,6 +112,7 @@ export function LiveCallModal({
       setMaximized(false)
       setTranscript("")
       setTranscriptCopied(false)
+      setRightTab("transcript")
     }
     onOpenChange(next)
   }
@@ -271,14 +274,35 @@ export function LiveCallModal({
           </div>
 
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
-            <div className="flex items-center justify-between bg-[#f3f5f7] px-4 py-3">
-              <h3 className="font-semibold text-foreground">Live Transcripts</h3>
+            <div className="flex items-center justify-between bg-[#f3f5f7] px-2 py-2">
+              <div className="flex items-center gap-1">
+                {(
+                  [
+                    ["transcript", "Transcription"],
+                    ["summary", "Summary"],
+                  ] as const
+                ).map(([tab, label]) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setRightTab(tab)}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
+                      rightTab === tab
+                        ? "bg-white text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <button
                 type="button"
                 disabled={!transcript}
                 title={transcriptCopied ? "Copied" : "Copy transcript"}
                 aria-label={transcriptCopied ? "Copied" : "Copy transcript"}
-                className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+                className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
                 onClick={() => {
                   void copyText(transcript).then((ok) => {
                     if (!ok) return
@@ -305,13 +329,23 @@ export function LiveCallModal({
                   onStatus={setRoomStatus}
                   onJoinFailed={handleJoinFailed}
                 />
-                <CallTranscript
-                  key={`t-${call.id}`}
-                  callId={call.id}
-                  onCallStatus={onCallStatus}
-                  onTextChange={setTranscript}
-                  supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
-                />
+                {/* The transcript stays mounted (hidden) on the Summary tab — its SSE
+                    also drives the call timer and call-ended state. */}
+                <div
+                  className={cn(
+                    "flex flex-1 flex-col overflow-hidden",
+                    rightTab !== "transcript" && "hidden",
+                  )}
+                >
+                  <CallTranscript
+                    key={`t-${call.id}`}
+                    callId={call.id}
+                    onCallStatus={onCallStatus}
+                    onTextChange={setTranscript}
+                    supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
+                  />
+                </div>
+                {rightTab === "summary" && <CallSummaryPanel callId={call.id} />}
               </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">

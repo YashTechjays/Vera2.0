@@ -17,7 +17,7 @@ Every PHI response audits field **names** only (never values).
 import asyncio
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from control_plane.api.v1.common import (
+    AppSettings,
     CallPlans,
     Kms,
     LiveKit,
@@ -52,8 +53,11 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     PromotedIdentifiers,
+    date_leaf_paths,
     iter_leaf_answers,
     missing_required,
+    normalize_date_answers,
+    normalize_date_value,
     normalize_phone_answers,
     normalize_phone_prefix,
     phone_promoted_paths,
@@ -87,6 +91,7 @@ from vera_core.models.enums import (
 )
 from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.recordings import recording_config_from
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -115,17 +120,44 @@ def _v2_doc(schema_json: dict[str, Any]) -> FormSchemaDoc | None:
     return FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
 
 
+def _raise_422(exc: InvalidIntakeValue) -> NoReturn:
+    raise CustomAPIException(
+        DefaultExceptionCode.VALIDATION_ERROR,
+        message="invalid field value",
+        data={"fields": [exc.field_path]},
+    ) from exc
+
+
 def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
     """`promote_columns`, translated to the API's validation-error contract — the
     error-wrapping shared by intake and dispute-resolve column promotion."""
     try:
         return promote_columns(get_value, doc)
     except InvalidIntakeValue as exc:
-        raise CustomAPIException(
-            DefaultExceptionCode.VALIDATION_ERROR,
-            message="invalid field value",
-            data={"fields": [exc.field_path]},
-        ) from exc
+        _raise_422(exc)
+
+
+def _normalize_date_answers_or_422(
+    answers: list[tuple[str, Any]], doc: FormSchemaDoc
+) -> list[tuple[str, Any]]:
+    """`normalize_date_answers`, translated to the API's validation-error
+    contract — every date-typed leaf's intake value gets reformatted to its
+    declared `date_format`, not just the promoted `patient_dob`/
+    `appointment_date` columns `_promote_or_422` covers."""
+    try:
+        return normalize_date_answers(answers, doc)
+    except InvalidIntakeValue as exc:
+        _raise_422(exc)
+
+
+def _normalize_date_value_or_422(value: Any, field_path: str, date_format: str | None) -> Any:
+    """`normalize_date_value`, translated to the API's validation-error contract —
+    the single-leaf counterpart to `_normalize_date_answers_or_422`, used when a
+    dispute-resolve edit reformats one date leaf's answer to its declared format."""
+    try:
+        return normalize_date_value(value, field_path, date_format)
+    except InvalidIntakeValue as exc:
+        _raise_422(exc)
 
 
 @router.post(
@@ -190,6 +222,7 @@ async def upload_patient_form(
                     data={"fields": unrecognized},
                 )
             answers = normalize_phone_answers(answers, doc)
+            answers = _normalize_date_answers_or_422(answers, doc)
             promoted = _promote_or_422(dict(answers).get, doc)
         else:
             answers = list(iter_leaf_answers(body.intake_payload))
@@ -668,6 +701,7 @@ async def resolve_disputes(
     ).scalar_one()
     doc = _v2_doc(version.schema_json)
     phone_paths = phone_promoted_paths(doc) if doc is not None else set()
+    date_paths = date_leaf_paths(doc) if doc is not None else {}
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
@@ -732,6 +766,8 @@ async def resolve_disputes(
     for path, new_value in body.form_data.items():
         if path in phone_paths:
             new_value = normalize_phone_prefix(new_value)
+        if path in date_paths:
+            new_value = _normalize_date_value_or_422(new_value, path, date_paths[path])
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).
@@ -940,6 +976,7 @@ async def update_patient_form_status(
     tenant_id: TenantId,
     livekit: LiveKit,
     kms: Kms,
+    settings: AppSettings,
     call_plans: CallPlans,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
@@ -1075,6 +1112,7 @@ async def update_patient_form_status(
             kms,
             audit,
             wait_for_form_id=form_id,
+            recording=recording_config_from(settings),
             plan_service=call_plans,
         )
 

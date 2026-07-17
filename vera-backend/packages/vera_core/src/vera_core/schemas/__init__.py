@@ -2,6 +2,9 @@ from .dto import (
     CallStats,
     CallSummary,
     JoinTokenResponse,
+    RecordingPlayback,
+    RetentionPolicy,
+    RetentionPolicyUpdate,
     StartVoiceSessionRequest,
     VoiceSessionResponse,
 )
@@ -18,6 +21,9 @@ __all__ = [
     "IvrPlaybookConfig",
     "JoinTokenResponse",
     "PersonaTweak",
+    "RecordingPlayback",
+    "RetentionPolicy",
+    "RetentionPolicyUpdate",
     "StartVoiceSessionRequest",
     "VoiceSessionResponse",
 ]

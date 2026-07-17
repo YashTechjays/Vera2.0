@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react"
 
-import { validateAll, type ValidationErrors } from "@/lib/ibv/validation"
+import { isoToDateFormat, validateAll, type ValidationErrors } from "@/lib/ibv/validation"
 import { allLeaves, isApplicable, isRequired, parseSchema } from "@/lib/ibv/schema"
 import {
   activeDisputeValue,
@@ -107,19 +107,34 @@ async function loadSchema(versionId: string): Promise<FormSchema> {
   return schema
 }
 
-/** Map an API form detail into the form's value + dispute maps (keyed by path). */
-function adaptDetail(detail: PatientFormDetail): {
+/** Map an API form detail into the form's value + dispute maps (keyed by path).
+ * Date leaves are converted from stored ISO to the schema's declared
+ * date_format on the way in — see isoToDateFormat. */
+function adaptDetail(
+  detail: PatientFormDetail,
+  schema: FormSchema
+): {
   values: FormValues
   disputes: DisputeMap
 } {
+  const dateFormats = new Map<string, string>()
+  for (const leaf of allLeaves(schema)) {
+    const format = leaf.field.validation?.date_format
+    if (leaf.field.type === "date" && format) dateFormats.set(leaf.path, format)
+  }
+  const toInput = (raw: unknown, path: string): string => {
+    const text = valueToInput(raw)
+    const format = dateFormats.get(path)
+    return format ? isoToDateFormat(text, format) : text
+  }
   const values: FormValues = {}
   const disputes: DisputeMap = {}
   for (const f of detail.fields) {
-    values[f.field_path] = valueToInput(f.value)
+    values[f.field_path] = toInput(f.value, f.field_path)
     if (f.dispute) {
       disputes[f.field_path] = {
-        previousValue: valueToInput(f.dispute.previous_value),
-        currentValue: valueToInput(f.dispute.current_value),
+        previousValue: toInput(f.dispute.previous_value, f.field_path),
+        currentValue: toInput(f.dispute.current_value, f.field_path),
         confidence: f.dispute.confidence ?? undefined,
         evidence: f.dispute.evidence ?? undefined,
         reasoning: f.dispute.reasoning ?? undefined,
@@ -229,7 +244,7 @@ export function IbvProvider({
             loadSchema(detail.schema_version_id),
             listInsuranceProviders().catch(() => [] as ProviderOption[]),
           ])
-          const { values: v, disputes: d } = adaptDetail(detail)
+          const { values: v, disputes: d } = adaptDetail(detail, loaded)
           seed(v, d, detail.patient_name)
           setSchema(loaded)
           setStatus(detail.status)
@@ -344,7 +359,7 @@ export function IbvProvider({
       return
     }
     setSaveState("saving")
-    if (mode === "mock" || !formId) {
+    if (mode === "mock" || !formId || !schema) {
       await new Promise((r) => setTimeout(r, 400))
       setDirty(false)
       setSaveState("saved")
@@ -370,7 +385,7 @@ export function IbvProvider({
         dispute_fields,
         reasked_fields: [],
       })
-      const { values: v, disputes: d } = adaptDetail(refreshed)
+      const { values: v, disputes: d } = adaptDetail(refreshed, schema)
       seed(v, d, refreshed.patient_name)
       setStatus(refreshed.status)
       setStatusError(null) // resolving disputes clears any "resolve first" warning
@@ -380,7 +395,7 @@ export function IbvProvider({
       setError(err instanceof ApiError ? err.message : "Could not save changes.")
       setSaveState("idle")
     }
-  }, [mode, formId, values, originalValues, disputes, flags, seed, clearedRequired])
+  }, [mode, formId, schema, values, originalValues, disputes, flags, seed, clearedRequired])
 
   const value: IbvContextValue = {
     schema,

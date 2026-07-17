@@ -20,12 +20,14 @@ import { apiRequest, ApiError } from "@/lib/api/client"
 import {
   endCall,
   getCallStats,
+  getCallSummary,
   getJoinToken,
   listCalls,
   publishCall,
   type CallStats,
   type CallSummary,
   type JoinTokenResponse,
+  type LiveCallSummary,
 } from "./calls"
 
 const call: CallSummary = {
@@ -122,5 +124,31 @@ describe("calls API client", () => {
   it("propagates ApiError when joining a private call (404)", async () => {
     vi.mocked(apiRequest).mockRejectedValue(new ApiError(404, "NOT_FOUND", "call not found"))
     await expect(getJoinToken("c1")).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it("fetches the handoff summary with GET /calls/{id}/summary", async () => {
+    const summary: LiveCallSummary = {
+      status: "ready",
+      summary: "Vera is verifying benefits; member ID confirmed.",
+      sections: {
+        participants: "Vera and payer IVR",
+        purpose: "verify benefits",
+        facts: ["member ID confirmed"],
+        open_items: [],
+        next_step: "provide DOB",
+      },
+      generated_at: 1752000000000,
+      turn_count: 12,
+    }
+    vi.mocked(apiRequest).mockResolvedValue(summary)
+    await expect(getCallSummary("c1")).resolves.toEqual(summary)
+    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/summary")
+  })
+
+  it("propagates the 503 ApiError when every summary LLM provider fails", async () => {
+    vi.mocked(apiRequest).mockRejectedValue(
+      new ApiError(503, "SERVICE_UNAVAILABLE", "summary temporarily unavailable"),
+    )
+    await expect(getCallSummary("c1")).rejects.toBeInstanceOf(ApiError)
   })
 })
