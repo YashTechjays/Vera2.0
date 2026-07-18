@@ -222,6 +222,13 @@ transition by definition; a healthy 10-minute call writes zero HEALTH rows.
   session. On `intervention_needed`: toast + refresh/patch the calls list query. On
   reconnect: refetch the calls list (SSE is an accelerant; `GET /calls` is the source of
   truth).
+- **Notification bell** (2026-07-18 amendment): the topbar bell carries an unread badge
+  and a popover inbox of intervention alerts (newest-first, capped at 50, session-scoped
+  memory). Closing the panel marks all read; "Clear" empties the inbox; clicking an alert
+  jumps to Live Monitoring. Read state is a single cursor (the newest-read SSE entry id)
+  persisted in sessionStorage — opaque stream ids only, no PHI — which also makes the
+  replay window idempotent for the user: read alerts never re-toast or re-count as unread
+  across reloads.
 - **Live Monitoring page:** color-coded health badge + flag label on call cards from the
   new list fields. `NULL` score renders a neutral "Assessing…" badge — never 0, never
   red. Stale data (`health_analyzed_at` older than ~3× the analysis interval) grays out
