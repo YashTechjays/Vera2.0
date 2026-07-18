@@ -148,6 +148,9 @@ Per `call.health` event, in order:
 3. **Intervener guard:** drop if `Call.intervener_user_id` is set (late result after
    takeover).
 4. **Update `Call`** (every surviving analysis): `health_score`, `health_flag`,
+   `health_reason` (the analyzer's one-line justification, VARCHAR(500), truncated on
+   write as defense in depth — 2026-07-18 amendment: shown as the health tooltip in
+   Live Monitoring, disclosed on list rows and audited alongside `patient_name`),
    `health_analyzed_at` — new nullable columns, idempotent migration. **Never cleared at
    closeout** (last-known state feeds reports).
 5. **Episode state machine** with asymmetric hysteresis. State is fully encoded by
