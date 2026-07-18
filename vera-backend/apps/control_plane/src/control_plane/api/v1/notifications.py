@@ -56,6 +56,11 @@ async def notification_frames(
         entry_id, notification = item
         if delivers_to(notification.audience, user_id):
             yield f"id: {entry_id}\ndata: {notification.model_dump_json()}\n\n"
+        else:
+            # A filtered-out event must still move bytes: under sustained traffic
+            # addressed to OTHER users the stream never idles, so without this a
+            # quiet connection could outlive nginx's proxy_read_timeout.
+            yield SSE_KEEPALIVE_FRAME
 
 
 @router.get("/notifications/stream")

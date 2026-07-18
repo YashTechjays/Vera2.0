@@ -1,4 +1,4 @@
-"""Per-tenant notification stream: publish shape, tail-from-now anchor, idle
+"""Per-tenant notification stream: publish shape, replay-window tail anchor, idle
 keepalive ticks (redis.asyncio BLOCK reads RAISE TimeoutError — repo footgun)."""
 
 import json
@@ -36,15 +36,11 @@ class _FakePipe:
 class _FakeRedis:
     def __init__(self) -> None:
         self.ops: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
-        self.xrevrange_result: list[tuple[str, dict[str, str]]] = []
         # Each item: an exception to raise, or an xread response to return.
         self.xread_script: list[Any] = []
 
     def pipeline(self, transaction: bool = False) -> _FakePipe:
         return _FakePipe(self)
-
-    async def xrevrange(self, key: str, max: str, min: str, count: int) -> Any:
-        return self.xrevrange_result
 
     async def xread(self, streams: dict[str, str], block: int) -> Any:
         self.ops.append(("xread", (dict(streams),), {"block": block}))
@@ -78,26 +74,29 @@ async def test_publish_xadds_with_maxlen_and_ttl() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tail_anchors_past_existing_entries_and_ticks_on_idle() -> None:
+async def test_tail_anchors_at_replay_window_and_ticks_on_idle() -> None:
     redis = _FakeRedis()
     tenant_id = uuid4()
     key = notify_stream_key(tenant_id)
-    redis.xrevrange_result = [("5-1", {"n": _notification().model_dump_json()})]
     redis.xread_script = [
         RedisTimeoutError(),  # idle BLOCK window -> keepalive tick
-        [(key, [("6-1", {"n": _notification().model_dump_json()})])],
+        [(key, [("45000-1", {"n": _notification().model_dump_json()})])],
     ]
-    service = NotificationService(RedisNotificationStore(redis))  # type: ignore[arg-type]
+    service = NotificationService(
+        RedisNotificationStore(redis, clock=lambda: 100.0)  # type: ignore[arg-type]
+    )
     it = service.tail(tenant_id)
     assert await anext(it) is None  # the idle tick
     item = await anext(it)
     assert item is not None
     entry_id, n = item
-    assert entry_id == "6-1"
+    assert entry_id == "45000-1"
     assert n.audience.kind == "tenant"
-    # Anchor: the first xread must start AFTER the pre-existing entry, not at 0/"$".
+    # Anchor: now(100s) minus the 60s replay window -> stream id "40000-0", so a
+    # notification published during a reload/reconnect gap is re-delivered
+    # (the consumer dedupes by entry id), never silently missed.
     first_xread = next(op for op in redis.ops if op[0] == "xread")
-    assert first_xread[1][0] == {key: "5-1"}
+    assert first_xread[1][0] == {key: "40000-0"}
 
 
 @pytest.mark.asyncio

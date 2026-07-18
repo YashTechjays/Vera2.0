@@ -1,14 +1,22 @@
 // Login-session notification SSE client. One connection for the whole session
 // (mounted by NotificationsProvider); the server filters by audience, so every
 // event that arrives here is addressed to this user. Reconnects forever with
-// capped backoff — the stream tails from "now", so there is no replay to
-// discard; consumers refetch current state via the REST API instead (the SSE is
-// an accelerant, never the source of truth). Mirrors callEvents.ts transport.
+// capped backoff — the server tails from a short REPLAY WINDOW (not "now"), so
+// a notification published during a reload/reconnect gap is re-delivered; the
+// consumer dedupes by the SSE entry `id`, making overlap harmless. Consumers
+// still refetch current state via the REST API (the SSE is an accelerant,
+// never the source of truth). Mirrors callEvents.ts transport.
 
 import { ApiError, BASE_URL } from "@/lib/api/client"
 import { getToken } from "@/lib/auth/storage"
 
-export type AppNotification = { type: string; data: Record<string, unknown>; ts: number }
+export type AppNotification = {
+  /** SSE entry id (Redis stream id) — the dedupe key across reconnect replays. */
+  id: string
+  type: string
+  data: Record<string, unknown>
+  ts: number
+}
 
 /** A "call needs intervention" alert. `reason` is deliberately not surfaced
  *  here — it can carry PHI; the toast shows category + score only. */
@@ -74,10 +82,14 @@ async function streamOnce(
     const frames = buffer.split("\n\n")
     buffer = frames.pop() ?? ""
     for (const frame of frames) {
-      const dataLine = frame.split("\n").find((l) => l.startsWith("data:"))
+      const lines = frame.split("\n")
+      const dataLine = lines.find((l) => l.startsWith("data:"))
       if (!dataLine) continue
       const json = dataLine.slice(5).trim()
-      if (json) onNotification(JSON.parse(json) as AppNotification)
+      if (!json) continue
+      const id = lines.find((l) => l.startsWith("id:"))?.slice(3).trim() ?? ""
+      const parsed = JSON.parse(json) as Omit<AppNotification, "id">
+      onNotification({ ...parsed, id })
     }
   }
 }

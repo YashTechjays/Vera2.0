@@ -38,7 +38,11 @@ async def test_notification_frames_filters_and_keeps_alive() -> None:
         yield "1-2", _n(NotificationAudience(kind="tenant"))
 
     frames = [frame async for frame in notification_frames(items(), user_id=me)]
-    assert frames[0] == SSE_KEEPALIVE_FRAME
-    assert len(frames) == 2  # the other-user notification never leaves the server
-    assert frames[1].startswith("id: 1-2\ndata: ")
-    assert '"tenant"' in frames[1]
+    assert frames[0] == SSE_KEEPALIVE_FRAME  # idle tick
+    # The other-user notification never leaves the server, but it still moves
+    # bytes (keepalive) so sustained foreign traffic can't starve the proxy
+    # read timeout on a quiet connection.
+    assert frames[1] == SSE_KEEPALIVE_FRAME
+    assert len(frames) == 3
+    assert frames[2].startswith("id: 1-2\ndata: ")
+    assert '"tenant"' in frames[2]

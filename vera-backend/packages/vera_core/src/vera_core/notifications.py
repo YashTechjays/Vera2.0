@@ -16,7 +16,8 @@ instead. Content is never logged here (type names only).
 """
 
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -55,12 +56,21 @@ class RedisNotificationStore:
     self-clears idle tenants' streams."""
 
     def __init__(
-        self, redis: Redis, *, maxlen: int = 1000, ttl_seconds: int = 86_400, block_ms: int = 5000
+        self,
+        redis: Redis,
+        *,
+        maxlen: int = 1000,
+        ttl_seconds: int = 86_400,
+        block_ms: int = 5000,
+        replay_ms: int = 60_000,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._redis = redis
         self._maxlen = maxlen
         self._ttl_seconds = ttl_seconds
         self._block_ms = block_ms
+        self._replay_ms = replay_ms
+        self._clock = clock
 
     async def publish(self, tenant_id: UUID, notification: Notification) -> None:
         key = notify_stream_key(tenant_id)
@@ -72,16 +82,18 @@ class RedisNotificationStore:
         await pipe.execute()
 
     async def tail(self, tenant_id: UUID) -> AsyncIterator[tuple[str, Notification] | None]:
-        """Tail from "now". Yields None on every idle BLOCK window so the SSE
-        endpoint can emit a keepalive (same contract as RedisCallStreamStore.read).
+        """Tail from a short REPLAY WINDOW (now - replay_ms), not from "now": a
+        client that reconnects inside the window — page reload, LB failover — still
+        receives a notification published during the gap. The consumer dedupes by
+        entry id, so an overlap re-delivers at most a duplicate, never a miss.
+        (Redis stream ids are ms-timestamp-prefixed, so the anchor is computable.)
 
-        The anchor id is resolved ONCE via XREVRANGE and advanced per entry —
-        re-issuing XREAD with "$" on every tick would silently drop entries
-        published between two ticks."""
+        Yields None on every idle BLOCK window so the SSE endpoint can emit a
+        keepalive (same contract as RedisCallStreamStore.read). The anchor is
+        resolved ONCE and advanced per entry — re-issuing XREAD with "$" on every
+        tick would silently drop entries published between two ticks."""
         key = notify_stream_key(tenant_id)
-        newest = await self._redis.xrevrange(key, "+", "-", count=1)
-        anchored = cast("list[tuple[str, dict[str, str]]]", newest or [])
-        last_id = anchored[0][0] if anchored else "0-0"
+        last_id = f"{max(int(self._clock() * 1000) - self._replay_ms, 0)}-0"
         while True:
             try:
                 result = await self._redis.xread({key: last_id}, block=self._block_ms)

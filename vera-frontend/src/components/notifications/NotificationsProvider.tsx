@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react"
+import { useEffect, useRef, type ReactNode } from "react"
 import { Toaster, toast } from "sonner"
 
 import { asInterventionNeeded, streamNotifications } from "@/lib/api/notifications"
@@ -28,11 +28,22 @@ const FLAG_LABELS: Record<string, string> = {
  * RequireAuth handles the redirect on the next API call.
  */
 export function NotificationsProvider({ children }: { children: ReactNode }) {
+  // The server replays a short window on every (re)connect so a notification
+  // published during a reload/reconnect gap is never missed; this set makes the
+  // overlap harmless by dropping entry ids we already handled this mount. A
+  // fresh page load starts empty — a replayed alert then toasts once, which is
+  // exactly the "you missed this during the reload" behavior we want.
+  const seenIds = useRef<Set<string>>(new Set())
   useEffect(() => {
     const controller = new AbortController()
     streamNotifications({
       signal: controller.signal,
       onNotification: (n) => {
+        if (n.id) {
+          if (seenIds.current.has(n.id)) return
+          if (seenIds.current.size >= 500) seenIds.current.clear() // bound memory
+          seenIds.current.add(n.id)
+        }
         window.dispatchEvent(new CustomEvent(NOTIFICATION_EVENT))
         const alert = asInterventionNeeded(n)
         if (alert) {
