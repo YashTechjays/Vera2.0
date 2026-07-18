@@ -258,7 +258,7 @@ transition by definition; a healthy 10-minute call writes zero HEALTH rows.
 | 7 | Unbounded transcript cost | `health_max_turns` chunked re-anchoring window |
 | 8 | IVR menu loops look like `conversation_loop` | Prompt clause + min-user-turns gate |
 | 9 | Both LLM providers down | Cycles skip; data goes stale, not wrong; UI grays out via `health_analyzed_at` |
-| 10 | Notification SSE reconnect gap | Frontend refetches calls list on reconnect |
+| 10 | Notification SSE reconnect gap | Server tails from a 60s replay window (not "now"); frontend dedupes by SSE entry id, so a reload/reconnect re-delivers rather than misses (2026-07-18 amendment). List refetch remains the state backstop. Filtered-out events also emit keepalive bytes so foreign-traffic bursts can't starve proxy timeouts |
 | 11 | Cold start / too few turns | `health_min_user_turns` gate + `assessable: false` no-op + NULL-renders-neutral |
 | 12 | Call published after flag raised | Tenant users see it via Critical tab on next poll (accepted for v1) |
 | 13 | Listen-only supervisor joins | Observer keeps running (only the intervene latch stops it) |
