@@ -316,3 +316,46 @@ transition by definition; a healthy 10-minute call writes zero HEALTH rows.
 - **Verification:** boot the real services and drive a call end-to-end (background-loop
   features are verified against the running service, not just unit tests), then the full
   gates: backend `just check`, frontend `tsc` + `eslint` + tests + build.
+
+## 9. Scale notes — Redis connections (2026-07-18 amendment)
+
+Reference load: 300 logged-in users, 1,500 concurrent outbound calls (= 1,500 worker
+jobs), 300 concurrently-watched per-call streams.
+
+**Blocked connections** (pinned in a `BLOCK`ing read for the lifetime of the thing;
+cost ~zero Redis CPU while parked):
+
+| Source | Count | Blocking read |
+|---|---|---|
+| Notification SSE (1 per logged-in user) | 300 | `XREAD BLOCK` on `vera:notify:{tenant}` |
+| Per-call events SSE (1 per watcher) | 300 | `XREAD BLOCK` on `vera:call-events:{room}` |
+| Worker-event consumer (1 per control-plane replica) | ~2 | `XREADGROUP BLOCK` |
+
+Worker jobs contribute **zero** blocking connections — they only `XADD` (turns, health
+frames, lifecycle events) and one-shot `GET/SET` (call plan).
+
+**Open (non-blocking) connections:** each real-call worker job holds ~3 idle-between-
+publishes clients (worker-event bus, call stream, call plan) → ~4,500 at 1,500 calls.
+The health observer added none of these — it publishes through the job's existing
+clients; its only new I/O is HTTPS to the LLM.
+
+**Total ≈ 5,150 vs Memorystore `maxclients` 65,000 → ~8% utilization.** The dominant
+term (worker publishers) predates this feature and scales with calls; the SSE terms
+scale with humans.
+
+Deliberately-deferred levers (numbers don't justify them yet):
+
+1. **Consolidate the worker's three per-job clients into one** (same Redis; separation
+   is tidiness, not necessity) → 4,500 → 1,500 at this load.
+2. **In-process notification broadcaster** (one `XREAD` per app replica fanned out to
+   local SSE subscribers) → collapses the notification term from N users to N replicas.
+   The `NotificationService` seam isolates this swap from every consumer.
+
+**Stream hygiene (no unbounded growth):** `vera:worker-events` is one global key,
+`XADD MAXLEN ~10k`. `vera:notify:{tenant}` is `MAXLEN ~1k` + rolling 24h `EXPIRE`
+refreshed on publish — idle tenants' keys self-delete. `vera:call-events:{room}` has a
+rolling 1h `EXPIRE` (15min grace after the ended sentinel) and is explicitly deleted by
+the transcript finalizer at closeout. `vera:notify` deliberately has NO consumer group
+(broadcast fan-out — every connection must see every entry, filtered by audience);
+`vera:worker-events` has one (exactly-one-process processing + XAUTOCLAIM reclaim,
+with idempotent handlers for at-least-once redelivery).
