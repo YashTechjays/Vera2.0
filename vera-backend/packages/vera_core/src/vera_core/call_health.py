@@ -55,7 +55,9 @@ _SPEAKER_LABELS = {"rep": "Payer rep", "bot": "Vera (agent)", "supervisor": "Sup
 # On overflow, truncate once to this many newest turns, then grow back to the cap:
 # the prefix stays byte-identical BETWEEN re-anchors (~1 cache miss per 20 turns).
 _REANCHOR_KEEP = 40
-_MAX_REASON_LEN = 500
+# Cap on the analyzer's justification — matches call.health_reason VARCHAR(500);
+# the consumer re-truncates on write as defense in depth (see worker_events).
+MAX_REASON_LEN = 500
 
 _JSON_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 _VALID_FLAGS = frozenset(values_of(CallHealthFlag))
@@ -100,7 +102,7 @@ def parse_assessment(text: str) -> HealthResult | None:
     if flag not in _VALID_FLAGS:
         flag = CallHealthFlag.OTHER.value
     score = max(0, min(100, round(parsed.call_health_score)))
-    return HealthResult(score=score, flag=flag, reason=(parsed.reason or "")[:_MAX_REASON_LEN])
+    return HealthResult(score=score, flag=flag, reason=(parsed.reason or "")[:MAX_REASON_LEN])
 
 
 class HealthTranscript:

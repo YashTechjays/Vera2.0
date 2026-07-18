@@ -108,6 +108,7 @@ def _call_row(**overrides: Any) -> Call:
         "intervener_user_id": None,
         "health_score": None,
         "health_flag": None,
+        "health_reason": None,
         "health_analyzed_at": None,
     }
     defaults.update(overrides)
@@ -145,6 +146,7 @@ async def test_escalation_opens_episode_flips_critical_and_notifies_owner(
     wired = _wire(monkeypatch, _FakeSession(call=call))
     await wired.consumer._handle_call_health(_event())
     assert call.health_score == 40 and call.health_flag == "conversation_loop"
+    assert call.health_reason == "looping"  # denormalized for the list tooltip
     assert call.current_status == CallStatus.CRITICAL.value
     assert [r.event_value for r in _health_rows(wired.session)] == ["conversation_loop"]
     assert [r.event_value for r in _status_rows(wired.session)] == [CallStatus.CRITICAL.value]
@@ -190,6 +192,26 @@ async def test_escalation_flips_from_non_active_non_terminal_status(
     assert [r.event_value for r in _health_rows(wired.session)] == ["conversation_loop"]
     assert [r.event_value for r in _status_rows(wired.session)] == [CallStatus.CRITICAL.value]
     assert len(wired.notifications.published) == 1
+
+
+@pytest.mark.asyncio
+async def test_oversized_reason_truncates_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The VARCHAR(500) column must never make the handler raise: a failing
+    handler stays unacked and would be redelivered forever (poison loop)."""
+    call = _call_row()
+    wired = _wire(monkeypatch, _FakeSession(call=call))
+    event = CallHealthEvent(
+        room_name=_ROOM,
+        score=40,
+        flag="conversation_loop",
+        reason="x" * 600,
+        turn_count=8,
+        ts=2_000,
+    )
+    await wired.consumer._handle_call_health(event)
+    assert call.health_reason is not None and len(call.health_reason) == 500
 
 
 @pytest.mark.asyncio

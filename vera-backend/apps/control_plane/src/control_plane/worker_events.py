@@ -27,6 +27,7 @@ from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.post_call import resolve_ai_processing
 from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditRecord, AuditSink
+from vera_core.call_health import MAX_REASON_LEN
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.events import (
@@ -441,6 +442,11 @@ class WorkerEventConsumer:
             flagged = event.flag != CallHealthFlag.NONE.value
             call.health_score = event.score
             call.health_flag = event.flag
+            # Defense in depth on the VARCHAR(500) column: the producer already
+            # caps the reason, but an oversized event must degrade to truncation,
+            # not a write error — a failing handler stays unacked and would be
+            # redelivered forever (poison loop).
+            call.health_reason = event.reason[:MAX_REASON_LEN]
             call.health_analyzed_at = analyzed_at
             detail: dict[str, object] = {
                 "score": event.score,

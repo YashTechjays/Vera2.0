@@ -195,6 +195,7 @@ def _summary(
         is_owner=call.initiated_by_id == caller_id,
         health_score=call.health_score,
         health_flag=call.health_flag,
+        health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
     )
 
@@ -587,7 +588,7 @@ async def publish_call(
         caller=caller,
         resource_type="call",
         resource_id=str(call.id),
-        fields=["patient_name", "insurance_provider"],
+        fields=["patient_name", "insurance_provider", "health_reason"],
     )
     return ok(_summary(call, patient_name, caller.user_id, insurance_provider))
 
@@ -756,7 +757,7 @@ async def list_calls(
         caller=caller,
         resource_type="call",
         resource_id="list",
-        fields=["patient_name", "insurance_provider"],
+        fields=["patient_name", "insurance_provider", "health_reason"],
     )
     return ok([_summary(c, name, caller.user_id, provider) for c, name, provider in rows])
 

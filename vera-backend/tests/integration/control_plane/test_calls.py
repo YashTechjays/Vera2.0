@@ -424,7 +424,9 @@ async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
         .first()
     )
     assert row is not None
-    assert row.detail == {"fields": ["patient_name", "insurance_provider"]}
+    # health_reason (analyzer justification, PHI) is disclosed on the list rows
+    # alongside patient_name and insurance_provider — all audited by field name.
+    assert row.detail == {"fields": ["patient_name", "insurance_provider", "health_reason"]}
 
 
 @pytest.mark.asyncio

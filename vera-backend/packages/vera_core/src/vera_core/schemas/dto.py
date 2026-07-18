@@ -27,6 +27,9 @@ class CallSummary(BaseModel):
     # UI renders it neutrally, never as 0). analyzed_at drives staleness display.
     health_score: int | None = None
     health_flag: str | None = None
+    # Analyzer's one-line justification (PHI — conversation-derived); shown as
+    # the health tooltip. Disclosure is audited alongside patient_name.
+    health_reason: str | None = None
     health_analyzed_at: datetime | None = None
 
 

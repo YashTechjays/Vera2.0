@@ -45,6 +45,7 @@ const call: CallSummary = {
   is_owner: true,
   health_score: null,
   health_flag: null,
+  health_reason: null,
   health_analyzed_at: null,
 }
 

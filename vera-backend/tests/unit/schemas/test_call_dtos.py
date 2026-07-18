@@ -33,3 +33,4 @@ def test_call_summary_health_fields_default_null() -> None:
         created_at=datetime.now(UTC),
     )
     assert s.health_score is None and s.health_flag is None and s.health_analyzed_at is None
+    assert s.health_reason is None

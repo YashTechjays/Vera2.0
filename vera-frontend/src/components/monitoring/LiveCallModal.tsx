@@ -203,7 +203,11 @@ export function LiveCallModal({
             </div>
             <div className="text-right">
               <div className="text-xs text-muted-foreground">Call Health</div>
-              <div className={cn("font-semibold", healthToneClass[healthTone(healthScore)])}>
+              {/* Live reason from the SSE health frames as a hover tooltip. */}
+              <div
+                className={cn("font-semibold", healthToneClass[healthTone(healthScore)])}
+                title={liveHealth?.reason ?? undefined}
+              >
                 {healthScore === null ? "Assessing…" : `${healthScore}%`}
               </div>
             </div>

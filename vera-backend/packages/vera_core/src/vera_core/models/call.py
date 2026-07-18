@@ -119,6 +119,11 @@ class Call(Base, TenantScopedMixin):
     # assessed (renders neutrally, never as 0).
     health_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     health_flag: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The analyzer's one-line justification — conversation-derived text (PHI);
+    # shown as the health tooltip in Live Monitoring (visibility-gated + audited).
+    # Length matches vera_core.call_health.MAX_REASON_LEN (producer caps, the
+    # consumer re-truncates on write).
+    health_reason: Mapped[str | None] = mapped_column(String(500), nullable=True, info=PHI_INFO)
     health_analyzed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

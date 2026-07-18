@@ -4,6 +4,7 @@ import {
   ArrowUp,
   Check,
   CheckCircle2,
+  Info,
   Phone,
   PhoneCall,
   type LucideIcon,
@@ -20,6 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useIbv } from "@/components/ibv/IbvProvider"
 import { usePermission } from "@/lib/auth/permissions"
@@ -109,18 +111,34 @@ function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
   const flag =
     call.health_flag && call.health_flag !== "none"
       ? call.health_flag.replaceAll("_", " ")
-      : undefined
-  return (
+      : null
+  const badge = (
     <span
       className={cn(
         "font-semibold tabular-nums",
         health.stale ? "text-muted-foreground" : healthToneClass[health.tone],
       )}
-      title={flag}
     >
       {health.text}
       {health.stale && " (stale)"}
     </span>
+  )
+  // The analyzer's justification (PHI — rendered, never logged) as a hover
+  // tooltip so a supervisor sees WHY at a glance without opening the call.
+  if (!call.health_reason && !flag) return badge
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex cursor-default items-center gap-1">
+          {badge}
+          <Info className="size-3.5 shrink-0 text-muted-foreground" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72">
+        {flag && <p className="font-semibold capitalize">{flag}</p>}
+        {call.health_reason && <p>{call.health_reason}</p>}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
