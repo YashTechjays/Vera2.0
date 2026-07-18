@@ -188,7 +188,9 @@ transition by definition; a healthy 10-minute call writes zero HEALTH rows.
 - **`NotificationService`** (new: `packages/vera_core/src/vera_core/notifications.py`):
   per-tenant capped Redis stream `notify:{tenant_id}` (maxlen, ephemeral). Envelope:
   `{type: "intervention_needed", audience: {kind: "user", user_id} | {kind: "tenant"},
-  data: {call_id, score, flag, reason}, ts}`.
+  data: {call_id, score, flag}, ts}`.
+  (Minimum-necessary, 2026-07-18 final-review amendment: `reason` was dropped from
+  `data` — no consumer reads it; it stays in `CallEvent.detail` for reporting.)
 - **Publisher:** `WorkerEventConsumer`, on escalation transitions only (never on
   re-confirmations). Audience from the Call row at flag time: unpublished → owner only;
   published → tenant-wide.

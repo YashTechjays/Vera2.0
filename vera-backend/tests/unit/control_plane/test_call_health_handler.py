@@ -152,6 +152,9 @@ async def test_escalation_opens_episode_flips_critical_and_notifies_owner(
     assert tenant_id == _TENANT
     assert n.audience.kind == "user" and n.audience.user_id == str(owner)  # unpublished -> owner
     assert n.data["call_id"] == str(_CALL) and n.data["flag"] == "conversation_loop"
+    # Minimum-necessary (2026-07-18 final-review amendment): `reason` stays in
+    # CallEvent.detail only — no consumer reads it off the notification wire.
+    assert n.data.keys() == {"call_id", "score", "flag"}
 
 
 @pytest.mark.asyncio

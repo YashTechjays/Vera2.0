@@ -88,6 +88,9 @@ class CallHealthEvent(BaseModel):
     score: int  # 0-100 (clamped at the producer)
     flag: str  # a CallHealthFlag value ("none" = healthy)
     reason: str  # PHI — never log
+    # The analyzer's WINDOWED transcript turn count at analysis time — capped by
+    # health_max_turns and reset by re-anchoring (spec §4.2) — NOT the call's
+    # cumulative total turn count.
     turn_count: int
     ts: int  # analyzed_at, epoch milliseconds — the consumer's idempotency key
 

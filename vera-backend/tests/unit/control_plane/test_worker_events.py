@@ -9,6 +9,7 @@ monkeypatched per-test via `_consumer()`, which routes queries through a
 
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -979,3 +980,48 @@ async def test_call_ended_closes_a_critical_call(monkeypatch: pytest.MonkeyPatch
     )
     await wired.consumer._handle_call_ended(ev)
     assert call.current_status in TERMINAL_VALUES  # CRITICAL closes like any active status
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix: the answered-after-health race. `_handle_call_health`'s
+# escalation branch can flip INITIATED/RINGING -> CRITICAL before call.answered
+# is processed, so the early-return branch above must still backfill
+# started_at — otherwise it stays NULL and `end_call`'s `started_at is None`
+# pre-answer routing misclassifies a live call.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_answered_backfills_started_at_on_critical_early_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    call = _call_row(
+        tenant_id, call_id, form_id, current_status=CallStatus.CRITICAL.value, started_at=None
+    )
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=_FakeSession(call=call))
+    ev = CallAnsweredEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_answered(ev)
+    assert call.current_status == CallStatus.CRITICAL.value  # unchanged
+    assert call.started_at is not None  # backfilled
+    assert wired.session.added == []  # idempotent: no new STATUS CallEvent on redelivery
+
+
+@pytest.mark.asyncio
+async def test_answered_redelivery_keeps_existing_started_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    original = datetime.fromtimestamp(1_700_000_000, tz=UTC)
+    call = _call_row(
+        tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value, started_at=original
+    )
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=_FakeSession(call=call))
+    ev = CallAnsweredEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_answered(ev)
+    assert call.started_at == original  # already-ACTIVE call's started_at is untouched
+    assert wired.session.added == []

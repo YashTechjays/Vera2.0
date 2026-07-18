@@ -474,9 +474,22 @@ async def entrypoint(ctx: JobContext) -> None:
         # event stream and the worker-event bus). An extra fan-out sink — it sees
         # the same ordered turns as every other stream and never blocks them.
         if call_stream is not None and bus is not None:
-            health_observer = build_health_observer(
-                session, room_name=room_name, settings=settings, call_stream=call_stream, bus=bus
-            )
+            try:
+                health_observer = build_health_observer(
+                    session,
+                    room_name=room_name,
+                    settings=settings,
+                    call_stream=call_stream,
+                    bus=bus,
+                )
+            except Exception as exc:
+                # A static misconfiguration (bad model selector, etc.) must degrade to
+                # "no observer", never break call setup. Type name only (PHI rule).
+                logger.warning(
+                    "build_health_observer failed for %s (%s); continuing without an observer",
+                    room_name,
+                    type(exc).__name__,
+                )
 
         # One reordering emitter driving the stream — the barge-in reorder state machine
         # lives once per job (see transcript_publisher). Kept as a fan-out seam so a second

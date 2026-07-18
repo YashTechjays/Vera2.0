@@ -75,6 +75,14 @@ export function LiveCallModal({
   useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const [liveHealth, setLiveHealth] = useState<CallHealth | null>(null)
+  // Reset liveHealth during render when the call changes (React's previous-render
+  // pattern, mirroring useCallStatus.ts) — an effect-based reset trips react-hooks
+  // v6's set-state-in-effect rule. Close still resets it too, below.
+  const [healthForCallId, setHealthForCallId] = useState(call?.id)
+  if (call?.id !== healthForCallId) {
+    setHealthForCallId(call?.id)
+    setLiveHealth(null)
+  }
   const progress = call?.formProgress ?? 0
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null

@@ -153,4 +153,8 @@ class CallEvent(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
     )
     event_type: Mapped[str] = mapped_column(String(16), nullable=False)
     event_value: Mapped[str] = mapped_column(String(64), nullable=False)
+    # HEALTH rows store {score, reason, turn_count} here — `reason` is LLM-generated,
+    # conversation-derived text and may carry PHI. Relevant to any future
+    # column-level protection retrofit (see vera_core/CLAUDE.md — envelope encryption
+    # is currently deferred).
     detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)

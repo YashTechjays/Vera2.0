@@ -325,7 +325,15 @@ class WorkerEventConsumer:
             if call.current_status in TERMINAL_VALUES:
                 return  # stale redelivery after terminal
             if call.current_status in (CallStatus.ACTIVE.value, CallStatus.CRITICAL.value):
-                return  # idempotent redelivery (CRITICAL = already live AND health-flagged)
+                # Idempotent redelivery (CRITICAL = already live AND health-flagged). But
+                # `_handle_call_health`'s escalation branch can flip INITIATED/RINGING ->
+                # CRITICAL before this event is processed (the answered-after-health race),
+                # in which case started_at is still NULL — backfill it here so `end_call`'s
+                # `started_at is None` pre-answer routing doesn't misclassify a live call.
+                # No STATUS CallEvent added — stays a no-op redelivery otherwise.
+                if call.started_at is None:
+                    call.started_at = func.now()
+                return
             call.current_status = CallStatus.ACTIVE.value
             call.started_at = func.now()
             session.add(
@@ -517,11 +525,13 @@ class WorkerEventConsumer:
                 notification = Notification(
                     type=TYPE_INTERVENTION_NEEDED,
                     audience=audience,
+                    # Minimum-necessary (2026-07-18 final-review amendment): `reason` is
+                    # dropped here — no consumer reads it (the toast shows flag+score
+                    # only) — but stays in CallEvent.detail for reporting.
                     data={
                         "call_id": str(call.id),
                         "score": event.score,
                         "flag": event.flag,
-                        "reason": event.reason,
                     },
                     ts=event.ts,
                 )

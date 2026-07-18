@@ -9,10 +9,10 @@ MAXLEN-trimmed, rolling TTL — a reconnecting client starts from "now" and
 recovers current state from the REST API (the stream is an accelerant, never
 the source of truth).
 
-PHI: `data` may carry the health observer's `reason` sentence, delivered only
-to users already authorized to read the call (owner, or tenant users for a
-published call — the same owner-or-published rule as call visibility). Content
-is never logged here (type names only).
+PHI: the health observer's intervention-needed notifications carry only
+`call_id`/`score`/`flag` (minimum-necessary, 2026-07-18) — the LLM's `reason`
+sentence is deliberately left out of `data` and stays in `CallEvent.detail`
+instead. Content is never logged here (type names only).
 """
 
 import logging
