@@ -28,6 +28,7 @@ def test_call_summary_health_fields_default_null() -> None:
     s = CallSummary(
         id=uuid4(),
         tenant_id=uuid4(),
+        form_id=uuid4(),
         status="active",
         room_name="r",
         created_at=datetime.now(UTC),

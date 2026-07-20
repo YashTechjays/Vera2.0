@@ -99,10 +99,7 @@ type WorkerEvent = (
     CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent | CallHealthEvent
 )
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
-    Annotated[
-        CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent | CallHealthEvent,
-        Field(discriminator="type"),
-    ]
+    Annotated[WorkerEvent, Field(discriminator="type")]
 )
 
 
