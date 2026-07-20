@@ -1,10 +1,17 @@
 """Worker→control-plane event bus over Redis Streams + a consumer group.
 
 The agent worker is DB-less; this is its first-class channel to signal domain
-events (call failures, and the answered/ended call-status transitions that
-drive the consumer's closeout) to the control plane. Events are PHI-free by
-construction: only a room_name (tenant+call UUIDs), an enum, and a timestamp —
-never a phone number or transcript text.
+events (call failures, the answered/ended call-status transitions that drive the
+consumer's closeout, and — since the Observer runtime — the answers extracted
+from the live call) to the control plane.
+
+Most events are PHI-free by construction: only a room_name (tenant+call UUIDs),
+an enum, and a timestamp. The one exception is ``CallAnswerRecordedEvent``, which
+carries an extracted answer value so the control plane can persist it: this rides
+Memorystore Redis (BAA-covered, CMEK at rest) under the SAME posture as
+``vera:transcript:*`` — a call-answer value, tokenized by contract and raw today
+under passthrough, never logged. Adding any further value-bearing event is a
+compliance decision, not a routine change.
 """
 
 from enum import StrEnum
@@ -55,10 +62,25 @@ class CallEndedEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
-type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent
+class CallAnswerRecordedEvent(BaseModel):
+    """Emitted by the Observer when it extracts an answer from the live call, so the
+    control plane can write the field_answer row (worker stays DB-less). Carries the
+    value — see the module docstring's compliance note. ``evidence_seq`` points into
+    ``transcript.seq`` for the supporting turn; ``confidence`` is 0-100."""
+
+    type: Literal["call.answer_recorded"] = "call.answer_recorded"
+    room_name: str
+    field_path: str
+    value: str
+    confidence: int | None = None
+    evidence_seq: int | None = None
+    ts: int  # epoch milliseconds
+
+
+type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
     Annotated[
-        CallFailedEvent | CallAnsweredEvent | CallEndedEvent,
+        CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent,
         Field(discriminator="type"),
     ]
 )

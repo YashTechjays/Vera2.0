@@ -27,11 +27,12 @@ from vera_core.audit import AuditRecord
 from vera_core.call_stream import CallStreamEvent
 from vera_core.events import (
     CallAnsweredEvent,
+    CallAnswerRecordedEvent,
     CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
 )
-from vera_core.models import Call, PatientForm, Tenant
+from vera_core.models import Call, PatientForm, SchemaVersion, Tenant
 from vera_core.models.audit_log import AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
 from vera_core.observability.correlation import room_name_for_call
@@ -114,10 +115,18 @@ class _FakeSession:
     Defaults to "no Call row" — matches a voice-lab room whose synthetic call id
     never made it into the table."""
 
-    def __init__(self, *, call: Any = None, form: Any = None, tenant: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        call: Any = None,
+        form: Any = None,
+        tenant: Any = None,
+        schema_version: Any = None,
+    ) -> None:
         self.call = call
         self.form = form
         self.tenant = tenant
+        self.schema_version = schema_version
         self.added: list[Any] = []
         self.queried: list[type] = []
         self.inserted: list[Any] = []
@@ -134,6 +143,8 @@ class _FakeSession:
             return _Result(self.form)
         if entity is Tenant:
             return _Result(self.tenant)
+        if entity is SchemaVersion:
+            return _Result(self.schema_version)
         raise AssertionError(f"unexpected query entity {entity}")
 
     def add(self, obj: Any) -> None:
@@ -807,3 +818,128 @@ async def test_young_call_failed_with_no_row_tears_room_down_but_is_not_acked(
     assert redis.acked == []  # DB-side closeout retried; room teardown already ran
     assert wired.session.added == []
     assert wired.dispatch_calls == []
+
+
+# ---------------------------------------------------------------------------
+# call.answer_recorded — persist an Observer-extracted ai_call answer.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_writes_recomputes_and_audits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id)
+    form = _form_row(tenant_id, form_id)
+    version = SchemaVersion(id=form.schema_version_id, schema_json={"dsl_version": "2.1"})
+    session = _FakeSession(call=call, form=form, schema_version=version)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session)
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_record_answer(sess: Any, **kwargs: Any) -> bool:
+        seen.update(kwargs)
+        return True
+
+    recomputed: list[Any] = []
+
+    async def _fake_recompute(sess: Any, f: Any, schema_json: Any) -> None:
+        recomputed.append(f)
+
+    monkeypatch.setattr(worker_events, "record_answer", _fake_record_answer)
+    monkeypatch.setattr(worker_events, "recompute_form_projection", _fake_recompute)
+
+    event = CallAnswerRecordedEvent(
+        room_name=room, field_path="sections.a.x", value="Yes", confidence=90, evidence_seq=3, ts=1
+    )
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert seen["field_path"] == "sections.a.x"
+    assert seen["raw_value"] == "Yes"
+    assert seen["source"] == "ai_call"
+    assert recomputed == [form]
+    ai_audits = [r for r in wired.audit.records if r.event_type == AuditEvent.FORM_AI_ANSWER.value]
+    assert len(ai_audits) == 1
+    assert ai_audits[0].detail == {"field_path": "sections.a.x", "call_id": str(call_id)}
+    assert "Yes" not in str(ai_audits[0].detail)  # never the value
+    assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_noop_skips_recompute_and_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id), form=_form_row(tenant_id, form_id)
+    )
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session)
+
+    async def _noop_write(sess: Any, **kwargs: Any) -> bool:
+        return False  # idempotent redelivery — value already current
+
+    recomputed: list[Any] = []
+    monkeypatch.setattr(worker_events, "record_answer", _noop_write)
+    monkeypatch.setattr(
+        worker_events,
+        "recompute_form_projection",
+        lambda *a, **k: recomputed.append(a),
+    )
+
+    event = CallAnswerRecordedEvent(room_name=room, field_path="sections.a.x", value="Yes", ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert recomputed == []
+    assert wired.audit.records == []
+    assert redis.acked == ["1-0"]  # acked (successfully processed as a no-op)
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_young_without_call_row_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)  # default session: call=None
+
+    event = CallAnswerRecordedEvent(
+        room_name=_VALID_ROOM, field_path="sections.a.x", value="Yes", ts=_now_ms()
+    )
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert redis.acked == []  # young + no row → left unacked for redelivery
+    assert wired.audit.records == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_serializes_within_a_room_but_parallel_across(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two answers for the same room must process in stream order; different rooms
+    are independent. Grouping is by the payload's room_name."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+
+    order: list[str] = []
+
+    async def _spy_process(entry_id: str, fields: dict[str, str]) -> None:
+        order.append(entry_id)
+
+    monkeypatch.setattr(wired.consumer, "_process", _spy_process)
+
+    room_a, room_b = _VALID_ROOM, f"call--{uuid4()}--{uuid4()}"
+
+    def _fields(room: str) -> dict[str, str]:
+        ev = CallAnswerRecordedEvent(room_name=room, field_path="a", value="v", ts=1)
+        return {"event": ev.model_dump_json()}
+
+    entries = [("a1", _fields(room_a)), ("b1", _fields(room_b)), ("a2", _fields(room_a))]
+    await wired.consumer._dispatch(entries)
+
+    # within room A, a1 precedes a2 (stream order preserved)
+    assert order.index("a1") < order.index("a2")
+    assert set(order) == {"a1", "a2", "b1"}

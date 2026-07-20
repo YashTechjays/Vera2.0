@@ -4,9 +4,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.control_plane.conftest import RBACWorld
+from vera_core.call_stream import CallStreamService
 from vera_core.db import uuid7
 from vera_core.observability.correlation import room_name_for_call
-from vera_core.transcript import ROLE_AGENT, ROLE_USER, TranscriptService
+from vera_core.transcript import ROLE_AGENT, ROLE_USER
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -15,12 +16,12 @@ def _auth(token: str) -> dict[str, str]:
 
 @pytest.mark.asyncio
 async def test_stream_replays_then_ends(
-    client: httpx.AsyncClient, rbac_world: RBACWorld, transcript_service: TranscriptService
+    client: httpx.AsyncClient, rbac_world: RBACWorld, call_stream_service: CallStreamService
 ) -> None:
     room = room_name_for_call(rbac_world.tenant_id, uuid7())
-    await transcript_service.publish_turn(room, ROLE_USER, "hi", ts=1)
-    await transcript_service.publish_turn(room, ROLE_AGENT, "hello", ts=2)
-    await transcript_service.end(room)
+    await call_stream_service.publish_turn(room, ROLE_USER, "hi", ts=1)
+    await call_stream_service.publish_turn(room, ROLE_AGENT, "hello", ts=2)
+    await call_stream_service.end(room)
 
     resp = await client.get(
         f"/api/v1/voice-lab/sessions/{room}/transcript", headers=_auth(rbac_world.admin_token)
@@ -63,11 +64,11 @@ async def test_stream_foreign_tenant_room_404(
 async def test_stream_access_is_audited(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
-    transcript_service: TranscriptService,
+    call_stream_service: CallStreamService,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     room = room_name_for_call(rbac_world.tenant_id, uuid7())
-    await transcript_service.end(room)
+    await call_stream_service.end(room)
     await client.get(
         f"/api/v1/voice-lab/sessions/{room}/transcript", headers=_auth(rbac_world.admin_token)
     )

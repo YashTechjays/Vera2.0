@@ -6,6 +6,7 @@ redelivery / a rare double-delivery is harmless.
 """
 
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -24,13 +25,14 @@ from control_plane.dispatch import run_dispatch_pass
 from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.post_call import resolve_ai_processing
 from control_plane.transcript_finalizer import finalize_transcript
-from vera_core.audit import AuditSink
+from vera_core.audit import AuditRecord, AuditSink
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.events import (
     WORKER_EVENTS_GROUP,
     WORKER_EVENTS_STREAM,
     CallAnsweredEvent,
+    CallAnswerRecordedEvent,
     CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
@@ -38,10 +40,12 @@ from vera_core.events import (
     WorkerEventBus,
     parse_worker_event,
 )
-from vera_core.models import Call, CallEvent
-from vera_core.models.enums import CallEventType, CallStatus
+from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
+from vera_core.models.audit_log import ActorType, AuditEvent
+from vera_core.models.enums import AnswerSource, CallEventType, CallStatus
 from vera_core.observability.correlation import parse_room_name
 from vera_core.plan_store import CallPlanService
+from vera_core.services.field_answers import recompute_form_projection, record_answer
 
 if TYPE_CHECKING:
     from vera_core.services.recordings import RecordingConfig
@@ -75,6 +79,21 @@ _NO_ROW_RETRY_WINDOW_S = 120.0
 
 def _event_is_young(ts_ms: int) -> bool:
     return (time.time() * 1000 - ts_ms) < _NO_ROW_RETRY_WINDOW_S * 1000
+
+
+def _entry_room(fields: dict[str, str]) -> str:
+    """Best-effort room_name for per-room dispatch grouping — a light JSON peek, not full
+    validation (poison/roomless entries fall into the "" bucket and drop normally). Only
+    the room_name (tenant+call UUIDs) is read; no values are touched."""
+    raw = fields.get("event")
+    if raw is None:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    room = parsed.get("room_name") if isinstance(parsed, dict) else None
+    return room if isinstance(room, str) else ""
 
 
 def _retry_young_or_drop(room_name: str, ts_ms: int) -> None:
@@ -122,6 +141,7 @@ class WorkerEventConsumer:
             "call.failed": self._handle_call_failed,
             "call.answered": self._handle_call_answered,
             "call.ended": self._handle_call_ended,
+            "call.answer_recorded": self._handle_call_answer_recorded,
         }
 
     async def run(self) -> None:
@@ -182,8 +202,21 @@ class WorkerEventConsumer:
         await self._dispatch(entries)
 
     async def _dispatch(self, entries: _StreamEntries) -> None:
-        """Process a batch of stream entries concurrently."""
-        await asyncio.gather(*(self._process(entry_id, fields) for entry_id, fields in entries))
+        """Process a batch concurrently ACROSS rooms but sequentially WITHIN a room.
+
+        Answers for one call (and its terminal call.ended) must land in stream order —
+        two answer_recorded events for the same field, or an answer racing call.ended's
+        completion recompute, would otherwise interleave. Grouping by room_name preserves
+        per-call order while keeping unrelated calls parallel."""
+        by_room: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        for entry_id, fields in entries:
+            by_room.setdefault(_entry_room(fields), []).append((entry_id, fields))
+
+        async def _process_room(room_entries: list[tuple[str, dict[str, str]]]) -> None:
+            for entry_id, fields in room_entries:
+                await self._process(entry_id, fields)
+
+        await asyncio.gather(*(_process_room(group) for group in by_room.values()))
 
     async def _process(self, entry_id: str, fields: dict[str, str]) -> None:
         raw = fields.get("event")
@@ -299,6 +332,63 @@ class WorkerEventConsumer:
         await self._close_and_refill(
             event.room_name, CallStatus.COMPLETED, trigger="call.ended", ts=event.ts
         )
+
+    async def _handle_call_answer_recorded(self, event: WorkerEvent) -> None:
+        """Persist an Observer-extracted answer as an ai_call field_answer, then re-derive
+        the form's promoted columns + completion_pct. Idempotent under redelivery (the
+        writer no-ops an unchanged value); the form row lock serializes against a
+        concurrent human resolve on the same form."""
+        if not isinstance(event, CallAnswerRecordedEvent):
+            return
+        ref = parse_room_name(event.room_name)
+        if ref is None:
+            return  # non-vera / console room
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id))
+            ).scalar_one_or_none()
+            if call is None:
+                _retry_young_or_drop(event.room_name, event.ts)
+                return  # voice-lab room (or the Call row hasn't committed yet → retry)
+            form = (
+                await session.execute(
+                    select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if form is None:
+                return  # form deleted
+            wrote = await record_answer(
+                session,
+                tenant_id=ref.tenant_id,
+                form_id=form.id,
+                call_id=call.id,
+                field_path=event.field_path,
+                raw_value=event.value,
+                source=AnswerSource.AI_CALL.value,
+                confidence=event.confidence,
+                evidence_seq=event.evidence_seq,
+            )
+            if not wrote:
+                return  # idempotent redelivery — value already current
+            version = (
+                await session.execute(
+                    select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+                )
+            ).scalar_one()
+            await recompute_form_projection(session, form, version.schema_json)
+            await self._audit.emit(
+                AuditRecord(
+                    tenant_id=ref.tenant_id,
+                    actor_type=ActorType.SERVICE,
+                    actor_user_id=None,
+                    actor_label="agent-worker",
+                    event_type=AuditEvent.FORM_AI_ANSWER.value,
+                    resource_type="patient_form",
+                    resource_id=str(form.id),
+                    # Field path + call id only — never the extracted value.
+                    detail={"field_path": event.field_path, "call_id": str(call.id)},
+                )
+            )
 
     async def _close_and_refill(
         self, room_name: str, status: CallStatus, *, trigger: str, ts: int

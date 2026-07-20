@@ -12,19 +12,25 @@ VIRTUAL_ASSISTANT can use this sandbox without seeing real call data.
 """
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
-from control_plane.deps import current_identity, get_audit, get_sessionmaker, get_transcript_service
+from control_plane.deps import (
+    current_identity,
+    get_audit,
+    get_call_stream_service,
+    get_sessionmaker,
+)
 from control_plane.exceptions import (
     ConflictError,
     CustomAPIException,
@@ -38,6 +44,7 @@ from control_plane.request_context import current_request_id
 from control_plane.responses import ResponseModel, ok
 from control_plane.sse import frames_with_keepalive
 from vera_core.audit import AuditRecord, AuditSink
+from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent, CallStreamService
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
 from vera_core.integrations.credentials import get_integration_credentials
@@ -51,7 +58,7 @@ from vera_core.observability.correlation import (
 )
 from vera_core.schemas import StartVoiceSessionRequest, VoiceSessionResponse
 from vera_core.services.ivr_selection import add_active_playbook_metadata
-from vera_core.transcript import TranscriptEvent, TranscriptService
+from vera_core.transcript import TranscriptEvent
 
 router = APIRouter(tags=["voice-lab"])
 
@@ -210,6 +217,38 @@ def _sse_frame(entry_id: str, event: TranscriptEvent) -> str:
     return f"id: {entry_id}\ndata: {event.model_dump_json()}\n\n"
 
 
+async def _transcript_turns(
+    items: AsyncIterator[tuple[str, CallStreamEvent] | None],
+) -> AsyncIterator[tuple[str, TranscriptEvent] | None]:
+    """Narrow the mixed call-event stream to transcript turns, FLATTENED to the sandbox's
+    wire contract (`{role, source, text, ts}`).
+
+    The Voice-Lab client parses `data:` straight into a flat turn with no `type`
+    discrimination, so the envelope must not reach it — dropping `call_status` frames and
+    unwrapping `data` here keeps that contract byte-identical while the backend runs a
+    single stream. Idle keepalive ticks pass through; a corrupt turn is skipped rather
+    than killing the response mid-stream."""
+    async for item in items:
+        if item is None:
+            yield None
+            continue
+        entry_id, event = item
+        if event.type != TYPE_TRANSCRIPT:
+            continue
+        try:
+            turn = TranscriptEvent.model_validate(
+                {
+                    "role": event.data.get("role"),
+                    "source": event.data.get("source"),  # None → derived from role
+                    "text": event.data.get("text", ""),
+                    "ts": event.ts,
+                }
+            )
+        except ValidationError:
+            continue  # corrupt envelope — never the content (PHI), never a 500 mid-stream
+        yield entry_id, turn
+
+
 @router.get("/voice-lab/sessions/{room_name}/transcript")
 async def stream_transcript(
     room_name: str,
@@ -218,7 +257,7 @@ async def stream_transcript(
     sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
     resolver: Annotated[PermissionResolver, Depends(get_resolver)],
     audit: Annotated[AuditSink, Depends(get_audit)],
-    service: Annotated[TranscriptService, Depends(get_transcript_service)],
+    service: Annotated[CallStreamService, Depends(get_call_stream_service)],
 ) -> StreamingResponse:
     # Tenant scope without a DB hit: only tenant users; the room name embeds the tenant
     # uuid and must match the caller's (cross-tenant guard, like end_voice_session).
@@ -261,7 +300,7 @@ async def stream_transcript(
         )
 
     return StreamingResponse(
-        frames_with_keepalive(service.consume(room_name), _sse_frame),
+        frames_with_keepalive(_transcript_turns(service.consume(room_name)), _sse_frame),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

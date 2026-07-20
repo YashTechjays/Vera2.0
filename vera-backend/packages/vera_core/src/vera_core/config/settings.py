@@ -161,7 +161,12 @@ class Settings(BaseSettings):
     # bounds the worst-case wait before the endpoint gives up and returns 503.
     summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
 
-    @field_validator("summary_fallback_models", mode="before")
+    # --- observer answer extraction (agent worker) ---------------------------
+    observer_extract_primary_model: str = "google:gemini-3.5-flash"
+    observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]
+    observer_extract_attempt_timeout_seconds: float = 8.0
+
+    @field_validator("summary_fallback_models", "observer_extract_fallback_models", mode="before")
     @classmethod
     def _split_fallback_models(cls, value: object) -> object:
         return _split_csv(value)

@@ -41,7 +41,6 @@ from vera_core.observability.otel import configure_observability
 from vera_core.plan_store import CallPlanService, RedisCallPlanStore
 from vera_core.redis import create_redis
 from vera_core.services.recordings import recording_config_from
-from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("control_plane.main")
 
@@ -86,7 +85,6 @@ def create_app(
     invitation_store: InvitationStore | None = None,
     livekit: LiveKitGateway | None = None,
     secrets: SecretProvider | None = None,
-    transcript_service: TranscriptService | None = None,
     call_stream_service: CallStreamService | None = None,
     call_plan_service: CallPlanService | None = None,
     summary_llm: ResilientLLM | None = None,
@@ -111,7 +109,6 @@ def create_app(
         # Build the Redis client lazily — only for the backends we weren't
         # handed (tests inject both and never touch Redis).
         redis: Redis | None = None
-        transcript_redis: Redis | None = None
         call_stream_redis: Redis | None = None
 
         def _redis() -> Redis:
@@ -144,22 +141,11 @@ def create_app(
             secrets=app.state.secrets,
         )
         app.state.summary_cache = summary_cache or RedisSummaryCache(_redis())
-        # A DEDICATED Redis client (separate pool) for transcript streaming: a tailing
+        # A DEDICATED Redis client (separate pool) for call-event streaming: a tailing
         # SSE stream holds a connection for its lifetime, so it must not draw from the
         # shared pool that serves session/permission/idempotency Redis (auth DoS risk).
-        _transcript_service = transcript_service
-        if _transcript_service is None:
-            transcript_redis = create_redis(settings.redis_url)
-            _transcript_service = TranscriptService(
-                RedisTranscriptStore(
-                    transcript_redis,
-                    ttl_seconds=settings.transcript_stream_ttl_seconds,
-                    end_grace_seconds=settings.transcript_end_grace_seconds,
-                )
-            )
-        app.state.transcript_service = _transcript_service
-        # Same dedicated-client reasoning as the transcript stream above: a tailing
-        # SSE pins a connection, so this must not draw from the shared pool.
+        # This one stream backs both SSE endpoints (real-call and Voice Lab), the
+        # transcript finalizer, the summariser, and the worker's Observer.
         _call_stream_service = call_stream_service
         if _call_stream_service is None:
             call_stream_redis = create_redis(settings.redis_url)
@@ -284,8 +270,6 @@ def create_app(
             await worker_events_redis.aclose()
         if redis is not None:
             await redis.aclose()
-        if transcript_redis is not None:
-            await transcript_redis.aclose()
         if call_stream_redis is not None:
             await call_stream_redis.aclose()
         await engine.dispose()
