@@ -101,10 +101,11 @@ export function NotificationsBell() {
                     )}
                   />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium">Call needs intervention</span>
+                    <span className="block text-sm font-medium">
+                      {shortCallRef(item.callId)} Call needs intervention
+                    </span>
                     <span className="block truncate text-xs text-muted-foreground">
-                      {FLAG_LABELS[item.flag] ?? item.flag} — health {item.score}% ·{" "}
-                      {shortCallRef(item.callId)}
+                      {FLAG_LABELS[item.flag] ?? item.flag} — health {item.score}%
                     </span>
                   </span>
                   <span className="shrink-0 text-xs text-muted-foreground">

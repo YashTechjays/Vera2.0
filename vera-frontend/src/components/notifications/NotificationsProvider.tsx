@@ -74,10 +74,11 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
           cursorAtMount.current !== null &&
           compareEntryIds(n.id, cursorAtMount.current) <= 0
         if (!alreadyRead) {
-          toast.warning("Call needs intervention", {
-            // shortCallRef is a non-PHI fragment of the call's opaque id — enough
-            // to tell two concurrently-flagged calls apart without a patient name.
-            description: `${FLAG_LABELS[alert.flag] ?? alert.flag} — health ${alert.score}% · ${shortCallRef(alert.callId)}`,
+          // shortCallRef (a non-PHI fragment of the call's opaque id) leads the
+          // title — with several concurrent alerts, that's the one glanceable
+          // detail that tells them apart; the message shouldn't bury it at the end.
+          toast.warning(`${shortCallRef(alert.callId)} Call needs intervention`, {
+            description: `${FLAG_LABELS[alert.flag] ?? alert.flag} — health ${alert.score}%`,
             action: {
               label: "View",
               onClick: () => {

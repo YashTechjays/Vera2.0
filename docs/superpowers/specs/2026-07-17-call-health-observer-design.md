@@ -233,8 +233,10 @@ transition by definition; a healthy 10-minute call writes zero HEALTH rows.
   entry is ambient (on-screen without the user asking, unlike a page they opened) — but
   with several concurrently-flagged calls a bare flag+score line couldn't tell them
   apart. Fix: `shortCallRef()` renders a short, non-PHI fragment of the call's opaque id
-  (e.g. `#B06E57` — last 6 hex chars of the UUID) alongside the flag/score in both the
-  toast and the bell row, purely a disambiguation hint, never a lookup key. Clicking a
+  (e.g. `#E8B06E57` — last 8 hex chars of the UUID, 32 bits of the UUIDv7's random tail,
+  keeping collisions vanishingly unlikely even across thousands of concurrently-visible
+  calls) alongside the flag/score in both the toast and the bell row, purely a
+  disambiguation hint, never a lookup key. Clicking a
   bell item (or the toast's "View" action) navigates to Live Monitoring with the
   `callId` in React Router **state** (never the URL/query string — `PHI-never-in-URLs`
   is unaffected since router state isn't part of the URL, and `callId` isn't PHI on its

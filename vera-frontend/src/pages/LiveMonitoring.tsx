@@ -37,10 +37,11 @@ import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
 import { elapsed } from "@/lib/monitoring/liveTimer"
 import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
+import { humanizeSegment } from "@/lib/patient-forms/display"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
-import type { OpenCallNavState } from "@/lib/notifications/store"
-import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
+import { shortCallRef, type OpenCallNavState } from "@/lib/notifications/store"
+import type { CallCategory, LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
@@ -208,16 +209,40 @@ export function LiveMonitoring() {
   useEffect(() => {
     const openCallId = (location.state as OpenCallNavState | null)?.openCallId
     if (!openCallId) return
+    // Replace-nav to drop the router state — marks this deep link handled (above).
+    const clearDeepLink = () => navigate(location.pathname, { replace: true, state: null })
+
     const target = calls.find((c) => c.id === openCallId)
     if (target) {
       openOverview(target)
-      navigate(location.pathname, { replace: true, state: null })
-    } else if (hasLoadedOnce.current) {
-      // Genuinely not there — call ended, or no longer visible to this user.
-      setError("That call is no longer active.")
-      navigate(location.pathname, { replace: true, state: null })
+      clearDeepLink()
+      return
     }
-    // Otherwise: first fetch hasn't resolved yet — wait for `calls` to update.
+    if (!hasLoadedOnce.current) return // first fetch hasn't resolved yet — wait for `calls`
+
+    // Not in the current snapshot. `calls` may just be stale relative to this
+    // request — e.g. the toast's "View" action can be clicked before the
+    // notification-triggered refetch it raced against has resolved — so force
+    // one direct fetch before concluding the call is genuinely gone. The
+    // notification is only published after its DB write commits, so a fetch
+    // issued now is guaranteed to reflect it.
+    let cancelled = false
+    void (async () => {
+      const fresh = await listCalls().catch(() => null)
+      if (cancelled) return
+      if (fresh) setCalls(fresh)
+      const freshTarget = fresh?.find((c) => c.id === openCallId)
+      if (freshTarget) {
+        openOverview(freshTarget)
+      } else {
+        // Genuinely not there — call ended, or no longer visible to this user.
+        setError("That call is no longer active.")
+      }
+      clearDeepLink()
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [location.state, location.pathname, calls, navigate])
 
   // Tick so Duration advances between polls.
@@ -332,9 +357,9 @@ export function LiveMonitoring() {
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="pl-10">Patient Name</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Agent</TableHead>
+              <TableHead className="pl-10">Call Ref</TableHead>
+              <TableHead>Patient Name</TableHead>
+              <TableHead>Insurance Type</TableHead>
               <TableHead>Duration</TableHead>
               <TableHead>Call Health</TableHead>
               <TableHead>Call Status</TableHead>
@@ -347,14 +372,18 @@ export function LiveMonitoring() {
               const cat = categoryOf(call.status)
               return (
                 <TableRow key={call.id} className={cn(rowTint[cat])}>
+                  <TableCell className="pl-10 font-mono text-xs text-muted-foreground">
+                    {shortCallRef(call.id)}
+                  </TableCell>
                   <TableCell className="font-medium">
                     <span className="flex items-center gap-2">
                       <CallIndicator category={cat} />
                       <span className="capitalize">{call.patient_name || "—"}</span>
                     </span>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">—</TableCell>
-                  <TableCell className="text-muted-foreground">—</TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {call.insurance_type ? humanizeSegment(call.insurance_type) : "—"}
+                  </TableCell>
                   <TableCell className={cn("font-semibold tabular-nums", durationColor[cat])}>
                     {/* Ended calls show their fixed duration, not a still-running timer. */}
                     {elapsed(call.started_at, call.ended_at ? Date.parse(call.ended_at) : now)}

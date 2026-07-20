@@ -14,6 +14,9 @@ export type CallSummary = {
   room_name: string
   patient_name: string | null
   insurance_provider: string | null
+  /** The bound form schema's family — e.g. "infertility_treatment". Not PHI
+   *  (a business classification, not patient data). */
+  insurance_type: string | null
   /** ISO-8601; null until the callee answers. */
   started_at: string | null
   /** ISO-8601; set once the call reaches a terminal status. */

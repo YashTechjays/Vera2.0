@@ -176,15 +176,15 @@ playwright-cli snapshot
 
 | Step | What to look for in the snapshot |
 |---|---|
-| After injecting the flagged event (§4) and being logged in with the tab open | A sonner **toast**: "Call needs intervention" / "Conversation loop — health 25% · #XXXXXX" |
+| After injecting the flagged event (§4) and being logged in with the tab open | A sonner **toast**: title `#XXXXXXXX Call needs intervention`, description `Conversation loop — health 25%` (ref leads the title, not buried in the message) |
 | Bell icon | Unread badge shows the count |
-| Click the bell | Popover lists the alert: `Conversation loop — health 25% · #XXXXXX` |
-| Live Monitoring table | Row shows `critical` status, red-toned `25%` health cell |
+| Click the bell | Popover lists the alert: title `#XXXXXXXX Call needs intervention`, subtitle `Conversation loop — health 25%` |
+| Live Monitoring table | Row shows `critical` status, red-toned `25%` health cell, an "Insurance Type" cell, and a "Call Ref" cell matching the bell's `#XXXXXXXX` ref |
 | Hover the health cell (`playwright-cli hover <ref>`) | Tooltip with the flag name + the `reason` text |
 | Click the bell item | Navigates + opens **that exact call's** modal (check the "Call {id}" line matches `$CALL1`), header "Call Health" shows a matching score |
 | Reload the page (`playwright-cli reload`) | Modal does NOT reopen (nav state is one-shot); bell badge resets to 0 (inbox is session-memory only — this is by design, not a bug) |
 | Mark a call terminal then click its (still-open-session) bell item | Page shows **"That call is no longer active."**, no modal, no crash |
-| Two concurrent flagged calls (`$CALL1`/`$CALL2`, different flags) | Bell shows two distinguishable entries, e.g. `#A1B2C3` vs `#D4E5F6` — verifies the non-PHI disambiguation |
+| Two concurrent flagged calls (`$CALL1`/`$CALL2`, different flags) | Bell shows two distinguishable entries, e.g. `#A1B2C3D4` vs `#D4E5F6A1` — verifies the non-PHI disambiguation |
 
 Screenshot any state with `playwright-cli screenshot --filename=<name>.png`.
 

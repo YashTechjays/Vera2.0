@@ -96,21 +96,21 @@ describe("read cursor persistence", () => {
 })
 
 describe("shortCallRef", () => {
-  it("takes the last 6 hex characters, uppercased, hash-prefixed", () => {
-    expect(shortCallRef("9f4f7b10-1cf7-4c5b-8ff6-46d2e8b06e57")).toBe("#B06E57")
+  it("takes the last 8 hex characters, uppercased, hash-prefixed", () => {
+    expect(shortCallRef("9f4f7b10-1cf7-4c5b-8ff6-46d2e8b06e57")).toBe("#E8B06E57")
   })
 
-  it("ignores dashes when counting the last 6 characters", () => {
-    // last 6 chars of the compacted (dash-free) id, not the raw string's tail
-    expect(shortCallRef("aaaaaaaa-bbbb-cccc-dddd-ee0000000000")).toBe("#000000")
+  it("ignores dashes when counting the last 8 characters", () => {
+    // last 8 chars of the compacted (dash-free) id, not the raw string's tail
+    expect(shortCallRef("aaaaaaaa-bbbb-cccc-dddd-ee0000000000")).toBe("#00000000")
   })
 
   it("disambiguates two different calls", () => {
     const a = shortCallRef("9f4f7b10-1cf7-4c5b-8ff6-46d2e8b06e57")
     const b = shortCallRef("7c1e0000-0000-4000-8000-000000000003")
     expect(a).not.toBe(b)
-    expect(a).toMatch(/^#[0-9A-F]{6}$/)
-    expect(b).toMatch(/^#[0-9A-F]{6}$/)
+    expect(a).toMatch(/^#[0-9A-F]{8}$/)
+    expect(b).toMatch(/^#[0-9A-F]{8}$/)
   })
 
   it("is a pure function of the id (same id -> same ref)", () => {

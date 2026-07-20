@@ -158,6 +158,8 @@ async def test_list_calls_empty_then_populated(
     assert row["status"] == "initiated"
     assert parse_room_name(row["room_name"]) is not None
     assert "insurance_provider" in row
+    # seeded_form_id binds an INFERTILITY_TREATMENT schema — the join must surface it.
+    assert row["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
 
 
 @pytest.mark.asyncio
@@ -499,6 +501,7 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     assert pub.json()["data"]["published"] is True
     # Same row shape as list_calls — None would blank the UI's Patient cell.
     assert pub.json()["data"]["patient_name"] == "Test Patient"
+    assert pub.json()["data"]["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
 
     assert len(await publish_audit_rows()) == 1
 

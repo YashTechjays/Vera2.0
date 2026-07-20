@@ -97,20 +97,33 @@ class CallHealthObserver:
 
     async def _run(self) -> None:
         while True:
-            await self._wake.wait()
-            # Cooldown: a turn burst inside the window coalesces into exactly one
-            # deferred run (the event stays set until cleared below).
-            wait_s = self._last_run + self._min_interval_s - self._loop.time()
-            if wait_s > 0:
-                await asyncio.sleep(wait_s)
-            self._wake.clear()
-            if self._closed:
-                return
-            if self._engaged():
-                logger.info("health observer for %s stopping: takeover engaged", self._room)
-                return  # permanent — its purpose is handing off to a human
-            self._last_run = self._loop.time()
-            await self._analyze_once()
+            try:
+                await self._wake.wait()
+                # Cooldown: a turn burst inside the window coalesces into exactly
+                # one deferred run (the event stays set until cleared below).
+                wait_s = self._last_run + self._min_interval_s - self._loop.time()
+                if wait_s > 0:
+                    await asyncio.sleep(wait_s)
+                self._wake.clear()
+                if self._closed:
+                    return
+                if self._engaged():
+                    logger.info("health observer for %s stopping: takeover engaged", self._room)
+                    return  # permanent — its purpose is handing off to a human
+                self._last_run = self._loop.time()
+                await self._analyze_once()
+            except asyncio.CancelledError:
+                raise  # aclose()'s cancellation must still stop the loop
+            except Exception as exc:
+                # A stray exception here must not silently kill the task — it would
+                # sit unretrieved until aclose()'s `await self._task` re-raises it,
+                # skipping the LLM chain's own cleanup. Type name only: any future
+                # code added to this loop may touch transcript content.
+                logger.warning(
+                    "health observer loop for %s hit %s; continuing",
+                    self._room,
+                    type(exc).__name__,
+                )
 
     async def _analyze_once(self) -> None:
         user_message = self._transcript.render_user_message()

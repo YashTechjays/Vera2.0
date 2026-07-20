@@ -16,6 +16,7 @@ import {
   DialogContent,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { copyText } from "@/lib/clipboard"
@@ -203,13 +204,24 @@ export function LiveCallModal({
             </div>
             <div className="text-right">
               <div className="text-xs text-muted-foreground">Call Health</div>
-              {/* Live reason from the SSE health frames as a hover tooltip. */}
-              <div
-                className={cn("font-semibold", healthToneClass[healthTone(healthScore)])}
-                title={liveHealth?.reason ?? undefined}
-              >
-                {healthScore === null ? "Assessing…" : `${healthScore}%`}
-              </div>
+              {/* Live reason from the SSE health frames as an accessible hover
+                  tooltip (matches the Live Monitoring table's health cell). */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    className={cn(
+                      "font-semibold",
+                      liveHealth?.reason && "cursor-default",
+                      healthToneClass[healthTone(healthScore)],
+                    )}
+                  >
+                    {healthScore === null ? "Assessing…" : `${healthScore}%`}
+                  </div>
+                </TooltipTrigger>
+                {liveHealth?.reason && (
+                  <TooltipContent className="max-w-72">{liveHealth.reason}</TooltipContent>
+                )}
+              </Tooltip>
             </div>
           </div>
         </div>

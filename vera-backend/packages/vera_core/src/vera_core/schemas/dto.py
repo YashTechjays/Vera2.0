@@ -18,6 +18,9 @@ class CallSummary(BaseModel):
     room_name: str
     patient_name: str | None = None
     insurance_provider: str | None = None
+    # The bound form schema's family — e.g. "infertility_treatment" (vera_core.models.
+    # enums.InsuranceType). Not PHI (a business classification, not patient data).
+    insurance_type: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     created_at: datetime

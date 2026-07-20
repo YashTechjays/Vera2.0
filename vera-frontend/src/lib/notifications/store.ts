@@ -26,10 +26,12 @@ export type OpenCallNavState = { openCallId: string }
 
 /** A short, non-PHI fragment of the call's opaque id — enough to tell two
  *  concurrently-flagged calls apart in a toast/bell line without showing any
- *  patient detail (e.g. "#7A2F91"). Not a lookup key — only ever a hint. */
+ *  patient detail (e.g. "#7A2F91B4"). Not a lookup key — only ever a hint.
+ *  8 hex chars (32 bits) of a UUIDv7's random tail keeps collisions
+ *  vanishingly unlikely even across thousands of concurrently-visible calls. */
 export function shortCallRef(callId: string): string {
   const compact = callId.replaceAll("-", "")
-  return `#${compact.slice(-6).toUpperCase()}`
+  return `#${compact.slice(-8).toUpperCase()}`
 }
 
 /** Human labels for the analyzer's intervention categories (toast + bell). */
@@ -103,5 +105,16 @@ export function saveReadCursor(id: string): void {
     sessionStorage.setItem(CURSOR_KEY, id)
   } catch {
     // storage unavailable — read state degrades to per-mount memory
+  }
+}
+
+/** Wipe the cursor at session end (logout / forced logout) so a shared tab's
+ *  next login starts with a clean "everything unread" inbox instead of
+ *  inheriting whoever was signed in before. */
+export function clearReadCursor(): void {
+  try {
+    sessionStorage.removeItem(CURSOR_KEY)
+  } catch {
+    // storage unavailable — nothing to clear
   }
 }
