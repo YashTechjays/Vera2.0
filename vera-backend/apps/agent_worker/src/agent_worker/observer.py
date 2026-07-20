@@ -101,7 +101,7 @@ class ResilientAnswerExtractor:
 
     async def extract(self, task: PlanTask, transcript: str) -> list[ExtractedAnswer]:
         # A whole-chain outage PROPAGATES rather than returning [], which is indistinguishable
-        # from "the rep answered nothing" and would retire those turns unextracted. 
+        # from "the rep answered nothing" and would retire those turns unextracted.
         reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
         return _parse_extraction(reply)
 
