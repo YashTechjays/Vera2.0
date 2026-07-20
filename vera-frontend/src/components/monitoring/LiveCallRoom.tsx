@@ -25,6 +25,7 @@ import {
   otherIntervenerPresent,
   participantLabel,
   participantMode,
+  rosterVisible,
   speakerButtonState,
   type ConnectionPhase,
   type ParticipantLike,
@@ -161,6 +162,8 @@ function RoomView({
   const phase = connectionPhase(state, everConnected)
   const otherIntervener = otherIntervenerPresent(likes)
   const supervisorLabel = intervenerLabel(likes)
+  const takeoverLive = microphone || otherIntervener
+  const roster = participants.filter((p) => rosterVisible(toParticipantLike(p), takeoverLive))
   // Our connection dropped, but the call itself isn't over (SSE, via `ended`) — offer a rejoin.
   const connectionLost = phase === "ended" && !ended
 
@@ -191,13 +194,13 @@ function RoomView({
       {isWaitingForCall(state, likes) && (
         <p className="text-muted-foreground">Waiting for the call…</p>
       )}
-      {participants.length > 0 && (
+      {roster.length > 0 && (
         <div>
           <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Participants ({participants.length})
+            Participants ({roster.length})
           </p>
           <ul className="space-y-1">
-            {participants.map((p) => (
+            {roster.map((p) => (
               <ParticipantRow key={p.sid} participant={p} />
             ))}
           </ul>
@@ -300,7 +303,8 @@ export function LiveCallRoom({
       video={false}
       onMediaDeviceFailure={() => handleRoomError(new Error("microphone unavailable"))}
       onError={handleRoomError}
-      className="flex flex-col"
+      // !h-auto: .lk-room-container's height:100% would collapse the transcript below.
+      className="flex !h-auto flex-col"
     >
       <LiveActivityBeacon />
       <RoomView microphone={microphone} onStatus={onStatus} ended={ended} onReconnect={reconnect} />

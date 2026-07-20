@@ -37,6 +37,7 @@ const call: CallSummary = {
   status: "active",
   room_name: "call--t1--c1",
   patient_name: "Jane Doe",
+  insurance_provider: "Cigna",
   started_at: "2026-07-04T10:00:00Z",
   ended_at: null,
   created_at: "2026-07-04T09:59:00Z",
