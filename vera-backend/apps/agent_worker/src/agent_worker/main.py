@@ -495,13 +495,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
         # After a supervisor takes over, the bot's STT is muted; a dedicated per-track
         # STT transcribes the caller + supervisor so the live transcript keeps going.
-        takeover_transcriber: TakeoverTranscriber | None = None
         if call_stream is not None and speaker is not None:
             # the callee already answered during wait_for_speaker
             await call_stream.publish_status(room_name, "active", ts=int(time.time() * 1000))
+
+        takeover_transcriber: TakeoverTranscriber | None = None
+        if turn_sink is not None and speaker is not None:
             takeover_transcriber = TakeoverTranscriber(
                 ctx.room,
-                call_stream,
+                turn_sink,
                 room_name,
                 stt_factory=lambda: deepgram.STT(model="nova-3"),
                 callee_identity=speaker.identity,

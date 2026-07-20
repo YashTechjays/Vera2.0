@@ -39,9 +39,9 @@ from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.llm import LLMUnavailableError
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
-    ROLE_USER,
     SOURCE_BOT,
     SOURCE_REP,
+    SOURCE_SUPERVISOR,
     TranscriptEvent,
     TurnRole,
     TurnSource,
@@ -184,7 +184,9 @@ class TaskObserver:
             return
         self._window.append(_render_turn(turn))
         self._dirty = True
-        if turn.role == ROLE_USER:  # a rep turn is the only new evidence worth a pass
+        if turn.source == SOURCE_REP:
+            # The REP's answer is the only new evidence worth a pass — keyed on source, not
+            # but it must not burn a pass nor become this answer's evidence_seq.
             self._latest_rep_seq = turn.seq
             self._schedule_pass()
 
@@ -243,7 +245,12 @@ class TaskObserver:
             )
 
 
-_SPEAKER_LABELS = {SOURCE_REP: "Representative", SOURCE_BOT: "Agent"}
+_SPEAKER_LABELS = {
+    SOURCE_REP: "Representative",
+    SOURCE_BOT: "Agent",
+    # Under a takeover the human supervisor asks the questions — label them distinctly so
+    SOURCE_SUPERVISOR: "Supervisor",
+}
 
 
 def _render_turn(turn: _Turn) -> str:
@@ -358,7 +365,7 @@ class ObserverManager:
         if self._answers.get(answer.field_path) == answer.value:
             # Unchanged — do not re-write or re-emit. INTENTIONALLY covers the intake
             # prefill seed too: a rep merely confirming a prefilled value leaves no
-            # ai_call row (the INTAKE row stays current; 
+            # ai_call row (the INTAKE row stays current;
             return
         ts = self._now_ms()
         await self._run_state.record_answer(

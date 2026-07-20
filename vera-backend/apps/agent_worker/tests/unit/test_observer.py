@@ -14,6 +14,8 @@ from agent_worker.observer import (
     ObserverManager,
     ResilientAnswerExtractor,
     _parse_extraction,
+    _render_turn,
+    _Turn,
 )
 from vera_core.events.worker import CallAnswerRecordedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
@@ -49,6 +51,11 @@ def _rep(text: str, ts: int = 1) -> TranscriptEvent:
 
 def _bot(text: str, ts: int = 1) -> TranscriptEvent:
     return TranscriptEvent(role="agent", source="bot", text=text, ts=ts)
+
+
+def _supervisor(text: str, ts: int = 1) -> TranscriptEvent:
+    # Under a takeover the TakeoverTranscriber publishes the supervisor as role=user.
+    return TranscriptEvent(role="user", source="supervisor", text=text, ts=ts)
 
 
 class FakeExtractor:
@@ -182,6 +189,38 @@ class TestRecording:
         assert extractor.calls == 0
         await _feed(manager, _rep("Yes."))  # seq 1
         assert run_state.records[0][3] == 1  # evidence_seq = latest rep turn seq
+
+
+class TestSupervisorTakeover:
+    """Form filling must keep working once a human supervisor drives the call: the
+    TakeoverTranscriber publishes BOTH the supervisor and the rep as role=user, so the
+    rep's answer (not the supervisor's question) is what triggers extraction."""
+
+    @pytest.mark.asyncio
+    async def test_supervisor_question_is_context_only(self) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, run_state, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _supervisor("Is the deductible met?"))
+        assert extractor.calls == 0  # a supervisor turn must not burn a pass
+        assert run_state.records == []
+
+    @pytest.mark.asyncio
+    async def test_rep_answer_after_takeover_still_extracts(self) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, run_state, bus, _ = _manager(_plan(), extractor)
+        await _feed(manager, _supervisor("Is the deductible met?"))  # seq 0, context
+        await _feed(manager, _rep("Yes, fully met."))  # seq 1, the evidence
+        assert extractor.calls == 1
+        # recorded, and evidence_seq points at the REP's turn — not the supervisor's
+        assert run_state.records == [(ROOM, "sections.a.x", "Yes", 1)]
+        assert len(bus.events) == 1
+
+    def test_supervisor_turns_are_labelled_distinctly(self) -> None:
+        # The extractor must be able to tell who asked from who answered.
+        rendered = _render_turn(
+            _Turn(role="user", text="Is it met?", source="supervisor", ts=1, seq=0)
+        )
+        assert rendered == "Supervisor: Is it met?"
 
 
 class TestRouting:
