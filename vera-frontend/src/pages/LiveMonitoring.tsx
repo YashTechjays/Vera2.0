@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle,
   ArrowUp,
@@ -9,6 +9,7 @@ import {
   PhoneCall,
   type LucideIcon,
 } from "lucide-react"
+import { useLocation, useNavigate } from "react-router-dom"
 
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -38,6 +39,7 @@ import { elapsed } from "@/lib/monitoring/liveTimer"
 import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
+import type { OpenCallNavState } from "@/lib/notifications/store"
 import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
@@ -145,6 +147,8 @@ function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
 export function LiveMonitoring() {
   const { openFormById } = useIbv()
   const canPublish = usePermission("calls:publish")
+  const location = useLocation()
+  const navigate = useNavigate()
   // PHI (patient_name) stays in component state so it's discarded on unmount.
   const [calls, setCalls] = useState<CallSummary[]>([])
   const [history, setHistory] = useState<CallSummary[]>([])
@@ -155,6 +159,10 @@ export function LiveMonitoring() {
   const [publishing, setPublishing] = useState<string | null>(null)
   const [selected, setSelected] = useState<CallSummary | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
+  // Whether the list has resolved at least once — gates the "call not found"
+  // verdict below so a notification's deep link isn't given up on before the
+  // first fetch has even had a chance to include the target call.
+  const hasLoadedOnce = useRef(false)
 
   // Load + poll (skip while the tab is hidden); a realtime notification
   // (intervention alert) refetches immediately instead of waiting the poll out.
@@ -176,6 +184,7 @@ export function LiveMonitoring() {
           items.reason instanceof ApiError ? items.reason.message : "Could not load calls.",
         )
       }
+      hasLoadedOnce.current = true
       if (counts.status === "fulfilled") setStats(counts.value)
       if (past.status === "fulfilled" && past.value) setHistory(past.value)
     }
@@ -191,6 +200,25 @@ export function LiveMonitoring() {
       window.removeEventListener(NOTIFICATION_EVENT, onNotification)
     }
   }, [tab])
+
+  // Deep link from a notification (bell item / toast "View"): open that exact
+  // call's modal once it shows up in the polled list. `state` is cleared via a
+  // replace navigation as soon as it's handled (found OR given up on), so this
+  // never re-fires for the same request and never survives a manual refresh.
+  useEffect(() => {
+    const openCallId = (location.state as OpenCallNavState | null)?.openCallId
+    if (!openCallId) return
+    const target = calls.find((c) => c.id === openCallId)
+    if (target) {
+      openOverview(target)
+      navigate(location.pathname, { replace: true, state: null })
+    } else if (hasLoadedOnce.current) {
+      // Genuinely not there — call ended, or no longer visible to this user.
+      setError("That call is no longer active.")
+      navigate(location.pathname, { replace: true, state: null })
+    }
+    // Otherwise: first fetch hasn't resolved yet — wait for `calls` to update.
+  }, [location.state, location.pathname, calls, navigate])
 
   // Tick so Duration advances between polls.
   useEffect(() => {

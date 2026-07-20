@@ -18,6 +18,20 @@ export type NotificationItem = {
   ts: number
 }
 
+/** React Router navigation `state` shape used to jump straight to the flagged
+ *  call's modal from a notification (bell item, or the toast's "View" action).
+ *  Router state — never the URL/query string — so this never violates the
+ *  PHI-never-in-URLs rule; `callId` is an opaque UUID, not PHI on its own. */
+export type OpenCallNavState = { openCallId: string }
+
+/** A short, non-PHI fragment of the call's opaque id — enough to tell two
+ *  concurrently-flagged calls apart in a toast/bell line without showing any
+ *  patient detail (e.g. "#7A2F91"). Not a lookup key — only ever a hint. */
+export function shortCallRef(callId: string): string {
+  const compact = callId.replaceAll("-", "")
+  return `#${compact.slice(-6).toUpperCase()}`
+}
+
 /** Human labels for the analyzer's intervention categories (toast + bell). */
 export const FLAG_LABELS: Record<string, string> = {
   supervisor_requested: "Supervisor requested",

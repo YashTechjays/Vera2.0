@@ -5,14 +5,22 @@ import { useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
-import { FLAG_LABELS, isUnread, timeAgo } from "@/lib/notifications/store"
+import {
+  FLAG_LABELS,
+  isUnread,
+  shortCallRef,
+  timeAgo,
+  type NotificationItem,
+  type OpenCallNavState,
+} from "@/lib/notifications/store"
 import { useNotifications } from "./context"
 
 /**
  * Topbar bell: unread badge + a popover inbox of intervention alerts.
  * Closing the panel marks everything read (the badge clears); "Clear" empties
- * the inbox. Clicking an alert jumps to Live Monitoring, where the flagged
- * call is already sitting in the Critical tab.
+ * the inbox. Clicking an alert navigates to Live Monitoring and opens THAT
+ * specific call's modal — critical with several concurrent flagged calls,
+ * where "somewhere in the Critical tab" isn't good enough.
  */
 export function NotificationsBell() {
   const { items, cursor, unread, markAllRead, clearAll } = useNotifications()
@@ -33,9 +41,15 @@ export function NotificationsBell() {
     setOpen(next)
   }
 
-  function openCall() {
-    onOpenChange(false)
-    void navigate("/")
+  function openCall(item: NotificationItem) {
+    // Same read/close effect as onOpenChange(false), inlined: routing this
+    // through onOpenChange (which also refreshes `now` via Date.now()) from
+    // inside the per-item .map() closure defeats the purity checker's static
+    // analysis of that impure call's reachability.
+    markAllRead()
+    setOpen(false)
+    const state: OpenCallNavState = { openCallId: item.callId }
+    void navigate("/", { state })
   }
 
   return (
@@ -77,7 +91,7 @@ export function NotificationsBell() {
               <li key={item.id}>
                 <button
                   type="button"
-                  onClick={openCall}
+                  onClick={() => openCall(item)}
                   className="flex w-full items-start gap-2 px-3 py-2 text-left transition-colors hover:bg-muted"
                 >
                   <span
@@ -89,7 +103,8 @@ export function NotificationsBell() {
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm font-medium">Call needs intervention</span>
                     <span className="block truncate text-xs text-muted-foreground">
-                      {FLAG_LABELS[item.flag] ?? item.flag} — health {item.score}%
+                      {FLAG_LABELS[item.flag] ?? item.flag} — health {item.score}% ·{" "}
+                      {shortCallRef(item.callId)}
                     </span>
                   </span>
                   <span className="shrink-0 text-xs text-muted-foreground">

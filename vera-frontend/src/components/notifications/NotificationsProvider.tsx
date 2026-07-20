@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import { useNavigate } from "react-router-dom"
 import { Toaster, toast } from "sonner"
 
 import { asInterventionNeeded, streamNotifications } from "@/lib/api/notifications"
@@ -9,8 +10,10 @@ import {
   latestEntryId,
   loadReadCursor,
   saveReadCursor,
+  shortCallRef,
   unreadCount,
   type NotificationItem,
+  type OpenCallNavState,
 } from "@/lib/notifications/store"
 import { NotificationsContext } from "./context"
 
@@ -40,6 +43,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const [cursor, setCursor] = useState<string | null>(() => loadReadCursor())
   const cursorAtMount = useRef(cursor) // the stream callback compares replays against this
   const seenIds = useRef<Set<string>>(new Set())
+  const navigate = useNavigate()
 
   useEffect(() => {
     const controller = new AbortController()
@@ -71,7 +75,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
           compareEntryIds(n.id, cursorAtMount.current) <= 0
         if (!alreadyRead) {
           toast.warning("Call needs intervention", {
-            description: `${FLAG_LABELS[alert.flag] ?? alert.flag} — health ${alert.score}%`,
+            // shortCallRef is a non-PHI fragment of the call's opaque id — enough
+            // to tell two concurrently-flagged calls apart without a patient name.
+            description: `${FLAG_LABELS[alert.flag] ?? alert.flag} — health ${alert.score}% · ${shortCallRef(alert.callId)}`,
+            action: {
+              label: "View",
+              onClick: () => {
+                const state: OpenCallNavState = { openCallId: alert.callId }
+                void navigate("/", { state })
+              },
+            },
           })
         }
       },
@@ -79,7 +92,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       // Non-retryable (4xx). Silent: the session flow owns re-auth UX.
     })
     return () => controller.abort()
-  }, [])
+    // `navigate` (react-router's useNavigate()) is a stable reference across
+    // renders, so listing it here satisfies exhaustive-deps without causing
+    // this effect to re-run/reopen the SSE connection on every render.
+  }, [navigate])
 
   const markAllRead = useCallback(() => {
     const latest = latestEntryId(items)
