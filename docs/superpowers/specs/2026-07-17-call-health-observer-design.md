@@ -224,11 +224,24 @@ transition by definition; a healthy 10-minute call writes zero HEALTH rows.
   truth).
 - **Notification bell** (2026-07-18 amendment): the topbar bell carries an unread badge
   and a popover inbox of intervention alerts (newest-first, capped at 50, session-scoped
-  memory). Closing the panel marks all read; "Clear" empties the inbox; clicking an alert
-  jumps to Live Monitoring. Read state is a single cursor (the newest-read SSE entry id)
-  persisted in sessionStorage — opaque stream ids only, no PHI — which also makes the
-  replay window idempotent for the user: read alerts never re-toast or re-count as unread
-  across reloads.
+  memory). Closing the panel marks all read; "Clear" empties the inbox. Read state is a
+  single cursor (the newest-read SSE entry id) persisted in sessionStorage — opaque
+  stream ids only, no PHI — which also makes the replay window idempotent for the user:
+  read alerts never re-toast or re-count as unread across reloads.
+- **Non-PHI call disambiguation + click-through** (2026-07-19 amendment): the
+  notification payload was never given patient PHI — deliberately, since a toast/bell
+  entry is ambient (on-screen without the user asking, unlike a page they opened) — but
+  with several concurrently-flagged calls a bare flag+score line couldn't tell them
+  apart. Fix: `shortCallRef()` renders a short, non-PHI fragment of the call's opaque id
+  (e.g. `#B06E57` — last 6 hex chars of the UUID) alongside the flag/score in both the
+  toast and the bell row, purely a disambiguation hint, never a lookup key. Clicking a
+  bell item (or the toast's "View" action) navigates to Live Monitoring with the
+  `callId` in React Router **state** (never the URL/query string — `PHI-never-in-URLs`
+  is unaffected since router state isn't part of the URL, and `callId` isn't PHI on its
+  own) and opens that exact call's modal once it appears in the polled list; state is
+  cleared via a replace-navigation as soon as it's handled, so a manual refresh never
+  re-opens it. If the call has since ended/left the visible list, the page surfaces
+  "That call is no longer active." instead of a silent no-op or a wrongly-opened modal.
 - **Live Monitoring page:** color-coded health badge + flag label on call cards from the
   new list fields. `NULL` score renders a neutral "Assessing…" badge — never 0, never
   red. Stale data (`health_analyzed_at` older than ~3× the analysis interval) grays out
