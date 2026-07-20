@@ -213,12 +213,27 @@ Then `/simplify` on the change, then `just check` (repo rule).
 > **Implementation note (2026-07-20) — directive application.** Decision #4 and W2 specify a
 > pre-LLM `on_user_turn_completed` hook consuming a *staged* directive. As built, the Observer
 > calls `controller.apply_directive_now(...)` directly (interrupt + `update_agent` /
-> `generate_reply`). Risk #1 (`update_agent` + `StopResponse` from inside the hook on 1.5.17)
-> is the reason: the spike showed the hook path swallowing the swap. The race decision #4 was
-> avoiding is closed instead by three guards inside `apply_directive_now` — the controller's
-> `lock`, a `generation` counter that drops stale directives, and an early return when
-> `takeover_engaged(session)` or `active_task_index is None` (IVR / wrap-up). Latency improves:
-> the redirect lands on the current turn, not the next.
+> `generate_reply`).
+>
+> **The hook path was NOT spiked.** W2 called for spiking `update_agent` + `StopResponse`
+> from inside `on_user_turn_completed` against livekit-agents 1.5.17 (risk #1) before
+> committing; that spike was never run, and the direct-apply path was built instead. So this
+> divergence rests on design argument, not on a measurement showing the hook design fails —
+> if the hook design is later preferred, nothing here is evidence against it.
+>
+> The race decision #4 was avoiding is closed instead by three guards inside
+> `apply_directive_now` — the controller's `lock` (serializes against a `task_complete`
+> handoff), a `generation` counter that drops stale directives, and an early return when
+> `takeover_engaged(session)` or `active_task_index is None` (IVR / wrap-up). Latency
+> improves as a side effect: the redirect lands on the current turn, not the next.
+>
+> **Accepted consequence — a dropped directive never re-fires.** `RuleEngine` stamps a flow
+> rule fired at evaluation time, while every `apply_directive_now` no-op path (takeover,
+> IVR/wrap-up, unreachable skip target, session-apply failure) returns silently. A rule that
+> fires into one of those windows is lost for the rest of the call — a "not covered →
+> terminate" firing mid-takeover will not re-fire when the takeover ends. Team-accepted:
+> re-arming would let a stale terminate land turns later against a moved-on conversation.
+> Documented in the `rule_engine` and `apply_directive_now` docstrings.
 >
 > **Implementation note (2026-07-20) — single transcript stream.** The Observer no longer reads
 > `vera:transcript:{room}`; that stream is **retired** and its store deleted. `vera:call-events:

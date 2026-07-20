@@ -45,7 +45,12 @@ class _FakeSession:
         self.added.append(obj)
 
 
-def _current(value: Any, *, source: str = AnswerSource.AI_CALL.value) -> FieldAnswer:
+def _current(
+    value: Any,
+    *,
+    source: str = AnswerSource.AI_CALL.value,
+    evidence_seq: int | None = None,
+) -> FieldAnswer:
     return FieldAnswer(
         tenant_id=TENANT,
         form_id=FORM,
@@ -53,11 +58,12 @@ def _current(value: Any, *, source: str = AnswerSource.AI_CALL.value) -> FieldAn
         field_path="sections.a.x",
         value={"value": value},
         source=source,
+        evidence_seq=evidence_seq,
         is_current=True,
     )
 
 
-async def _record(session: _FakeSession, value: Any) -> bool:
+async def _record(session: _FakeSession, value: Any, *, evidence_seq: int | None = 3) -> bool:
     return await record_answer(
         session,  # type: ignore[arg-type]
         tenant_id=TENANT,
@@ -67,7 +73,7 @@ async def _record(session: _FakeSession, value: Any) -> bool:
         raw_value=value,
         source=AnswerSource.AI_CALL.value,
         confidence=90,
-        evidence_seq=3,
+        evidence_seq=evidence_seq,
     )
 
 
@@ -104,3 +110,47 @@ async def test_same_value_but_different_source_supersedes() -> None:
     session = _FakeSession(current=_current("Yes", source=AnswerSource.INTAKE.value))
     assert await _record(session, "Yes") is True
     assert session.events == ["flush", "add"]
+
+
+@pytest.mark.asyncio
+async def test_stale_redelivery_does_not_overwrite_a_newer_answer() -> None:
+    # The reordering the per-room dispatch can't prevent: answer A (seq 2) is left unacked
+    # because its Call row hadn't committed; answer B (seq 7) for the same field lands; A is
+    # then redelivered. Without the evidence_seq guard A's older value would supersede B's.
+    session = _FakeSession(current=_current("Yes, fully met", evidence_seq=7))
+    assert await _record(session, "Not sure", evidence_seq=2) is False
+    assert session.events == []  # no demote, no insert
+
+
+@pytest.mark.asyncio
+async def test_same_seq_re_extraction_still_supersedes() -> None:
+    # A retried pass over the SAME turn may refine its value (the observer re-arms and
+    # retries after a provider outage) — that is news, not a stale replay.
+    session = _FakeSession(current=_current("ABC", evidence_seq=5))
+    assert await _record(session, "ABC123", evidence_seq=5) is True
+    assert session.events == ["flush", "add"]
+
+
+@pytest.mark.asyncio
+async def test_newer_seq_supersedes_as_normal() -> None:
+    session = _FakeSession(current=_current("Yes", evidence_seq=2))
+    assert await _record(session, "No", evidence_seq=9) is True
+    assert session.added[0].evidence_seq == 9
+
+
+@pytest.mark.asyncio
+async def test_human_resolve_supersedes_regardless_of_seq() -> None:
+    # A different source is a different authority: a human correction must land even though
+    # it carries no evidence_seq at all and the current ai_call row has a high one.
+    session = _FakeSession(current=_current("Yes", evidence_seq=99))
+    wrote = await record_answer(
+        session,  # type: ignore[arg-type]
+        tenant_id=TENANT,
+        form_id=FORM,
+        call_id=CALL,
+        field_path="sections.a.x",
+        raw_value="No",
+        source=AnswerSource.HUMAN.value,
+        evidence_seq=None,
+    )
+    assert wrote is True

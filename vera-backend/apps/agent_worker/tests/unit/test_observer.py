@@ -365,6 +365,30 @@ class TestCrashIsolation:
         await manager.aclose()  # must not raise
         assert run_state.records == []
 
+    @pytest.mark.asyncio
+    async def test_failed_pass_is_retried_by_the_final_drain(self) -> None:
+        # A provider outage on a task's LAST rep turn used to lose that answer for good: the
+        # pass cleared `_dirty` before extracting, so the aclose() drain saw "nothing new"
+        # and skipped the very turn it exists to catch. The failed pass must re-arm.
+        class _FlakyExtractor:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def extract(self, task: Any, transcript: str) -> list[ExtractedAnswer]:
+                self.calls += 1
+                if self.calls == 1:
+                    raise LLMUnavailableError  # whole chain exhausted, this pass only
+                return [ExtractedAnswer("sections.a.x", "Yes", 90)]
+
+        extractor = _FlakyExtractor()
+        manager, run_state, _, _ = _manager(_plan(), extractor)  # type: ignore[arg-type]
+        await _feed(manager, _rep("Yes, it is covered."))
+        assert run_state.records == []  # first pass died in the outage
+
+        await manager.aclose()
+        assert extractor.calls == 2  # the drain RETRIED rather than skipping the window
+        assert run_state.records == [(ROOM, "sections.a.x", "Yes", 0)]
+
 
 class FakeCompletionLLM:
     """Stands in for vera_core.llm.ResilientLLM's `complete` surface."""
@@ -393,11 +417,14 @@ class TestResilientExtractor:
         assert llm.calls[0][1] == "Representative: yes"
 
     @pytest.mark.asyncio
-    async def test_chain_exhausted_returns_empty(self) -> None:
-        out = await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
-            _plan().tasks[0], "anything"
-        )
-        assert out == []  # LLMUnavailableError → skip the pass, call continues
+    async def test_chain_exhausted_propagates(self) -> None:
+        # It must NOT return [] — that is indistinguishable from "the rep answered nothing",
+        # which would let the caller retire the window as extracted. The raise is what lets
+        # TaskObserver re-arm and retry those turns (see test_failed_pass_is_retried_...).
+        with pytest.raises(LLMUnavailableError):
+            await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
+                _plan().tasks[0], "anything"
+            )
 
 
 class TestParsing:

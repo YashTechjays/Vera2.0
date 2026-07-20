@@ -1,12 +1,16 @@
 """Rule engine: turns the live answer snapshot into at most one directive.
 
 Pure and synchronous — the Observer calls `evaluate(answers)` after every answer it
-records and stages whatever comes back on the controller. It owns no I/O and never
-touches the session; the agent's hook applies the directive.
+records and passes whatever comes back to `controller.apply_directive_now(...)`, which
+interrupts the session and swaps the agent from the Observer's own background task. This
+module owns no I/O and never touches the session itself.
 
 Two rule kinds, from the compiled CallPlan:
 * `flow_rules` fire **once** — a terminate or a forward skip is a terminal redirect, so
   once a rule's `when` has held there is nothing to re-decide.
+
+  **Fire-once counts one EVALUATION, not one successful apply** (accepted behavior, team
+  decision).
 * `contradictions` **re-arm**: they push back once per distinct set of values for their
   `fields`, so a rep who restates the same conflicting answer isn't re-challenged, but a
   genuinely new conflicting combination is.

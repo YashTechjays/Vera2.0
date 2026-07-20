@@ -1,7 +1,8 @@
 """Observer runtime: extract answers from the live transcript, one Observer per task.
 
-A single ``ObserverManager`` tails the transcript Redis stream (decoupled from the voice
-pipeline — it reads the stream the emitter writes, it is not a fan-out sink). It never runs
+A single ``ObserverManager`` tails the call-event Redis stream, filtering it to transcript
+turns (decoupled from the voice pipeline — it reads the stream the emitter writes, it is
+not a fan-out sink). It never runs
 during the IVR phase or wrap-up: it routes each finalized turn to the Observer for
 ``controller.active_task_index``, and when that index is ``None`` (IVR, wrap-up) the turn is
 dropped — extraction only happens on the conversation path.
@@ -37,7 +38,6 @@ from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
-from vera_core.llm import LLMUnavailableError
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
     SOURCE_BOT,
@@ -100,11 +100,9 @@ class ResilientAnswerExtractor:
         self._llm = llm
 
     async def extract(self, task: PlanTask, transcript: str) -> list[ExtractedAnswer]:
-        try:
-            reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
-        except LLMUnavailableError:
-            # Whole chain exhausted — skip this pass; the call continues (best-effort).
-            return []
+        # A whole-chain outage PROPAGATES rather than returning [], which is indistinguishable
+        # from "the rep answered nothing" and would retire those turns unextracted. 
+        reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
         return _parse_extraction(reply)
 
 
@@ -187,7 +185,9 @@ class TaskObserver:
         self._dirty = True
         if turn.source == SOURCE_REP:
             # The REP's answer is the only new evidence worth a pass — keyed on source, not
-            # but it must not burn a pass nor become this answer's evidence_seq.
+            # role: under a takeover the supervisor also publishes as role=user, so its
+            # question still enters the window as context, but it must not burn a pass nor
+            # become this answer's evidence_seq.
             self._latest_rep_seq = turn.seq
             self._schedule_pass()
 
@@ -224,7 +224,13 @@ class TaskObserver:
         self._dirty = False
         transcript = "\n".join(self._window)
         rep_seq = self._latest_rep_seq
-        for answer in await self._extractor.extract(self._task, transcript):
+        try:
+            extracted = await self._extractor.extract(self._task, transcript)
+        except Exception:
+            # Re-arm: the window still holds unextracted turns.
+            self._dirty = True
+            raise
+        for answer in extracted:
             if answer.field_path not in self._whitelist:
                 continue  # another task's field — never ours to write
             await self._record(answer, rep_seq)
@@ -250,6 +256,7 @@ _SPEAKER_LABELS = {
     SOURCE_REP: "Representative",
     SOURCE_BOT: "Agent",
     # Under a takeover the human supervisor asks the questions — label them distinctly so
+    # the extractor reads them as questions, never as the rep's answers.
     SOURCE_SUPERVISOR: "Supervisor",
 }
 
@@ -383,7 +390,8 @@ class ObserverManager:
         if self._answers.get(answer.field_path) == answer.value:
             # Unchanged — do not re-write or re-emit. INTENTIONALLY covers the intake
             # prefill seed too: a rep merely confirming a prefilled value leaves no
-            # ai_call row (the INTAKE row stays current;
+            # ai_call row (the INTAKE row stays current). The form reads the same either
+            # way — only the answer's provenance differs.
             return
         ts = self._now_ms()
         await self._run_state.record_answer(
@@ -415,7 +423,7 @@ class ObserverManager:
             await self._controller.apply_directive_now(directive)
 
     async def aclose(self) -> None:
-        """Stop tailing and drain. Call in the entrypoint shutdown AFTER the transcript
+        """Stop tailing and drain. Call in the entrypoint shutdown AFTER the call-event
         stream's end() sentinel is written (so the tail drains the final turns) and BEFORE
         the plan-run state is cleared. The tail normally exits on the sentinel; bounded so a
         never-written sentinel can't hang shutdown."""

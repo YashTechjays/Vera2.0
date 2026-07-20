@@ -55,8 +55,7 @@ async def record_answer(
 ) -> bool:
     """Supersede the current answer for (form, field) with a new one, returning whether a
     row was written. Idempotent under the worker stream's at-least-once redelivery: an
-    identical (source, call_id, value) that is already current is a no-op (returns False).
-
+    identical (source, call_id, value) that is already current is a no-op (returns False)
     Demote-then-flush-then-insert keeps the `fa_current_uq` partial-unique index (one
     current row per field) satisfied through the swap."""
     current = (
@@ -68,13 +67,17 @@ async def record_answer(
             )
         )
     ).scalar_one_or_none()
-    if (
-        current is not None
-        and current.source == source
-        and current.call_id == call_id
-        and unwrap_value(current.value) == raw_value
-    ):
-        return False
+    # Replay checks, same call + same source only. Cross-source writes (a human resolve) and
+    # seq-less answers (intake) fall through — they always supersede.
+    if current is not None and current.source == source and current.call_id == call_id:
+        if unwrap_value(current.value) == raw_value:
+            return False
+        if (
+            evidence_seq is not None
+            and current.evidence_seq is not None
+            and evidence_seq < current.evidence_seq
+        ):
+            return False
     if current is not None:
         current.is_current = False
         await session.flush()  # clear the old current before inserting the new one
