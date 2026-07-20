@@ -17,11 +17,11 @@ from agent_worker.observer import (
     _render_turn,
     _Turn,
 )
+from vera_core.call_stream import TYPE_CALL_STATUS, TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, FlowRule
 from vera_core.llm import LLMUnavailableError
-from vera_core.transcript import TranscriptEvent
 
 ROOM = "call--t--c"
 
@@ -45,17 +45,27 @@ def _plan(*, flow_rules: list[FlowRule] | None = None) -> CallPlan:
     )
 
 
-def _rep(text: str, ts: int = 1) -> TranscriptEvent:
-    return TranscriptEvent(role="user", source="rep", text=text, ts=ts)
+def _turn(role: str, source: str, text: str, ts: int = 1) -> CallStreamEvent:
+    return CallStreamEvent(
+        type=TYPE_TRANSCRIPT, data={"role": role, "source": source, "text": text}, ts=ts
+    )
 
 
-def _bot(text: str, ts: int = 1) -> TranscriptEvent:
-    return TranscriptEvent(role="agent", source="bot", text=text, ts=ts)
+def _rep(text: str, ts: int = 1) -> CallStreamEvent:
+    return _turn("user", "rep", text, ts)
 
 
-def _supervisor(text: str, ts: int = 1) -> TranscriptEvent:
+def _bot(text: str, ts: int = 1) -> CallStreamEvent:
+    return _turn("agent", "bot", text, ts)
+
+
+def _supervisor(text: str, ts: int = 1) -> CallStreamEvent:
     # Under a takeover the TakeoverTranscriber publishes the supervisor as role=user.
-    return TranscriptEvent(role="user", source="supervisor", text=text, ts=ts)
+    return _turn("user", "supervisor", text, ts)
+
+
+def _status(status: str = "active", ts: int = 1) -> CallStreamEvent:
+    return CallStreamEvent(type=TYPE_CALL_STATUS, data={"status": status}, ts=ts)
 
 
 class FakeExtractor:
@@ -76,10 +86,10 @@ class FakeExtractor:
 class FakeTranscript:
     """A TranscriptSource whose read() yields queued items then RETURNS (end-of-call)."""
 
-    def __init__(self, items: list[tuple[str, TranscriptEvent] | None] | None = None) -> None:
+    def __init__(self, items: list[tuple[str, CallStreamEvent] | None] | None = None) -> None:
         self.items = items or []
 
-    async def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]:
+    async def read(self, room_name: str) -> AsyncIterator[tuple[str, CallStreamEvent] | None]:
         for item in self.items:
             yield item
 
@@ -142,7 +152,7 @@ def _manager(
     return manager, run_state, bus, controller
 
 
-async def _feed(manager: ObserverManager, event: TranscriptEvent) -> None:
+async def _feed(manager: ObserverManager, event: CallStreamEvent) -> None:
     manager.ingest(event)
     await _settle()
 
@@ -189,6 +199,32 @@ class TestRecording:
         assert extractor.calls == 0
         await _feed(manager, _rep("Yes."))  # seq 1
         assert run_state.records[0][3] == 1  # evidence_seq = latest rep turn seq
+
+
+class TestStreamFiltering:
+    """The Observer shares one mixed stream with the SSE/finalizer — non-transcript frames
+    must be invisible to it (no pass, no seq slot, no task rotation)."""
+
+    @pytest.mark.asyncio
+    async def test_call_status_frame_is_ignored_entirely(self) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, run_state, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _status("active"))
+        assert extractor.calls == 0
+        assert run_state.records == []
+        # …and it consumed no seq slot: the next rep turn is still seq 0.
+        await _feed(manager, _rep("Yes."))
+        assert run_state.records == [(ROOM, "sections.a.x", "Yes", 0)]
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_source_turn_is_skipped(self) -> None:
+        # Mirrors the finalizer dropping a corrupt envelope — no slot consumed either.
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, run_state, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _turn("???", "???", "junk"))
+        assert extractor.calls == 0
+        await _feed(manager, _rep("Yes."))
+        assert run_state.records == [(ROOM, "sections.a.x", "Yes", 0)]
 
 
 class TestSupervisorTakeover:

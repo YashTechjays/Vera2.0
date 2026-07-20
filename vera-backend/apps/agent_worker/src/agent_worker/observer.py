@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from agent_worker.rule_engine import RuleEngine
+from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.llm import LLMUnavailableError
@@ -42,9 +43,7 @@ from vera_core.transcript import (
     SOURCE_BOT,
     SOURCE_REP,
     SOURCE_SUPERVISOR,
-    TranscriptEvent,
-    TurnRole,
-    TurnSource,
+    resolve_turn_source,
 )
 
 if TYPE_CHECKING:
@@ -66,9 +65,11 @@ class ExtractedAnswer:
 
 @dataclass(frozen=True, slots=True)
 class _Turn:
-    role: TurnRole
+    # role/source are plain str: they arrive from the call-event envelope's JSON `data`,
+    # and are only ever string-compared (SOURCE_REP) or label-looked-up here.
+    role: str
     text: str
-    source: TurnSource | None
+    source: str | None
     ts: int
     seq: int
 
@@ -259,11 +260,14 @@ def _render_turn(turn: _Turn) -> str:
 
 
 class TranscriptSource(Protocol):
-    """A tailable transcript stream — `RedisTranscriptStore` in production, a fake in tests.
+    """A tailable call-event stream — `RedisCallStreamStore` in production, a fake in tests.
     `read` replays from the start then blocks-and-tails, yielding `None` on an idle window
-    and returning when the call ends (the end sentinel, or the stream key disappearing)."""
+    and returning when the call ends (the end sentinel, or the stream key disappearing).
+    The stream is mixed: transcript turns AND call_status frames (filtered in `ingest`)."""
 
-    def read(self, room_name: str) -> AsyncIterator[tuple[str, TranscriptEvent] | None]: ...
+    def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]: ...
 
 
 # Bound how long shutdown waits for the tail loop to drain to the end sentinel before it
@@ -331,14 +335,28 @@ class ObserverManager:
                 "observer manager %s: tail loop failed (%s)", self._room, type(exc).__name__
             )
 
-    def ingest(self, event: TranscriptEvent) -> None:
+    def ingest(self, event: CallStreamEvent) -> None:
+        # Filter BEFORE anything else: a call_status frame must consume no seq slot AND must
+        # not trigger a task rotation. Both skips mirror transcript_finalizer._build_rows, so
+        # our seq stays equal to the row's eventual transcript.seq.
+        if event.type != TYPE_TRANSCRIPT:
+            return
+        source = resolve_turn_source(event.data)
+        if source is None:
+            return  # unresolvable source — the finalizer drops it too, consuming no slot
         seq, self._seq = self._seq, self._seq + 1  # matches transcript.seq numbering
         index = self._controller.active_task_index
         if index != self._active_index:
             self._rotate(index)
         if self._active is not None:
             self._active.feed(
-                _Turn(role=event.role, text=event.text, source=event.source, ts=event.ts, seq=seq)
+                _Turn(
+                    role=str(event.data.get("role", "")),
+                    text=str(event.data.get("text", "")),
+                    source=source,
+                    ts=event.ts,
+                    seq=seq,
+                )
             )
 
     def _rotate(self, index: int | None) -> None:

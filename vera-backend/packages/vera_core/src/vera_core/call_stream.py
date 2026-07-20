@@ -1,11 +1,12 @@
-"""Generalized live per-call event stream — envelope model, Redis transport, service.
+"""The single live per-call event stream — envelope model, Redis transport, service.
 
-The real-call counterpart of `vera_core.transcript` (which stays voice-lab-only):
-one stream per room carrying typed envelopes so ONE SSE can deliver every live
-surface — transcript turns today, call-status frames, and (later) form-filling
-progress — without a new pipe per event type. Payloads are tokenized /
-de-identified only (same PHI contract as the transcript stream); never hydrated
-raw PHI.
+One stream per room (`vera:call-events:{room}`) carrying typed envelopes, so ONE pipe
+feeds every live surface: transcript turns and call-status frames today, form-filling
+progress later. It is the only live transport — the real-call SSE, the voice-lab SSE
+(which adapts envelopes back to a flat turn wire), the transcript finalizer, the call
+summariser and the worker's Observer (filtering `type == "transcript"`) all read it.
+The turn vocabulary these envelopes carry lives in `vera_core.transcript`.
+Payloads are de-identified only; never hydrated raw PHI.
 """
 
 import asyncio
@@ -62,9 +63,9 @@ class CallStreamStore(Protocol):
 
 
 class RedisCallStreamStore:
-    """Redis Streams transport; identical lifecycle to RedisTranscriptStore
-    (rolling backstop TTL on publish; ended sentinel + grace TTL; replay-then-tail
-    read that stops on the sentinel or a vanished key)."""
+    """Redis Streams transport: rolling backstop TTL on publish; ended sentinel + grace
+    TTL; replay-then-tail read that stops on the sentinel or a vanished key. `read` is the
+    canonical BLOCK-timeout handling every tailing consumer copies (see repo CLAUDE.md)."""
 
     def __init__(
         self,

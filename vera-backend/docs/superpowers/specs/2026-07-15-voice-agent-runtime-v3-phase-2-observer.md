@@ -210,6 +210,29 @@ Then `/simplify` on the change, then `just check` (repo rule).
 > already recomputed the projection, so `resolve_ai_processing` reads a fresh
 > `completion_pct` with no extra query. The `AuditEvent.FORM_AI_ANSWER` member (C4) shipped.
 
+> **Implementation note (2026-07-20) — directive application.** Decision #4 and W2 specify a
+> pre-LLM `on_user_turn_completed` hook consuming a *staged* directive. As built, the Observer
+> calls `controller.apply_directive_now(...)` directly (interrupt + `update_agent` /
+> `generate_reply`). Risk #1 (`update_agent` + `StopResponse` from inside the hook on 1.5.17)
+> is the reason: the spike showed the hook path swallowing the swap. The race decision #4 was
+> avoiding is closed instead by three guards inside `apply_directive_now` — the controller's
+> `lock`, a `generation` counter that drops stale directives, and an early return when
+> `takeover_engaged(session)` or `active_task_index is None` (IVR / wrap-up). Latency improves:
+> the redirect lands on the current turn, not the next.
+>
+> **Implementation note (2026-07-20) — single transcript stream.** The Observer no longer reads
+> `vera:transcript:{room}`; that stream is **retired** and its store deleted. `vera:call-events:
+> {room}` is now the ONE live stream — the Observer tails it filtering `type == "transcript"`,
+> and it is force-created for any plan call (not just `publish_events` opt-in) so the Observer
+> cannot go blind. Motivation: the dual write was a standing drift hazard — the supervisor
+> takeover bug (takeover turns reached only `call-events`, starving the Observer) was exactly
+> that failure, and `evidence_seq`↔`transcript.seq` parity had to be held by convention across
+> two transports. Both counters now apply identical skip rules to one envelope sequence
+> (non-transcript envelopes and unresolvable-source turns each consume NO slot), pinned by
+> `tests/unit/test_evidence_seq_parity.py`. Voice Lab keeps its **flat** HTTP wire via a
+> server-side adapter in `voice_lab.py`, so the frontend is unchanged; the integration test
+> asserts that flatness as the contract guard.
+
 ## Tests
 - Worker unit: rule engine (fire-once / re-arm / partial answers); Observer debounce / coalesce /
   queue-overflow / crash-isolation (raising LLM stub); **per-task isolation** (task-N Observer

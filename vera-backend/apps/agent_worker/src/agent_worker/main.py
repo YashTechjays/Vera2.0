@@ -66,7 +66,6 @@ from vera_core.plan_store import (
     RedisPlanRunStateStore,
 )
 from vera_core.redis import create_redis
-from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("agent_worker")
 
@@ -281,7 +280,7 @@ def resolve_session(room_name: str, *, is_local: bool) -> str | None:
 
 
 def _fan_out_sink(sinks: list[TurnPublisher]) -> TurnPublisher | None:
-    """Collapse the enabled stream sinks (transcript service, call stream) behind one
+    """Collapse the enabled stream sinks (the call stream today) behind one
     TurnPublisher, so at most one ReorderingEmitter is ever attached per job: None with
     nothing enabled, the sink itself with exactly one, a FanOutTurnPublisher otherwise."""
     if not sinks:
@@ -413,26 +412,13 @@ async def entrypoint(ctx: JobContext) -> None:
             key_terms=controller.plan.stt_key_terms if controller is not None else None,
         )
 
-        # Live transcript Redis stream. Written for Voice Lab (publish_transcript) AND for
-        # every plan-backed call — the Observer TAILS this stream to extract answers, so a
-        # plan call must always populate vera:transcript:{room}, opt-in or not.
-        transcript_redis: Redis | None = None
-        transcript_service: TranscriptService | None = None
-        if meta.get("publish_transcript") or controller is not None:
-            transcript_redis = create_redis(settings.redis_url)
-            transcript_service = TranscriptService(
-                RedisTranscriptStore(
-                    transcript_redis,
-                    ttl_seconds=settings.transcript_stream_ttl_seconds,
-                    end_grace_seconds=settings.transcript_end_grace_seconds,
-                )
-            )
-
-        # Real-call envelope stream (dispatcher opt-in via publish_events): transcript
-        # turns + call_status frames for the /calls/{id}/events SSE. Reuses the
-        # transcript TTL settings — same lifecycle, different stream.
+        # THE call event stream: transcript turns + call_status frames, feeding the
+        # /calls/{id}/events SSE, the Voice-Lab SSE, the transcript finalizer, and the
+        # Observer. Written for the SSE opt-ins (publish_events / publish_transcript) AND
+        # unconditionally for every plan-backed call — the Observer tails it to extract
+        # answers, so a plan call must always populate vera:call-events:{room}, opt-in or not.
         call_stream: CallStreamService | None = None
-        if meta.get("publish_events"):
+        if meta.get("publish_events") or meta.get("publish_transcript") or controller is not None:
             call_stream_redis = create_redis(settings.redis_url)
             call_stream = CallStreamService(
                 RedisCallStreamStore(
@@ -442,7 +428,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             )
 
-        # The Observer TAILS the transcript stream (with its OWN read client, so tearing
+        # The Observer TAILS the call-event stream (with its OWN read client, so tearing
         # down the write path at shutdown can't kill the reader) to extract answers from the
         # live call. It routes turns per active task and does nothing during IVR/wrap-up, so
         # it is inert until the conversation path begins. Started for a plan-backed canonical
@@ -473,7 +459,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 run_state=run_state,
                 bus=bus,
                 extractor=ResilientAnswerExtractor(extract_llm),
-                transcript=RedisTranscriptStore(
+                transcript=RedisCallStreamStore(
                     observer_redis,
                     ttl_seconds=settings.transcript_stream_ttl_seconds,
                     end_grace_seconds=settings.transcript_end_grace_seconds,
@@ -482,12 +468,11 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             observer_manager.start()
 
-        # One reordering emitter fanned out to every enabled sink — the barge-in reorder
-        # state machine lives once per job, not once per stream (see transcript_publisher).
-        # (The Observer is NOT a sink — it reads the stream these sinks write.)
-        sinks: list[TurnPublisher] = [
-            svc for svc in (transcript_service, call_stream) if svc is not None
-        ]
+        # One reordering emitter driving the stream — the barge-in reorder state machine
+        # lives once per job (see transcript_publisher). Kept as a fan-out seam so a second
+        # sink can be added without reshaping the emitter wiring.
+        # (The Observer is NOT a sink — it reads the stream this sink writes.)
+        sinks: list[TurnPublisher] = [call_stream] if call_stream is not None else []
         turn_sink = _fan_out_sink(sinks)
         turn_emitter: ReorderingEmitter | None = None
         if turn_sink is not None:
@@ -519,18 +504,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 except Exception:  # best-effort; never block shutdown
                     logger.exception("failed to flush turn emitter for %s", room_name)
 
-        async def _end_transcript_stream() -> None:
-            if transcript_service is not None:
-                try:
-                    await transcript_service.end(room_name)
-                except Exception:  # best-effort; never block shutdown
-                    logger.exception("failed to mark transcript ended for %s", room_name)
-            if transcript_redis is not None:
-                try:
-                    await transcript_redis.aclose()
-                except Exception:
-                    logger.exception("failed to close transcript redis for %s", room_name)
-
         async def _end_call_stream() -> None:
             if call_stream is not None:
                 try:
@@ -545,8 +518,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     logger.exception("failed to close call stream redis for %s", room_name)
 
         async def _end_observer() -> None:
-            # Runs AFTER _end_transcript_stream (so the tail drains through the end sentinel)
-            # and BEFORE the plan-run state is cleared (its final drain writes record_answer).
+            # Runs AFTER _end_call_stream (so the tail drains through the end sentinel it
+            # writes — without that the drain would burn its full timeout and lose trailing
+            # turns) and BEFORE the plan-run state is cleared (its final drain writes
+            # record_answer). Safe against _end_call_stream closing its Redis client: the
+            # Observer reads on its own.
             if observer_manager is not None:
                 try:
                     await observer_manager.aclose()
@@ -586,20 +562,20 @@ async def entrypoint(ctx: JobContext) -> None:
                     logger.exception("failed to close plan redis for %s", room_name)
 
         async def _on_shutdown() -> None:
-            # Sequential, spec-pinned order: flush the shared emitter once, then
-            # transcript-stream teardown (writes the end sentinel), then the Observer
-            # (its tail drains through that sentinel), then call-stream teardown, then
-            # the plan run's Redis keys. Each step inside the helpers is best-effort (own
-            # try/except), so a failure never skips the rest.
+            # Sequential, spec-pinned order: flush the shared emitter once, then the takeover
+            # transcriber (so its turns land before any sentinel), then call-stream teardown
+            # (which WRITES the end sentinel), then the Observer — its tail drains through
+            # that sentinel, so it must come after — then the plan run's Redis keys. Each step
+            # inside the helpers is best-effort (own try/except), so a failure never skips the
+            # rest.
             await _flush_turn_emitter()
             if takeover_transcriber is not None:
                 try:
                     await takeover_transcriber.aclose()  # before end(): flush its turns first
                 except Exception:
                     logger.exception("failed to close takeover transcriber for %s", room_name)
-            await _end_transcript_stream()
-            await _end_observer()
             await _end_call_stream()
+            await _end_observer()
             await _end_plan_run()
 
             # Last: signal the terminal event. Normally call.ended (the consumer
