@@ -2,19 +2,16 @@
 
 `intervention_event.category` is a first-class CHECK column so the
 intervention-by-category report is a GROUP BY, not a JSONB scan (ADR §6).
-`export_artifact` logs PHI leaving the perimeter (ondelete RESTRICT keeps the
-disclosure record). `call_provider_usage` is the home the spec §4.7.2 cost/latency
-reports lacked. `eval_run` is authoring-catalog scoped (no tenant_id, no RLS) —
-it evaluates a global `prompt_version`.
+`call_provider_usage` is the home the spec §4.7.2 cost/latency reports lacked.
+`eval_run` is authoring-catalog scoped (no tenant_id, no RLS) — it evaluates a
+global `prompt_version`. Export-disclosure ledger lives in `export_artifact.py`.
 """
 
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -36,7 +33,6 @@ from vera_core.db.base import (
 )
 from vera_core.models.enums import (
     EvalScope,
-    ExportFormat,
     InterventionCategory,
     InterventionType,
     ProviderStage,
@@ -67,23 +63,6 @@ class InterventionEvent(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
     payload_ref: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, info=PHI_INFO
     )
-
-
-class ExportArtifact(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
-    """A PHI export leaving the perimeter — the disclosure record (ADR §4.5.4)."""
-
-    __tablename__ = "export_artifact"
-    __table_args__ = (
-        check_in("format", ExportFormat),
-        Index("ix_export_artifact_form", "form_id"),
-    )
-
-    form_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("patient_form.id", ondelete="RESTRICT"), nullable=False
-    )
-    format: Mapped[str] = mapped_column(String(16), nullable=False)
-    gcs_uri: Mapped[str] = mapped_column(String(1024), nullable=False)
-    disclosed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class HumanRating(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):

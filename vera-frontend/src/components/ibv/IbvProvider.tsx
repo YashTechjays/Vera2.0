@@ -30,6 +30,7 @@ import {
   updatePatientFormStatus,
 } from "@/lib/patient-forms/api"
 import type {
+  FieldProvenance,
   PatientFormDetail,
   PatientFormStatus,
   ProviderOption,
@@ -88,6 +89,10 @@ type IbvContextValue = {
   /** Increments after each successful save — worklists watch it to refetch. */
   savedTick: number
   modalOpen: boolean
+  /** The currently open form's id (null for mock/demo). */
+  formId: string | null
+  /** Returns the provenance record for a field path, or null if absent. */
+  provenanceFor: (path: string) => FieldProvenance | null
   /** Open a real patient form by id, loaded from the API. */
   openFormById: (formId: string) => void
   closeForm: () => void
@@ -107,15 +112,16 @@ async function loadSchema(versionId: string): Promise<FormSchema> {
   return schema
 }
 
-/** Map an API form detail into the form's value + dispute maps (keyed by path).
- * Date leaves are converted from stored ISO to the schema's declared
- * date_format on the way in — see isoToDateFormat. */
+/** Map an API form detail into the form's value, dispute, and provenance maps
+ * (keyed by path). Date leaves are converted from stored ISO to the schema's
+ * declared date_format on the way in — see isoToDateFormat. */
 function adaptDetail(
   detail: PatientFormDetail,
   schema: FormSchema
 ): {
   values: FormValues
   disputes: DisputeMap
+  provenance: Record<string, FieldProvenance>
 } {
   const dateFormats = new Map<string, string>()
   for (const leaf of allLeaves(schema)) {
@@ -129,6 +135,7 @@ function adaptDetail(
   }
   const values: FormValues = {}
   const disputes: DisputeMap = {}
+  const provenance: Record<string, FieldProvenance> = {}
   for (const f of detail.fields) {
     values[f.field_path] = toInput(f.value, f.field_path)
     if (f.dispute) {
@@ -140,8 +147,9 @@ function adaptDetail(
         reasoning: f.dispute.reasoning ?? undefined,
       }
     }
+    if (f.provenance) provenance[f.field_path] = f.provenance
   }
-  return { values, disputes }
+  return { values, disputes, provenance }
 }
 
 export function IbvProvider({
@@ -162,6 +170,7 @@ export function IbvProvider({
   const [originalValues, setOriginalValues] = useState<FormValues>({})
   const [disputes, setDisputes] = useState<DisputeMap>({})
   const [flags, setFlagsState] = useState<DisputeFlagMap>({})
+  const [provenance, setProvenance] = useState<Record<string, FieldProvenance>>({})
 
   const [dirty, setDirty] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>("idle")
@@ -231,6 +240,7 @@ export function IbvProvider({
       setStatus(null)
       setStatusError(null)
       setInsuranceType(null)
+      setProvenance({})
       setIvrNavigation(true)
       setProviders([])
       setProviderId("")
@@ -244,11 +254,12 @@ export function IbvProvider({
             loadSchema(detail.schema_version_id),
             listInsuranceProviders().catch(() => [] as ProviderOption[]),
           ])
-          const { values: v, disputes: d } = adaptDetail(detail, loaded)
+          const { values: v, disputes: d, provenance: prov } = adaptDetail(detail, loaded)
           seed(v, d, detail.patient_name)
           setSchema(loaded)
           setStatus(detail.status)
           setInsuranceType(detail.insurance_type)
+          setProvenance(prov)
           setIvrNavigation(detail.ivr_navigation_enabled)
           setProviders(providerList)
           setProviderId(matchProvider(providerList, detail.insurance_provider))
@@ -263,7 +274,10 @@ export function IbvProvider({
     [seed],
   )
 
-  const closeForm = useCallback(() => setModalOpen(false), [])
+  const closeForm = useCallback(() => {
+    setModalOpen(false)
+    setProvenance({})
+  }, [])
 
   const setValue = useCallback((path: string, value: string) => {
     setValues((prev) => ({ ...prev, [path]: value }))
@@ -385,10 +399,11 @@ export function IbvProvider({
         dispute_fields,
         reasked_fields: [],
       })
-      const { values: v, disputes: d } = adaptDetail(refreshed, schema)
+      const { values: v, disputes: d, provenance: prov } = adaptDetail(refreshed, schema)
       seed(v, d, refreshed.patient_name)
       setStatus(refreshed.status)
       setStatusError(null) // resolving disputes clears any "resolve first" warning
+      setProvenance(prov)
       setSaveState("saved")
       setSavedTick((t) => t + 1)
     } catch (err) {
@@ -396,6 +411,11 @@ export function IbvProvider({
       setSaveState("idle")
     }
   }, [mode, formId, schema, values, originalValues, disputes, flags, seed, clearedRequired])
+
+  const provenanceFor = useCallback(
+    (path: string) => provenance[path] ?? null,
+    [provenance],
+  )
 
   const value: IbvContextValue = {
     schema,
@@ -428,6 +448,8 @@ export function IbvProvider({
     insuranceType,
     savedTick,
     modalOpen,
+    formId,
+    provenanceFor,
     openFormById,
     closeForm,
   }

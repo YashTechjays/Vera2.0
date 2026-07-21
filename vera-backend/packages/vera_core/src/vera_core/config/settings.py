@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     worker_events_reclaim_idle_ms: int = 60_000  # VERA_WORKER_EVENTS_RECLAIM_IDLE_MS
     call_failed_teardown_grace_ms: int = 1_500  # VERA_CALL_FAILED_TEARDOWN_GRACE_MS
 
+    # Post-call re-read (LLM eval). Gemini Flash on Vertex (BAA-covered); the review
+    # floor routes low-confidence/unsupported fields to EXCEPTION_REVIEW.
+    gemini_flash_model: str = "gemini-2.5-flash"  # VERA_GEMINI_FLASH_MODEL
+    vertex_location: str = "us-central1"  # VERA_VERTEX_LOCATION
+    post_call_review_floor: int = 70  # VERA_POST_CALL_REVIEW_FLOOR
+    post_call_block_ms: int = 5_000  # VERA_POST_CALL_BLOCK_MS
+    post_call_reclaim_idle_ms: int = 60_000  # VERA_POST_CALL_RECLAIM_IDLE_MS
     # Pipeline sweeper: reconciles stuck calls (worker crash / lost event) and
     # wakes the dispatcher on a timer (working-hours reopen, queue expiry).
     pipeline_sweep_interval_seconds: int = 60  # VERA_PIPELINE_SWEEP_INTERVAL_SECONDS

@@ -31,6 +31,13 @@ export function statusBadgeClass(status: PatientFormStatus | string): string {
   }
 }
 
+/** Tailwind chip classes for a call attempt's mode ("full" | "retry"). */
+export function modeBadgeClass(mode: "full" | "retry"): string {
+  return mode === "retry"
+    ? "bg-purple-100 text-purple-700"
+    : "bg-slate-100 text-slate-600"
+}
+
 // Manual status transitions a reviewer/operator may trigger from the form UI —
 // mirrors the backend state machine in patient_forms.py. The call pipeline owns
 // every other edge, so only these targets are offered.
@@ -88,4 +95,15 @@ export function formatDate(iso: string | null): string {
   return Number.isNaN(d.getTime())
     ? "—"
     : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
+}
+
+/** Rough relative age for worklist columns: "3d" / "5h" / "12m", or "—". */
+export function ageLabel(iso: string | null): string {
+  if (!iso) return "—"
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return "—"
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60_000))
+  if (mins >= 1440) return `${Math.floor(mins / 1440)}d`
+  if (mins >= 60) return `${Math.floor(mins / 60)}h`
+  return `${mins}m`
 }

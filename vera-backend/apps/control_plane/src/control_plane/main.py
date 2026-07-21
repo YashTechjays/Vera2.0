@@ -21,7 +21,9 @@ from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
+from control_plane.llm import VertexLLMClient
 from control_plane.pipeline_sweeper import PipelineSweeper
+from control_plane.post_call_consumer import PostCallConsumer
 from control_plane.recording_jobs import RecordingVerifier, RetentionSweeper
 from control_plane.recording_storage import GCSRecordingStorage, RecordingStorage
 from control_plane.request_context import RequestIdMiddleware
@@ -36,6 +38,7 @@ from vera_core.call_stream import CallStreamService, RedisCallStreamStore
 from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_settings
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
+from vera_core.events import PostCallJobBus
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.notifications import NotificationService, RedisNotificationStore
 from vera_core.observability.otel import configure_observability
@@ -48,8 +51,8 @@ logger = logging.getLogger("control_plane.main")
 
 def _log_task_exit(label: str) -> Callable[[asyncio.Task[None]], None]:
     """Build a done-callback that surfaces an unexpected exit of a lifespan
-    background task (the worker-event consumer, the pipeline sweeper, the
-    recording verifier / retention sweeper).
+    background task (the worker-event / post-call consumers, the pipeline
+    sweeper, the recording verifier / retention sweeper).
 
     `run()` only returns via cancellation (shutdown) or an uncaught exception; without
     this callback the latter would die silently ("Task exception was never retrieved").
@@ -182,17 +185,25 @@ def create_app(
         )
         app.state.invitation_store = invitation_store or RedisInvitationStore(_redis())
 
-        # Worker→control-plane event consumer. Needs a real LiveKit gateway (to tear
-        # rooms down) and a dedicated Redis client (a blocking XREADGROUP pins a
-        # connection — same reason the transcript stream gets its own client). Not
-        # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
+        # Both stream consumers need a real LiveKit gateway (to tear rooms down) and are
+        # skipped when SIP/LiveKit is unconfigured (tests / local without a trunk).
+        livekit_ready = settings.livekit_url is not None and app.state.livekit is not None
+
+        # Worker→control-plane event consumer. Uses a dedicated Redis client (a blocking
+        # XREADGROUP pins a connection — same reason the transcript stream gets its own).
         worker_events_redis: Redis | None = None
         worker_event_task: asyncio.Task[None] | None = None
+        # Post-call eval bus: always set so tests can enqueue through it. The
+        # worker-events close path only gets it when the eval consumer will run
+        # (needs a GCP project for the LLM) — otherwise jobs would pile up
+        # undrained and forms would strand in AI_PROCESSING until the sweeper.
+        app.state.post_call_bus = PostCallJobBus(_redis())
+        post_call_eval_ready = settings.gcp_project is not None
         # Derived once; None when the bucket is unset (recording disabled) — every
         # consumer (dispatch refill, sweeper wake-up, verifier reap) shares it.
         recording_config = recording_config_from(settings)
         sweeper_task: asyncio.Task[None] | None = None
-        if settings.livekit_url is not None and app.state.livekit is not None:
+        if livekit_ready:
             worker_events_redis = create_redis(settings.redis_url)
             consumer = WorkerEventConsumer(
                 worker_events_redis,
@@ -208,6 +219,7 @@ def create_app(
                 recording=recording_config,
                 call_plans=_call_plans,
                 notifications=_notifications,
+                post_call_bus=app.state.post_call_bus if post_call_eval_ready else None,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
@@ -266,9 +278,36 @@ def create_app(
             retention_sweeper_task = asyncio.create_task(retention_sweeper.run())
             retention_sweeper_task.add_done_callback(_log_task_exit("retention sweeper"))
 
+        post_call_redis: Redis | None = None
+        post_call_task: asyncio.Task[None] | None = None
+        if livekit_ready and settings.gcp_project is not None:
+            post_call_redis = create_redis(settings.redis_url)
+            llm = VertexLLMClient(
+                project=settings.gcp_project,
+                location=settings.vertex_location,
+                model=settings.gemini_flash_model,
+            )
+            post_call_consumer = PostCallConsumer(
+                post_call_redis,
+                sessionmaker,
+                _call_stream_service,
+                llm,
+                app.state.audit,
+                app.state.livekit,
+                kms=app.state.kms,
+                recording=recording_config,
+                plan_service=_call_plans,
+                block_ms=settings.post_call_block_ms,
+                reclaim_idle_ms=settings.post_call_reclaim_idle_ms,
+                review_floor=settings.post_call_review_floor,
+            )
+            post_call_task = asyncio.create_task(post_call_consumer.run())
+            post_call_task.add_done_callback(_log_task_exit("post-call consumer"))
+
         configure_observability(settings)
         yield
         # Stop background loops in reverse start order before closing their clients.
+        await _cancel_task(post_call_task)
         await _cancel_task(retention_sweeper_task)
         await _cancel_task(verifier_task)
         await _cancel_task(sweeper_task)
@@ -278,6 +317,8 @@ def create_app(
         # Detached dispatch tasks (post-commit enqueue / consumer refill) must finish
         # before the engine goes away — they hold their own sessions off this engine.
         await drain_pending()
+        if post_call_redis is not None:
+            await post_call_redis.aclose()
         if worker_events_redis is not None:
             await worker_events_redis.aclose()
         if redis is not None:

@@ -23,14 +23,15 @@ import type {
   PatientFormStatus,
   PatientFormSummary,
 } from "@/lib/patient-forms/types"
-import { formatDate, statusBadgeClass, statusLabel } from "@/lib/patient-forms/display"
+import { ageLabel, formatDate, statusBadgeClass, statusLabel } from "@/lib/patient-forms/display"
 
 const PAGE_SIZE = 20
 
-type TabKey = "all" | "completed"
-const TABS: { key: TabKey; label: string }[] = [
+type TabKey = "all" | "needs_review" | "completed"
+const TABS: { key: TabKey; label: string; fixedStatus?: PatientFormStatus }[] = [
   { key: "all", label: "All Data" },
-  { key: "completed", label: "Completed" },
+  { key: "needs_review", label: "Needs Review", fixedStatus: "exception_review" },
+  { key: "completed", label: "Completed", fixedStatus: "completed" },
 ]
 
 const STATUS_OPTIONS: PatientFormStatus[] = [
@@ -74,8 +75,9 @@ export function DataManagement() {
   // to reload. Without this the list is a frozen snapshot from page load.
   const [autoTick, setAutoTick] = useState(0)
 
-  // Tab "Completed" forces a status filter; otherwise the Select drives it.
-  const effectiveStatus = tab === "completed" ? "completed" : status || undefined
+  // Tabs with a fixedStatus force that filter; the "all" tab defers to the Select.
+  const activeTab = TABS.find((t) => t.key === tab)!
+  const effectiveStatus = activeTab.fixedStatus ?? (status || undefined)
 
   useEffect(() => {
     const id = setInterval(() => setAutoTick((n) => n + 1), 30_000)
@@ -130,6 +132,7 @@ export function DataManagement() {
 
   const rows = items ?? []
   const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const extraCols = tab === "needs_review" ? 2 : 0
 
   return (
     <div className="space-y-6">
@@ -174,23 +177,24 @@ export function DataManagement() {
                 className="pl-8"
               />
             </form>
-            <div className="w-44">
-              <Select
-                value={status}
-                disabled={tab === "completed"}
-                onChange={(e) => {
-                  setStatus(e.target.value as "" | PatientFormStatus)
-                  setPage(1)
-                }}
-              >
-                <option value="">All Status</option>
-                {STATUS_OPTIONS.map((s) => (
-                  <option key={s} value={s}>
-                    {statusLabel(s)}
-                  </option>
-                ))}
-              </Select>
-            </div>
+            {!activeTab.fixedStatus && (
+              <div className="w-44">
+                <Select
+                  value={status}
+                  onChange={(e) => {
+                    setStatus(e.target.value as "" | PatientFormStatus)
+                    setPage(1)
+                  }}
+                >
+                  <option value="">All Status</option>
+                  {STATUS_OPTIONS.map((s) => (
+                    <option key={s} value={s}>
+                      {statusLabel(s)}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
           </div>
         </div>
 
@@ -223,13 +227,19 @@ export function DataManagement() {
                   </span>
                 </TableHead>
               ))}
+              {tab === "needs_review" && (
+                <>
+                  <TableHead className="select-none">Reason</TableHead>
+                  <TableHead className="select-none">Age</TableHead>
+                </>
+              )}
             </TableRow>
           </TableHeader>
           <TableBody>
             {items === null && (
               <TableRow>
                 <TableCell
-                  colSpan={COLUMNS.length}
+                  colSpan={COLUMNS.length + extraCols}
                   className="py-10 text-center text-muted-foreground"
                 >
                   Loading…
@@ -239,7 +249,7 @@ export function DataManagement() {
             {items?.length === 0 && (
               <TableRow>
                 <TableCell
-                  colSpan={COLUMNS.length}
+                  colSpan={COLUMNS.length + extraCols}
                   className="py-10 text-center text-muted-foreground"
                 >
                   No records match your filters.
@@ -273,6 +283,25 @@ export function DataManagement() {
                     {statusLabel(f.status)}
                   </span>
                 </TableCell>
+                {tab === "needs_review" && (
+                  <>
+                    <TableCell>
+                      {f.review_reason ? (
+                        <span
+                          className={cn(
+                            "inline-block rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide",
+                            "bg-amber-100 text-amber-700", // review reasons are warning-level by definition
+                          )}
+                        >
+                          {statusLabel(f.review_reason)}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
+                    <TableCell>{ageLabel(f.updated_at)}</TableCell>
+                  </>
+                )}
               </TableRow>
             ))}
           </TableBody>

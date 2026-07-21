@@ -58,6 +58,44 @@ type RequestOptions = {
   headers?: Record<string, string>
 }
 
+/** apiRequest for binary downloads: returns the raw Blob. Failures still arrive
+ *  as the JSON envelope, so parse it for the error message when present. */
+export async function apiRequestBlob(path: string, opts: RequestOptions = {}): Promise<Blob> {
+  const { method = "GET", body, auth = true, headers: extraHeaders } = opts
+  const headers: Record<string, string> = { ...extraHeaders }
+  if (body !== undefined) headers["Content-Type"] = "application/json"
+  if (auth) {
+    const token = getToken()
+    if (token) headers.Authorization = `Bearer ${token}`
+  }
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch {
+    throw new ApiError(0, "NETWORK_ERROR", "Could not reach the server. Is the API running?")
+  }
+  if (!res.ok) {
+    let envelope: Envelope<unknown> | null = null
+    try {
+      envelope = (await res.json()) as Envelope<unknown>
+    } catch {
+      /* non-JSON error body */
+    }
+    // Reuse apiRequest's 401 handling so an expired session clears auth state.
+    if (res.status === 401 && auth) authFailureHandler?.()
+    throw new ApiError(
+      res.status,
+      envelope?.error_code ?? null,
+      envelope?.message ?? `Request failed (${res.status})`,
+    )
+  }
+  return res.blob()
+}
+
 export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, auth = true, headers: extraHeaders } = opts
 
