@@ -2,9 +2,13 @@
 schema_version row (both insurance types) that is missing the key, using the
 call_reference_number leaf's existing, never-moved location — and leaves alone
 (and flags via its guard count) any row whose own sections tree doesn't have
-that leaf. The test imports UPDATE_STATEMENTS / UNRESOLVABLE_COUNT_STATEMENTS
-from the migration module itself, so it exercises the exact statements the
-migration runs. Skips without a reachable DB (see conftest)."""
+that leaf. Patching must never disturb the order of any EXISTING key at any
+nesting level (schema_json is Postgres `json`, not `jsonb`, precisely because
+document key order is field order) — this is exercised directly, not just
+implied by "validation still passes". The test imports
+SELECT_ELIGIBLE_STATEMENTS / UNRESOLVABLE_COUNT_STATEMENTS / patch_document /
+abort_if_unresolvable from the migration module itself, so it exercises the
+exact logic the migration runs. Skips without a reachable DB (see conftest)."""
 
 import importlib.util
 from collections.abc import AsyncGenerator
@@ -39,6 +43,14 @@ DISEASE_SECTIONS_WITH_LEAF: dict[str, Any] = {
 SECTIONS_WITHOUT_LEAF: dict[str, Any] = {
     "insurance_representative": {"fields": {"rep_name": {"type": "text"}}}
 }
+# Deliberately non-alphabetical sibling keys at every level: a jsonb round-trip
+# would re-sort these (Postgres jsonb keys sort by length then byte order),
+# which is exactly the regression this fixture catches.
+ORDER_SENSITIVE_FIELDS: dict[str, Any] = {
+    "zzz_last_field": {"type": "text"},
+    "call_reference_number": {"type": "text"},
+    "aaa_first_field": {"type": "text"},
+}
 
 MISSING_KEY_IBV: dict[str, Any] = {
     "dsl_version": "2.1",
@@ -62,6 +74,11 @@ UNRESOLVABLE_IBV: dict[str, Any] = {
     "name": "unresolvable-ibv",
     "sections": SECTIONS_WITHOUT_LEAF,
 }
+ORDER_SENSITIVE_IBV: dict[str, Any] = {
+    "dsl_version": "2.1",
+    "name": "order-sensitive-ibv",
+    "sections": {"insurance_representative": {"fields": ORDER_SENSITIVE_FIELDS}},
+}
 
 
 def _migration_module() -> ModuleType:
@@ -72,26 +89,32 @@ def _migration_module() -> ModuleType:
     return module
 
 
-def _update_statements() -> tuple[str, ...]:
-    statements: tuple[str, ...] = _migration_module().UPDATE_STATEMENTS
-    return statements
-
-
-def _unresolvable_count_statements() -> tuple[str, ...]:
-    statements: tuple[str, ...] = _migration_module().UNRESOLVABLE_COUNT_STATEMENTS
-    return statements
-
-
 async def _run_backfill(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """Mirrors upgrade()'s backfill loop exactly: SELECT the raw json text per
+    insurance type, patch it via the migration's own patch_document (order-
+    preserving), write it back. Reuses the migration module's own SQL and
+    Python logic so the two cannot drift."""
+    module = _migration_module()
     async with sessionmaker() as session, session.begin():
-        for statement in _update_statements():
-            await session.execute(text(statement))
+        for (section_key, field_key), statement in zip(
+            module.PATH_BY_INSURANCE_TYPE.values(),
+            module.SELECT_ELIGIBLE_STATEMENTS,
+            strict=True,
+        ):
+            path = f"sections.{section_key}.{field_key}"
+            result = await session.execute(text(statement))
+            for row_id, schema_json_text in result.all():
+                await session.execute(
+                    text(module.UPDATE_ROW_SQL),
+                    {"doc": module.patch_document(schema_json_text, path), "id": row_id},
+                )
 
 
 async def _guard_counts(sessionmaker: async_sessionmaker[AsyncSession]) -> list[int]:
+    module = _migration_module()
     async with sessionmaker() as session:
         counts: list[int] = []
-        for statement in _unresolvable_count_statements():
+        for statement in module.UNRESOLVABLE_COUNT_STATEMENTS:
             result = await session.execute(text(statement))
             counts.append(result.scalar_one())
         return counts
@@ -149,6 +172,7 @@ async def backfill_world(
             "already_has_key": version(ibv_schema, 2, ALREADY_HAS_KEY),
             "v1": version(ibv_schema, 3, V1_DOC),
             "unresolvable": version(ibv_schema, 4, UNRESOLVABLE_IBV),
+            "order_sensitive": version(ibv_schema, 5, ORDER_SENSITIVE_IBV),
             "missing_key_disease": version(disease_schema, 1, MISSING_KEY_DISEASE),
         }
         await session.flush()
@@ -190,6 +214,24 @@ async def test_backfills_rows_missing_the_key_when_the_leaf_resolves(
     assert "rep_call_reference_number_field" not in unresolvable_doc
 
 
+async def test_backfill_preserves_existing_key_order(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    backfill_world: dict[str, UUID],
+) -> None:
+    """The regression this fixture exists to catch: a jsonb round-trip would
+    silently re-sort sibling keys (Postgres jsonb orders by length then byte
+    value), scrambling the live call's question order and the review UI's
+    field order for a form still pinned to this row."""
+    await _run_backfill(admin_sessionmaker)
+    doc = await _schema_json(admin_sessionmaker, backfill_world["order_sensitive"])
+
+    fields = doc["sections"]["insurance_representative"]["fields"]
+    assert list(fields.keys()) == ["zzz_last_field", "call_reference_number", "aaa_first_field"]
+    # The new key is simply appended; nothing about the existing document moves.
+    assert list(doc.keys())[-1] == "rep_call_reference_number_field"
+    assert list(doc.keys())[:-1] == ["dsl_version", "name", "sections"]
+
+
 async def test_row_already_carrying_the_key_is_untouched(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     backfill_world: dict[str, UUID],
@@ -226,5 +268,20 @@ async def test_guard_counts_the_unresolvable_row_per_insurance_type(
     backfill_world: dict[str, UUID],
 ) -> None:
     counts = await _guard_counts(admin_sessionmaker)
-    # _PATH_BY_INSURANCE_TYPE order: infertility_treatment, disease_only.
+    # PATH_BY_INSURANCE_TYPE order: infertility_treatment, disease_only.
     assert counts == [1, 0]
+
+
+class TestAbortIfUnresolvable:
+    """upgrade()'s actual abort decision, DB-free: proves the guard's SQL count
+    (asserted against a real database above) is correctly wired to a hard
+    abort, rather than only asserting the count itself."""
+
+    def test_raises_when_count_is_nonzero(self) -> None:
+        module = _migration_module()
+        with pytest.raises(RuntimeError, match="infertility_treatment"):
+            module.abort_if_unresolvable(1, "infertility_treatment")
+
+    def test_does_not_raise_when_count_is_zero(self) -> None:
+        module = _migration_module()
+        module.abort_if_unresolvable(0, "disease_only")

@@ -131,54 +131,98 @@ can be written back — no data needs to be deleted.
 migration alongside the `dsl.py` change): backfills
 `rep_call_reference_number_field` into every `schema_version` row (both
 `infertility_treatment` and `disease_only`, published and demoted alike) that is
-`dsl_version` `2.x` and doesn't already carry the key. Pure SQL via
-`op.execute`, statements exposed as module constants (`UPDATE_STATEMENTS`) so an
-integration test runs the exact SQL the migration runs, mirroring
-`9d09f73f7357`'s pattern:
+`dsl_version` `2.x` and doesn't already carry the key.
+
+**Revised during final review**: an earlier version of this migration wrote the
+backfilled value via `SET schema_json = (schema_json::jsonb || jsonb_build_object(...))::json`
+— a single SQL `UPDATE`. The final whole-branch review caught that this is
+wrong: `schema_json` is Postgres `json`, not `jsonb`, *specifically* because
+document key order is field/section order (`forms/CLAUDE.md`,
+"Semantics worth remembering"). Casting through `jsonb` silently re-sorts every
+object's keys at every nesting level — Postgres jsonb orders keys by length
+then byte value, not insertion order — so the backfilled rows (exactly the
+ones still serving in-flight/retrying forms) would have come back with
+scrambled task/question order (`queue_dispatcher.py` re-parses and
+re-compiles the pinned document's prompts at dispatch, bucketing and numbering
+questions in document order) and scrambled field order in the review UI. The
+fix (already implemented, not merely proposed) reads each eligible row's raw
+JSON **text** (`::text`, never `::jsonb`) and patches it in Python
+(`json.loads` / mutate / `json.dumps`, which preserve key order exactly, unlike
+a jsonb round-trip) before writing it back — so the "patch in place, nothing
+else changes" guarantee is actually true, not just true for parsing.
+
+Pure-SQL-only isn't possible for the write step under this constraint (there's
+no `jsonb`-free way to add one key while a Postgres query is running), so the
+guard/count queries stay pure SQL (read-only, so casting to `jsonb` there is
+harmless), and the actual patch runs in Python — statements and the patch
+function are exposed as module-level constants (`UNRESOLVABLE_COUNT_STATEMENTS`,
+`SELECT_ELIGIBLE_STATEMENTS`, `patch_document`, `abort_if_unresolvable`) so an
+integration test exercises the exact logic the migration runs, mirroring
+`9d09f73f7357`'s "statements as a tested module constant" pattern as closely as
+the order-preservation requirement allows:
 
 ```python
-_PATH_BY_INSURANCE_TYPE: dict[str, tuple[str, str]] = {
+PATH_BY_INSURANCE_TYPE: dict[str, tuple[str, str]] = {
     "infertility_treatment": ("insurance_representative", "call_reference_number"),
     "disease_only": ("representative_details", "call_reference_number"),
 }
 
 # Rows eligible for backfill (dsl 2.x, key missing) whose sections tree does NOT
 # have the expected leaf — should always count 0; non-zero aborts upgrade().
+# Read-only: casting to jsonb here is safe, the result is never written back.
 UNRESOLVABLE_COUNT_STATEMENTS: tuple[str, ...] = tuple(
     f"""SELECT count(*) FROM schema_version sv JOIN form_schema fs ON fs.id = sv.schema_id
         WHERE fs.insurance_type = '{insurance_type}'
           AND (sv.schema_json ->> 'dsl_version') LIKE '2.%'
           AND NOT (sv.schema_json::jsonb ? 'rep_call_reference_number_field')
           AND NOT COALESCE(((sv.schema_json::jsonb) #> '{{sections,{section_key},fields}}') ? '{field_key}', FALSE)"""
-    for insurance_type, (section_key, field_key) in _PATH_BY_INSURANCE_TYPE.items()
+    for insurance_type, (section_key, field_key) in PATH_BY_INSURANCE_TYPE.items()
 )
 
-# Exposed so the integration test runs the EXACT statements the migration runs.
-UPDATE_STATEMENTS: tuple[str, ...] = tuple(
-    f"""UPDATE schema_version sv
-        SET schema_json = ((sv.schema_json::jsonb) || jsonb_build_object(
-              'rep_call_reference_number_field', 'sections.{section_key}.{field_key}'))::json
-        FROM form_schema fs
-        WHERE fs.id = sv.schema_id AND fs.insurance_type = '{insurance_type}'
+# Rows eligible for backfill (dsl 2.x, key missing, leaf resolves). Selects the
+# RAW json text (::text, never ::jsonb) so patch_document() can preserve order.
+SELECT_ELIGIBLE_STATEMENTS: tuple[str, ...] = tuple(
+    f"""SELECT sv.id, sv.schema_json::text AS schema_json_text
+        FROM schema_version sv JOIN form_schema fs ON fs.id = sv.schema_id
+        WHERE fs.insurance_type = '{insurance_type}'
           AND (sv.schema_json ->> 'dsl_version') LIKE '2.%'
           AND NOT (sv.schema_json::jsonb ? 'rep_call_reference_number_field')
           AND COALESCE(((sv.schema_json::jsonb) #> '{{sections,{section_key},fields}}') ? '{field_key}', FALSE)"""
-    for insurance_type, (section_key, field_key) in _PATH_BY_INSURANCE_TYPE.items()
+    for insurance_type, (section_key, field_key) in PATH_BY_INSURANCE_TYPE.items()
 )
+
+UPDATE_ROW_SQL = "UPDATE schema_version SET schema_json = CAST(:doc AS json) WHERE id = :id"
+
+
+def patch_document(schema_json_text: str, path: str) -> str:
+    """Order-preserving: json.loads/json.dumps keep every existing key's
+    position at every nesting level exactly as it was."""
+    doc = json.loads(schema_json_text)
+    doc["rep_call_reference_number_field"] = path
+    return json.dumps(doc)
+
+
+def abort_if_unresolvable(count: int, insurance_type: str) -> None:
+    if count:
+        raise RuntimeError(f"... investigate before re-running (insurance_type={insurance_type!r})")
 
 
 def upgrade() -> None:
     conn = op.get_bind()
-    for statement in UNRESOLVABLE_COUNT_STATEMENTS:
-        if conn.exec_driver_sql(statement).scalar_one():
-            raise RuntimeError(
-                "backfill_rep_call_reference_number_field: a schema_version row is "
-                "dsl 2.x, missing rep_call_reference_number_field, and does NOT "
-                "resolve the expected call_reference_number leaf — investigate "
-                "before re-running (see this migration's docstring)."
+    for insurance_type, statement in zip(
+        PATH_BY_INSURANCE_TYPE, UNRESOLVABLE_COUNT_STATEMENTS, strict=True
+    ):
+        abort_if_unresolvable(conn.exec_driver_sql(statement).scalar_one(), insurance_type)
+
+    for (section_key, field_key), statement in zip(
+        PATH_BY_INSURANCE_TYPE.values(), SELECT_ELIGIBLE_STATEMENTS, strict=True
+    ):
+        path = f"sections.{section_key}.{field_key}"
+        for row_id, schema_json_text in conn.exec_driver_sql(statement).all():
+            conn.execute(
+                sa.text(UPDATE_ROW_SQL),
+                {"doc": patch_document(schema_json_text, path), "id": row_id},
             )
-    for statement in UPDATE_STATEMENTS:
-        op.execute(statement)
 
 
 def downgrade() -> None:
@@ -186,20 +230,28 @@ def downgrade() -> None:
 ```
 
 Two guards, matching the precedent's philosophy: (1) idempotency — only rows
-missing the key are touched, so a re-run is a no-op; (2) a pre-flight count that
-aborts the whole migration (transaction rolls back) if any eligible row's own
-`sections` tree doesn't actually have the expected leaf — should never fire per
-the git-history check above, but costs nothing given this table drives a
-HIPAA-regulated voice pipeline.
+missing the key are touched, so a re-run is a no-op; (2) a pre-flight count
+(`abort_if_unresolvable`, isolated so it's independently unit-testable) that
+aborts the whole migration (transaction rolls back) before any row is patched
+if any eligible row's own `sections` tree doesn't actually have the expected
+leaf — should never fire per the git-history check above, but costs nothing
+given this table drives a HIPAA-regulated voice pipeline. Because the guard is
+fail-closed, a genuinely unresolvable row makes `upgrade()` abort on every
+re-run until investigated — by design, not a flaky migration.
 
 **Test:**
 `tests/integration/db/test_backfill_rep_call_reference_number_field_migration.py`,
 mirroring `test_promoted_fields_cleanup_migration.py` — fixture `schema_version`
 rows per insurance type: one missing the key with the leaf present (gets
 backfilled), one already carrying the key (idempotency — untouched, asserted via
-a second run), a v1 doc with no `dsl_version` (ignored), and one
-deliberately-mismatched row (leaf missing from its `sections` tree) asserting
-`upgrade()` raises and touches nothing.
+a second run), a v1 doc with no `dsl_version` (ignored), one
+deliberately-mismatched row (leaf missing from its `sections` tree, asserted via
+`UNRESOLVABLE_COUNT_STATEMENTS`), and — the regression test for the ordering
+bug above — a row with deliberately non-alphabetical sibling keys, asserting
+the backfilled document's existing key order is untouched at every nesting
+level and the new key is simply appended. `abort_if_unresolvable` gets its own
+DB-free unit tests (raises on a nonzero count, no-ops on zero) since it's the
+one piece of `upgrade()`'s control flow no SQL-level test exercises.
 
 **Deploy ordering:** the migration runs via `just migrate` alongside the code
 deploy that makes the field required, so by the time the new validator is live,
