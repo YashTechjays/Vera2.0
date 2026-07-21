@@ -141,6 +141,9 @@ class ReviewReason(enum.StrEnum):
     # The form's pinned schema document failed to parse (e.g. legacy v1) — the
     # eval cannot run against it.
     UNSUPPORTED_SCHEMA = "unsupported_schema"
+    # A supervisor ended the call by hand — it is never auto-redialed even with
+    # unsatisfied retryable fields; a human takes it from here.
+    USER_ENDED = "user_ended"
 
 
 class VersionStatus(enum.StrEnum):
