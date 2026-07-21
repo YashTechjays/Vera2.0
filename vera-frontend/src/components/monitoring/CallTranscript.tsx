@@ -3,28 +3,32 @@ import { Hash, MessageSquare } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
+  asCallHealth,
   asCallStatus,
   asTranscriptTurn,
   streamCallEvents,
+  type CallHealth,
   type TranscriptTurn,
   type TranscriptTurnSource,
 } from "@/lib/api/callEvents"
+import { transcriptText, turnLabel } from "@/lib/monitoring/transcriptText"
 
 type TurnStyle = { onRight: boolean; label: string; bubble: string }
 // The supervisor label is snapshotted when the turn arrives so a later intervener
 // (lock steal) can't retroactively relabel earlier turns.
 type StampedTurn = TranscriptTurn & { supervisorLabel: string }
 
-/** `source` (the actor) sets the side, label, and colour: the caller (rep) on the
- *  left, our side (Vera + supervisor) on the right. */
+/** `source` (the actor) sets the side, label, and colour: our side (Vera + supervisor)
+ *  on the left, the caller (rep) on the right. */
 function turnStyle(source: TranscriptTurnSource, supervisorLabel: string): TurnStyle {
+  const label = turnLabel(source, supervisorLabel)
   switch (source) {
     case "bot":
-      return { onRight: true, label: "Vera", bubble: "bg-muted text-foreground" }
+      return { onRight: false, label, bubble: "bg-muted text-foreground" }
     case "supervisor":
-      return { onRight: true, label: supervisorLabel, bubble: "bg-blue-500/10 text-foreground" }
+      return { onRight: false, label, bubble: "bg-blue-500/10 text-foreground" }
     case "rep":
-      return { onRight: false, label: "Rep", bubble: "bg-primary/10 text-foreground" }
+      return { onRight: true, label, bubble: "bg-primary/10 text-foreground" }
   }
 }
 
@@ -38,6 +42,8 @@ function turnStyle(source: TranscriptTurnSource, supervisorLabel: string): TurnS
 export function CallTranscript({
   callId,
   onCallStatus,
+  onTextChange,
+  onHealth,
   supervisorLabel = "Supervisor",
 }: {
   callId: string
@@ -45,6 +51,11 @@ export function CallTranscript({
    *  terminal CallStatus value on DB replay) with the event's timestamp — the
    *  modal lifts this into its call-started timer and call-ended indication. */
   onCallStatus?: (status: string, ts: number) => void
+  /** The transcript as plain text, re-emitted per turn — feeds the modal's
+   *  copy button. Same PHI hygiene: component state only, gone on unmount. */
+  onTextChange?: (text: string) => void
+  /** Fires for every health envelope — the modal lifts this into its header badge. */
+  onHealth?: (h: CallHealth) => void
   /** Label for supervisor (takeover) turns — the intervener's email when known. */
   supervisorLabel?: string
 }) {
@@ -54,11 +65,19 @@ export function CallTranscript({
   // The stream callback must always see the latest handler/label without re-opening
   // the SSE (the stream effect below deliberately depends on callId only).
   const onCallStatusRef = useRef(onCallStatus)
+  const onTextChangeRef = useRef(onTextChange)
+  const onHealthRef = useRef(onHealth)
   const supervisorLabelRef = useRef(supervisorLabel)
   useEffect(() => {
     onCallStatusRef.current = onCallStatus
+    onTextChangeRef.current = onTextChange
+    onHealthRef.current = onHealth
     supervisorLabelRef.current = supervisorLabel
-  }, [onCallStatus, supervisorLabel])
+  }, [onCallStatus, onTextChange, onHealth, supervisorLabel])
+
+  useEffect(() => {
+    onTextChangeRef.current?.(transcriptText(turns))
+  }, [turns])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -70,6 +89,8 @@ export function CallTranscript({
           setTurns((prev) => [...prev, { ...turn, supervisorLabel: supervisorLabelRef.current }])
         const status = asCallStatus(e)
         if (status) onCallStatusRef.current?.(status, e.ts)
+        const health = asCallHealth(e)
+        if (health) onHealthRef.current?.(health)
       },
       // A dropped connection was re-established and the server replays the
       // stream from the start — discard the stale turns; the replay replaces

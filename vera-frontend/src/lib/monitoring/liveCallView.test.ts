@@ -11,6 +11,7 @@ import {
   otherIntervenerPresent,
   participantLabel,
   participantMode,
+  rosterVisible,
   shouldAllowClose,
   speakerButtonState,
   type ParticipantLike,
@@ -82,7 +83,7 @@ describe("participantMode", () => {
     expect(PARTICIPANT_MODE_BADGE.intervener).toBe("Intervening")
     expect(PARTICIPANT_MODE_BADGE.listener).toBe("Listening")
     expect(PARTICIPANT_MODE_BADGE.agent).toBe("AI Agent")
-    expect(PARTICIPANT_MODE_BADGE.callee).toBe("Caller")
+    expect(PARTICIPANT_MODE_BADGE.callee).toBe("Insurance Rep")
   })
 })
 
@@ -94,7 +95,17 @@ describe("participantLabel", () => {
 
   it("names the agent and the callee", () => {
     expect(participantLabel({ identity: "x", isAgent: true })).toBe("Vera Agent")
-    expect(participantLabel({ identity: "phone-callee" })).toBe("Caller")
+    expect(participantLabel({ identity: "phone-callee" })).toBe("Insurance Rep")
+  })
+
+  it("keeps two listening supervisors distinct, both as listeners", () => {
+    const first = supervisor({ isLocal: true })
+    const second = supervisor({ identity: "supervisor-u2", name: "second@tenant.example" })
+    expect(participantMode(first)).toBe("listener")
+    expect(participantMode(second)).toBe("listener")
+    expect(participantLabel(first)).toBe("va@tenant.example")
+    expect(participantLabel(second)).toBe("second@tenant.example")
+    expect(otherIntervenerPresent([first, second])).toBe(false)
   })
 })
 
@@ -117,6 +128,16 @@ describe("intervenerLabel", () => {
     const intervening = supervisor({ attributes: { "vera.mode": "intervener" } })
     expect(intervenerLabel([intervening])).toBe("va@tenant.example")
     expect(intervenerLabel([supervisor()])).toBeNull()
+  })
+})
+
+describe("rosterVisible", () => {
+  it("hides only the agent, and only while a takeover is live", () => {
+    const agent: ParticipantLike = { identity: "x", isAgent: true }
+    expect(rosterVisible(agent, true)).toBe(false)
+    expect(rosterVisible(agent, false)).toBe(true)
+    expect(rosterVisible(supervisor(), true)).toBe(true)
+    expect(rosterVisible({ identity: "phone-callee" }, true)).toBe(true)
   })
 })
 

@@ -478,6 +478,11 @@ class FormSchemaDoc(_Model):
     # own `default` is still allowed to be absent from the payload (it counts as
     # filled either way).
     promoted_fields: PromotedFields
+    # Single root-anchored leaf path: where this insurance type's rep call reference
+    # number lives. The one generalized place retry/resume logic reads regardless of
+    # insurance type — empty/never-collected on a prior attempt means no valid retry
+    # state (treat as a fresh call).
+    rep_call_reference_number_field: str
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.
     stt_key_terms: list[str] | None = None
@@ -733,6 +738,17 @@ class FormSchemaDoc(_Model):
                     f"promoted_fields.{column}: {path!r} is not a system_fields target "
                     "(promoted fields must be guaranteed present at intake)"
                 )
+
+        # rep call reference number field — single root-anchored path naming which
+        # leaf holds the representative's call reference number. Only checked for
+        # leaf existence: unlike system_fields/promoted_fields this value is
+        # collected DURING the call, not known beforehand, so it deliberately does
+        # NOT need to be a system_fields target.
+        if self.rep_call_reference_number_field not in leaves:
+            errors.append(
+                "rep_call_reference_number_field: "
+                f"{self.rep_call_reference_number_field!r} does not resolve to a leaf"
+            )
 
         # stt key terms: bounded, unique, static vocabulary
         terms = self.stt_key_terms or []

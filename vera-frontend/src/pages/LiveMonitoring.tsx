@@ -1,5 +1,15 @@
-import { useEffect, useMemo, useState } from "react"
-import { ArrowUp, Check } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import {
+  AlertCircle,
+  ArrowUp,
+  Check,
+  CheckCircle2,
+  Info,
+  Phone,
+  PhoneCall,
+  type LucideIcon,
+} from "lucide-react"
+import { useLocation, useNavigate } from "react-router-dom"
 
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -12,29 +22,41 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useIbv } from "@/components/ibv/IbvProvider"
 import { usePermission } from "@/lib/auth/permissions"
-import { listCalls, publishCall, type CallSummary } from "@/lib/api/calls"
+import {
+  getCallStats,
+  listCalls,
+  publishCall,
+  type CallStats,
+  type CallSummary,
+} from "@/lib/api/calls"
+import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
 import { elapsed } from "@/lib/monitoring/liveTimer"
+import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
+import { humanizeSegment } from "@/lib/patient-forms/display"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
-import { stats, type CallCategory, type LiveCall } from "@/lib/mock-data"
+import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
+import { shortCallRef, type OpenCallNavState } from "@/lib/notifications/store"
+import type { CallCategory, LiveCall } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
 
-type TabKey = "active" | "critical"
-// No Completed tab: GET /calls only carries live calls; history is a follow-up.
+type TabKey = "active" | "critical" | "completed"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "active", label: "Active" },
   { key: "critical", label: "Critical" },
+  { key: "completed", label: "Completed" },
 ]
 
 function categoryOf(status: string): CallCategory {
   const s = status.toLowerCase()
   if (s === "critical") return "critical"
-  if (s === "completed" || s === "failed") return "completed"
+  if (isTerminalCallStatus(s)) return "completed"
   if (s === "waiting" || s === "ivr") return "processing"
   return "active"
 }
@@ -57,9 +79,8 @@ const badgeStyle: Record<CallCategory, string> = {
   processing: "bg-amber-100 text-amber-800",
   completed: "bg-emerald-100 text-emerald-700",
 }
-
 /** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
- *  (insurance, confidence, form %) are placeholders. */
+ *  (confidence, form %) are placeholders. */
 function toLiveCall(c: CallSummary, now: number): LiveCall {
   return {
     id: c.id,
@@ -71,11 +92,12 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     category: categoryOf(c.status),
     visible: c.published,
     action: c.is_owner ? "view" : "intervene",
-    insurance: "—",
+    insurance: c.insurance_provider || "—",
     confidence: 0,
     formProgress: 0,
     callTime: elapsed(c.started_at, now),
     startedAt: c.started_at,
+    healthScore: c.health_score,
   }
 }
 
@@ -87,41 +109,141 @@ function CallIndicator({ category }: { category: CallCategory }) {
   return <Check className="size-4 text-emerald-500" strokeWidth={2.5} />
 }
 
+function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
+  const health = healthDisplay(call.health_score, call.health_analyzed_at, now)
+  const flag =
+    call.health_flag && call.health_flag !== "none"
+      ? call.health_flag.replaceAll("_", " ")
+      : null
+  const badge = (
+    <span
+      className={cn(
+        "font-semibold tabular-nums",
+        health.stale ? "text-muted-foreground" : healthToneClass[health.tone],
+      )}
+    >
+      {health.text}
+      {health.stale && " (stale)"}
+    </span>
+  )
+  // The analyzer's justification (PHI — rendered, never logged) as a hover
+  // tooltip so a supervisor sees WHY at a glance without opening the call.
+  if (!call.health_reason && !flag) return badge
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex cursor-default items-center gap-1">
+          {badge}
+          <Info className="size-3.5 shrink-0 text-muted-foreground" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72">
+        {flag && <p className="font-semibold capitalize">{flag}</p>}
+        {call.health_reason && <p>{call.health_reason}</p>}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 export function LiveMonitoring() {
-  const { openForm } = useIbv()
+  const { openFormById } = useIbv()
   const canPublish = usePermission("calls:publish")
+  const location = useLocation()
+  const navigate = useNavigate()
   // PHI (patient_name) stays in component state so it's discarded on unmount.
   const [calls, setCalls] = useState<CallSummary[]>([])
+  const [history, setHistory] = useState<CallSummary[]>([])
+  const [stats, setStats] = useState<CallStats | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<TabKey>("active")
   const [now, setNow] = useState(() => Date.now())
   const [publishing, setPublishing] = useState<string | null>(null)
   const [selected, setSelected] = useState<CallSummary | null>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
+  // Whether the list has resolved at least once — gates the "call not found"
+  // verdict below so a notification's deep link isn't given up on before the
+  // first fetch has even had a chance to include the target call.
+  const hasLoadedOnce = useRef(false)
 
-  // Load + poll (skip while the tab is hidden).
+  // Load + poll (skip while the tab is hidden); a realtime notification
+  // (intervention alert) refetches immediately instead of waiting the poll out.
   useEffect(() => {
     let cancelled = false
     async function load() {
-      try {
-        const items = await listCalls()
-        if (!cancelled) {
-          setCalls(items)
-          setError(null)
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load calls.")
+      // allSettled: a stats/history hiccup must not stall the live list (and vice versa).
+      const [items, counts, past] = await Promise.allSettled([
+        listCalls(),
+        getCallStats(),
+        tab === "completed" ? listCalls("history") : Promise.resolve(null),
+      ])
+      if (cancelled) return
+      if (items.status === "fulfilled") {
+        setCalls(items.value)
+        setError(null)
+      } else {
+        setError(
+          items.reason instanceof ApiError ? items.reason.message : "Could not load calls.",
+        )
       }
+      hasLoadedOnce.current = true
+      if (counts.status === "fulfilled") setStats(counts.value)
+      if (past.status === "fulfilled" && past.value) setHistory(past.value)
     }
     void load()
     const id = setInterval(() => {
       if (document.visibilityState === "visible") void load()
     }, POLL_MS)
+    const onNotification = () => void load()
+    window.addEventListener(NOTIFICATION_EVENT, onNotification)
     return () => {
       cancelled = true
       clearInterval(id)
+      window.removeEventListener(NOTIFICATION_EVENT, onNotification)
     }
-  }, [])
+  }, [tab])
+
+  // Deep link from a notification (bell item / toast "View"): open that exact
+  // call's modal once it shows up in the polled list. `state` is cleared via a
+  // replace navigation as soon as it's handled (found OR given up on), so this
+  // never re-fires for the same request and never survives a manual refresh.
+  useEffect(() => {
+    const openCallId = (location.state as OpenCallNavState | null)?.openCallId
+    if (!openCallId) return
+    // Replace-nav to drop the router state — marks this deep link handled (above).
+    const clearDeepLink = () => navigate(location.pathname, { replace: true, state: null })
+
+    const target = calls.find((c) => c.id === openCallId)
+    if (target) {
+      openOverview(target)
+      clearDeepLink()
+      return
+    }
+    if (!hasLoadedOnce.current) return // first fetch hasn't resolved yet — wait for `calls`
+
+    // Not in the current snapshot. `calls` may just be stale relative to this
+    // request — e.g. the toast's "View" action can be clicked before the
+    // notification-triggered refetch it raced against has resolved — so force
+    // one direct fetch before concluding the call is genuinely gone. The
+    // notification is only published after its DB write commits, so a fetch
+    // issued now is guaranteed to reflect it.
+    let cancelled = false
+    void (async () => {
+      const fresh = await listCalls().catch(() => null)
+      if (cancelled) return
+      if (fresh) setCalls(fresh)
+      const freshTarget = fresh?.find((c) => c.id === openCallId)
+      if (freshTarget) {
+        openOverview(freshTarget)
+      } else {
+        // Genuinely not there — call ended, or no longer visible to this user.
+        setError("That call is no longer active.")
+      }
+      clearDeepLink()
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [location.state, location.pathname, calls, navigate])
 
   // Tick so Duration advances between polls.
   useEffect(() => {
@@ -131,8 +253,24 @@ export function LiveMonitoring() {
 
   const rows = useMemo(() => {
     if (tab === "critical") return calls.filter((c) => categoryOf(c.status) === "critical")
+    if (tab === "completed") return history
     return calls
-  }, [tab, calls])
+  }, [tab, calls, history])
+
+  // Stat cards from GET /calls/stats (same visibility as the list); zeros until it loads.
+  const statCards = useMemo(() => {
+    const cards: { label: string; value: number; icon: LucideIcon; tone?: "critical" }[] = [
+      { label: "Total Calls Today", value: stats?.total_today ?? 0, icon: Phone },
+      { label: "Active Calls", value: stats?.live ?? 0, icon: PhoneCall },
+      {
+        label: "Running Smoothly",
+        value: (stats?.live ?? 0) - (stats?.critical ?? 0),
+        icon: CheckCircle2,
+      },
+      { label: "Critical Alerts", value: stats?.critical ?? 0, icon: AlertCircle, tone: "critical" },
+    ]
+    return cards
+  }, [stats])
 
   // Render the freshest polled row, falling back to the click-time snapshot once the call leaves the active list so its header survives while the modal is open.
   const modalCall = useMemo(() => {
@@ -163,7 +301,7 @@ export function LiveMonitoring() {
       <h1 className="text-2xl font-semibold tracking-tight">Live Monitoring</h1>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map(({ label, value, icon: Icon, tone }) => (
+        {statCards.map(({ label, value, icon: Icon, tone }) => (
           <Card key={label}>
             <div className="flex items-center gap-3 px-4">
               <div className="flex size-11 shrink-0 items-center justify-center rounded-md bg-muted">
@@ -219,10 +357,11 @@ export function LiveMonitoring() {
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="pl-10">Patient Name</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Agent</TableHead>
+              <TableHead className="pl-10">Call Ref</TableHead>
+              <TableHead>Patient Name</TableHead>
+              <TableHead>Insurance Type</TableHead>
               <TableHead>Duration</TableHead>
+              <TableHead>Call Health</TableHead>
               <TableHead>Call Status</TableHead>
               <TableHead>Visible To All</TableHead>
               <TableHead>Action</TableHead>
@@ -233,16 +372,24 @@ export function LiveMonitoring() {
               const cat = categoryOf(call.status)
               return (
                 <TableRow key={call.id} className={cn(rowTint[cat])}>
+                  <TableCell className="pl-10 font-mono text-xs text-muted-foreground">
+                    {shortCallRef(call.id)}
+                  </TableCell>
                   <TableCell className="font-medium">
                     <span className="flex items-center gap-2">
                       <CallIndicator category={cat} />
                       <span className="capitalize">{call.patient_name || "—"}</span>
                     </span>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">—</TableCell>
-                  <TableCell className="text-muted-foreground">—</TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {call.insurance_type ? humanizeSegment(call.insurance_type) : "—"}
+                  </TableCell>
                   <TableCell className={cn("font-semibold tabular-nums", durationColor[cat])}>
-                    {elapsed(call.started_at, now)}
+                    {/* Ended calls show their fixed duration, not a still-running timer. */}
+                    {elapsed(call.started_at, call.ended_at ? Date.parse(call.ended_at) : now)}
+                  </TableCell>
+                  <TableCell>
+                    <CallHealthCell call={call} now={now} />
                   </TableCell>
                   <TableCell>
                     <span
@@ -273,7 +420,8 @@ export function LiveMonitoring() {
                       variant={call.is_owner ? "default" : "outline"}
                       onClick={() => openOverview(call)}
                     >
-                      {call.is_owner ? "View Live" : "Intervene"}
+                      {/* Terminal calls open the same modal as a transcript replay. */}
+                      {cat === "completed" ? "View" : call.is_owner ? "View Live" : "Intervene"}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -281,7 +429,7 @@ export function LiveMonitoring() {
             })}
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                   No calls in this view.
                 </TableCell>
               </TableRow>
@@ -294,7 +442,9 @@ export function LiveMonitoring() {
         call={modalCall}
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
-        onExpand={() => openForm()}
+        onExpand={() => {
+          if (selected) openFormById(selected.form_id)
+        }}
       />
     </div>
   )

@@ -71,6 +71,7 @@ V2_SCHEMA = {
         "insurance_provider": "sections.patient_information.patient_name",
         "insurance_provider_phone_number": "sections.patient_information.patient_name",
     },
+    "rep_call_reference_number_field": "sections.patient_information.patient_name",
     "sections": {
         "patient_information": {
             "title": "Patient Information",
@@ -322,6 +323,7 @@ def _doc_with_promoted_fields(
             "insurance_type": "test_type",
             "system_fields": dict(promoted_fields),
             "promoted_fields": promoted_fields,
+            "rep_call_reference_number_field": promoted_fields["patient_name"],
             "sections": sections,
             # All fixture sections are role="context" (no voice collection needed for
             # these tests), so none may be assigned to a task (dsl.py: "only collect
@@ -420,6 +422,7 @@ def _doc_with_date_format(date_format: str) -> FormSchemaDoc:
             "insurance_type": "test_type",
             "system_fields": {"patient_dob": dob_path, "filler": filler_path},
             "promoted_fields": promoted_fields,
+            "rep_call_reference_number_field": filler_path,
             "sections": {
                 "patient_information": {
                     "title": "Patient Information",

@@ -157,6 +157,9 @@ async def test_list_calls_empty_then_populated(
     assert row is not None
     assert row["status"] == "initiated"
     assert parse_room_name(row["room_name"]) is not None
+    assert "insurance_provider" in row
+    # seeded_form_id binds an INFERTILITY_TREATMENT schema — the join must surface it.
+    assert row["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
 
 
 @pytest.mark.asyncio
@@ -315,6 +318,90 @@ async def test_list_scopes_to_owner_or_published(
 
 
 @pytest.mark.asyncio
+async def test_list_calls_history_scope_returns_terminal_calls_only(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    live_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+    )
+    done_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+
+    history = await client.get(
+        "/api/v1/calls",
+        params={"scope": "history"},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert history.status_code == 200, history.text
+    ids = [c["id"] for c in history.json()["data"]]
+    assert str(done_id) in ids
+    assert str(live_id) not in ids
+    # Summaries carry ended_at so the UI can render a fixed duration.
+    assert "ended_at" in history.json()["data"][0]
+
+    live = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
+    live_ids = [c["id"] for c in live.json()["data"]]
+    assert str(live_id) in live_ids
+    assert str(done_id) not in live_ids
+
+
+@pytest.mark.asyncio
+async def test_call_stats_counts_todays_visible_calls(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """total_today counts today's calls (any status), live/critical the in-flight
+    ones — all restricted to what the caller could see in the list (a stranger's
+    private call is invisible to the stats too). One in-flight call max per form
+    (uq_call_active_form), so today's set is 1 critical + 2 completed."""
+    for status in (CallStatus.CRITICAL, CallStatus.COMPLETED, CallStatus.COMPLETED):
+        await seed_call(
+            admin_sessionmaker,
+            rbac_world.tenant_id,
+            seeded_form_id,
+            initiated_by_id=rbac_world.admin_id,
+            status=status.value,
+        )
+    # An old call must not count toward today.
+    old_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+    await admin_session.execute(
+        update(Call).where(Call.id == old_id).values(created_at=text("now() - interval '2 days'"))
+    )
+    await admin_session.commit()
+
+    resp = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("cache-control") == "no-store"
+    data = resp.json()["data"]
+    assert data == {"total_today": 3, "live": 1, "critical": 1}
+
+    # The supervisor sees none of the admin's private calls.
+    other = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.supervisor_token))
+    assert other.json()["data"] == {"total_today": 0, "live": 0, "critical": 0}
+
+
+@pytest.mark.asyncio
 async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -339,7 +426,9 @@ async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
         .first()
     )
     assert row is not None
-    assert row.detail == {"fields": ["patient_name"]}
+    # health_reason (analyzer justification, PHI) is disclosed on the list rows
+    # alongside patient_name and insurance_provider — all audited by field name.
+    assert row.detail == {"fields": ["patient_name", "insurance_provider", "health_reason"]}
 
 
 @pytest.mark.asyncio
@@ -412,6 +501,7 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     assert pub.json()["data"]["published"] is True
     # Same row shape as list_calls — None would blank the UI's Patient cell.
     assert pub.json()["data"]["patient_name"] == "Test Patient"
+    assert pub.json()["data"]["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
 
     assert len(await publish_audit_rows()) == 1
 
@@ -976,6 +1066,69 @@ async def _seed_published_active_call(
         status="active",
         published=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_end_call_locked_to_active_intervener(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_livekit: FakeLiveKit,
+) -> None:
+    """While a takeover is live (claim inside the connect grace), only the
+    intervener may end the call; the intervener's own end goes through."""
+    call_id = await _seed_published_active_call(admin_sessionmaker, rbac_world, seeded_form_id)
+    claim = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert claim.status_code == 200, claim.text
+
+    denied = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert denied.status_code == 409, denied.text
+    assert "intervening supervisor" in denied.json()["message"]
+
+    allowed = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token)
+    )
+    assert allowed.status_code == 200, allowed.text
+
+
+@pytest.mark.asyncio
+async def test_end_call_allowed_when_intervener_lock_is_stale(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_livekit: FakeLiveKit,
+) -> None:
+    """A crashed intervener (claim past the grace, holder gone from the room)
+    must not lock the call forever — a non-holder's end goes through."""
+    call_id = await _seed_published_active_call(admin_sessionmaker, rbac_world, seeded_form_id)
+    claim = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert claim.status_code == 200, claim.text
+
+    # Age the claim past the grace window and drop the holder from the room: stale lock.
+    await admin_session.execute(
+        update(Call)
+        .where(Call.id == call_id)
+        .values(intervener_claimed_at=text("now() - interval '5 minutes'"))
+    )
+    await admin_session.commit()
+    room_name = room_name_for_call(rbac_world.tenant_id, call_id)
+    fake_livekit.participants[room_name] = []
+
+    ended = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert ended.status_code == 200, ended.text
 
 
 async def _intervention_events(session: AsyncSession, call_id: UUID) -> list[InterventionEvent]:

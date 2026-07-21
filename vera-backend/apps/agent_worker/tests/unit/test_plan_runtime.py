@@ -4,13 +4,14 @@ skip-scan on applicable_when, wrap-up, and the agent-owned cursor write."""
 import asyncio
 import uuid
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from conftest import chat_ctx_texts
 from livekit.agents import Agent
 from livekit.agents.llm import FunctionTool
 
+from agent_worker.directives import ReAsk, SkipToTask, Terminate
 from agent_worker.intervention import TakeoverState
 from agent_worker.plan_runtime import (
     WRAP_UP_TASK_KEY,
@@ -269,13 +270,20 @@ class TestWrapUp:
         mock_session.shutdown.assert_called_once_with(drain=True)
 
 
-class TestDirectiveSeam:
-    @pytest.mark.asyncio
-    async def test_apply_directive_is_a_phase_2_seam(self) -> None:
-        controller, _ = _controller()
-        with pytest.raises(NotImplementedError):
-            await controller.apply_directive(object())
+def _attach_ordered_session(controller: PlanRunController) -> tuple[MagicMock, list[Any]]:
+    """A mock session that records interrupt/swap/reply call order, so a test can assert the
+    bot was interrupted (went silent) BEFORE the redirect."""
+    order: list[Any] = []
+    session = MagicMock()
+    session.userdata.engaged = False  # no supervisor takeover
+    session.interrupt = AsyncMock(side_effect=lambda: order.append("interrupt"))
+    session.update_agent = MagicMock(side_effect=lambda a: order.append(("update_agent", a)))
+    session.generate_reply = MagicMock(side_effect=lambda **k: order.append(("generate_reply", k)))
+    controller.attach_session(session)
+    return session, order
 
+
+class TestDirectiveIntervention:
     @pytest.mark.asyncio
     async def test_handoffs_serialize_on_the_controller_lock(self) -> None:
         controller, _ = _controller()
@@ -285,6 +293,87 @@ class TestDirectiveSeam:
             await asyncio.sleep(0)
             assert not task.done()
         assert await task is controller.agents[2]
+
+    @pytest.mark.asyncio
+    async def test_terminate_interrupts_then_swaps_to_wrap_up(self) -> None:
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        # bot silenced (interrupt) BEFORE the swap
+        assert order == ["interrupt", ("update_agent", controller.wrap_up_agent)]
+
+    @pytest.mark.asyncio
+    async def test_skip_forward_interrupts_then_swaps(self) -> None:
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(SkipToTask(rule_key="jump", task_key="last_task"))
+        assert order == ["interrupt", ("update_agent", controller.agents[2])]
+
+    @pytest.mark.asyncio
+    async def test_skip_to_current_or_behind_is_a_noop(self) -> None:
+        controller, _ = _controller()
+        controller.note_task_entered(2)  # already at last_task
+        session, order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(SkipToTask(rule_key="back", task_key="intro_task"))
+        assert order == []  # no interrupt, no swap
+        session.update_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reask_interrupts_then_generates_reply(self) -> None:
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        session, order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(
+            ReAsk(rule_key="ded", reason="Deductible was stated twice.", clarify="Which is right?")
+        )
+        assert order[0] == "interrupt"
+        assert order[1][0] == "generate_reply"
+        instructions = order[1][1]["instructions"]
+        assert "CONSISTENCY CHECK" in instructions and "Which is right?" in instructions
+        session.update_agent.assert_not_called()  # re-ask keeps the same agent
+
+    @pytest.mark.asyncio
+    async def test_no_session_attached_is_a_noop(self) -> None:
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        await controller.apply_directive_now(Terminate(rule_key="t"))  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_apply_failure_is_swallowed(self) -> None:
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        session = MagicMock()
+        session.userdata.engaged = False
+        session.interrupt = AsyncMock(side_effect=RuntimeError("boom"))
+        controller.attach_session(session)
+        # a redirect failure must never bubble into the Observer / drop the call
+        await controller.apply_directive_now(Terminate(rule_key="t"))
+
+    @pytest.mark.asyncio
+    async def test_no_directive_fires_after_wrap_up_entered(self) -> None:
+        # A rule fired late (the outgoing observer's final drain) must not re-enter
+        # wrap-up (double goodbye), yank the call back into a task, or interrupt the
+        # goodbye with a re-ask — once no task is active, every directive is a no-op.
+        controller, _ = _controller()
+        controller.note_wrap_up_entered()
+        session, order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(SkipToTask(rule_key="late", task_key="intro_task"))
+        await controller.apply_directive_now(Terminate(rule_key="late"))
+        await controller.apply_directive_now(ReAsk(rule_key="late", reason="x"))
+        assert order == []  # no interrupt, no swap, no reply
+        session.generate_reply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_op_while_supervisor_has_taken_over(self) -> None:
+        # Under a live human takeover the rule engine must not yank the agent around.
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        session, order = _attach_ordered_session(controller)
+        session.userdata.engaged = True  # supervisor is driving the call
+        await controller.apply_directive_now(Terminate(rule_key="t"))
+        assert order == []  # no interrupt, no swap
 
 
 class TestPrefill:

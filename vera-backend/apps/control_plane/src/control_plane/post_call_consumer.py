@@ -19,7 +19,9 @@ from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from control_plane.call_summary import snapshot_turns
 from vera_core.audit import AuditSink
+from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.events import (
     POST_CALL_GROUP,
@@ -29,9 +31,7 @@ from vera_core.events import (
     parse_post_call_job,
 )
 from vera_core.integrations.llm import LLMClient, TranscriptTurn
-from vera_core.observability.correlation import room_name_for_call
 from vera_core.services.post_call_eval import EvalDeps, evaluate_call
-from vera_core.transcript import TranscriptService
 
 logger = logging.getLogger("control_plane.post_call_consumer")
 
@@ -45,11 +45,16 @@ MAX_DELIVERIES = 5
 
 
 async def build_turns(
-    transcript: TranscriptService, tenant_id: UUID, call_id: UUID
+    call_stream: CallStreamService,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    call_id: UUID,
 ) -> list[TranscriptTurn]:
-    room = room_name_for_call(tenant_id, call_id)
-    events = await transcript.snapshot(room)
-    return [TranscriptTurn(seq=i, role=e.role, text=e.text) for i, e in enumerate(events)]
+    # dev's snapshot_turns reads the live Redis stream while it exists, else the
+    # persisted Transcript rows. Adapt its (source, role, text) turns to the
+    # eval's own TranscriptTurn (seq is the extraction/evidence index).
+    snap = await snapshot_turns(call_stream, sessionmaker, tenant_id, call_id)
+    return [TranscriptTurn(seq=i, role=t.role, text=t.text) for i, t in enumerate(snap)]
 
 
 class PostCallConsumer:
@@ -57,7 +62,7 @@ class PostCallConsumer:
         self,
         redis: Redis,
         sessionmaker: async_sessionmaker[AsyncSession],
-        transcript: TranscriptService,
+        call_stream: CallStreamService,
         llm: LLMClient,
         audit: AuditSink,
         livekit: Any,
@@ -72,7 +77,7 @@ class PostCallConsumer:
     ) -> None:
         self._redis = redis
         self._sessionmaker = sessionmaker
-        self._transcript = transcript
+        self._call_stream = call_stream
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
@@ -177,7 +182,7 @@ class PostCallConsumer:
         return int(pending[0].get("times_delivered", 0))
 
     async def _process_job(self, job: PostCallJob) -> None:
-        turns = await build_turns(self._transcript, job.tenant_id, job.call_id)
+        turns = await build_turns(self._call_stream, self._sessionmaker, job.tenant_id, job.call_id)
         async with tenant_session(self._sessionmaker, job.tenant_id) as session:
             outcome = await evaluate_call(
                 session,

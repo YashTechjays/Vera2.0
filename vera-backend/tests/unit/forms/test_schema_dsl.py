@@ -41,6 +41,7 @@ def minimal_doc(**overrides: Any) -> dict[str, Any]:
         "insurance_type": "infertility_treatment",
         "system_fields": {"plan_type": "sections.basics.plan_type"},
         "promoted_fields": dict.fromkeys(PROMOTED_COLUMNS, "sections.basics.plan_type"),
+        "rep_call_reference_number_field": "sections.basics.plan_type",
         "sections": {
             "basics": {
                 "title": "Basics",
@@ -147,6 +148,20 @@ class TestCompiledArtifacts:
             insurance_provider_phone_number=(
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
+        )
+
+    def test_ibv_rep_call_reference_number_field(self) -> None:
+        doc = SCHEMAS["infertility_treatment"][1]()
+        assert (
+            doc.rep_call_reference_number_field
+            == "sections.insurance_representative.call_reference_number"
+        )
+
+    def test_disease_only_rep_call_reference_number_field(self) -> None:
+        doc = SCHEMAS["disease_only"][1]()
+        assert (
+            doc.rep_call_reference_number_field
+            == "sections.representative_details.call_reference_number"
         )
 
 
@@ -400,6 +415,18 @@ class TestDocumentValidation:
         doc = minimal_doc()
         doc["promoted_fields"]["patient_name"] = "sections.basics.notes"
         with pytest.raises(ValidationError, match="not a system_fields target"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_rep_call_reference_number_field_is_required(self) -> None:
+        doc = minimal_doc()
+        del doc["rep_call_reference_number_field"]
+        with pytest.raises(ValidationError):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_rep_call_reference_number_field_rejects_path_not_a_leaf(self) -> None:
+        doc = minimal_doc()
+        doc["rep_call_reference_number_field"] = "sections.basics.missing"
+        with pytest.raises(ValidationError, match="does not resolve to a leaf"):
             FormSchemaDoc.model_validate(doc)
 
 

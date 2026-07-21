@@ -36,8 +36,8 @@ from vera_core.db import elevated_session, platform_session, tenant_session
 from vera_core.events import PostCallJobBus
 from vera_core.llm import ResilientLLM
 from vera_core.models.enums import AccountType
+from vera_core.notifications import NotificationService
 from vera_core.plan_store import CallPlanService
-from vera_core.transcript import TranscriptService
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
@@ -93,13 +93,13 @@ def get_livekit(request: Request) -> LiveKitGateway:
     return gw
 
 
-def get_transcript_service(request: Request) -> TranscriptService:
-    service: TranscriptService = request.app.state.transcript_service
+def get_call_stream_service(request: Request) -> CallStreamService:
+    service: CallStreamService = request.app.state.call_stream_service
     return service
 
 
-def get_call_stream_service(request: Request) -> CallStreamService:
-    service: CallStreamService = request.app.state.call_stream_service
+def get_notification_service(request: Request) -> NotificationService:
+    service: NotificationService = request.app.state.notifications
     return service
 
 

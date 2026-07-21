@@ -116,6 +116,10 @@ running container, so `remote-deploy.sh` fetches it directly at deploy time. Cre
 ensure that role has `BYPASSRLS` on the Cloud SQL instance (`ALTER ROLE … BYPASSRLS`). If it's
 missing, control-plane migrations fail **red** (fail-closed) before the container is touched.
 
+Two more secrets, also **not** in `secrets.map` (read only by the one-off super-admin bootstrap,
+never by the running container): `vera-test-superadmin-email` and `vera-test-superadmin-password`
+— the credentials for platform operator #1. See "Bootstrap the platform super-admin" below.
+
 ### Database (Cloud SQL) — one-time setup
 
 Run as the **`postgres`** admin on the **`vera_db`** database (Cloud SQL Studio). All SQL is
@@ -289,6 +293,57 @@ GitHub Environment.
 7. **Serving:** `curl http://<dev-lb>/healthz` → `{"status":"ok"}` (LB routes it to
    the control-plane); the frontend loads and its `/api/v1/...` calls succeed via
    the LB; the worker log shows LiveKit registration (`agent_name="vera-agent"`).
+
+---
+
+## 3a. Bootstrap the platform super-admin (one-time, manual)
+
+Platform-admin endpoints need one `SUPER_ADMIN` to exist, which `seed.py` does **not** create
+(it makes only a TENANT_ADMIN). `deploy/superadmin/superadmin_seed.sh` — shipped to `/opt/vera` by
+the launcher in step 2 below (not by the deploy pipeline) — creates platform operator #1 from Secret
+Manager creds. It is **not** run automatically: on first creation the bootstrap prints a
+**one-time** `otpauth://` MFA URI you must scan to log in, so a human runs it and captures that
+URI live (an unattended run would bury it in CI logs → lockout). It is idempotent — a second run
+is a `no-op`, and cannot rotate the password or reset MFA.
+
+1. **Create the two secrets once** (as a principal with `secretmanager.admin`):
+   ```bash
+   printf 'superadmin@veratechsolutions.example' | \
+     gcloud secrets create vera-test-superadmin-email    --project=<PROJECT> --data-file=-
+   printf '<STRONG_PASSWORD>' | \
+     gcloud secrets create vera-test-superadmin-password --project=<PROJECT> --data-file=-
+   ```
+   The VM's attached SA already has `secretmanager.secretAccessor`, so it can read them.
+
+2. **Run it once** from your laptop or the jumpserver with `deploy/superadmin/superadmin_runme.sh` —
+   a standalone launcher (not part of CI/CD) that ships `superadmin_seed.sh` to the VM over
+   IAP and runs it. It auto-detects the project/VM/zone from `gcloud`, prints them, and asks you
+   to confirm **before** copying anything to the VM:
+   ```bash
+   # zero-arg: project from `gcloud config`, the single vera-test VM auto-detected
+   ./deploy/superadmin/superadmin_runme.sh --sa <DEPLOYER_SA>
+
+   # or pass any value explicitly (an arg always wins over auto-detect):
+   ./deploy/superadmin/superadmin_runme.sh --project <PROJECT> --vm <VM_NAME> --zone <VM_ZONE> --sa <DEPLOYER_SA>
+
+   # --check prints the resolved values and exits without touching the VM
+   ```
+   `--sa <DEPLOYER_SA>` impersonates the deploy SA so the SSH identity is in the VM's `docker`
+   group (needed for the `docker compose run` inside the bootstrap). First run prints
+   `created platform operator …` then an `otpauth://` line — **scan it into an authenticator app
+   immediately** and store the password. Re-running prints `platform operator already exists —
+   no-op`. Requires the app VM to be deployed already (its `app.env` must exist).
+
+   The underlying one-liner it runs on the VM, if you prefer to invoke it by hand:
+   ```bash
+   gcloud compute ssh <VM_NAME> \
+     --tunnel-through-iap --zone <VM_ZONE> --project <PROJECT> \
+     --impersonate-service-account=<DEPLOYER_SA> \
+     --command "bash /opt/vera/superadmin_seed.sh vera-test <PROJECT>"
+   ```
+
+3. **Verify login:** `POST /api/v1/platform/auth/login` (email + password) then
+   `POST /api/v1/platform/auth/mfa/verify` (6-digit code).
 
 ---
 

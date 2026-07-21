@@ -1,10 +1,19 @@
 """Worker→control-plane event bus over Redis Streams + a consumer group.
 
 The agent worker is DB-less; this is its first-class channel to signal domain
-events (call failures, and the answered/ended call-status transitions that
-drive the consumer's closeout) to the control plane. Events are PHI-free by
-construction: only a room_name (tenant+call UUIDs), an enum, and a timestamp —
-never a phone number or transcript text.
+events (call failures, the answered/ended call-status transitions that drive
+the consumer's closeout, the answers extracted from the live call by the
+Observer runtime, and the call-health observer's periodic assessments) to the
+control plane.
+
+Most events are PHI-free by construction: only a room_name (tenant+call UUIDs),
+an enum, and a timestamp. Two exceptions carry PHI and rely on the stream
+being in-boundary Redis (BAA-covered, CMEK at rest) under the SAME posture as
+``vera:transcript:*`` — never logged, never echoed by any handler:
+``CallAnswerRecordedEvent``, whose extracted answer value is tokenized by
+contract and raw today under passthrough; and ``CallHealthEvent``, whose
+``reason`` sentence is derived from the conversation. Adding any further
+value-bearing event is a compliance decision, not a routine change.
 """
 
 from enum import StrEnum
@@ -55,12 +64,42 @@ class CallEndedEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
-type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent
+class CallAnswerRecordedEvent(BaseModel):
+    """Emitted by the Observer when it extracts an answer from the live call, so the
+    control plane can write the field_answer row (worker stays DB-less). Carries the
+    value — see the module docstring's compliance note. ``evidence_seq`` points into
+    ``transcript.seq`` for the supporting turn; ``confidence`` is 0-100."""
+
+    type: Literal["call.answer_recorded"] = "call.answer_recorded"
+    room_name: str
+    field_path: str
+    value: str
+    confidence: int | None = None
+    evidence_seq: int | None = None
+    ts: int  # epoch milliseconds
+
+
+class CallHealthEvent(BaseModel):
+    """Emitted by the worker's call-health observer after each assessable
+    analysis. `reason` is PHI (see module docstring) — never log it."""
+
+    type: Literal["call.health"] = "call.health"
+    room_name: str
+    score: int  # 0-100 (clamped at the producer)
+    flag: str  # a CallHealthFlag value ("none" = healthy)
+    reason: str  # PHI — never log
+    # The analyzer's WINDOWED transcript turn count at analysis time — capped by
+    # health_max_turns and reset by re-anchoring (spec §4.2) — NOT the call's
+    # cumulative total turn count.
+    turn_count: int
+    ts: int  # analyzed_at, epoch milliseconds — the consumer's idempotency key
+
+
+type WorkerEvent = (
+    CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent | CallHealthEvent
+)
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
-    Annotated[
-        CallFailedEvent | CallAnsweredEvent | CallEndedEvent,
-        Field(discriminator="type"),
-    ]
+    Annotated[WorkerEvent, Field(discriminator="type")]
 )
 
 

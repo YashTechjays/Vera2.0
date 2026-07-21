@@ -168,9 +168,33 @@ class Settings(BaseSettings):
     # bounds the worst-case wait before the endpoint gives up and returns 503.
     summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
 
-    @field_validator("summary_fallback_models", mode="before")
+    # --- observer answer extraction (agent worker) ---------------------------
+    observer_extract_primary_model: str = "google:gemini-3.5-flash"
+    observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]
+    observer_extract_attempt_timeout_seconds: float = 8.0
+
+    @field_validator("summary_fallback_models", "observer_extract_fallback_models", mode="before")
     @classmethod
     def _split_fallback_models(cls, value: object) -> object:
+        return _split_csv(value)
+
+    # --- call-health observer (agent worker) --------------------------------
+    # Fault-tolerant analyzer chain, same "provider:model" selector format as the
+    # summary chain; runs INSIDE the agent worker as a per-call background task.
+    health_primary_model: str = "google:gemini-3.1-flash-lite"  # VERA_HEALTH_PRIMARY_MODEL
+    health_fallback_models: list[str] = ["openai:gpt-5.4-mini"]  # VERA_HEALTH_FALLBACK_MODELS
+    health_attempt_timeout_seconds: float = 8.0  # VERA_HEALTH_ATTEMPT_TIMEOUT_SECONDS
+    # A completed user turn triggers an analysis, at most one in flight and at
+    # least this many seconds apart (silence triggers nothing).
+    health_min_interval_seconds: float = 15.0  # VERA_HEALTH_MIN_INTERVAL_SECONDS
+    # Cold-start gate: no analysis until this many user turns exist.
+    health_min_user_turns: int = 2  # VERA_HEALTH_MIN_USER_TURNS
+    # Transcript window cap (chunked re-anchoring — see vera_core.call_health).
+    health_max_turns: int = 60  # VERA_HEALTH_MAX_TURNS
+
+    @field_validator("health_fallback_models", mode="before")
+    @classmethod
+    def _split_health_fallback_models(cls, value: object) -> object:
         return _split_csv(value)
 
     # --- IVR navigator ------------------------------------------------------
