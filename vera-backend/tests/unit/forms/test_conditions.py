@@ -127,6 +127,7 @@ class TestCompletionPctV2:
         "insurance_type": "infertility_treatment",
         "system_fields": {"a": "sections.s.a"},
         "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.s.a"),
+        "rep_call_reference_number_field": "sections.s.a",
         "sections": {
             "s": {
                 "title": "S",
