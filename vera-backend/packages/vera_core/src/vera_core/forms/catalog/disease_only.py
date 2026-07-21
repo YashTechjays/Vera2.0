@@ -419,6 +419,7 @@ def build_disease_only() -> FormSchemaDoc:
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
         ),
+        rep_call_reference_number_field="sections.representative_details.call_reference_number",
         shared_conditions={
             "disease_covered": eq("sections.coverage_summary.disease_coverage_active", "Yes"),
         },
