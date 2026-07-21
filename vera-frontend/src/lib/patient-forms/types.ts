@@ -37,9 +37,10 @@ export type CallAttempt = {
   created_at: string
   retry_of: string | null
   changed_paths: string[]
-  /** "available" when the caller may fetch this attempt's recording (AVAILABLE
-   *  + owner-or-published); null otherwise — null means render no play control. */
-  recording: "available" | null
+  /** True when THIS caller may fetch the attempt's recording (it is AVAILABLE,
+   *  the call is owner-or-published visible, and the caller holds
+   *  recordings:read) — false means render no play control. */
+  recording_available: boolean
 }
 
 /** JSONB field value — the backend stores/returns `Any`. */

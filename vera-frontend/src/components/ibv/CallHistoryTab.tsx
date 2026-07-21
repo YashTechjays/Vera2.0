@@ -68,7 +68,7 @@ export function AttemptCard({
           ))}
         </ul>
       )}
-      {canPlay && a.recording === "available" && (
+      {canPlay && a.recording_available && (
         <button
           type="button"
           className="mt-1 block text-xs text-muted-foreground underline-offset-2 hover:underline"

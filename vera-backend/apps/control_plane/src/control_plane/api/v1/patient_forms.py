@@ -18,10 +18,10 @@ import asyncio
 import hashlib
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -36,7 +36,7 @@ from control_plane.api.v1.common import (
 )
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import require
+from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import get_audit, get_sessionmaker
 from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
@@ -431,13 +431,14 @@ class CallAttemptView(BaseModel):
     created_at: datetime
     retry_of: UUID | None
     changed_paths: list[str]
-    # "available" only when the recording is playable AND the call passes the
-    # playback endpoint's owner-or-published gate for THIS caller — the UI must
-    # never advertise a recording the caller can't fetch.
-    recording: Literal["available"] | None
+    # True only when THIS caller may actually fetch the recording: it is
+    # AVAILABLE, the call passes the playback endpoint's owner-or-published
+    # gate, and the caller holds recordings:read — the DTO must never
+    # advertise a recording the playback endpoint would refuse.
+    recording_available: bool
 
 
-def _call_attempt_view(a: CallAttempt, caller_id: UUID | None) -> CallAttemptView:
+def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
     visible = not call_hidden_from(a.initiated_by_id, a.published, caller_id)
     return CallAttemptView(
         id=a.id,
@@ -447,7 +448,7 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None) -> CallAttemptVie
         created_at=a.created_at,
         retry_of=a.retry_of,
         changed_paths=a.changed_paths,
-        recording="available" if (a.recording_available and visible) else None,
+        recording_available=a.recording_available and visible and can_play,
     )
 
 
@@ -758,6 +759,7 @@ async def list_form_calls(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
     caller: VerifiedIdentity = require("forms:read"),
 ) -> ResponseModel[list[CallAttemptView]]:
     """The form's call-attempt timeline: mode, status, lineage, and which field
@@ -778,7 +780,11 @@ async def list_form_calls(
         resource_id=str(form_id),
         fields=sorted({p for a in attempts for p in a.changed_paths}),
     )
-    return ok([_call_attempt_view(a, caller.user_id) for a in attempts])
+    # recordings:read shapes recording_available only (no 403 — the timeline
+    # itself needs just forms:read); the playback endpoint re-enforces it.
+    _, permissions = await resolver.effective_permissions(session, tenant_id, caller.user_id)
+    can_play = "recordings:read" in permissions
+    return ok([_call_attempt_view(a, caller.user_id, can_play) for a in attempts])
 
 
 @router.post(

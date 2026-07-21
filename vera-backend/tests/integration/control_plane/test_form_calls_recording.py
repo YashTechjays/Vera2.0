@@ -128,13 +128,13 @@ async def recording_form_id(database_url: str, rbac_world: RBACWorld) -> AsyncGe
 
 async def _recordings_by_attempt(
     client: httpx.AsyncClient, form_id: UUID, token: str
-) -> list[str | None]:
+) -> list[bool]:
     resp = await client.get(
         f"/api/v1/patient-forms/{form_id}/calls",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200, resp.text
-    return [c["recording"] for c in resp.json()["data"]]
+    return [c["recording_available"] for c in resp.json()["data"]]
 
 
 @pytest.mark.asyncio
@@ -142,9 +142,9 @@ async def test_owner_sees_available_on_owned_and_published_calls(
     client: httpx.AsyncClient, rbac_world: RBACWorld, recording_form_id: UUID
 ) -> None:
     assert await _recordings_by_attempt(client, recording_form_id, rbac_world.supervisor_token) == [
-        "available",
-        "available",
-        None,
+        True,
+        True,
+        False,
     ]
 
 
@@ -153,7 +153,7 @@ async def test_non_owner_sees_available_only_on_published_call(
     client: httpx.AsyncClient, rbac_world: RBACWorld, recording_form_id: UUID
 ) -> None:
     assert await _recordings_by_attempt(client, recording_form_id, rbac_world.admin_token) == [
-        None,
-        "available",
-        None,
+        False,
+        True,
+        False,
     ]

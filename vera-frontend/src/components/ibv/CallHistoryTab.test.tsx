@@ -13,7 +13,7 @@ const attempt = (over: Partial<CallAttempt>): CallAttempt => ({
   created_at: "2026-07-21T12:00:00Z",
   retry_of: null,
   changed_paths: [],
-  recording: null,
+  recording_available: false,
   ...over,
 })
 
@@ -37,20 +37,20 @@ describe("AttemptCard recording playback", () => {
   beforeEach(() => clearPlaybackCache())
 
   it("shows the play control when the recording is available and the caller may play it", () => {
-    expect(card(attempt({ recording: "available" }), true)).toContain("Play recording")
+    expect(card(attempt({ recording_available: true }), true)).toContain("Play recording")
   })
 
   it("hides the play control when the attempt has no playable recording", () => {
-    expect(card(attempt({ recording: null }), true)).not.toContain("Play recording")
+    expect(card(attempt({ recording_available: false }), true)).not.toContain("Play recording")
   })
 
   it("hides the play control without the recordings:read permission", () => {
-    expect(card(attempt({ recording: "available" }), false)).not.toContain("Play recording")
+    expect(card(attempt({ recording_available: true }), false)).not.toContain("Play recording")
   })
 
   it("renders the player (toggled label + audio) when open", () => {
     cachePlayback("c1", { url: "https://storage.example/sig", expires_at: "2999-01-01T00:00:00Z" })
-    const html = card(attempt({ recording: "available" }), true, true)
+    const html = card(attempt({ recording_available: true }), true, true)
     expect(html).toContain("Hide recording")
     expect(html).toContain('aria-label="Call recording"')
   })

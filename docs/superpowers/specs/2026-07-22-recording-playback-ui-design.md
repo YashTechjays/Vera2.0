@@ -24,17 +24,19 @@ published. No new access rules.
 
 `GET /patient-forms/{form_id}/calls` (`list_form_calls`, patient_forms.py):
 
-- `CallAttemptView` gains `recording: Literal["available"] | None`.
-- Computed with one query: the latest `Recording` row per attempt call id,
-  taking `RecordingStatus.AVAILABLE` only.
-- The caller-visibility rule is applied server-side per call using the same
-  predicate as the playback endpoint (`_call_hidden_from`, extracted from
-  `api/v1/calls.py` into a shared helper so the two gates cannot diverge).
-  A hidden call's attempt row still renders (history is `forms:read`), but its
-  `recording` field is `null` — the UI never advertises a recording the caller
-  cannot fetch.
+- `CallAttemptView` gains `recording_available: bool` (simplify pass: a
+  boolean, not a `"available"` string sentinel).
+- Computed with one query: any `RecordingStatus.AVAILABLE` `Recording` row per
+  attempt call id.
+- True only when the FULL playback gate passes for THIS caller: the
+  owner-or-published visibility predicate (`call_hidden_from`, extracted from
+  `api/v1/calls.py` into `vera_core/services/call_visibility.py` so the two
+  gates cannot diverge) AND the `recordings:read` permission (resolved
+  server-side in the endpoint). A hidden call's attempt row still renders
+  (history is `forms:read`), but `recording_available` is `false` — the UI
+  never advertises a recording the playback endpoint would refuse.
 - Everything else (no recording row, PENDING/FAILED/DISCARDED/DELETED, hidden
-  call) → `null`.
+  call, caller without `recordings:read`) → `false`.
 
 Why not probe `GET /calls/{id}/recording` per attempt from the FE: each probe
 mints a signed URL and writes a `RECORDING_ACCESSED` audit row — rendering a
