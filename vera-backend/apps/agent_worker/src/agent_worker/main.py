@@ -30,6 +30,7 @@ from redis.asyncio import Redis
 
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.health_observer import CallHealthObserver, build_health_observer
 from agent_worker.intervention import AgentTakeoverController, intervener_present
 from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
@@ -324,6 +325,7 @@ async def entrypoint(ctx: JobContext) -> None:
     observer_redis: Redis | None = None
     observer_manager: ObserverManager | None = None
     extract_llm: ResilientLLM | None = None
+    health_observer: CallHealthObserver | None = None
 
     try:
         # Attach correlation attributes to the active OTel span so every pipeline
@@ -468,11 +470,34 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             observer_manager.start()
 
+        # Call-health observer (real /calls flow only: needs both the per-call
+        # event stream and the worker-event bus). An extra fan-out sink — it sees
+        # the same ordered turns as every other stream and never blocks them.
+        if call_stream is not None and bus is not None:
+            try:
+                health_observer = build_health_observer(
+                    session,
+                    room_name=room_name,
+                    settings=settings,
+                    call_stream=call_stream,
+                    bus=bus,
+                )
+            except Exception as exc:
+                # A static misconfiguration (bad model selector, etc.) must degrade to
+                # "no observer", never break call setup. Type name only (PHI rule).
+                logger.warning(
+                    "build_health_observer failed for %s (%s); continuing without an observer",
+                    room_name,
+                    type(exc).__name__,
+                )
+
         # One reordering emitter driving the stream — the barge-in reorder state machine
         # lives once per job (see transcript_publisher). Kept as a fan-out seam so a second
         # sink can be added without reshaping the emitter wiring.
         # (The Observer is NOT a sink — it reads the stream this sink writes.)
-        sinks: list[TurnPublisher] = [call_stream] if call_stream is not None else []
+        sinks: list[TurnPublisher] = [
+            svc for svc in (call_stream, health_observer) if svc is not None
+        ]
         turn_sink = _fan_out_sink(sinks)
         turn_emitter: ReorderingEmitter | None = None
         if turn_sink is not None:
@@ -574,6 +599,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     await takeover_transcriber.aclose()  # before end(): flush its turns first
                 except Exception:
                     logger.exception("failed to close takeover transcriber for %s", room_name)
+            if health_observer is not None:
+                try:
+                    await health_observer.aclose()  # before the call stream ends
+                except Exception:
+                    logger.exception("failed to close health observer for %s", room_name)
             await _end_call_stream()
             await _end_observer()
             await _end_plan_run()
@@ -624,6 +654,9 @@ async def entrypoint(ctx: JobContext) -> None:
         if extract_llm is not None:
             with contextlib.suppress(Exception):
                 await extract_llm.aclose()
+        if health_observer is not None:
+            with contextlib.suppress(Exception):
+                await health_observer.aclose()
         raise
     # record=False disables livekit-agents session recording. Left unset it defers to the
     # server's enable_recording flag, which uploads a session report — including call AUDIO

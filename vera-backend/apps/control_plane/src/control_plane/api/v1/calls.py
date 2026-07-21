@@ -78,6 +78,7 @@ from vera_core.db.rls import tenant_session
 from vera_core.llm import LLMUnavailableError, ResilientLLM
 from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
+from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
@@ -178,7 +179,11 @@ async def _intervener_lock_live(
 
 
 def _summary(
-    call: Call, patient_name: str | None, caller_id: UUID, insurance_provider: str | None = None
+    call: Call,
+    patient_name: str | None,
+    caller_id: UUID,
+    insurance_provider: str | None = None,
+    insurance_type: str | None = None,
 ) -> CallSummary:
     return CallSummary(
         id=call.id,
@@ -188,11 +193,16 @@ def _summary(
         room_name=room_name_for_call(call.tenant_id, call.id),
         patient_name=patient_name,
         insurance_provider=insurance_provider,
+        insurance_type=insurance_type,
         started_at=call.started_at,
         ended_at=call.ended_at,
         created_at=call.created_at,
         published=call.published,
         is_owner=call.initiated_by_id == caller_id,
+        health_score=call.health_score,
+        health_flag=call.health_flag,
+        health_reason=call.health_reason,
+        health_analyzed_at=call.health_analyzed_at,
     )
 
 
@@ -571,12 +581,17 @@ async def publish_call(
     # Patient cell until the next poll.
     row = (
         await session.execute(
-            select(PatientForm.patient_name, PatientForm.insurance_provider).where(
-                PatientForm.id == call.form_id
+            select(
+                PatientForm.patient_name,
+                PatientForm.insurance_provider,
+                FormSchema.insurance_type,
             )
+            .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
+            .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
+            .where(PatientForm.id == call.form_id)
         )
     ).one_or_none()
-    patient_name, insurance_provider = row if row else (None, None)
+    patient_name, insurance_provider, insurance_type = row if row else (None, None, None)
     await emit_phi_read_audit(
         audit,
         request,
@@ -584,9 +599,9 @@ async def publish_call(
         caller=caller,
         resource_type="call",
         resource_id=str(call.id),
-        fields=["patient_name", "insurance_provider"],
+        fields=["patient_name", "insurance_provider", "health_reason"],
     )
-    return ok(_summary(call, patient_name, caller.user_id, insurance_provider))
+    return ok(_summary(call, patient_name, caller.user_id, insurance_provider, insurance_type))
 
 
 @router.post(
@@ -735,8 +750,15 @@ async def list_calls(
         else Call.current_status.in_(TERMINAL_VALUES)
     )
     query = (
-        select(Call, PatientForm.patient_name, PatientForm.insurance_provider)
+        select(
+            Call,
+            PatientForm.patient_name,
+            PatientForm.insurance_provider,
+            FormSchema.insurance_type,
+        )
         .join(PatientForm, PatientForm.id == Call.form_id)
+        .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
+        .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
         .where(status_cond)
         .where(_visible_to(caller.user_id))
         .order_by(Call.created_at.desc())
@@ -753,9 +775,14 @@ async def list_calls(
         caller=caller,
         resource_type="call",
         resource_id="list",
-        fields=["patient_name", "insurance_provider"],
+        fields=["patient_name", "insurance_provider", "health_reason"],
     )
-    return ok([_summary(c, name, caller.user_id, provider) for c, name, provider in rows])
+    return ok(
+        [
+            _summary(c, name, caller.user_id, provider, insurance_type)
+            for c, name, provider, insurance_type in rows
+        ]
+    )
 
 
 @router.get(

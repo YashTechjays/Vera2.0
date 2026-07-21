@@ -9,6 +9,7 @@ monkeypatched per-test via `_consumer()`, which routes queries through a
 
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -21,6 +22,7 @@ import control_plane.call_closeout as call_closeout
 import control_plane.post_call as post_call
 import control_plane.transcript_finalizer as transcript_finalizer
 import control_plane.worker_events as worker_events
+from control_plane.call_closeout import TERMINAL_VALUES
 from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import AuditRecord
@@ -943,3 +945,83 @@ async def test_dispatch_serializes_within_a_room_but_parallel_across(
     # within room A, a1 precedes a2 (stream order preserved)
     assert order.index("a1") < order.index("a2")
     assert set(order) == {"a1", "a2", "b1"}
+
+
+# ---------------------------------------------------------------------------
+# Task 8: CRITICAL-interplay — the health observer's status flip must survive
+# a redelivered call.answered, and a CRITICAL call must still close normally.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_answered_redelivery_does_not_clobber_critical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.CRITICAL.value)
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=_FakeSession(call=call))
+    ev = CallAnsweredEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_answered(ev)
+    assert call.current_status == CallStatus.CRITICAL.value  # health flip survives
+    assert wired.session.added == []
+
+
+@pytest.mark.asyncio
+async def test_call_ended_closes_a_critical_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.CRITICAL.value)
+    form = _form_row(tenant_id, form_id)
+    session = _FakeSession(call=call, form=form, tenant=_tenant(id=tenant_id))
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=session)
+    ev = CallEndedEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_ended(ev)
+    assert call.current_status in TERMINAL_VALUES  # CRITICAL closes like any active status
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix: the answered-after-health race. `_handle_call_health`'s
+# escalation branch can flip INITIATED/RINGING -> CRITICAL before call.answered
+# is processed, so the early-return branch above must still backfill
+# started_at — otherwise it stays NULL and `end_call`'s `started_at is None`
+# pre-answer routing misclassifies a live call.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_answered_backfills_started_at_on_critical_early_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    call = _call_row(
+        tenant_id, call_id, form_id, current_status=CallStatus.CRITICAL.value, started_at=None
+    )
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=_FakeSession(call=call))
+    ev = CallAnsweredEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_answered(ev)
+    assert call.current_status == CallStatus.CRITICAL.value  # unchanged
+    assert call.started_at is not None  # backfilled
+    assert wired.session.added == []  # idempotent: no new STATUS CallEvent on redelivery
+
+
+@pytest.mark.asyncio
+async def test_answered_redelivery_keeps_existing_started_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    original = datetime.fromtimestamp(1_700_000_000, tz=UTC)
+    call = _call_row(
+        tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value, started_at=original
+    )
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=_FakeSession(call=call))
+    ev = CallAnsweredEvent(
+        room_name=room_name_for_call(tenant_id, call_id), ts=int(time.time() * 1000)
+    )
+    await wired.consumer._handle_call_answered(ev)
+    assert call.started_at == original  # already-ACTIVE call's started_at is untouched
+    assert wired.session.added == []

@@ -3,9 +3,11 @@ import { Hash, MessageSquare } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
+  asCallHealth,
   asCallStatus,
   asTranscriptTurn,
   streamCallEvents,
+  type CallHealth,
   type TranscriptTurn,
   type TranscriptTurnSource,
 } from "@/lib/api/callEvents"
@@ -41,6 +43,7 @@ export function CallTranscript({
   callId,
   onCallStatus,
   onTextChange,
+  onHealth,
   supervisorLabel = "Supervisor",
 }: {
   callId: string
@@ -51,6 +54,8 @@ export function CallTranscript({
   /** The transcript as plain text, re-emitted per turn — feeds the modal's
    *  copy button. Same PHI hygiene: component state only, gone on unmount. */
   onTextChange?: (text: string) => void
+  /** Fires for every health envelope — the modal lifts this into its header badge. */
+  onHealth?: (h: CallHealth) => void
   /** Label for supervisor (takeover) turns — the intervener's email when known. */
   supervisorLabel?: string
 }) {
@@ -61,12 +66,14 @@ export function CallTranscript({
   // the SSE (the stream effect below deliberately depends on callId only).
   const onCallStatusRef = useRef(onCallStatus)
   const onTextChangeRef = useRef(onTextChange)
+  const onHealthRef = useRef(onHealth)
   const supervisorLabelRef = useRef(supervisorLabel)
   useEffect(() => {
     onCallStatusRef.current = onCallStatus
     onTextChangeRef.current = onTextChange
+    onHealthRef.current = onHealth
     supervisorLabelRef.current = supervisorLabel
-  }, [onCallStatus, onTextChange, supervisorLabel])
+  }, [onCallStatus, onTextChange, onHealth, supervisorLabel])
 
   useEffect(() => {
     onTextChangeRef.current?.(transcriptText(turns))
@@ -82,6 +89,8 @@ export function CallTranscript({
           setTurns((prev) => [...prev, { ...turn, supervisorLabel: supervisorLabelRef.current }])
         const status = asCallStatus(e)
         if (status) onCallStatusRef.current?.(status, e.ts)
+        const health = asCallHealth(e)
+        if (health) onHealthRef.current?.(health)
       },
       // A dropped connection was re-established and the server replays the
       // stream from the start — discard the stale turns; the replay replaces

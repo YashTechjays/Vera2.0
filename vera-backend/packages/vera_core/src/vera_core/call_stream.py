@@ -29,6 +29,7 @@ _ENDED_VALUE = "ended"
 
 TYPE_TRANSCRIPT = "transcript"
 TYPE_CALL_STATUS = "call_status"
+TYPE_HEALTH = "health"
 
 
 def call_stream_key(room_name: str) -> str:
@@ -38,7 +39,7 @@ def call_stream_key(room_name: str) -> str:
 class CallStreamEvent(BaseModel):
     """One live event. `data` is type-specific and de-identified by construction."""
 
-    type: str  # "transcript" | "call_status" | future types (e.g. "form_field")
+    type: str  # "transcript" | "call_status" | "health" | future types
     data: dict[str, Any]
     ts: int  # epoch milliseconds
 
@@ -200,6 +201,18 @@ class CallStreamService:
     async def publish_status(self, room_name: str, status: str, *, ts: int) -> None:
         await self._store.publish(
             room_name, CallStreamEvent(type=TYPE_CALL_STATUS, data={"status": status}, ts=ts)
+        )
+
+    async def publish_health(
+        self, room_name: str, *, score: int, flag: str, reason: str, ts: int
+    ) -> None:
+        """Publish one call-health-observer assessment frame (spec: rides the
+        same /calls/{id}/events SSE — no new pipe per event type)."""
+        await self._store.publish(
+            room_name,
+            CallStreamEvent(
+                type=TYPE_HEALTH, data={"score": score, "flag": flag, "reason": reason}, ts=ts
+            ),
         )
 
     def consume(

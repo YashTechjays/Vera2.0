@@ -21,6 +21,8 @@ export type LiveCall = {
   /** ISO start time from the API (null until the callee answers) — the modals'
    *  live-timer seed. Absent on mock rows. */
   startedAt?: string | null
+  /** Latest observer health score (0-100); null/undefined = not assessed. */
+  healthScore?: number | null
 }
 
 export const liveCalls: LiveCall[] = [

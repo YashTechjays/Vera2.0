@@ -14,6 +14,9 @@ export type CallSummary = {
   room_name: string
   patient_name: string | null
   insurance_provider: string | null
+  /** The bound form schema's family — e.g. "infertility_treatment". Not PHI
+   *  (a business classification, not patient data). */
+  insurance_type: string | null
   /** ISO-8601; null until the callee answers. */
   started_at: string | null
   /** ISO-8601; set once the call reaches a terminal status. */
@@ -23,6 +26,15 @@ export type CallSummary = {
   published: boolean
   /** True when the current caller owns the call (its initiated_by). */
   is_owner: boolean
+  /** Latest observer health score (0-100); null = never assessed (render neutrally, never 0). */
+  health_score: number | null
+  /** "none" or an intervention category; null = never assessed. */
+  health_flag: string | null
+  /** Analyzer's one-line justification (PHI — session-scoped state only);
+   *  shown in the health tooltip. Null until first assessed. */
+  health_reason: string | null
+  /** ISO-8601 time of the latest assessment; drives the staleness gray-out. */
+  health_analyzed_at: string | null
 }
 
 /** LiveKit join details for a call room. */

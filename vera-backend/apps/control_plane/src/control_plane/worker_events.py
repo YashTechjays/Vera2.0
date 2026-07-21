@@ -12,6 +12,7 @@ import os
 import socket
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from redis.asyncio import Redis
@@ -26,6 +27,7 @@ from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.post_call import resolve_ai_processing
 from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditRecord, AuditSink
+from vera_core.call_health import MAX_REASON_LEN
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.events import (
@@ -36,13 +38,20 @@ from vera_core.events import (
     CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
+    CallHealthEvent,
     WorkerEvent,
     WorkerEventBus,
     parse_worker_event,
 )
 from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import AnswerSource, CallEventType, CallStatus
+from vera_core.models.enums import AnswerSource, CallEventType, CallHealthFlag, CallStatus
+from vera_core.notifications import (
+    TYPE_INTERVENTION_NEEDED,
+    Notification,
+    NotificationAudience,
+    NotificationService,
+)
 from vera_core.observability.correlation import parse_room_name
 from vera_core.plan_store import CallPlanService
 from vera_core.services.field_answers import recompute_form_projection, record_answer
@@ -122,6 +131,7 @@ class WorkerEventConsumer:
         form_auto_retry_enabled: bool = False,
         recording: "RecordingConfig | None" = None,
         call_plans: CallPlanService | None = None,
+        notifications: NotificationService | None = None,
     ) -> None:
         self._redis = redis
         self._livekit = livekit
@@ -136,12 +146,14 @@ class WorkerEventConsumer:
         self._form_auto_retry_enabled = form_auto_retry_enabled
         self._recording = recording
         self._call_plans = call_plans
+        self._notifications = notifications
         self._bus = WorkerEventBus(redis)
         self._handlers: dict[str, EventHandler] = {
             "call.failed": self._handle_call_failed,
             "call.answered": self._handle_call_answered,
             "call.ended": self._handle_call_ended,
             "call.answer_recorded": self._handle_call_answer_recorded,
+            "call.health": self._handle_call_health,
         }
 
     async def run(self) -> None:
@@ -313,8 +325,16 @@ class WorkerEventConsumer:
                 return  # voice-lab room
             if call.current_status in TERMINAL_VALUES:
                 return  # stale redelivery after terminal
-            if call.current_status == CallStatus.ACTIVE.value:
-                return  # idempotent redelivery
+            if call.current_status in (CallStatus.ACTIVE.value, CallStatus.CRITICAL.value):
+                # Idempotent redelivery (CRITICAL = already live AND health-flagged). But
+                # `_handle_call_health`'s escalation branch can flip INITIATED/RINGING ->
+                # CRITICAL before this event is processed (the answered-after-health race),
+                # in which case started_at is still NULL — backfill it here so `end_call`'s
+                # `started_at is None` pre-answer routing doesn't misclassify a live call.
+                # No STATUS CallEvent added — stays a no-op redelivery otherwise.
+                if call.started_at is None:
+                    call.started_at = func.now()
+                return
             call.current_status = CallStatus.ACTIVE.value
             call.started_at = func.now()
             session.add(
@@ -389,6 +409,148 @@ class WorkerEventConsumer:
                     detail={"field_path": event.field_path, "call_id": str(call.id)},
                 )
             )
+
+    async def _handle_call_health(self, event: WorkerEvent) -> None:
+        """Persist one observer analysis (spec §4.3). Every surviving analysis
+        updates the denormalized Call columns; a CallEvent(HEALTH) row, the
+        ACTIVE<->CRITICAL flip, and a notification happen only on episode
+        transitions — escalation immediately, recovery after 2 consecutive
+        healthy results (asymmetric hysteresis, spec edge #4). Late results are
+        DROPPED, never retried: unlike lifecycle events, a health frame is
+        transient and superseded by the next analysis."""
+        if not isinstance(event, CallHealthEvent):
+            return
+        ref = parse_room_name(event.room_name)
+        if ref is None:
+            return
+        analyzed_at = datetime.fromtimestamp(event.ts / 1000, tz=UTC)
+        notification: Notification | None = None
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id).with_for_update())
+            ).scalar_one_or_none()
+            if call is None:
+                return  # voice-lab room / dropped row
+            if call.current_status in TERMINAL_VALUES:
+                return  # analysis finished after the call ended
+            if call.intervener_user_id is not None:
+                return  # takeover raced the in-flight analysis
+            if call.health_analyzed_at is not None and analyzed_at <= call.health_analyzed_at:
+                return  # consumer-group redelivery / out-of-order duplicate
+            prior_flag = call.health_flag
+            in_episode = call.current_status == CallStatus.CRITICAL.value
+            flagged = event.flag != CallHealthFlag.NONE.value
+            call.health_score = event.score
+            call.health_flag = event.flag
+            # Defense in depth on the VARCHAR(500) column: the producer already
+            # caps the reason, but an oversized event must degrade to truncation,
+            # not a write error — a failing handler stays unacked and would be
+            # redelivered forever (poison loop).
+            call.health_reason = event.reason[:MAX_REASON_LEN]
+            call.health_analyzed_at = analyzed_at
+            detail: dict[str, object] = {
+                "score": event.score,
+                "reason": event.reason,
+                "turn_count": event.turn_count,
+            }
+            transition_flag: str | None = None
+            if flagged and not in_episode:
+                transition_flag = event.flag  # open an episode (escalation: immediate)
+                # Always flip, regardless of current_status: the terminal guard above
+                # already dropped terminal statuses, and `in_episode` already excludes
+                # CRITICAL, so whatever reaches here (normally ACTIVE, but also
+                # INITIATED/RINGING/IVR/WAITING if call.health races call.answered's
+                # commit) is safe to promote. This closes the health-before-answered
+                # reorder race — `_handle_call_answered` already treats CRITICAL as
+                # "already live" and skips the ACTIVE flip in that case.
+                call.current_status = CallStatus.CRITICAL.value
+                session.add(
+                    CallEvent(
+                        tenant_id=ref.tenant_id,
+                        call_id=call.id,
+                        event_type=CallEventType.STATUS.value,
+                        event_value=CallStatus.CRITICAL.value,
+                    )
+                )
+            elif flagged and in_episode:
+                # Compare against the EPISODE category (the last HEALTH row), not
+                # the per-analysis flag — a single healthy blip must not make the
+                # same category read as a brand-new episode (spec §4.3).
+                episode_flag = (
+                    await session.execute(
+                        select(CallEvent.event_value)
+                        .where(
+                            CallEvent.call_id == call.id,
+                            CallEvent.event_type == CallEventType.HEALTH.value,
+                        )
+                        .order_by(CallEvent.created_at.desc(), CallEvent.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if event.flag != episode_flag:
+                    transition_flag = event.flag  # category change while flagged
+            elif in_episode and prior_flag == CallHealthFlag.NONE.value:
+                # Second consecutive healthy result — close the episode. The
+                # (prior_flag == none AND status CRITICAL) pair IS the 2-streak;
+                # no counter column needed. No notification on recovery.
+                session.add(
+                    CallEvent(
+                        tenant_id=ref.tenant_id,
+                        call_id=call.id,
+                        event_type=CallEventType.HEALTH.value,
+                        event_value=CallHealthFlag.NONE.value,
+                        detail=detail,
+                    )
+                )
+                call.current_status = CallStatus.ACTIVE.value
+                session.add(
+                    CallEvent(
+                        tenant_id=ref.tenant_id,
+                        call_id=call.id,
+                        event_type=CallEventType.STATUS.value,
+                        event_value=CallStatus.ACTIVE.value,
+                    )
+                )
+            if transition_flag is not None:
+                session.add(
+                    CallEvent(
+                        tenant_id=ref.tenant_id,
+                        call_id=call.id,
+                        event_type=CallEventType.HEALTH.value,
+                        event_value=transition_flag,
+                        detail=detail,
+                    )
+                )
+                # Routing rule (spec §4.4): unpublished -> owner only; published
+                # or ownerless (tenant-visible in the list) -> tenant-wide.
+                audience = (
+                    NotificationAudience(kind="tenant")
+                    if call.published or call.initiated_by_id is None
+                    else NotificationAudience(kind="user", user_id=str(call.initiated_by_id))
+                )
+                notification = Notification(
+                    type=TYPE_INTERVENTION_NEEDED,
+                    audience=audience,
+                    # Minimum-necessary (2026-07-18 final-review amendment): `reason` is
+                    # dropped here — no consumer reads it (the toast shows flag+score
+                    # only) — but stays in CallEvent.detail for reporting.
+                    data={
+                        "call_id": str(call.id),
+                        "score": event.score,
+                        "flag": event.flag,
+                    },
+                    ts=event.ts,
+                )
+        # After the transaction committed — receivers who refetch see the new state.
+        if notification is not None and self._notifications is not None:
+            try:
+                await self._notifications.publish(ref.tenant_id, notification)
+            except Exception as exc:  # payload is PHI — type name only
+                logger.warning(
+                    "intervention notification publish failed for %s (%s)",
+                    event.room_name,
+                    type(exc).__name__,
+                )
 
     async def _close_and_refill(
         self, room_name: str, status: CallStatus, *, trigger: str, ts: int

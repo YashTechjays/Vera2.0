@@ -38,11 +38,16 @@ const call: CallSummary = {
   room_name: "call--t1--c1",
   patient_name: "Jane Doe",
   insurance_provider: "Cigna",
+  insurance_type: "infertility_treatment",
   started_at: "2026-07-04T10:00:00Z",
   ended_at: null,
   created_at: "2026-07-04T09:59:00Z",
   published: false,
   is_owner: true,
+  health_score: null,
+  health_flag: null,
+  health_reason: null,
+  health_analyzed_at: null,
 }
 
 const joinToken: JoinTokenResponse = {

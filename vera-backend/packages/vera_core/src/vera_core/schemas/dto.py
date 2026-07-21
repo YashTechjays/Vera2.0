@@ -18,11 +18,22 @@ class CallSummary(BaseModel):
     room_name: str
     patient_name: str | None = None
     insurance_provider: str | None = None
+    # The bound form schema's family — e.g. "infertility_treatment" (vera_core.models.
+    # enums.InsuranceType). Not PHI (a business classification, not patient data).
+    insurance_type: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     created_at: datetime
     published: bool = False
     is_owner: bool = False
+    # Latest call-health-observer assessment. NULL score = never assessed (the
+    # UI renders it neutrally, never as 0). analyzed_at drives staleness display.
+    health_score: int | None = None
+    health_flag: str | None = None
+    # Analyzer's one-line justification (PHI — conversation-derived); shown as
+    # the health tooltip. Disclosure is audited alongside patient_name.
+    health_reason: str | None = None
+    health_analyzed_at: datetime | None = None
 
 
 class CallStats(BaseModel):

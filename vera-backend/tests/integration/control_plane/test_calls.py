@@ -158,6 +158,8 @@ async def test_list_calls_empty_then_populated(
     assert row["status"] == "initiated"
     assert parse_room_name(row["room_name"]) is not None
     assert "insurance_provider" in row
+    # seeded_form_id binds an INFERTILITY_TREATMENT schema — the join must surface it.
+    assert row["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
 
 
 @pytest.mark.asyncio
@@ -424,7 +426,9 @@ async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
         .first()
     )
     assert row is not None
-    assert row.detail == {"fields": ["patient_name", "insurance_provider"]}
+    # health_reason (analyzer justification, PHI) is disclosed on the list rows
+    # alongside patient_name and insurance_provider — all audited by field name.
+    assert row.detail == {"fields": ["patient_name", "insurance_provider", "health_reason"]}
 
 
 @pytest.mark.asyncio
@@ -497,6 +501,7 @@ async def test_publish_is_owner_only_idempotent_and_audited(
     assert pub.json()["data"]["published"] is True
     # Same row shape as list_calls — None would blank the UI's Patient cell.
     assert pub.json()["data"]["patient_name"] == "Test Patient"
+    assert pub.json()["data"]["insurance_type"] == InsuranceType.INFERTILITY_TREATMENT.value
 
     assert len(await publish_audit_rows()) == 1
 
