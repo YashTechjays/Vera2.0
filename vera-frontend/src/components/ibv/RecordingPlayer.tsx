@@ -1,33 +1,16 @@
 import { useEffect, useRef, useState } from "react"
 
 import { getRecordingPlayback, type RecordingPlayback } from "@/lib/api/calls"
-
-/** Signed URLs are valid ~10 min; cache per call so collapse/expand inside the
- *  TTL doesn't refetch — every fetch is a server-audited disclosure. Module
- *  scope by design: the cache must survive this component unmounting. */
-const playbackCache = new Map<string, RecordingPlayback>()
-
-export function cachePlayback(callId: string, playback: RecordingPlayback): void {
-  playbackCache.set(callId, playback)
-}
-
-export function clearPlaybackCache(): void {
-  playbackCache.clear()
-}
-
-function fresh(p: RecordingPlayback | undefined): p is RecordingPlayback {
-  return !!p && new Date(p.expires_at).getTime() > Date.now()
-}
+import { cachePlayback, evictPlayback, getFreshPlayback } from "@/lib/recordings/playbackCache"
 
 /** Inline audio player for one call attempt's recording. Mounted only on the
  *  user's explicit click (CallHistoryTab), so the audited URL fetch is always
  *  user-initiated. On a mid-playback error past expiry it refetches once and
  *  resumes; a second failure surfaces the inline error. */
 export function RecordingPlayer({ callId }: { callId: string }) {
-  const [playback, setPlayback] = useState<RecordingPlayback | null>(() => {
-    const cached = playbackCache.get(callId)
-    return fresh(cached) ? cached : null
-  })
+  const [playback, setPlayback] = useState<RecordingPlayback | null>(() =>
+    getFreshPlayback(callId),
+  )
   const [failed, setFailed] = useState(false)
   const retried = useRef(false)
   const resumeAt = useRef(0)
@@ -60,10 +43,10 @@ export function RecordingPlayer({ callId }: { callId: string }) {
 
   const handleError = () => {
     // Expired mid-listen (long pause, late seek): refetch once, resume position.
-    if (!retried.current && !fresh(playback)) {
+    if (!retried.current && getFreshPlayback(callId) === null) {
       retried.current = true
       resumeAt.current = audioRef.current?.currentTime ?? 0
-      playbackCache.delete(callId)
+      evictPlayback(callId)
       getRecordingPlayback(callId)
         .then((p) => {
           cachePlayback(callId, p)

@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
 
-import { RecordingPlayer, cachePlayback, clearPlaybackCache } from "./RecordingPlayer"
+import { RecordingPlayer } from "./RecordingPlayer"
+import { cachePlayback, clearPlaybackCache } from "@/lib/recordings/playbackCache"
 
 const FRESH = { url: "https://storage.example/sig", expires_at: "2999-01-01T00:00:00Z" }
 const EXPIRED = { url: "https://storage.example/old", expires_at: "2000-01-01T00:00:00Z" }
