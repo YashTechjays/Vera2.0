@@ -26,7 +26,8 @@ from vera_core.forms.review import (
 from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import SchemaVersion
-from vera_core.models.enums import AnswerSource, FormStatus
+from vera_core.models.call import Call
+from vera_core.models.enums import AnswerSource, CallStatus, FormStatus
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
@@ -158,6 +159,15 @@ async def evaluate_call(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
+    # A user-ended (CANCELED) call must never be auto-redialed — the supervisor who
+    # ended it does not want the payer called back. resolve_ai_processing enforces this
+    # on the non-eval path; the eval pipeline bypasses that gate, so re-check it here.
+    call: Call | None = (
+        await session.execute(select(Call).where(Call.id == call_id))
+    ).scalar_one_or_none()
+    user_ended = call is not None and (
+        call.current_status == CallStatus.CANCELED.value or call.end_requested_by_id is not None
+    )
     prev_status = form.status
     sm = FormStateMachine()
 
@@ -345,6 +355,15 @@ async def evaluate_call(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
     )
     if retryable and sm.can_retry(form, tenant_max_retries=tenant.max_retries):
+        # Never auto-redial a call a supervisor deliberately ended: route to human
+        # review instead of re-queueing (see user_ended above).
+        if user_ended:
+            return await _finish(
+                FormStatus.EXCEPTION_REVIEW,
+                written=len(kept),
+                reviewed=unsatisfied,
+                reason="user_ended",
+            )
         return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
     return await _finish(
         FormStatus.EXCEPTION_REVIEW,

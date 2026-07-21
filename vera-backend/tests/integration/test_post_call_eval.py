@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from vera_core.audit import AuditRecord
@@ -536,6 +536,47 @@ async def test_llm_failure_routes_to_exception_review(
     assert rows == []
 
     # Form status in DB should be exception_review.
+    form_row = (
+        await ctx.session.execute(
+            text("SELECT status FROM patient_form WHERE id = :fid").bindparams(fid=ctx.form_id)
+        )
+    ).one()
+    assert form_row.status == FormStatus.EXCEPTION_REVIEW.value
+
+
+async def test_user_canceled_call_never_requeues(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A supervisor-ended (CANCELED) call is routed to human review, never
+    auto-redialed — even with an unsatisfied required field and retries remaining.
+    Mirrors resolve_ai_processing's user_ended gate, which the eval path bypasses."""
+    ctx = seeded_ai_processing_form
+    # The seed fixture creates the call COMPLETED; mark it user-canceled.
+    await ctx.session.execute(
+        update(Call).where(Call.id == ctx.call_id).values(current_status=CallStatus.CANCELED.value)
+    )
+    await ctx.session.flush()
+
+    # LLM extracts nothing → the required ask field stays unsatisfied (retryable),
+    # and the seeded tenant's max_retries (5) leaves retries available — so a
+    # normally-ended call would route to IN_QUEUE here.
+    turns = [TranscriptTurn(0, "user", "sorry, we got cut off")]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    # Never IN_QUEUE for a user-canceled call — it parks for a human instead.
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
     form_row = (
         await ctx.session.execute(
             text("SELECT status FROM patient_form WHERE id = :fid").bindparams(fid=ctx.form_id)
