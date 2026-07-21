@@ -1038,6 +1038,7 @@ def build_ibv_standard() -> FormSchemaDoc:
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
         ),
+        rep_call_reference_number_field="sections.insurance_representative.call_reference_number",
         stt_key_terms=[
             # treatments
             "intrauterine insemination",

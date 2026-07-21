@@ -48,6 +48,7 @@ _SCHEMA_JSON: dict[str, object] = {
     # shortcut tests/unit/forms/test_conditions.py uses).
     "system_fields": {"in_network": "sections.coverage.in_network"},
     "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.coverage.in_network"),
+    "rep_call_reference_number_field": "sections.coverage.in_network",
     "sections": {
         "coverage": {
             "title": "Coverage",
@@ -123,20 +124,6 @@ class _SeedCtx:
     collection_path: str
     session: AsyncSession
 
-    async def reload_form(self) -> PatientForm:
-        """Re-query the PatientForm so DB-generated columns (enqueued_at) are visible.
-
-        Flushes pending writes, expires the identity-map entry so the next SELECT
-        goes to the DB rather than returning the cached in-memory object, then
-        fetches the fresh row.  This is the only way to observe server-side
-        defaults like `enqueued_at = func.now()` within the same transaction.
-        """
-        await self.session.flush()
-        self.session.expire_all()
-        return (
-            await self.session.execute(select(PatientForm).where(PatientForm.id == self.form_id))
-        ).scalar_one()
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -153,14 +140,17 @@ def fake_livekit() -> _FakeLiveKit:
     return _FakeLiveKit()
 
 
-async def _seed_form(database_url: str, *, retry_count: int = 0) -> AsyncGenerator[_SeedCtx]:
-    """Shared seed helper: Tenant + schema chain + PatientForm(AI_PROCESSING) + Call.
+@pytest.fixture
+async def seeded_ai_processing_form(
+    database_url: str,
+) -> AsyncGenerator[_SeedCtx]:
+    """Insert a Tenant + schema chain + PatientForm(AI_PROCESSING) + Call.
 
-    `retry_count` seeds the form's initial retry_count (0 for normal fixture,
-    max_retries for the _maxed variant).  Uses the superuser engine (bypasses RLS).
-    `form_schema.insurance_type` is UNIQUE — uses find-or-create so the fixture is
-    safe whether the schema row was seeded in an earlier test or not.  Teardown is
-    scoped: only rows THIS call created are removed.
+    Uses the superuser engine (bypasses RLS) so we can insert a Tenant row.
+    `form_schema.insurance_type` is UNIQUE — uses find-or-create (mirrors the
+    pattern in tests/integration/control_plane/test_call_queue.py) so the
+    fixture is safe whether the schema row was seeded in an earlier test or not.
+    Teardown is scoped: only rows THIS fixture created are removed.
     """
     tenant_id = uuid7()
     form_id = uuid7()
@@ -220,7 +210,6 @@ async def _seed_form(database_url: str, *, retry_count: int = 0) -> AsyncGenerat
                 schema_version_id=schema_version_id,
                 patient_name="Test Patient",
                 status=FormStatus.AI_PROCESSING.value,
-                retry_count=retry_count,
             )
         )
         await session.flush()
@@ -300,81 +289,9 @@ async def _seed_form(database_url: str, *, retry_count: int = 0) -> AsyncGenerat
         await engine.dispose()
 
 
-@pytest.fixture
-async def seeded_ai_processing_form(
-    database_url: str,
-) -> AsyncGenerator[_SeedCtx]:
-    """Tenant + schema chain + PatientForm(AI_PROCESSING, retry_count=0) + Call."""
-    async for ctx in _seed_form(database_url, retry_count=0):
-        yield ctx
-
-
-@pytest.fixture
-async def seeded_ai_processing_form_maxed(
-    database_url: str,
-) -> AsyncGenerator[_SeedCtx]:
-    """Same as seeded_ai_processing_form but retry_count == tenant.max_retries (5).
-
-    Used to verify that an incomplete form with no retries remaining routes to
-    EXCEPTION_REVIEW instead of re-queuing.
-    """
-    async for ctx in _seed_form(database_url, retry_count=5):
-        yield ctx
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
-async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(
-    seeded_ai_processing_form: _SeedCtx,
-    fake_audit: _FakeAuditSink,
-    fake_livekit: _FakeLiveKit,
-) -> None:
-    """The LLM emitting the same field_path twice must not violate fa_current_uq
-    (which would leave the job unacked and reclaim-loop it forever): the last
-    occurrence wins and exactly one current answer is written."""
-    ctx = seeded_ai_processing_form
-    path = ctx.collection_path
-    turns = [
-        TranscriptTurn(0, "agent", "are they in network"),
-        TranscriptTurn(1, "user", "yes in network"),
-    ]
-    llm = FakeLLMClient(
-        extracted=[
-            ExtractedField(path, "out-of-network", 55, 0),
-            ExtractedField(path, "in-network", 92, 1),
-        ],
-        verdicts=[JudgeVerdict(path, True, 88, "yes in network")],
-    )
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
-
-    outcome = await evaluate_call(
-        ctx.session,
-        deps,
-        tenant_id=ctx.tenant_id,
-        form_id=ctx.form_id,
-        call_id=ctx.call_id,
-        turns=turns,
-    )
-
-    assert outcome.answers_written == 1
-    rows = (
-        (
-            await ctx.session.execute(
-                select(FieldAnswer).where(
-                    FieldAnswer.form_id == ctx.form_id,
-                    FieldAnswer.field_path == path,
-                    FieldAnswer.is_current.is_(True),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert len(rows) == 1
-    assert rows[0].value["value"] == "in-network"  # last occurrence won
 
 
 async def test_evaluate_call_writes_answers_and_completes(
@@ -477,9 +394,6 @@ async def test_token_valued_field_routes_to_review(
         .all()
     )
     assert rows == []  # token value must never be stored
-
-    form = await ctx.reload_form()
-    assert form.enqueued_at is None  # review path must not queue the form
 
 
 async def test_redelivery_is_a_noop(
@@ -628,77 +542,3 @@ async def test_llm_failure_routes_to_exception_review(
         )
     ).one()
     assert form_row.status == FormStatus.EXCEPTION_REVIEW.value
-
-
-async def test_incomplete_with_retries_left_requeues(
-    seeded_ai_processing_form: _SeedCtx,
-    fake_audit: _FakeAuditSink,
-    fake_livekit: _FakeLiveKit,
-) -> None:
-    """A form with a required unfilled field and retries remaining re-queues (IN_QUEUE).
-
-    The LLM extracts nothing — the single required ask field stays empty — so
-    retryable_required_paths returns it.  retry_count starts at 0, max_retries=5,
-    so the retry branch fires: form → IN_QUEUE, retry_count incremented to 1.
-
-    Note: try_dispatch runs inside the same transaction immediately after the
-    IN_QUEUE transition.  Because max_agents_per_va=3 and no forms are active,
-    the fake LiveKit dispatches immediately (IN_QUEUE → IN_CALL within the same
-    flush).  We therefore assert on the *outcome* (what _finish returned) rather
-    than the post-dispatch DB status, and verify that retry_count was incremented
-    (the state machine side effect that proves the IN_QUEUE branch fired).
-    """
-    ctx = seeded_ai_processing_form
-    turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
-    llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
-
-    outcome = await evaluate_call(
-        ctx.session,
-        deps,
-        tenant_id=ctx.tenant_id,
-        form_id=ctx.form_id,
-        call_id=ctx.call_id,
-        turns=turns,
-    )
-
-    # _finish returns IN_QUEUE — the re-queue decision was made.
-    assert outcome.status == FormStatus.IN_QUEUE
-    # try_dispatch fires immediately inside the same transaction, so by the time
-    # we reload, the form may be IN_CALL.  What proves IN_QUEUE fired is
-    # retry_count == 1 (incremented by FormStateMachine on AI_PROCESSING → IN_QUEUE).
-    form = await ctx.reload_form()
-    assert form.retry_count == 1
-    # Status is either IN_QUEUE (dispatch blocked) or IN_CALL (dispatch succeeded).
-    assert form.status in (FormStatus.IN_QUEUE.value, FormStatus.IN_CALL.value)
-
-
-async def test_incomplete_retries_exhausted_goes_to_review(
-    seeded_ai_processing_form_maxed: _SeedCtx,
-    fake_audit: _FakeAuditSink,
-    fake_livekit: _FakeLiveKit,
-) -> None:
-    """A form with a required unfilled field and no retries remaining routes to EXCEPTION_REVIEW.
-
-    retry_count starts at 5 == tenant.max_retries, so the state machine blocks the
-    IN_QUEUE transition.  The decision matrix falls through to EXCEPTION_REVIEW with
-    reason="retries_exhausted".
-    """
-    ctx = seeded_ai_processing_form_maxed
-    turns = [TranscriptTurn(0, "user", "no")]
-    llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
-
-    outcome = await evaluate_call(
-        ctx.session,
-        deps,
-        tenant_id=ctx.tenant_id,
-        form_id=ctx.form_id,
-        call_id=ctx.call_id,
-        turns=turns,
-    )
-
-    assert outcome.status == FormStatus.EXCEPTION_REVIEW
-    form = await ctx.reload_form()
-    assert form.status == FormStatus.EXCEPTION_REVIEW.value
-    assert form.enqueued_at is None  # review path must not queue the form

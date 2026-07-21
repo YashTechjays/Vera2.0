@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
+  Check,
+  Copy,
   Maximize2,
+  Minimize2,
   X,
   Grid3x3,
   MessageSquare,
@@ -13,17 +16,21 @@ import {
   DialogContent,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { copyText } from "@/lib/clipboard"
 import { usePermission } from "@/lib/auth/permissions"
 import { ApiError } from "@/lib/api/client"
 import { endCall } from "@/lib/api/calls"
+import type { CallHealth } from "@/lib/api/callEvents"
 import {
   interveneButtonState,
   shouldAllowClose,
   type LiveCallMode,
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
+import { healthTone, healthToneClass } from "@/lib/monitoring/health"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
@@ -32,12 +39,6 @@ import { LiveCallRoom } from "./LiveCallRoom"
 import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
-
-function confidenceColor(score: number): string {
-  if (score >= 85) return "text-emerald-600"
-  if (score >= 70) return "text-amber-600"
-  return "text-red-600"
-}
 
 /**
  * The live-call modal: auto-connects listen-only, and upgrades in place to publish via
@@ -66,8 +67,26 @@ export function LiveCallModal({
   const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
   const [formExpanded, setFormExpanded] = useState(false)
+  // Full-width/height presentation of this modal (the header ⛶), not the IBV form.
+  const [maximized, setMaximized] = useState(false)
+  // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
+  const [transcript, setTranscript] = useState("")
+  const [transcriptCopied, setTranscriptCopied] = useState(false)
+  const copiedTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
+  const [liveHealth, setLiveHealth] = useState<CallHealth | null>(null)
+  // Reset liveHealth during render when the call changes (React's previous-render
+  // pattern, mirroring useCallStatus.ts) — an effect-based reset trips react-hooks
+  // v6's set-state-in-effect rule. Close still resets it too, below.
+  const [healthForCallId, setHealthForCallId] = useState(call?.id)
+  if (call?.id !== healthForCallId) {
+    setHealthForCallId(call?.id)
+    setLiveHealth(null)
+  }
   const progress = call?.formProgress ?? 0
+  // Prefer the live SSE score; fall back to the polled list value until the first envelope.
+  const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
   const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
     call?.id,
@@ -100,7 +119,11 @@ export function LiveCallModal({
       setMode("listen")
       setRoomStatus(null)
       setActionError(null)
+      setMaximized(false)
+      setTranscript("")
+      setTranscriptCopied(false)
       setRightTab("transcript")
+      setLiveHealth(null)
     }
     onOpenChange(next)
   }
@@ -133,7 +156,12 @@ export function LiveCallModal({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="flex max-h-[92vh] w-[96vw] max-w-[1100px] flex-col gap-0 p-0"
+        className={cn(
+          "flex flex-col gap-0 p-0",
+          maximized
+            ? "h-[98vh] max-h-[98vh] w-[98vw] max-w-none"
+            : "max-h-[92vh] w-[96vw] max-w-[1100px]",
+        )}
       >
         <div className="border-b border-border p-4">
           <div className="flex items-start justify-between gap-4">
@@ -146,11 +174,11 @@ export function LiveCallModal({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={onExpand}
-                title="Open full form"
+                onClick={() => setMaximized((v) => !v)}
+                title={maximized ? "Restore size" : "Expand"}
                 className="flex size-8 items-center justify-center rounded-full bg-muted-foreground/80 text-white transition-colors hover:bg-muted-foreground"
               >
-                <Maximize2 className="size-4" />
+                {maximized ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
               </button>
               {closeAllowed && (
                 <button
@@ -175,10 +203,25 @@ export function LiveCallModal({
               <div className="font-semibold">{call?.insurance ?? "—"}</div>
             </div>
             <div className="text-right">
-              <div className="text-xs text-muted-foreground">Confidence</div>
-              <div className={cn("font-semibold", confidenceColor(call?.confidence ?? 0))}>
-                {call?.confidence ?? 0}%
-              </div>
+              <div className="text-xs text-muted-foreground">Call Health</div>
+              {/* Live reason from the SSE health frames as an accessible hover
+                  tooltip (matches the Live Monitoring table's health cell). */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    className={cn(
+                      "font-semibold",
+                      liveHealth?.reason && "cursor-default",
+                      healthToneClass[healthTone(healthScore)],
+                    )}
+                  >
+                    {healthScore === null ? "Assessing…" : `${healthScore}%`}
+                  </div>
+                </TooltipTrigger>
+                {liveHealth?.reason && (
+                  <TooltipContent className="max-w-72">{liveHealth.reason}</TooltipContent>
+                )}
+              </Tooltip>
             </div>
           </div>
         </div>
@@ -257,27 +300,50 @@ export function LiveCallModal({
           </div>
 
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
-            <div className="flex items-center gap-1 bg-[#f3f5f7] px-2 py-2">
-              {(
-                [
-                  ["transcript", "Transcription"],
-                  ["summary", "Summary"],
-                ] as const
-              ).map(([tab, label]) => (
-                <button
-                  key={tab}
-                  type="button"
-                  onClick={() => setRightTab(tab)}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
-                    rightTab === tab
-                      ? "bg-white text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
+            <div className="flex items-center justify-between bg-[#f3f5f7] px-2 py-2">
+              <div className="flex items-center gap-1">
+                {(
+                  [
+                    ["transcript", "Transcription"],
+                    ["summary", "Summary"],
+                  ] as const
+                ).map(([tab, label]) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setRightTab(tab)}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
+                      rightTab === tab
+                        ? "bg-white text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={!transcript}
+                title={transcriptCopied ? "Copied" : "Copy transcript"}
+                aria-label={transcriptCopied ? "Copied" : "Copy transcript"}
+                className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+                onClick={() => {
+                  void copyText(transcript).then((ok) => {
+                    if (!ok) return
+                    setTranscriptCopied(true)
+                    window.clearTimeout(copiedTimer.current)
+                    copiedTimer.current = window.setTimeout(() => setTranscriptCopied(false), 2000)
+                  })
+                }}
+              >
+                {transcriptCopied ? (
+                  <Check className="size-4 text-emerald-600" />
+                ) : (
+                  <Copy className="size-4" />
+                )}
+              </button>
             </div>
             {call?.id ? (
               <div className="flex flex-1 flex-col overflow-hidden">
@@ -302,6 +368,8 @@ export function LiveCallModal({
                     key={`t-${call.id}`}
                     callId={call.id}
                     onCallStatus={onCallStatus}
+                    onTextChange={setTranscript}
+                    onHealth={setLiveHealth}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                   />
                 </div>
@@ -321,7 +389,7 @@ export function LiveCallModal({
             {!callEnded && (
               <Button
                 onClick={() => void handleEndCall()}
-                disabled={ending}
+                disabled={ending || roomStatus?.otherIntervener}
                 className="bg-red-500 text-white hover:bg-red-600"
               >
                 {ending ? "Ending…" : "End Call"}
@@ -333,6 +401,12 @@ export function LiveCallModal({
               </Button>
             )}
             {actionError && <span className="text-sm text-destructive">{actionError}</span>}
+            {/* Helper text, not a title: the disabled button swallows hover events. */}
+            {!actionError && !callEnded && roomStatus?.otherIntervener && (
+              <span className="text-sm text-muted-foreground">
+                Only the intervening supervisor can end this call
+              </span>
+            )}
           </div>
           {intervene.visible && mode === "listen" && !callEnded && (
             <Button

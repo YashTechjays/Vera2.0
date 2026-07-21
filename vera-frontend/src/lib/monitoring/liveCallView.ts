@@ -51,7 +51,7 @@ export const PARTICIPANT_MODE_BADGE: Record<ParticipantMode, string> = {
   intervener: "Intervening",
   listener: "Listening",
   agent: "AI Agent",
-  callee: "Caller",
+  callee: "Insurance Rep",
 }
 
 /** Kind beats identity beats attribute; an unknown identity falls back to agent (self-hosted workers may lack ParticipantKind.Agent). */
@@ -68,7 +68,7 @@ export function participantMode(p: ParticipantLike): ParticipantMode {
 export function participantLabel(p: ParticipantLike): string {
   const mode = participantMode(p)
   if (mode === "agent") return "Vera Agent"
-  if (mode === "callee") return "Caller"
+  if (mode === "callee") return "Insurance Rep"
   return p.name || p.identity
 }
 
@@ -85,6 +85,11 @@ export function otherIntervenerPresent(participants: ParticipantLike[]): boolean
 export function intervenerLabel(participants: ParticipantLike[]): string | null {
   const intervener = participants.find((p) => participantMode(p) === "intervener")
   return intervener ? participantLabel(intervener) : null
+}
+
+/** Roster row visibility: the silenced agent is hidden while a takeover is live. */
+export function rosterVisible(p: ParticipantLike, takeoverLive: boolean): boolean {
+  return !(takeoverLive && participantMode(p) === "agent")
 }
 
 /** Connected but the AI agent hasn't entered the room yet. */

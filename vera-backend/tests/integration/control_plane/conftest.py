@@ -40,7 +40,6 @@ from vera_core.models import (
     Tenant,
     UserRole,
 )
-from vera_core.transcript import InMemoryTranscriptStore, TranscriptService
 
 _LONG_TTL = 3600
 
@@ -65,6 +64,9 @@ class FakePostCallBus:
 
     async def emit(self, job: PostCallJob) -> None:
         self.emitted.append(job)
+
+    async def ensure_group(self) -> None:
+        pass
 
 
 class FakeLiveKit(LiveKitGateway):
@@ -163,11 +165,6 @@ async def drain_dispatch_tasks() -> AsyncIterator[None]:
     (a stray task would insert rows mid-teardown or pollute the next tenant)."""
     yield
     await drain_pending()
-
-
-@pytest.fixture(scope="session")
-def transcript_service() -> TranscriptService:
-    return TranscriptService(InMemoryTranscriptStore())
 
 
 class _MemCallStreamStore:
@@ -456,7 +453,6 @@ async def authz_app(
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
     fake_post_call_bus: FakePostCallBus,
-    transcript_service: TranscriptService,
     call_stream_service: CallStreamService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
@@ -474,7 +470,6 @@ async def authz_app(
         invitation_store=invitation_store,
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
-        transcript_service=transcript_service,
         call_stream_service=call_stream_service,
     )
     async with app.router.lifespan_context(app):

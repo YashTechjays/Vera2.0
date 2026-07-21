@@ -57,6 +57,25 @@ export function asCallStatus(e: CallStreamEvent): string | null {
   return typeof status === "string" ? status : null
 }
 
+/** One call-health-observer assessment (the "health" envelope). */
+export type CallHealth = {
+  /** 0-100; higher is healthier. */
+  score: number
+  /** "none" (healthy) or an intervention category (conversation_loop, ...). */
+  flag: string
+  /** LLM's one-line justification (PHI — session-scoped state only). */
+  reason: string | null
+  ts: number
+}
+
+/** Narrow an envelope to a health assessment; null for other/malformed types. */
+export function asCallHealth(e: CallStreamEvent): CallHealth | null {
+  if (e.type !== "health") return null
+  const { score, flag, reason } = e.data as { score?: unknown; flag?: unknown; reason?: unknown }
+  if (typeof score !== "number" || typeof flag !== "string") return null
+  return { score, flag, reason: typeof reason === "string" ? reason : null, ts: e.ts }
+}
+
 // The worker publishes "ended" on its live stream; the DB replay of an already-terminal
 // call carries the CallStatus enum value instead — treat both vocabularies as terminal.
 const TERMINAL_CALL_STATUSES = new Set([

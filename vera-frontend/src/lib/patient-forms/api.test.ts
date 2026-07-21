@@ -5,10 +5,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 vi.mock("@/lib/api/client", () => ({ apiRequest: vi.fn() }))
 
 import { apiRequest } from "@/lib/api/client"
-import { listInsuranceProviders, updatePatientFormStatus } from "./api"
+import { listInsuranceProviders, listPatientForms, updatePatientFormStatus } from "./api"
 
 describe("patient-forms API client", () => {
   beforeEach(() => vi.resetAllMocks())
+
+  it("passes the server-side sort on the worklist query", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
+    await listPatientForms({ sort_by: "appointment_date", sort_dir: "desc" })
+    expect(apiRequest).toHaveBeenCalledWith(
+      "/patient-forms?page=1&page_size=20&sort_by=appointment_date&sort_dir=desc",
+    )
+  })
 
   it("lists active insurance providers with GET /patient-forms/insurance-providers", async () => {
     const providers = [{ id: "p1", name: "Cigna" }]

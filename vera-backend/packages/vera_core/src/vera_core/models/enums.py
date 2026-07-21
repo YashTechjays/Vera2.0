@@ -104,6 +104,23 @@ class InterventionCategory(enum.StrEnum):
     OTHER = "other"
 
 
+class CallHealthFlag(enum.StrEnum):
+    """Call-health observer verdict vocabulary: the InterventionCategory values
+    (kept in sync so intervention reports and observer flags speak one language)
+    plus `none` (healthy) and `supervisor_requested` (the rep/IVR asked for a
+    human). Stored on call.health_flag and in call_event HEALTH rows."""
+
+    NONE = "none"
+    SUPERVISOR_REQUESTED = "supervisor_requested"
+    REPEATED_QUESTIONS = "repeated_questions"
+    HALLUCINATION = "hallucination"
+    CONVERSATION_LOOP = "conversation_loop"
+    LONG_SILENCE = "long_silence"
+    OFF_SCRIPT = "off_script"
+    LOW_CONFIDENCE = "low_confidence"
+    OTHER = "other"
+
+
 class ProviderStage(enum.StrEnum):
     STT = "stt"
     LLM = "llm"

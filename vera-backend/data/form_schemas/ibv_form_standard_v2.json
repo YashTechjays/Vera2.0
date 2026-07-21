@@ -33,6 +33,7 @@
     "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
     "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number"
   },
+  "rep_call_reference_number_field": "sections.insurance_representative.call_reference_number",
   "stt_key_terms": [
     "intrauterine insemination",
     "IUI",

@@ -89,8 +89,8 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   window elapses with no new entries — they do NOT return an empty result. A tailing consumer MUST
   catch `TimeoutError as RedisTimeoutError` around the blocking read and treat it as a normal idle
   tick; otherwise a broad `except RedisError` miscatches every idle poll as an error (traceback +
-  back-off log spam every window). Copy the canonical handling in `RedisTranscriptStore.read`
-  (`vera_core/transcript.py`) and `control_plane/worker_events.py::_read_once`.
+  back-off log spam every window). Copy the canonical handling in `RedisCallStreamStore.read`
+  (`vera_core/call_stream.py`) and `control_plane/worker_events.py::_read_once`.
 - uv workspace: `vera_core` (shared core) → consumed by `control_plane` (FastAPI, owns
   Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
 

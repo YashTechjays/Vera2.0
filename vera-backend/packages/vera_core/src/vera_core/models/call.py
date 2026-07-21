@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -30,7 +31,7 @@ from vera_core.db.base import (
     TenantScopedMixin,
     UUIDv7PKMixin,
 )
-from vera_core.models.enums import CallEventType, CallMode, CallStatus, check_in
+from vera_core.models.enums import CallEventType, CallHealthFlag, CallMode, CallStatus, check_in
 
 # Terminal call statuses — a call in one of these will never become live again.
 # Keep in sync with control_plane/call_closeout.py.
@@ -49,6 +50,7 @@ class Call(Base, TenantScopedMixin):
     __table_args__ = (
         check_in("mode", CallMode),
         check_in("current_status", CallStatus, name="current_status_valid"),
+        check_in("health_flag", CallHealthFlag, name="health_flag_valid"),
         Index("ix_call_tenant_status", "tenant_id", "current_status"),
         Index("ix_call_form_id", "form_id"),
         # At most ONE live (non-terminal) call per form — DB backstop against two
@@ -111,6 +113,21 @@ class Call(Base, TenantScopedMixin):
         DateTime(timezone=True), nullable=True
     )
 
+    # Latest call-health-observer assessment (denormalized at-a-glance state; the
+    # transition history lives in call_event HEALTH rows). Deliberately KEPT after
+    # the call ends — last-known health feeds reporting. NULL score = never
+    # assessed (renders neutrally, never as 0).
+    health_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    health_flag: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The analyzer's one-line justification — conversation-derived text (PHI);
+    # shown as the health tooltip in Live Monitoring (visibility-gated + audited).
+    # Length matches vera_core.call_health.MAX_REASON_LEN (producer caps, the
+    # consumer re-truncates on write).
+    health_reason: Mapped[str | None] = mapped_column(String(500), nullable=True, info=PHI_INFO)
+    health_analyzed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
 
 class CallLineage(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
     """retry_call --is-a-retry-of--> parent_call, for tracing retry descent."""
@@ -141,4 +158,8 @@ class CallEvent(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
     )
     event_type: Mapped[str] = mapped_column(String(16), nullable=False)
     event_value: Mapped[str] = mapped_column(String(64), nullable=False)
+    # HEALTH rows store {score, reason, turn_count} here — `reason` is LLM-generated,
+    # conversation-derived text and may carry PHI. Relevant to any future
+    # column-level protection retrofit (see vera_core/CLAUDE.md — envelope encryption
+    # is currently deferred).
     detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)

@@ -12,12 +12,12 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import (
@@ -78,6 +78,7 @@ from vera_core.db.rls import tenant_session
 from vera_core.llm import LLMUnavailableError, ResilientLLM
 from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
 from vera_core.models.audit_log import ActorType, AuditEvent
+from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
@@ -86,7 +87,7 @@ from vera_core.observability.correlation import (
     SUPERVISOR_IDENTITY_PREFIX,
     room_name_for_call,
 )
-from vera_core.schemas import CallSummary, JoinTokenResponse, RecordingPlayback
+from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
 
 logger = logging.getLogger(__name__)
 
@@ -166,17 +167,53 @@ _LISTEN_TOKEN_TTL = timedelta(minutes=5)  # listen-only can't publish, no race
 _PRESENCE_PROBE_TIMEOUT = 3.0  # cap the LiveKit probe so it can't hold the row lock
 
 
-def _summary(call: Call, patient_name: str | None, caller_id: UUID) -> CallSummary:
+async def _intervener_lock_live(
+    session: AsyncSession, livekit: LiveKit, room_name: str, call: Call, holder: UUID
+) -> bool:
+    """Whether the claim still counts: inside the connect grace, or the holder is in the room."""
+    claimed_at = call.intervener_claimed_at
+    db_now = (await session.execute(select(func.now()))).scalar_one()
+    if claimed_at is not None and db_now - claimed_at < _INTERVENE_CONNECT_GRACE:
+        return True
+    return await _holder_still_present(livekit, room_name, holder)
+
+
+def _summary(
+    call: Call,
+    patient_name: str | None,
+    caller_id: UUID,
+    insurance_provider: str | None = None,
+    insurance_type: str | None = None,
+) -> CallSummary:
     return CallSummary(
         id=call.id,
         tenant_id=call.tenant_id,
+        form_id=call.form_id,
         status=call.current_status,
         room_name=room_name_for_call(call.tenant_id, call.id),
         patient_name=patient_name,
+        insurance_provider=insurance_provider,
+        insurance_type=insurance_type,
         started_at=call.started_at,
+        ended_at=call.ended_at,
         created_at=call.created_at,
         published=call.published,
         is_owner=call.initiated_by_id == caller_id,
+        health_score=call.health_score,
+        health_flag=call.health_flag,
+        health_reason=call.health_reason,
+        health_analyzed_at=call.health_analyzed_at,
+    )
+
+
+def _visible_to(caller_id: UUID) -> ColumnElement[bool]:
+    """Calls the caller may see: their own, published ones, and ownerless
+    (pre-ownership dispatcher) calls — hidden, those would have no monitoring
+    and no owner to ever publish them."""
+    return or_(
+        Call.initiated_by_id == caller_id,
+        Call.published.is_(True),
+        Call.initiated_by_id.is_(None),
     )
 
 
@@ -243,12 +280,7 @@ async def join_token(
             call.intervener_claimed_at = func.now()
         else:
             if holder is not None:
-                claimed_at = call.intervener_claimed_at
-                db_now = (await session.execute(select(func.now()))).scalar_one()
-                inside_grace = (
-                    claimed_at is not None and db_now - claimed_at < _INTERVENE_CONNECT_GRACE
-                )
-                if inside_grace or await _holder_still_present(livekit, room_name, holder):
+                if await _intervener_lock_live(session, livekit, room_name, call, holder):
                     raise ConflictError(
                         message="another supervisor is currently intervening on this call"
                     )
@@ -547,11 +579,19 @@ async def publish_call(
         )
     # Same row shape as list_calls — a None patient_name blanks the UI's
     # Patient cell until the next poll.
-    patient_name = (
+    row = (
         await session.execute(
-            select(PatientForm.patient_name).where(PatientForm.id == call.form_id)
+            select(
+                PatientForm.patient_name,
+                PatientForm.insurance_provider,
+                FormSchema.insurance_type,
+            )
+            .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
+            .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
+            .where(PatientForm.id == call.form_id)
         )
-    ).scalar_one_or_none()
+    ).one_or_none()
+    patient_name, insurance_provider, insurance_type = row if row else (None, None, None)
     await emit_phi_read_audit(
         audit,
         request,
@@ -559,9 +599,9 @@ async def publish_call(
         caller=caller,
         resource_type="call",
         resource_id=str(call.id),
-        fields=["patient_name"],
+        fields=["patient_name", "insurance_provider", "health_reason"],
     )
-    return ok(_summary(call, patient_name, caller.user_id))
+    return ok(_summary(call, patient_name, caller.user_id, insurance_provider, insurance_type))
 
 
 @router.post(
@@ -571,6 +611,7 @@ async def publish_call(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
         DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
     ),
 )
 async def end_call(
@@ -601,7 +642,8 @@ async def end_call(
     already terminal and no-op).
 
     Visibility matches join-token (`_call_hidden_from`): anyone who may watch
-    the call may end it; a hidden call 404s so it is never revealed.
+    the call may end it; a hidden call 404s so it is never revealed. While a
+    takeover is live, only the intervening supervisor may end the call.
     """
     call = (
         await session.execute(select(Call).where(Call.id == call_id))
@@ -610,6 +652,16 @@ async def end_call(
         raise NotFoundError(message="call not found")
     if call.current_status in TERMINAL_VALUES:
         return ok(None, message="Call already ended.")  # idempotent no-op
+    room_name = room_name_for_call(tenant_id, call.id)
+    # Lock-free read by design: holding the row lock across the presence probe is worse
+    # than the benign race with a fresh claim (worst case: a moments-ago-legal end).
+    holder = call.intervener_user_id
+    if (
+        holder is not None
+        and holder != caller.user_id
+        and await _intervener_lock_live(session, livekit, room_name, call, holder)
+    ):
+        raise ConflictError(message="only the intervening supervisor can end this call")
     pre_answer = call.started_at is None
     actor_label = caller.email or caller.subject
     await audit.emit(
@@ -630,7 +682,6 @@ async def end_call(
             },
         )
     )
-    room_name = room_name_for_call(tenant_id, call.id)
     if pre_answer:
         closed = await close_call(
             sessionmaker,
@@ -684,27 +735,39 @@ async def list_calls(
     tenant_id: TenantId,
     session: TenantSession,
     audit: Audit,
+    scope: Literal["live", "history"] = "live",
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[list[CallSummary]]:
+    """`scope=live` (default) lists in-flight calls — unbounded unless `limit`
+    is passed (capping it by default could silently hide live calls from
+    monitoring); `scope=history` returns the most recent terminal calls,
+    capped at `limit` (default 50)."""
     response.headers["Cache-Control"] = "no-store"
-    rows = (
-        await session.execute(
-            select(Call, PatientForm.patient_name)
-            .join(PatientForm, PatientForm.id == Call.form_id)
-            .where(Call.current_status.in_(list(_ACTIVE_STATUSES)))
-            # Ownerless (pre-ownership dispatcher) calls are tenant-visible —
-            # hidden, they'd have no monitoring and no owner to ever publish them.
-            .where(
-                or_(
-                    Call.initiated_by_id == caller.user_id,
-                    Call.published.is_(True),
-                    Call.initiated_by_id.is_(None),
-                )
-            )
-            .order_by(Call.created_at.desc())
+    status_cond = (
+        Call.current_status.in_(list(_ACTIVE_STATUSES))
+        if scope == "live"
+        else Call.current_status.in_(TERMINAL_VALUES)
+    )
+    query = (
+        select(
+            Call,
+            PatientForm.patient_name,
+            PatientForm.insurance_provider,
+            FormSchema.insurance_type,
         )
-    ).all()
-    # PHI disclosure (patient_name) — audit field names, mirroring list_patient_forms.
+        .join(PatientForm, PatientForm.id == Call.form_id)
+        .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
+        .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
+        .where(status_cond)
+        .where(_visible_to(caller.user_id))
+        .order_by(Call.created_at.desc())
+    )
+    effective_limit = (limit or 50) if scope == "history" else limit
+    if effective_limit is not None:
+        query = query.limit(effective_limit)
+    rows = (await session.execute(query)).all()
+    # PHI disclosure — audit field names, mirroring list_patient_forms.
     await emit_phi_read_audit(
         audit,
         request,
@@ -712,9 +775,50 @@ async def list_calls(
         caller=caller,
         resource_type="call",
         resource_id="list",
-        fields=["patient_name"],
+        fields=["patient_name", "insurance_provider", "health_reason"],
     )
-    return ok([_summary(c, name, caller.user_id) for c, name in rows])
+    return ok(
+        [
+            _summary(c, name, caller.user_id, provider, insurance_type)
+            for c, name, provider, insurance_type in rows
+        ]
+    )
+
+
+@router.get(
+    "/calls/stats",
+    response_model=ResponseModel[CallStats],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def call_stats(
+    response: Response,
+    tenant_id: TenantId,
+    session: TenantSession,
+    caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[CallStats]:
+    """Counts for the Live Monitoring stat cards, over the same calls the list
+    shows the caller. Pure counts (no PHI), so no disclosure audit; "today" is
+    the DB clock's UTC day."""
+    response.headers["Cache-Control"] = "no-store"
+    # Structural UTC "today": date_trunc truncates in the session TimeZone, so
+    # shift to UTC, truncate, then re-anchor the naive result as UTC.
+    utc_midnight = func.timezone("UTC", func.date_trunc("day", func.timezone("UTC", func.now())))
+    row = (
+        await session.execute(
+            select(
+                func.count().filter(Call.created_at >= utc_midnight),
+                func.count().filter(Call.current_status.in_(list(_ACTIVE_STATUSES))),
+                func.count().filter(Call.current_status == CallStatus.CRITICAL),
+            )
+            .select_from(Call)
+            .where(_visible_to(caller.user_id))
+        )
+    ).one()
+    total_today, live, critical = row
+    return ok(CallStats(total_today=total_today, live=live, critical=critical))
 
 
 @router.get(

@@ -30,6 +30,7 @@ def schema_doc() -> FormSchemaDoc:
             "promoted_fields": dict.fromkeys(
                 PromotedFields.model_fields, "sections.basics.plan_type"
             ),
+            "rep_call_reference_number_field": "sections.basics.plan_type",
             "sections": {
                 "basics": {
                     "title": "Basics",

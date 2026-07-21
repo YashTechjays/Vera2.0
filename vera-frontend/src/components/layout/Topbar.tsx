@@ -1,6 +1,7 @@
-import { PanelLeft, Search, Bell, LogOut } from "lucide-react"
+import { PanelLeft, Search, LogOut } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
+import { NotificationsBell } from "@/components/notifications/NotificationsBell"
 import { useAppDispatch, useAppStore } from "@/store/hooks"
 import { logoutThunk, selectLogoutRedirectPath } from "@/store/authSlice"
 
@@ -43,9 +44,7 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
       </div>
 
       <div className="ml-auto flex items-center gap-1">
-        <Button variant="ghost" size="icon" aria-label="Notifications">
-          <Bell className="size-5" />
-        </Button>
+        <NotificationsBell />
         <Button variant="ghost" size="icon" aria-label="Sign out" onClick={onLogout}>
           <LogOut className="size-5" />
         </Button>

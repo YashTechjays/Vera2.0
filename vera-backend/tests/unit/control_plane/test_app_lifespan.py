@@ -63,7 +63,6 @@ async def test_lifespan_sets_post_call_bus_when_livekit_unset() -> None:
         auth_audit=MagicMock(),
         email_sender=MagicMock(),
         invitation_store=MagicMock(),
-        transcript_service=MagicMock(),
     )
     with (
         patch("control_plane.main.create_engine", return_value=fake_engine),
