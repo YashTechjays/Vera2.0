@@ -9,13 +9,10 @@ import {
 
 import { isoToDateFormat, validateAll, type ValidationErrors } from "@/lib/ibv/validation"
 import { allLeaves, isApplicable, isRequired, parseSchema } from "@/lib/ibv/schema"
-import { demoSchema, mockValues } from "@/lib/ibv/mock"
 import {
   activeDisputeValue,
   applyAllFlags,
   defaultFlags,
-  mockDisputes,
-  seedValues,
   toggleApplied,
   toggleSwapped,
   type Dispute,
@@ -96,8 +93,6 @@ type IbvContextValue = {
   formId: string | null
   /** Returns the provenance record for a field path, or null if absent. */
   provenanceFor: (path: string) => FieldProvenance | null
-  /** Open the form with demo data (Live Monitoring). */
-  openForm: () => void
   /** Open a real patient form by id, loaded from the API. */
   openFormById: (formId: string) => void
   closeForm: () => void
@@ -226,24 +221,6 @@ export function IbvProvider({
     },
     [],
   )
-
-  // Demo path (Live Monitoring): seed from the bundled mock + dev-fixture schema.
-  const openForm = useCallback(() => {
-    setMode("mock")
-    setFormId(null)
-    setError(null)
-    setLoading(false)
-    setStatus(null)
-    setStatusError(null)
-    setInsuranceType(null)
-    setProvenance({})
-    setIvrNavigation(true)
-    setProviders([])
-    setProviderId("")
-    setSchema(demoSchema)
-    seed({ ...mockValues, ...seedValues(mockDisputes) }, mockDisputes, "Demo Patient")
-    setModalOpen(true)
-  }, [seed])
 
   // Real path: load a patient form by id from the API. setState happens in the
   // event handler + async callbacks, never synchronously inside an effect.
@@ -473,7 +450,6 @@ export function IbvProvider({
     modalOpen,
     formId,
     provenanceFor,
-    openForm,
     openFormById,
     closeForm,
   }

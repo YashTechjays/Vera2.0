@@ -5,6 +5,8 @@
 // belongs to is fetched from /auth/me on demand. Session timeouts also come from
 // /auth/me, so no session start time is stored client-side.
 
+import { clearReadCursor } from "@/lib/notifications/store"
+
 const TOKEN_KEY = "vera.session_token"
 const TENANT_SLUG_KEY = "vera.tenant_slug"
 // Non-sensitive hint (no token) for which login plane an in-flight MFA challenge is on,
@@ -51,6 +53,9 @@ export function clearSession(): void {
   storage?.removeItem(TOKEN_KEY)
   storage?.removeItem(TENANT_SLUG_KEY)
   clearAuthPlane()
+  // A shared tab's next login (shift change) must start with a clean inbox,
+  // not inherit the outgoing user's read cursor.
+  clearReadCursor()
 }
 
 function clearAuthPlane(): void {

@@ -77,6 +77,10 @@ async def resolve_ai_processing(
             await session.execute(select(Tenant).where(Tenant.id == ref.tenant_id))
         ).scalar_one()
 
+        # completion_pct is already current here: the Observer's ai_call answers are
+        # stream-ordered before call.ended and, under the consumer's per-room sequential
+        # dispatch, each recomputed the projection as it landed — so this reads the fresh
+        # value with no recompute needed on this path.
         sm = FormStateMachine()
         requeued = False
         # A user-ended (CANCELED) call never auto-retries, whatever the fill:

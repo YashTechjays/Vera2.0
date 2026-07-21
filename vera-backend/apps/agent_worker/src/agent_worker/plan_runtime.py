@@ -15,21 +15,23 @@ Division of labor (two writers, disjoint state):
 * Answers are owned by the Phase-2 Observer, which watches the cursor and is
   the sole writer of `PlanRunState.answers`.
 
-`PlanRunController.apply_directive` is the Phase-2 seam where the rule engine
-redirects the live conversation (terminate → wrap-up / skip ahead / re-ask);
-its lock + generation counter exist now so directives and in-flight
-`task_complete` handoffs can never double-swap the active agent.
+`PlanRunController.apply_directive_now` is the Phase-2 seam where the rule
+engine redirects the live conversation (terminate → wrap-up / skip ahead /
+re-ask): it interrupts the bot then swaps the agent or re-asks, serialized on
+the controller lock against an in-flight `task_complete` handoff so the two can
+never double-swap the active agent.
 """
 
 import asyncio
 import logging
 from typing import Any
 
-from livekit.agents import Agent, llm
+from livekit.agents import Agent, AgentSession, llm
 
 from agent_worker.agent import VeraAgent
+from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx
-from agent_worker.intervention import takeover_engaged
+from agent_worker.intervention import TakeoverState, takeover_engaged
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.conditions import evaluate
@@ -177,11 +179,15 @@ class PlanRunController:
         # Phase-2 Observer keeps it current. Redis stays the cross-process truth.
         self._answers: dict[str, Any] = dict(plan.prefilled)
         self.active_task_index: int | None = None
-        # Serializes handoffs against (Phase-2) rule-engine directives; the
-        # generation counter lets a directive detect a handoff that landed
-        # while it waited for the lock.
+        # Serializes handoffs against rule-engine directives so a directive and an
+        # in-flight `task_complete` handoff can never double-swap the active agent.
         self.lock = asyncio.Lock()
+        # Counts task advances; a takeover interlock reads it to assert the plan did
+        # NOT advance while a supervisor was in control (test_takeover_interlock).
         self.generation = 0
+        # The live AgentSession, attached after session.start (see attach_session).
+        # apply_directive_now drives it to interrupt/swap the bot on a rule fire.
+        self._session: AgentSession[TakeoverState] | None = None
         # Fire-and-forget cursor writes: strong refs (a bare create_task result
         # can be GC'd mid-flight), drained in tests via drain_cursor_writes.
         self._cursor_writes: set[asyncio.Task[None]] = set()
@@ -218,14 +224,61 @@ class PlanRunController:
 
     # -- Phase-2 seams ----------------------------------------------------------
 
+    def attach_session(self, session: AgentSession[TakeoverState]) -> None:
+        """Hand the controller the session so a rule-engine directive can interrupt/swap
+        the bot. Wired during entrypoint setup, BEFORE session.start — this only stores
+        the reference; nothing drives the session until the Observer extracts an answer,
+        which requires a started session producing transcript turns."""
+        self._session = session
+
     def update_answers(self, answers: dict[str, Any]) -> None:
         """Refresh the in-process answers snapshot (Observer-fed in Phase 2)."""
         self._answers = dict(answers)
 
-    async def apply_directive(self, directive: object) -> None:
-        """Rule-engine redirect (terminate → wrap-up / skip ahead / re-ask).
-        Lands in Phase 2; the lock + generation contract is already in place."""
-        raise NotImplementedError("rule-engine directives land in Phase 2")
+    async def apply_directive_now(self, directive: Directive) -> None:
+        """Apply a rule-engine redirect immediately, from the Observer's background task:
+        interrupt the bot (it goes silent, cutting off any in-flight speech), then swap
+        agent (terminate → wrap-up / skip → target task) or re-ask (contradiction).
+
+        Serialized on the controller lock against a `task_complete` handoff; a skip whose
+        target is no longer ahead of the active task is dropped. Never raises into the
+        caller — a redirect must not drop the call. No-op while a human supervisor has taken
+        over — the rule engine must not yank the agent around under a live takeover."""
+        if self._session is None or takeover_engaged(self._session):
+            return
+        try:
+            async with self.lock:
+                if self.active_task_index is None:
+                    return
+                if isinstance(directive, ReAsk):
+                    await self._session.interrupt()
+                    self._session.generate_reply(instructions=self._reask_instruction(directive))
+                    return
+                target = self._directive_target(directive)
+                if target is None:  # skip whose target is already at/behind us → no-op
+                    return
+                await self._session.interrupt()
+                self._session.update_agent(target)
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: directive apply failed (%s)", self.room_name, type(exc).__name__
+            )
+
+    def _directive_target(self, directive: Terminate | SkipToTask) -> Agent | None:
+        if isinstance(directive, Terminate):
+            return self.wrap_up_agent
+        for i, task in enumerate(self.plan.tasks):
+            if task.task_key == directive.task_key:
+                # Only skip forward: a target at or behind the active task is a no-op.
+                if self.active_task_index is not None and i <= self.active_task_index:
+                    return None
+                return self.agents[i]
+        return None  # unknown task_key (should not happen: validated at compile)
+
+    @staticmethod
+    def _reask_instruction(directive: ReAsk) -> str:
+        clarify = f" {directive.clarify}" if directive.clarify else ""
+        return f"CONSISTENCY CHECK: {directive.reason} Re-ask to clarify, do not move on.{clarify}"
 
     # -- internals ----------------------------------------------------------------
 

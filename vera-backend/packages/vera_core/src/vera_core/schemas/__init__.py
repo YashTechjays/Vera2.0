@@ -1,4 +1,5 @@
 from .dto import (
+    CallStats,
     CallSummary,
     JoinTokenResponse,
     RecordingPlayback,
@@ -12,6 +13,7 @@ from .ivr_playbook import IvrPlaybookConfig
 from .persona import PersonaTweak
 
 __all__ = [
+    "CallStats",
     "CallSummary",
     "FieldType",
     "FormField",

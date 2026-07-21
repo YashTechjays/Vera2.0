@@ -64,6 +64,11 @@ fails CI on any drift, and round-trip (`load → compile` = identity) must hold.
 - `promoted_fields` is REQUIRED and total: a `PromotedFields` block mapping all
   eight patient_form columns; each path must resolve to a leaf AND be a
   `system_fields` target.
+- `rep_call_reference_number_field` is REQUIRED: a single root-anchored path
+  naming which leaf holds the representative's call reference number. Only
+  checked for leaf existence — unlike `promoted_fields` it does NOT need to be
+  a `system_fields` target (this value is collected during the call, not known
+  beforehand).
 - `inapplicable_value` is only legal where self or an ancestor carries
   `applicable_when`.
 
@@ -78,6 +83,12 @@ fails CI on any drift, and round-trip (`load → compile` = identity) must hold.
   call; `context` = injected as agent background; `input`/`readonly` (and every
   leaf of a `ui_only` section) = never voice-touched. `system_fields` binds
   platform handles to paths and wins over role in the UI color coding.
+- `rep_call_reference_number_field` is the one generalized place to look for a
+  schema's rep call reference number, regardless of insurance type — a retry
+  mechanism reads it to decide whether a previous attempt already captured a
+  valid reference number (empty/never-collected means treat the retry as a
+  fresh call). See
+  `docs/superpowers/specs/2026-07-21-rep-call-reference-number-field-design.md`.
 - Bumping the grammar (`dsl_version`) means updating: the `Literal` in `dsl.py`,
   the version gates in `intake.py`/`review.py`/`conditions.is_v2`, and the
   frontend `parseSchema` guard.

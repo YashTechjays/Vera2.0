@@ -20,6 +20,7 @@ V2 = {
     # point them all at one leaf (same shortcut as test_conditions.py).
     "system_fields": {"network_status": "sections.cov.network_status"},
     "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.cov.network_status"),
+    "rep_call_reference_number_field": "sections.cov.network_status",
     "sections": {
         "cov": {
             "title": "Coverage",

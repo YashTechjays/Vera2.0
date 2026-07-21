@@ -117,6 +117,16 @@ export type PaginatedPatientForms = {
   total: number
 }
 
+/** Server-side sort columns the worklist endpoint whitelists. */
+export type PatientFormSortKey =
+  | "appointment_date"
+  | "appointment_type"
+  | "patient_name"
+  | "member_id"
+  | "insurance_provider"
+  | "status"
+  | "created_at"
+
 export type ListPatientFormsParams = {
   page?: number
   page_size?: number
@@ -124,6 +134,9 @@ export type ListPatientFormsParams = {
   status?: PatientFormStatus
   /** case-insensitive substring match on patient_name */
   q?: string
+  /** server-side sort; the backend defaults to created_at desc, nulls last */
+  sort_by?: PatientFormSortKey
+  sort_dir?: "asc" | "desc"
 }
 
 /** Request body for POST /patient-forms/{id}/disputes:resolve. Mirrors the

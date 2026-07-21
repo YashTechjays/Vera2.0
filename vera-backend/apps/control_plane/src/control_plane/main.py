@@ -40,11 +40,11 @@ from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
 from vera_core.events import PostCallJobBus
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
+from vera_core.notifications import NotificationService, RedisNotificationStore
 from vera_core.observability.otel import configure_observability
 from vera_core.plan_store import CallPlanService, RedisCallPlanStore
 from vera_core.redis import create_redis
 from vera_core.services.recordings import recording_config_from
-from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("control_plane.main")
 
@@ -89,11 +89,11 @@ def create_app(
     invitation_store: InvitationStore | None = None,
     livekit: LiveKitGateway | None = None,
     secrets: SecretProvider | None = None,
-    transcript_service: TranscriptService | None = None,
     call_stream_service: CallStreamService | None = None,
     call_plan_service: CallPlanService | None = None,
     summary_llm: ResilientLLM | None = None,
     summary_cache: SummaryCache | None = None,
+    notification_service: NotificationService | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -114,8 +114,8 @@ def create_app(
         # Build the Redis client lazily — only for the backends we weren't
         # handed (tests inject both and never touch Redis).
         redis: Redis | None = None
-        transcript_redis: Redis | None = None
         call_stream_redis: Redis | None = None
+        notifications_redis: Redis | None = None
 
         def _redis() -> Redis:
             nonlocal redis
@@ -147,22 +147,11 @@ def create_app(
             secrets=app.state.secrets,
         )
         app.state.summary_cache = summary_cache or RedisSummaryCache(_redis())
-        # A DEDICATED Redis client (separate pool) for transcript streaming: a tailing
+        # A DEDICATED Redis client (separate pool) for call-event streaming: a tailing
         # SSE stream holds a connection for its lifetime, so it must not draw from the
         # shared pool that serves session/permission/idempotency Redis (auth DoS risk).
-        _transcript_service = transcript_service
-        if _transcript_service is None:
-            transcript_redis = create_redis(settings.redis_url)
-            _transcript_service = TranscriptService(
-                RedisTranscriptStore(
-                    transcript_redis,
-                    ttl_seconds=settings.transcript_stream_ttl_seconds,
-                    end_grace_seconds=settings.transcript_end_grace_seconds,
-                )
-            )
-        app.state.transcript_service = _transcript_service
-        # Same dedicated-client reasoning as the transcript stream above: a tailing
-        # SSE pins a connection, so this must not draw from the shared pool.
+        # This one stream backs both SSE endpoints (real-call and Voice Lab), the
+        # transcript finalizer, the summariser, and the worker's Observer.
         _call_stream_service = call_stream_service
         if _call_stream_service is None:
             call_stream_redis = create_redis(settings.redis_url)
@@ -174,6 +163,14 @@ def create_app(
                 )
             )
         app.state.call_stream_service = _call_stream_service
+        # User-scoped realtime notifications (intervention alerts). Same
+        # dedicated-client reasoning as the SSE streams above: every connected
+        # user pins a blocking XREAD, which must not starve the shared pool.
+        _notifications = notification_service
+        if _notifications is None:
+            notifications_redis = create_redis(settings.redis_url)
+            _notifications = NotificationService(RedisNotificationStore(notifications_redis))
+        app.state.notifications = _notifications
         # Call-plan staging (dispatch writes, worker reads). One-shot SET/GET —
         # no tailing/blocking reads — so the shared pool is fine.
         _call_plans = call_plan_service or CallPlanService(
@@ -222,6 +219,7 @@ def create_app(
                 recording=recording_config,
                 call_plans=_call_plans,
                 post_call_bus=app.state.post_call_bus if post_call_eval_ready else None,
+                notifications=_notifications,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
@@ -292,7 +290,7 @@ def create_app(
             post_call_consumer = PostCallConsumer(
                 post_call_redis,
                 sessionmaker,
-                _transcript_service,
+                _call_stream_service,
                 llm,
                 app.state.audit,
                 app.state.livekit,
@@ -325,10 +323,10 @@ def create_app(
             await worker_events_redis.aclose()
         if redis is not None:
             await redis.aclose()
-        if transcript_redis is not None:
-            await transcript_redis.aclose()
         if call_stream_redis is not None:
             await call_stream_redis.aclose()
+        if notifications_redis is not None:
+            await notifications_redis.aclose()
         await engine.dispose()
 
     app = FastAPI(title="Vera Control Plane", version="0.1.0", lifespan=lifespan)

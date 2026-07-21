@@ -58,6 +58,7 @@ VALID_SCHEMA_JSON: dict[str, Any] = {
     "insurance_type": "infertility_treatment",
     "system_fields": {"member_id": "sections.basics.plan_type"},
     "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.basics.plan_type"),
+    "rep_call_reference_number_field": "sections.basics.plan_type",
     "sections": {
         "basics": {
             "title": "Basics",

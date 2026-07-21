@@ -118,6 +118,7 @@ async def _make_form_with_dispute(
     tenant_id: UUID,
     schema_version_id: UUID,
     status: FormStatus = FormStatus.EXCEPTION_REVIEW,
+    appointment_date: date | None = None,
 ) -> UUID:
     """Create a form with one undisputed INTAKE field, plus a disputed field: an INTAKE
     baseline answer + a current AI_CALL answer that diverges from it (the dispute signal
@@ -130,6 +131,7 @@ async def _make_form_with_dispute(
             status=status.value,
             intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
             patient_name="jane doe",
+            appointment_date=appointment_date,
             completion_pct=0,
             retry_count=0,
         )
@@ -305,6 +307,54 @@ async def test_list_total_reflects_full_filtered_count_not_just_the_page(
     body = resp.json()["data"]
     assert len(body["items"]) == 1
     assert body["total"] == 2
+
+
+async def test_list_sorts_by_appointment_date_with_nulls_last(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """Server-side sort drives the Data Management worklist: the chosen column
+    orders the whole result set (not just one page), dateless forms sink to the
+    end in either direction."""
+    dated = {
+        d: await _make_form_with_dispute(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            schema_version_id=schema_version_id,
+            appointment_date=d,
+        )
+        for d in (date(2026, 7, 10), date(2026, 7, 20))
+    }
+    undated = await _make_form_with_dispute(
+        admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+    )
+
+    async def _ids(sort_dir: str) -> list[str]:
+        resp = await client.get(
+            "/api/v1/patient-forms",
+            params={"sort_by": "appointment_date", "sort_dir": sort_dir},
+            headers=_auth(rbac_world.admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        return [row["id"] for row in resp.json()["data"]["items"]]
+
+    newest_first = [str(dated[date(2026, 7, 20)]), str(dated[date(2026, 7, 10)]), str(undated)]
+    assert await _ids("desc") == newest_first
+    assert await _ids("asc") == [newest_first[1], newest_first[0], newest_first[2]]
+
+
+async def test_list_rejects_unknown_sort_column(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        "/api/v1/patient-forms",
+        params={"sort_by": "intake_payload"},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
 
 
 async def test_list_requires_forms_read(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:

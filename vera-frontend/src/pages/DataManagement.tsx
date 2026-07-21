@@ -18,7 +18,11 @@ import { ApiError } from "@/lib/api/client"
 import { usePermission } from "@/lib/auth/permissions"
 import { useIbv } from "@/components/ibv/IbvProvider"
 import { listPatientForms } from "@/lib/patient-forms/api"
-import type { PatientFormStatus, PatientFormSummary } from "@/lib/patient-forms/types"
+import type {
+  PatientFormSortKey,
+  PatientFormStatus,
+  PatientFormSummary,
+} from "@/lib/patient-forms/types"
 import { ageLabel, formatDate, statusBadgeClass, statusLabel } from "@/lib/patient-forms/display"
 
 const PAGE_SIZE = 20
@@ -40,13 +44,7 @@ const STATUS_OPTIONS: PatientFormStatus[] = [
   "call_failed",
 ]
 
-type SortKey =
-  | "appointment_date"
-  | "appointment_type"
-  | "patient_name"
-  | "member_id"
-  | "insurance_provider"
-  | "status"
+type SortKey = Exclude<PatientFormSortKey, "created_at">
 const COLUMNS: { key: SortKey; label: string }[] = [
   { key: "appointment_date", label: "Appointment Date" },
   { key: "appointment_type", label: "Appointment Type" },
@@ -66,9 +64,10 @@ export function DataManagement() {
   const [tab, setTab] = useState<TabKey>("all")
   const [status, setStatus] = useState<"" | PatientFormStatus>("")
   const [query, setQuery] = useState("")
+  // Most recent appointment first by default; the server sorts the full set.
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
     key: "appointment_date",
-    dir: "asc",
+    dir: "desc",
   })
   const [error, setError] = useState<string | null>(null)
   // Periodic tick so the worklist reflects server-side status changes (a call
@@ -93,6 +92,8 @@ export function DataManagement() {
       page_size: PAGE_SIZE,
       status: effectiveStatus,
       q: query.trim() || undefined,
+      sort_by: sort.key,
+      sort_dir: sort.dir,
     })
       .then((res) => {
         if (cancelled) return
@@ -109,15 +110,14 @@ export function DataManagement() {
     return () => {
       cancelled = true
     }
-  }, [canRead, page, effectiveStatus, query, savedTick, autoTick])
+  }, [canRead, page, effectiveStatus, query, sort, savedTick, autoTick])
 
-  const toggleSort = useCallback(
-    (key: SortKey) =>
-      setSort((prev) =>
-        prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" },
-      ),
-    [],
-  )
+  const toggleSort = useCallback((key: SortKey) => {
+    setSort((prev) =>
+      prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" },
+    )
+    setPage(1)
+  }, [])
 
   if (!canRead) {
     return (
@@ -130,16 +130,7 @@ export function DataManagement() {
     )
   }
 
-  // Client-side sort of the current page.
-  const rows = [...(items ?? [])].sort((a, b) => {
-    const av = a[sort.key] ?? ""
-    const bv = b[sort.key] ?? ""
-    const cmp =
-      typeof av === "number" && typeof bv === "number"
-        ? av - bv
-        : String(av).localeCompare(String(bv))
-    return sort.dir === "asc" ? cmp : -cmp
-  })
+  const rows = items ?? []
   const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const extraCols = tab === "needs_review" ? 2 : 0
 

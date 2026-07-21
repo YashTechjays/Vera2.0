@@ -18,7 +18,7 @@ import asyncio
 import hashlib
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
@@ -337,6 +337,26 @@ class PaginatedForms(BaseModel):
     total: int
 
 
+SortKey = Literal[
+    "appointment_date",
+    "appointment_type",
+    "patient_name",
+    "member_id",
+    "insurance_provider",
+    "status",
+    "created_at",
+]
+_SORT_COLUMNS = {
+    "appointment_date": PatientForm.appointment_date,
+    "appointment_type": PatientForm.appointment_type,
+    "patient_name": PatientForm.patient_name,
+    "member_id": PatientForm.member_id,
+    "insurance_provider": PatientForm.insurance_provider,
+    "status": PatientForm.status,
+    "created_at": PatientForm.created_at,
+}
+
+
 class DisputeView(BaseModel):
     previous_value: Any
     current_value: Any
@@ -556,6 +576,8 @@ async def list_patient_forms(
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = Query(None),
     q: str | None = Query(None),
+    sort_by: SortKey = "created_at",
+    sort_dir: Literal["asc", "desc"] = "desc",
     caller: VerifiedIdentity = require("forms:read"),
 ) -> ResponseModel[PaginatedForms]:
     response.headers["Cache-Control"] = "no-store"
@@ -564,6 +586,8 @@ async def list_patient_forms(
         conds.append(PatientForm.status == status)
     if q:
         conds.append(PatientForm.patient_name.ilike(f"%{q.lower()}%"))
+    sort_col = _SORT_COLUMNS[sort_by]
+    primary = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
 
     async def _fetch_page() -> tuple[list[PatientForm], int]:
         """One round trip: the page rows with the filtered total as a window
@@ -573,7 +597,8 @@ async def list_patient_forms(
             await session.execute(
                 select(PatientForm, func.count().over())
                 .where(*conds)
-                .order_by(PatientForm.created_at.desc())
+                # created_at tie-break keeps pages stable when the sort key repeats.
+                .order_by(primary.nulls_last(), PatientForm.created_at.desc())
                 .offset((page - 1) * page_size)
                 .limit(page_size)
             )
