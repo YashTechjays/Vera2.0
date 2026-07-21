@@ -20,8 +20,8 @@ from vera_core.models.enums import (
 )
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
-from vera_core.models.transcript import Recording
 from vera_core.models.tenant import Tenant
+from vera_core.models.transcript import Recording
 from vera_core.services.call_provenance import load_call_attempts, load_field_provenance
 
 pytestmark = pytest.mark.integration

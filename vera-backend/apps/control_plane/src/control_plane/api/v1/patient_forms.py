@@ -98,6 +98,7 @@ from vera_core.services.call_provenance import (
     load_call_attempts,
     load_field_provenance,
 )
+from vera_core.services.call_visibility import call_hidden_from
 from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
@@ -430,9 +431,14 @@ class CallAttemptView(BaseModel):
     created_at: datetime
     retry_of: UUID | None
     changed_paths: list[str]
+    # "available" only when the recording is playable AND the call passes the
+    # playback endpoint's owner-or-published gate for THIS caller — the UI must
+    # never advertise a recording the caller can't fetch.
+    recording: Literal["available"] | None
 
 
-def _call_attempt_view(a: CallAttempt) -> CallAttemptView:
+def _call_attempt_view(a: CallAttempt, caller_id: UUID | None) -> CallAttemptView:
+    visible = not call_hidden_from(a.initiated_by_id, a.published, caller_id)
     return CallAttemptView(
         id=a.id,
         attempt=a.attempt,
@@ -441,6 +447,7 @@ def _call_attempt_view(a: CallAttempt) -> CallAttemptView:
         created_at=a.created_at,
         retry_of=a.retry_of,
         changed_paths=a.changed_paths,
+        recording="available" if (a.recording_available and visible) else None,
     )
 
 
@@ -771,7 +778,7 @@ async def list_form_calls(
         resource_id=str(form_id),
         fields=sorted({p for a in attempts for p in a.changed_paths}),
     )
-    return ok([_call_attempt_view(a) for a in attempts])
+    return ok([_call_attempt_view(a, caller.user_id) for a in attempts])
 
 
 @router.post(

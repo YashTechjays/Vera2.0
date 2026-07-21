@@ -8,9 +8,7 @@ enrichment (`api/v1/patient_forms.py`) — so the gates can never diverge.
 from uuid import UUID
 
 
-def call_hidden_from(
-    initiated_by_id: UUID | None, published: bool, user_id: UUID | None
-) -> bool:
+def call_hidden_from(initiated_by_id: UUID | None, published: bool, user_id: UUID | None) -> bool:
     """Whether *user_id* must NOT see the call (the caller maps this to the same
     404 as a missing row, so a private call is never revealed by enumeration).
     A non-owner sees it only when it is published or ownerless."""
