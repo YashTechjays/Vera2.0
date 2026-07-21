@@ -9,6 +9,7 @@ migration runs. Skips without a reachable DB (see conftest)."""
 import importlib.util
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 from uuid import UUID
 
@@ -63,21 +64,21 @@ UNRESOLVABLE_IBV: dict[str, Any] = {
 }
 
 
-def _update_statements() -> tuple[str, ...]:
+def _migration_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("migration_rep_call_ref_backfill", MIGRATION_FILE)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    statements: tuple[str, ...] = module.UPDATE_STATEMENTS
+    return module
+
+
+def _update_statements() -> tuple[str, ...]:
+    statements: tuple[str, ...] = _migration_module().UPDATE_STATEMENTS
     return statements
 
 
 def _unresolvable_count_statements() -> tuple[str, ...]:
-    spec = importlib.util.spec_from_file_location("migration_rep_call_ref_backfill", MIGRATION_FILE)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    statements: tuple[str, ...] = module.UNRESOLVABLE_COUNT_STATEMENTS
+    statements: tuple[str, ...] = _migration_module().UNRESOLVABLE_COUNT_STATEMENTS
     return statements
 
 
