@@ -15,7 +15,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane.api.v1.common import AppSettings, AuthAudit, Email, Invites
+from control_plane.api.v1.common import AppSettings, AuthAudit, Email, Invites, Resolver
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import PLATFORM_INVITE_NS, InviteData
 from control_plane.auth.invite_reset import reset_and_reissue_invite
@@ -222,6 +222,7 @@ async def deactivate_operator(
     request: Request,
     session: PlatformSession,
     audit: AuthAudit,
+    resolver: Resolver,
     caller: Annotated[VerifiedIdentity, platform_require("platform:users:invite")],
 ) -> ResponseModel[None]:
     user = (
@@ -247,6 +248,15 @@ async def deactivate_operator(
     flipped = await set_operator_status(session, app_user_id=user_id, status="deactivated")
     if not flipped:
         raise NotFoundError(message="no such platform operator")
+
+    # PermissionResolver.effective_permissions checks the cache BEFORE the
+    # active-status query — a cache hit skips the DB (and the active check)
+    # entirely. This invalidate() is therefore the only thing that closes the
+    # window promptly; without it, a deactivated operator stays authorized for
+    # up to the cache TTL (see the docstring on effective_permissions,
+    # control_plane/auth/rbac.py). The cache keys on tenant_id directly, and
+    # None is the platform scope — mirrors deactivate_user in api/v1/users.py.
+    await resolver.invalidate(None, user_id)
 
     await emit_auth_event(
         audit,

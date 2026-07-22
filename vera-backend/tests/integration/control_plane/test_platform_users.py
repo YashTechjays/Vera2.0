@@ -11,7 +11,7 @@ import httpx
 import pyotp
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import InMemorySessionStore, SessionData
@@ -43,6 +43,7 @@ def _idem() -> dict[str, str]:
 class PlatformWorld:
     super_admin_id: UUID
     super_admin_token: str
+    session_store: InMemorySessionStore
 
 
 async def _mint_platform(store: InMemorySessionStore, *, user_id: UUID, email: str) -> str:
@@ -106,7 +107,11 @@ async def platform_world(
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield (
                 client,
-                PlatformWorld(super_admin_id=super_id, super_admin_token=super_admin_token),
+                PlatformWorld(
+                    super_admin_id=super_id,
+                    super_admin_token=super_admin_token,
+                    session_store=store,
+                ),
             )
 
     # Cleanup covers every platform app_user this test created (invite creates new
@@ -193,6 +198,66 @@ async def test_deactivate_operator_blocks_the_last_active_operator(
         headers=_auth(pw.super_admin_token),
     )
     assert resp.status_code == 409, resp.text
+
+
+async def test_deactivated_operator_is_denied_on_immediate_subsequent_request(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression for the missing cache invalidation: PermissionResolver.
+    effective_permissions (rbac.py) checks a cache BEFORE the DB active-status
+    query, and a cache hit skips the DB (and the active check) entirely.
+    deactivate_operator must call resolver.invalidate(None, user_id) right after
+    flipping status, or a just-deactivated operator stays authorized until the
+    cache TTL expires. This proves an IMMEDIATE follow-up request BY THE
+    DEACTIVATED OPERATOR is denied — every other test in this file only asserts
+    the deactivate call's own response, which is exactly why this was missed."""
+    client, pw = platform_world
+
+    # A second, already-ACTIVE operator with its own SUPER_ADMIN session — built
+    # directly (mirrors how `platform_world` seeds its own super_admin) rather than
+    # via the full invite/accept/MFA flow, which is exercised elsewhere
+    # (test_full_platform_invite_accept_activate_flow) and isn't the point here.
+    victim_id = uuid7()
+    async with admin_sessionmaker() as s, s.begin():
+        super_role = (
+            await s.execute(
+                text("SELECT id FROM role WHERE tenant_id IS NULL AND name = 'SUPER_ADMIN'")
+            )
+        ).scalar_one()
+        s.add(
+            AppUser(
+                id=victim_id,
+                tenant_id=None,
+                account_type="platform",
+                email="cache-victim@test.example",
+                name="Cache Victim",
+                status="active",
+            )
+        )
+        await s.flush()
+        s.add(UserRole(tenant_id=None, app_user_id=victim_id, role_id=super_role))
+
+    victim_token = await _mint_platform(
+        pw.session_store, user_id=victim_id, email="cache-victim@test.example"
+    )
+
+    # Prime the permission cache: the victim's own token successfully reaches a
+    # platform-gated endpoint, populating the (tenant_id=None, victim_id) cache
+    # entry that effective_permissions will hit on the next call.
+    primed = await client.get("/api/v1/platform/users", headers=_auth(victim_token))
+    assert primed.status_code == 200, primed.text
+
+    deactivate = await client.post(
+        f"/api/v1/platform/users/{victim_id}/deactivate",
+        headers=_auth(pw.super_admin_token),
+    )
+    assert deactivate.status_code == 200, deactivate.text
+
+    # The regression: without resolver.invalidate(None, victim_id), this next call
+    # would still hit the primed cache entry and succeed for up to the cache TTL.
+    after = await client.get("/api/v1/platform/users", headers=_auth(victim_token))
+    assert after.status_code in (401, 403), after.text
 
 
 async def test_resend_operator_invitation_reissues_a_working_token(
@@ -301,3 +366,39 @@ async def test_plain_tenant_admin_session_cannot_reach_platform_user_endpoints(
     the caller's `account_type`."""
     resp = await client.get("/api/v1/platform/users", headers=_auth(rbac_world.admin_token))
     assert resp.status_code in (401, 403), resp.text
+
+
+async def test_plain_tenant_admin_session_cannot_reach_platform_mutation_endpoints(
+    client: httpx.AsyncClient, rbac_world: "RBACWorld"
+) -> None:
+    """As above, but for the three MUTATING platform endpoints, which the sibling
+    read-only test above doesn't touch. `platform_require` is a FastAPI `Depends`
+    sub-dependency; FastAPI resolves every such sub-dependency (session, audit,
+    idempotency key, caller) before it runs the route's own body — where the
+    `AppUser` lookup by `user_id` lives (see `solve_dependencies` in
+    `fastapi/dependencies/utils.py`: the loop over `dependant.dependencies` runs to
+    completion, raising on the first failure, before body/path values are even
+    assembled). So a denied caller never reaches the DB lookup, and a nonexistent
+    `user_id` is safe to use for the deactivate/resend calls — the 401/403 fires
+    first regardless of whether that id exists."""
+    dummy_user_id = uuid4()
+    headers = {**_auth(rbac_world.admin_token), **_idem()}
+
+    invite_resp = await client.post(
+        "/api/v1/platform/users/invitations",
+        headers=headers,
+        json={"email": "denied-invite@test.example", "name": "", "send_email": False},
+    )
+    assert invite_resp.status_code in (401, 403), invite_resp.text
+
+    deactivate_resp = await client.post(
+        f"/api/v1/platform/users/{dummy_user_id}/deactivate",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert deactivate_resp.status_code in (401, 403), deactivate_resp.text
+
+    resend_resp = await client.post(
+        f"/api/v1/platform/users/{dummy_user_id}/resend-invitation",
+        headers=headers,
+    )
+    assert resend_resp.status_code in (401, 403), resend_resp.text
