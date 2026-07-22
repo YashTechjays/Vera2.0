@@ -200,7 +200,7 @@ export function deactivateUser(userId: string) {
 /** Reissue a fresh invite link for a user stuck in status="invited" (their
  *  original link or MFA bridge token expired). Requires `users:manage`. */
 export function resendInvitation(userId: string) {
-  return apiRequest<null>(`/users/${encodeURIComponent(userId)}/resend-invitation`, {
+  return apiRequest<InviteUserResult>(`/users/${encodeURIComponent(userId)}/resend-invitation`, {
     method: "POST",
     headers: { "Idempotency-Key": randomId() },
   })

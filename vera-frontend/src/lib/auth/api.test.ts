@@ -26,12 +26,19 @@ describe("auth api client — resend and platform invite", () => {
   beforeEach(() => vi.resetAllMocks())
 
   it("resends a tenant invitation with the conventional Idempotency-Key", async () => {
-    vi.mocked(apiRequest).mockResolvedValue({})
-    await resendInvitation("user-1")
+    const mockResult = {
+      user_id: "u1",
+      email: "a@b.com",
+      invite_url: "http://localhost:5173/invite/token-123",
+      email_sent: true,
+    }
+    vi.mocked(apiRequest).mockResolvedValue(mockResult)
+    const result = await resendInvitation("user-1")
     expect(apiRequest).toHaveBeenCalledWith("/users/user-1/resend-invitation", {
       method: "POST",
       headers: { "Idempotency-Key": "test-idempotency-key" },
     })
+    expect(result).toEqual(mockResult)
   })
 
   it("validates a platform invite with no tenant slug", async () => {
