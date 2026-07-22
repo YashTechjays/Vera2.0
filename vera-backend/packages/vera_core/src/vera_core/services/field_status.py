@@ -4,6 +4,7 @@
 it is the single "current values of a form" query for snapshots and completion %.
 """
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -11,6 +12,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.forms.review import FieldStatus
 from vera_core.models.field_answer import FieldAnswer, FieldEvaluation
+
+
+def latest_eval_subquery() -> Any:
+    """Subquery: latest created_at per answer_id across all evaluations — the one
+    encoding of "the latest FieldEvaluation for an answer" (multiple evals from LLM
+    retries must never fan out into duplicate rows). Concurrent evals within the
+    same database clock tick choose non-deterministically."""
+    return (
+        select(
+            FieldEvaluation.answer_id,
+            func.max(FieldEvaluation.created_at).label("max_created_at"),
+        )
+        .group_by(FieldEvaluation.answer_id)
+        .subquery()
+    )
 
 
 async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, FieldStatus]:
@@ -21,20 +37,9 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
     no evaluation yields ai_supported=None; ai_confidence is the judge's score
     when an evaluation exists (the satisfaction gate's input), else the extractor's.
 
-    The latest evaluation per answer is resolved in-DB via a subquery on
-    MAX(created_at) so that multiple evaluations (e.g. LLM retries) never produce
-    duplicate rows for the same field path. Concurrent evals within the same
-    database clock tick choose non-deterministically.
+    The latest evaluation per answer is resolved in-DB via latest_eval_subquery().
     """
-    # Subquery: latest created_at per answer_id across all evaluations.
-    latest_eval = (
-        select(
-            FieldEvaluation.answer_id,
-            func.max(FieldEvaluation.created_at).label("max_created_at"),
-        )
-        .group_by(FieldEvaluation.answer_id)
-        .subquery()
-    )
+    latest_eval = latest_eval_subquery()
     rows = (
         await session.execute(
             select(

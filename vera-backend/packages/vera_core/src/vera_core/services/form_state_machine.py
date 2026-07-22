@@ -60,6 +60,7 @@ class FormStateMachine:
         *,
         tenant_max_retries: int,
         manual: bool = False,
+        reason: str | None = None,
     ) -> None:
         """Move *form* to *target* status, applying side effects.
 
@@ -79,6 +80,11 @@ class FormStateMachine:
             episode; a manual enqueue starts a fresh episode — it is never
             blocked by the cap and resets ``retry_count`` so the new episode
             gets its full auto-retry allowance.
+        reason:
+            Why the pipeline routed the form to ``EXCEPTION_REVIEW`` (a
+            ``ReviewReason`` value). Stamped onto ``form.review_reason`` on that
+            target and cleared on every other — the machine owns the lifecycle of
+            this column so callers can't leave a stale reason behind.
 
         Raises
         ------
@@ -108,6 +114,10 @@ class FormStateMachine:
                 form.retry_count += 1
 
         form.status = target.value
+        # The machine owns review_reason's lifecycle: stamped entering
+        # EXCEPTION_REVIEW, cleared on every other target — a caller can never
+        # leave a stale reason behind on a form that moved on.
+        form.review_reason = reason if target == FormStatus.EXCEPTION_REVIEW else None
 
     def can_retry(self, form: Any, *, tenant_max_retries: int) -> bool:
         """True when the retry-cap guard would allow another retry (IN_QUEUE hop).

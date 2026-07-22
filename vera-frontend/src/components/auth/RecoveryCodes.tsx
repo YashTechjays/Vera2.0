@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { copyText } from "@/lib/clipboard"
+import { triggerBlobDownload } from "@/lib/utils"
 
 export function RecoveryCodes({ codes, onContinue }: { codes: string[]; onContinue: () => void }) {
   const [saved, setSaved] = useState(false)
@@ -11,13 +12,10 @@ export function RecoveryCodes({ codes, onContinue }: { codes: string[]; onContin
     void copyText(codes.join("\n"))
   }
   function download() {
-    const blob = new Blob([codes.join("\n")], { type: "text/plain" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = "vera-recovery-codes.txt"
-    a.click()
-    URL.revokeObjectURL(url)
+    triggerBlobDownload(
+      new Blob([codes.join("\n")], { type: "text/plain" }),
+      "vera-recovery-codes.txt",
+    )
   }
 
   return (

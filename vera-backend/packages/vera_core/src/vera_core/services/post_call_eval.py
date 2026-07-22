@@ -27,7 +27,7 @@ from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import SchemaVersion
 from vera_core.models.call import Call
-from vera_core.models.enums import AnswerSource, CallStatus, FormStatus
+from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, ReviewReason
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
@@ -178,7 +178,7 @@ async def evaluate_call(
         reviewed: list[str],
         reason: str | None = None,
     ) -> EvalOutcome:
-        sm.transition(form, target, tenant_max_retries=tenant.max_retries)
+        sm.transition(form, target, tenant_max_retries=tenant.max_retries, reason=reason)
         if target == FormStatus.IN_QUEUE:
             form.enqueued_at = func.now()
         await session.flush()
@@ -217,7 +217,7 @@ async def evaluate_call(
     # (3) No transcript → route to EXCEPTION_REVIEW.
     if not turns:
         return await _finish(
-            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="no_transcript"
+            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.NO_TRANSCRIPT
         )
 
     # (2) Parse schema — collection paths for extraction. A document the model
@@ -234,7 +234,10 @@ async def evaluate_call(
             exc,
         )
         return await _finish(
-            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="unsupported_schema"
+            FormStatus.EXCEPTION_REVIEW,
+            written=0,
+            reviewed=[],
+            reason=ReviewReason.UNSUPPORTED_SCHEMA,
         )
     paths = doc.collection_paths()
 
@@ -251,7 +254,7 @@ async def evaluate_call(
             exc,
         )
         return await _finish(
-            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason="llm_error"
+            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.LLM_ERROR
         )
     token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
     clean = [ef for ef in extracted if not has_phi_token(ef.value)]
@@ -295,7 +298,7 @@ async def evaluate_call(
             FormStatus.EXCEPTION_REVIEW,
             written=len(kept),
             reviewed=[ef.field_path for ef, _ in kept],
-            reason="llm_error",
+            reason=ReviewReason.LLM_ERROR,
         )
     verdicts = {v.field_path: v for v in raw_verdicts}
     for ef, answer in kept:
@@ -338,7 +341,7 @@ async def evaluate_call(
             FormStatus.EXCEPTION_REVIEW,
             written=len(kept),
             reviewed=token_fields,
-            reason="token_value",
+            reason=ReviewReason.TOKEN_VALUE,
         )
     status_by_path = await load_field_status(session, form_id)
     # The authoritative decision evaluates gates against the REAL current values
@@ -362,12 +365,14 @@ async def evaluate_call(
                 FormStatus.EXCEPTION_REVIEW,
                 written=len(kept),
                 reviewed=unsatisfied,
-                reason="user_ended",
+                reason=ReviewReason.USER_ENDED,
             )
         return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
     return await _finish(
         FormStatus.EXCEPTION_REVIEW,
         written=len(kept),
         reviewed=unsatisfied,
-        reason="retries_exhausted" if retryable else "unsatisfied_unaskable",
+        reason=(
+            ReviewReason.RETRIES_EXHAUSTED if retryable else ReviewReason.UNSATISFIED_UNASKABLE
+        ),
     )
