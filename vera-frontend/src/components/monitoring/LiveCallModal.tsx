@@ -25,6 +25,7 @@ import { ApiError } from "@/lib/api/client"
 import { endCall } from "@/lib/api/calls"
 import type { CallHealth } from "@/lib/api/callEvents"
 import {
+  coachingPanelVisible,
   interveneButtonState,
   shouldAllowClose,
   type LiveCallMode,
@@ -34,6 +35,7 @@ import { healthTone, healthToneClass } from "@/lib/monitoring/health"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
+import { CoachingPanel } from "./CoachingPanel"
 import { Keypad } from "./Keypad"
 import { LiveCallRoom } from "./LiveCallRoom"
 import { useCallStatus } from "./useCallStatus"
@@ -102,6 +104,7 @@ export function LiveCallModal({
   const callEnded = sseEnded
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
+  const canCoach = coachingPanelVisible(canIntervene, call?.isOwner ?? false, callEnded)
 
   // Tab close / refresh while intervening abandons the call with a silenced agent — warn.
   // (The modal close-lock only covers Esc/overlay/X, not leaving the page.)
@@ -372,6 +375,7 @@ export function LiveCallModal({
                     onHealth={setLiveHealth}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                   />
+                  {canCoach && <CoachingPanel callId={call.id} />}
                 </div>
                 {rightTab === "summary" && <CallSummaryPanel callId={call.id} />}
               </div>

@@ -24,18 +24,22 @@ from pydantic import BaseModel, model_validator
 ROLE_USER: Literal["user"] = "user"
 ROLE_AGENT: Literal["agent"] = "agent"
 ROLE_DTMF: Literal["dtmf"] = "dtmf"  # a keypad press (DTMF), text = the digits sent
+ROLE_COACHING: Literal["coaching"] = "coaching"  # typed supervisor coaching, never heard on call
+ROLE_WHISPER: Literal["whisper"] = "whisper"  # spoken (hold-to-whisper) supervisor coaching
 
 SOURCE_REP: Literal["rep"] = "rep"  # the human on the line (payer rep / IVR side)
 SOURCE_BOT: Literal["bot"] = "bot"  # Vera — speech or an action it took
 SOURCE_SUPERVISOR: Literal["supervisor"] = "supervisor"  # a supervisor who took over the call
 
-type TurnRole = Literal["user", "agent", "dtmf"]
+type TurnRole = Literal["user", "agent", "dtmf", "coaching", "whisper"]
 type TurnSource = Literal["rep", "bot", "supervisor"]
 
 _SOURCE_BY_ROLE: dict[str, TurnSource] = {
     ROLE_USER: SOURCE_REP,
     ROLE_AGENT: SOURCE_BOT,
     ROLE_DTMF: SOURCE_BOT,
+    ROLE_COACHING: SOURCE_SUPERVISOR,
+    ROLE_WHISPER: SOURCE_SUPERVISOR,
 }
 
 

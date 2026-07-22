@@ -23,6 +23,9 @@ export type LiveCall = {
   startedAt?: string | null
   /** Latest observer health score (0-100); null/undefined = not assessed. */
   healthScore?: number | null
+  /** True when the current caller owns the call — gates coaching for an owner
+   *  who lacks calls:intervene. Absent (falsy) on mock rows. */
+  isOwner?: boolean
 }
 
 export const liveCalls: LiveCall[] = [

@@ -54,6 +54,35 @@ describe("asTranscriptTurn", () => {
     ).toEqual({ role: "user", source: "rep", text: "hi", ts: 1 })
   })
 
+  it("maps a coaching envelope, carrying the speaker's user id", () => {
+    const e: CallStreamEvent = {
+      type: "transcript",
+      data: { role: "coaching", source: "supervisor", text: "ask about the deductible", user_id: "sup-1" },
+      ts: 9,
+    }
+    expect(asTranscriptTurn(e)).toEqual({
+      role: "coaching",
+      source: "supervisor",
+      text: "ask about the deductible",
+      ts: 9,
+      speakerUserId: "sup-1",
+    })
+  })
+
+  it("maps a whisper envelope with no speaker id (unknown/legacy)", () => {
+    const e: CallStreamEvent = {
+      type: "transcript",
+      data: { role: "whisper", source: "supervisor", text: "mention the copay" },
+      ts: 10,
+    }
+    expect(asTranscriptTurn(e)).toEqual({
+      role: "whisper",
+      source: "supervisor",
+      text: "mention the copay",
+      ts: 10,
+    })
+  })
+
   it("ignores non-transcript envelopes", () => {
     expect(asTranscriptTurn({ type: "call_status", data: { status: "active" }, ts: 1 })).toBeNull()
   })

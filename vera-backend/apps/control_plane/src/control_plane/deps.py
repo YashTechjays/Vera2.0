@@ -28,6 +28,7 @@ from control_plane.auth.session import SessionStore
 from control_plane.call_summary import SummaryCache
 from control_plane.email import EmailSender
 from control_plane.idempotency import IdempotencyStore
+from control_plane.rate_limit import CallRateLimiter
 from vera_core.audit import AuditSink, AuthAuditSink
 from vera_core.call_stream import CallStreamService
 from vera_core.config import Settings
@@ -38,6 +39,7 @@ from vera_core.llm import ResilientLLM
 from vera_core.models.enums import AccountType
 from vera_core.notifications import NotificationService
 from vera_core.plan_store import CallPlanService
+from vera_core.stt import ResilientSTT
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
@@ -141,6 +143,16 @@ def get_audit(request: Request) -> AuditSink:
 def get_idempotency_store(request: Request) -> IdempotencyStore:
     store: IdempotencyStore = request.app.state.idempotency
     return store
+
+
+def get_call_rate_limiter(request: Request) -> CallRateLimiter:
+    limiter: CallRateLimiter = request.app.state.call_rate_limiter
+    return limiter
+
+
+def get_whisper_stt(request: Request) -> ResilientSTT:
+    stt: ResilientSTT = request.app.state.whisper_stt
+    return stt
 
 
 def get_email_sender(request: Request) -> EmailSender:

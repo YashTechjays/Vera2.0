@@ -196,7 +196,11 @@ class _MemCallStreamStore:
         return room_name in self._entries
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         # This fake replays a fixed snapshot and never blocks; the deadline is only
         # recorded so endpoint tests can assert what was passed.
@@ -226,6 +230,7 @@ class RBACWorld:
         self.admin_id: UUID = UUID(int=0)
         self.supervisor_id: UUID = UUID(int=0)
         self.virtual_assistant_id: UUID = UUID(int=0)
+        self.listener_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
@@ -399,6 +404,7 @@ async def rbac_world(
         tenant_id=tenant_id,
         email="virtual_assistant@test.example",
     )
+    world.listener_id = listener_id
     world.listener_token = await _mint(
         session_store, user_id=listener_id, tenant_id=tenant_id, email="listener@test.example"
     )

@@ -58,7 +58,11 @@ class CallStreamStore(Protocol):
     async def delete(self, room_name: str) -> None: ...
     async def exists(self, room_name: str) -> bool: ...
     def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]: ...
     async def read_all(self, room_name: str) -> list[CallStreamEvent]: ...
 
@@ -102,21 +106,28 @@ class RedisCallStreamStore:
         return bool(await self._redis.exists(call_stream_key(room_name)))
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]:
-        """Replay-then-tail. When `first_entry_deadline_s` is set and nothing has
-        EVER been seen on this stream, give up once that many seconds have elapsed
-        since the read started — bounds a tail on a stream that may never appear
-        (see `stream_call_events`'s live-no-stream branch). A stream that has
-        already yielded at least one entry tails indefinitely regardless — the
-        deadline only guards the "is anything ever going to show up" question.
+        """Replay-then-tail from `start_id` ("0" replays everything; Redis's "$"
+        sentinel tails only entries added after this call starts — the coaching
+        listener uses "$" so a restart mid-call can't re-inject a stale note).
+        When `first_entry_deadline_s` is set and nothing has EVER been seen on
+        this stream, give up once that many seconds have elapsed since the read
+        started — bounds a tail on a stream that may never appear (see
+        `stream_call_events`'s live-no-stream branch). A stream that has already
+        yielded at least one entry tails indefinitely regardless — the deadline
+        only guards the "is anything ever going to show up" question.
 
         Every idle BLOCK window yields a `None` keepalive tick so a consumer
         holding a byte stream open (the SSE endpoint) can emit a heartbeat —
         a silent call must not starve proxy read timeouts (nginx defaults to
         60s) into killing the connection."""
         key = call_stream_key(room_name)
-        last_id = "0"
+        last_id = start_id
         seen = False
         loop = asyncio.get_running_loop()
         deadline = (
@@ -186,16 +197,21 @@ class CallStreamService:
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Publish one finalized turn. `source` (the acting side — drives UI attribution)
-        defaults from the role; producers pass it explicitly when they know better."""
+        defaults from the role; producers pass it explicitly when they know better.
+        `user_id` (the specific supervisor who spoke/coached, if known) is only added
+        to the envelope when present, so older consumers see no shape change."""
+        data: dict[str, Any] = {
+            "role": role,
+            "source": source or source_for_role(role),
+            "text": text,
+        }
+        if user_id is not None:
+            data["user_id"] = user_id
         await self._store.publish(
-            room_name,
-            CallStreamEvent(
-                type=TYPE_TRANSCRIPT,
-                data={"role": role, "source": source or source_for_role(role), "text": text},
-                ts=ts,
-            ),
+            room_name, CallStreamEvent(type=TYPE_TRANSCRIPT, data=data, ts=ts)
         )
 
     async def publish_status(self, room_name: str, status: str, *, ts: int) -> None:
@@ -216,10 +232,17 @@ class CallStreamService:
         )
 
     def consume(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]:
-        """Replay-then-tail; a `None` item is an idle-window keepalive tick."""
-        return self._store.read(room_name, first_entry_deadline_s=first_entry_deadline_s)
+        """Replay-then-tail from `start_id`; a `None` item is an idle-window
+        keepalive tick."""
+        return self._store.read(
+            room_name, start_id=start_id, first_entry_deadline_s=first_entry_deadline_s
+        )
 
     async def exists(self, room_name: str) -> bool:
         return await self._store.exists(room_name)
