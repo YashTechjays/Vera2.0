@@ -160,3 +160,32 @@ async def test_injection_failure_is_logged_and_does_not_raise() -> None:
     stream = _FakeStream([("1-0", _coaching_event("ask about the deductible"))])
 
     await CoachingListener(_FakeSession(agent), stream, "room-1").run()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_a_failed_note_does_not_end_coaching_for_the_rest_of_the_call() -> None:
+    """One bad entry (injection failure, or any other stray exception) must
+    not kill the listener task - later notes on the same call still land."""
+    agent = _FakeAgent()
+    agent.raise_on_update = True
+    stream = _FakeStream(
+        [
+            ("1-0", _coaching_event("this one fails")),
+            ("2-0", _coaching_event("this one must still land")),
+        ]
+    )
+
+    original_consume = stream.consume
+
+    async def _consume_then_recover(room_name: str, *, start_id: str = "0", **_kwargs: Any) -> Any:
+        async for item in original_consume(room_name, start_id=start_id):
+            if item is not None and item[0] == "2-0":
+                agent.raise_on_update = False  # second note should succeed
+            yield item
+
+    stream.consume = _consume_then_recover  # type: ignore[method-assign]
+
+    await CoachingListener(_FakeSession(agent), stream, "room-1").run()
+
+    assert len(agent.update_calls) == 1
+    assert "this one must still land" in agent.update_calls[0].messages[-1][1]

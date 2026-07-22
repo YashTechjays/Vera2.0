@@ -12,6 +12,7 @@ for the next turn generation to read; it does not cancel or affect a
 turn already in flight.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
@@ -73,21 +74,30 @@ class CoachingListener:
         async for entry in self._stream.consume(self._room_name, start_id="$"):
             if entry is None:
                 continue  # idle-window keepalive tick — nothing to do
-            _entry_id, event = entry
-            if event.type != TYPE_TRANSCRIPT:
-                continue
-            if event.data.get("role") not in (ROLE_COACHING, ROLE_WHISPER):
-                continue
-            text = str(event.data.get("text", "")).strip()
-            if not text:
-                continue
-            await self._inject(text)
+            try:
+                await self._handle(entry)
+            except asyncio.CancelledError:
+                raise  # shutdown must still stop the loop
+            except Exception as exc:
+                # A stray failure (a bad note, a mid-handoff current_agent, a
+                # Redis hiccup surfaced through the entry) must not silently
+                # end coaching for the rest of the call — type name only,
+                # never the note text (PHI).
+                logger.warning("coaching listener hit %s; continuing", type(exc).__name__)
+
+    async def _handle(self, entry: tuple[str, CallStreamEvent]) -> None:
+        _entry_id, event = entry
+        if event.type != TYPE_TRANSCRIPT:
+            return
+        if event.data.get("role") not in (ROLE_COACHING, ROLE_WHISPER):
+            return
+        text = str(event.data.get("text", "")).strip()
+        if not text:
+            return
+        await self._inject(text)
 
     async def _inject(self, text: str) -> None:
         agent = self._session.current_agent
         ctx = agent.chat_ctx.copy()
         ctx.add_message(role="system", content=_COACHING_NOTE_PREFIX + text)
-        try:
-            await agent.update_chat_ctx(ctx)
-        except Exception:
-            logger.exception("coaching note injection failed")  # never the text (PHI)
+        await agent.update_chat_ctx(ctx)
