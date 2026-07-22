@@ -91,6 +91,34 @@ async def test_publish_turn_keeps_an_explicit_source() -> None:
 
 
 @pytest.mark.asyncio
+async def test_publish_turn_stamps_user_id_when_present() -> None:
+    store = _MemStore()
+    svc = CallStreamService(store)
+    await svc.publish_turn("r", "coaching", "ask about the deductible", ts=42, user_id="u-1")
+    assert store.events == [
+        CallStreamEvent(
+            type="transcript",
+            data={
+                "role": "coaching",
+                "source": "supervisor",
+                "text": "ask about the deductible",
+                "user_id": "u-1",
+            },
+            ts=42,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_turn_omits_user_id_when_absent() -> None:
+    """No shape change for existing consumers that never pass user_id."""
+    store = _MemStore()
+    svc = CallStreamService(store)
+    await svc.publish_turn("r", "agent", "hello", ts=42)
+    assert "user_id" not in store.events[0].data
+
+
+@pytest.mark.asyncio
 async def test_publish_status_wraps_call_status_envelope() -> None:
     store = _MemStore()
     svc = CallStreamService(store)
