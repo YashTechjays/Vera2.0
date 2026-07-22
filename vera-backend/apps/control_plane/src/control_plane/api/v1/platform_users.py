@@ -22,7 +22,7 @@ from control_plane.auth.invite_reset import reset_and_reissue_invite
 from control_plane.auth.platform_provisioning import create_operator_invite, set_operator_status
 from control_plane.auth.rbac import platform_require
 from control_plane.deps import client_ip, get_idempotency_store, platform_scoped_session
-from control_plane.email import EmailMessage
+from control_plane.email import EmailMessage, EmailSender
 from control_plane.exceptions import (
     ConflictError,
     CustomAPIException,
@@ -66,6 +66,40 @@ class OperatorResponse(BaseModel):
     name: str
     status: str
     last_login_at: datetime | None
+
+
+async def _send_operator_invite_email(
+    email_sender: EmailSender,
+    *,
+    to: str,
+    name: str,
+    intro: str,
+    invite_url: str,
+    ttl_seconds: int,
+    log_context: str,
+) -> bool:
+    """Send a platform-operator invite email, returning whether it was sent. Never
+    raises: on delivery failure the caller falls back to the copyable invite link.
+    `intro` is the tier-specific opening sentence (fresh invite vs. resend)."""
+    try:
+        await email_sender.send(
+            EmailMessage(
+                to=to,
+                subject="You're invited to Vera as a platform operator",
+                body=(
+                    f"Hello{(' ' + name) if name else ''},\n\n"
+                    f"{intro} "
+                    f"(valid for {ttl_seconds // 3600} hours). "
+                    "Two-factor authentication is required to finish setup.\n\n"
+                    f"{invite_url}\n\n"
+                    "If you didn't expect this, you can ignore this email."
+                ),
+            )
+        )
+        return True
+    except Exception:
+        logger.warning("%s to %s could not be sent", log_context, to, exc_info=True)
+        return False
 
 
 def _to_response(row: AppUser) -> OperatorResponse:
@@ -129,27 +163,18 @@ async def invite_operator(
 
     email_sent = False
     if body.send_email:
-        try:
-            await email_sender.send(
-                EmailMessage(
-                    to=email,
-                    subject="You're invited to Vera as a platform operator",
-                    body=(
-                        f"Hello{(' ' + body.name) if body.name else ''},\n\n"
-                        "You've been invited as a Vera platform operator. Set your "
-                        "password using the link below "
-                        f"(valid for {settings.invite_ttl_seconds // 3600} hours). "
-                        "Two-factor authentication is required to finish setup.\n\n"
-                        f"{invite_url}\n\n"
-                        "If you didn't expect this, you can ignore this email."
-                    ),
-                )
-            )
-            email_sent = True
-        except Exception:
-            logger.warning(
-                "platform invitation email to %s could not be sent", email, exc_info=True
-            )
+        email_sent = await _send_operator_invite_email(
+            email_sender,
+            to=email,
+            name=body.name,
+            intro=(
+                "You've been invited as a Vera platform operator. Set your "
+                "password using the link below"
+            ),
+            invite_url=invite_url,
+            ttl_seconds=settings.invite_ttl_seconds,
+            log_context="platform invitation email",
+        )
 
     await emit_auth_event(
         audit,
@@ -281,27 +306,15 @@ async def resend_operator_invitation(
     )
     invite_url = f"{settings.frontend_base_url}/platform/accept-invite?token={token}"
 
-    email_sent = False
-    try:
-        await email_sender.send(
-            EmailMessage(
-                to=user.email,
-                subject="You're invited to Vera as a platform operator",
-                body=(
-                    f"Hello{(' ' + user.name) if user.name else ''},\n\n"
-                    "Here is a fresh link to set your password "
-                    f"(valid for {settings.invite_ttl_seconds // 3600} hours). "
-                    "Two-factor authentication is required to finish setup.\n\n"
-                    f"{invite_url}\n\n"
-                    "If you didn't expect this, you can ignore this email."
-                ),
-            )
-        )
-        email_sent = True
-    except Exception:
-        logger.warning(
-            "resend platform invitation email to %s could not be sent", user.email, exc_info=True
-        )
+    email_sent = await _send_operator_invite_email(
+        email_sender,
+        to=user.email,
+        name=user.name,
+        intro="Here is a fresh link to set your password",
+        invite_url=invite_url,
+        ttl_seconds=settings.invite_ttl_seconds,
+        log_context="resend platform invitation email",
+    )
 
     await emit_auth_event(
         audit,
