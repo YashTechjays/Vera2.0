@@ -57,6 +57,32 @@ adds `platform:users:invite` and `platform:users:read` to `PLATFORM_PERMISSIONS`
 mirroring how tenant `users:manage` covers invite and deactivate under one permission —
 avoids minting a near-duplicate permission.
 
+### RLS constraint: NULL-tenant writes need SECURITY DEFINER functions
+
+The platform-readable RLS policy (`platform_readable_rls_policy_ddl` in `vera_core/db/rls.py`)
+is `WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid)` — strict equality,
+no carve-out for NULL. Under a `platform_session` this evaluates false for any row with
+`tenant_id IS NULL`, so **every INSERT or UPDATE of a NULL-tenant row is rejected**, not just
+the UPDATE case the codebase already worked around for platform MFA (migration
+`f066c667ddc1`). DELETE is unaffected (RLS only evaluates `USING`, not `WITH CHECK`, for
+DELETE), so the resend flow's stale-`UserIdentity` cleanup is a plain ORM `DELETE`.
+
+This means invite creation (INSERT `AppUser` + `UserRole`), accept-invite (INSERT
+`UserIdentity`), and deactivate/activate-mfa (UPDATE `AppUser.status`) cannot be plain ORM
+writes under `platform_session`. Following the exact precedent of `f066c667ddc1` (narrow,
+fixed-`search_path` `SECURITY DEFINER` functions owned by `vera_definer_owner`, NOLOGIN/
+BYPASSRLS, gated by `current_setting('app.platform', true) = 'on'`, column-scoped GRANTs),
+this feature adds three more:
+
+- `platform_create_operator_invite(email, name, invited_by) RETURNS uuid` — atomically
+  inserts the invited `AppUser` and the `SUPER_ADMIN` `UserRole` grant.
+- `platform_create_password_identity(app_user_id, email, hashed_password) RETURNS uuid` —
+  inserts the `UserIdentity` row during accept-invite.
+- `platform_set_operator_status(app_user_id, status) RETURNS boolean` — flips `status` to
+  `'active'` (activate-mfa) or `'deactivated'` (deactivate), with `status IN ('active',
+  'deactivated')` enforced inside the function body so this narrow surface can't be used to
+  write an arbitrary status value.
+
 ### Audit events
 
 New `AuthEvent` values, kept distinct from the tenant equivalents so platform-operator
@@ -108,13 +134,19 @@ the ADR-0006 §A session-shape precedent — platform routes are never tenant-sl
 
 - `GET /platform/auth/invitations/validate` — pre-flight check (`valid`/`invalid`/`deactivated`),
   doesn't consume the token.
-- `POST /platform/auth/invitations/accept` — sets password, creates `UserIdentity`.
-  Unlike the tenant flow's `enforce_mfa` branch, this **unconditionally** returns a TOTP
+- `POST /platform/auth/invitations/accept` — sets password (via the new
+  `platform_create_password_identity` definer function), unconditionally returns a TOTP
   QR provisioning URI + bridge `mfa_token` (mandatory MFA, no skip path — platform login
-  already mandates TOTP for everyone). Leaves `status="invited"`. Emits
-  `PLATFORM_INVITE_ACCEPTED`. Deletes the `platform_invite` token (single-use).
-- `POST /platform/auth/invitations/activate-mfa` — completes TOTP enrollment, flips
-  `status="active"`, returns recovery codes once. Emits `PLATFORM_USER_ACTIVATED`.
+  already mandates TOTP for everyone) via the existing `mfa.enroll_platform` helper.
+  Leaves `status="invited"`. Emits `PLATFORM_INVITE_ACCEPTED`. Deletes the
+  `platform_invite` token (single-use).
+- `POST /platform/auth/invitations/activate-mfa` — completes TOTP enrollment via the
+  existing `mfa.activate_platform` helper, flips `status="active"` via the new
+  `platform_set_operator_status` definer function. **No recovery codes** — platform MFA
+  is TOTP-only everywhere in this codebase (consuming a recovery code would need yet
+  another definer write on an already-enrolled row; the existing platform login
+  enrollment has the identical constraint and the same no-recovery-codes posture). Emits
+  `PLATFORM_USER_ACTIVATED`.
 
 Every mutating endpoint gets `Depends(require_idempotency_key)` + `claim_or_conflict(...)`,
 per the project-wide idempotency seam requirement.
