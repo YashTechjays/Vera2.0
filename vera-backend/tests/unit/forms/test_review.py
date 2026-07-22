@@ -2,17 +2,27 @@
 
 from uuid import uuid4
 
+from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.review import (
     AnswerRow,
+    FieldStatus,
     adjudication_action,
     all_required_paths,
     build_field_views,
     completion_pct,
+    expand_to_groups,
+    has_call_reference,
     is_disputed,
     normalize_value,
     unwrap_value,
 )
 from vera_core.models.enums import DisputeActionType
+
+from .test_prompting import FORM_SCHEMA_DIR
+
+_IBV_DOC: FormSchemaDoc = load_document(
+    (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
+)
 
 SCHEMA = {
     "sections": [
@@ -204,3 +214,52 @@ class TestBuildFieldViews:
         b = self._answer("a.y", "2")
         views = build_field_views([a, b], {})
         assert [v["field_path"] for v in views] == ["a.y", "b.x"]
+
+
+def _status(source: str = "ai_call") -> FieldStatus:
+    return FieldStatus(source=source, ai_supported=True, ai_confidence=90)
+
+
+class TestHasCallReference:
+    """The retry-scope gate: a captured call reference number → FOCUSED retry."""
+
+    def test_true_when_reference_answer_present(self) -> None:
+        ref = _IBV_DOC.rep_call_reference_number_field
+        assert has_call_reference({ref: _status()}, _IBV_DOC) is True
+
+    def test_false_when_reference_answer_absent(self) -> None:
+        assert has_call_reference({}, _IBV_DOC) is False
+
+
+class TestExpandToGroups:
+    """A missing field inside a group pulls in every collectable leaf of that group."""
+
+    @staticmethod
+    def _group_with_multiple_leaves() -> tuple[str, list[str]] | None:
+        collectable = _IBV_DOC.collection_paths()
+        for group_path in _IBV_DOC.group_paths():
+            prefix = f"{group_path}."
+            leaves = [p for p in collectable if p.startswith(prefix)]
+            if len(leaves) > 1:
+                return group_path, leaves
+        return None
+
+    def test_grouped_field_expands_to_whole_group(self) -> None:
+        found = self._group_with_multiple_leaves()
+        assert found is not None, "IBV schema is expected to contain a multi-leaf group"
+        _, leaves = found
+        expanded = expand_to_groups(_IBV_DOC, {leaves[0]})
+        assert set(leaves).issubset(set(expanded))
+
+    def test_result_is_document_ordered(self) -> None:
+        found = self._group_with_multiple_leaves()
+        assert found is not None
+        _, leaves = found
+        expanded = expand_to_groups(_IBV_DOC, {leaves[-1]})
+        collectable = _IBV_DOC.collection_paths()
+        assert expanded == [p for p in collectable if p in set(expanded)]
+
+    def test_ungrouped_field_passes_through(self) -> None:
+        # The call-reference leaf sits directly under a section, in no group.
+        ref = _IBV_DOC.rep_call_reference_number_field
+        assert expand_to_groups(_IBV_DOC, {ref}) == [ref]

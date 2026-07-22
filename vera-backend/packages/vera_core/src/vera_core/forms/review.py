@@ -275,3 +275,31 @@ def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[s
     doc = FormSchemaDoc.model_validate(schema_json)
     titles = {path: leaf.title for path, leaf, _ in leaf_gates(doc)}
     return [titles.get(p, p) for p in paths]
+
+
+def has_call_reference(status_by_path: Mapping[str, "FieldStatus"], doc: FormSchemaDoc) -> bool:
+    """True when the form already has a current answer at the schema's
+    `rep_call_reference_number_field` leaf. The retry-SCOPE gate: with a reference
+    number captured, a retry is FOCUSED (asks only the still-missing fields);
+    without one it starts FRESH (a full call from the top). Takes a parsed doc so
+    the caller validates the schema once and shares it across the retry helpers."""
+    return doc.rep_call_reference_number_field in status_by_path
+
+
+def expand_to_groups(doc: FormSchemaDoc, paths: Collection[str]) -> list[str]:
+    """Grow *paths* so a field inside a group pulls in ALL collectable leaves of
+    that group (a partial group reads oddly on a call). For each group whose
+    subtree contains a wanted path, every collectable (ask/confirm) leaf under it
+    joins the set. Returns the union in document order; a path in no group passes
+    through unchanged."""
+    collectable = doc.collection_paths()  # ask/confirm leaves, document order
+    collectable_set = set(collectable)
+    wanted = set(paths)
+    result = set(wanted)
+    for group_path in doc.group_paths():
+        prefix = f"{group_path}."
+        if any(p == group_path or p.startswith(prefix) for p in wanted):
+            result.update(p for p in collectable if p.startswith(prefix))
+    ordered = [p for p in collectable if p in result]
+    ordered.extend(p for p in paths if p not in collectable_set)
+    return ordered

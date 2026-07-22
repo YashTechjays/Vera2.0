@@ -347,13 +347,19 @@ async def evaluate_call(
     # The authoritative decision evaluates gates against the REAL current values
     # (in-session, never logged) — the dispatcher's PHI-free sentinel
     # approximation is only for the retry-nudge labels. COMPLETED requires every
-    # required field of EVERY role satisfied: an unsatisfied non-askable field
-    # can't be fixed by a retry call, so it goes to review, never COMPLETED.
+    # required field of EVERY role satisfied. The pipeline NEVER auto-COMPLETEs:
+    # even an all-satisfied form parks in EXCEPTION_REVIEW for a human to sign off
+    # (COMPLETED is a human-only transition out of review, once disputes clear).
     unsatisfied = unsatisfied_required_paths(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
     )
     if not unsatisfied:
-        return await _finish(FormStatus.COMPLETED, written=len(kept), reviewed=[])
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW,
+            written=len(kept),
+            reviewed=[],
+            reason=ReviewReason.READY_FOR_REVIEW,
+        )
     retryable = retryable_required_paths(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
     )
