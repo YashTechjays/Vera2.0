@@ -195,14 +195,24 @@ the same `AppUser.id` is blocked both at the application layer and by a DB uniqu
 constraint (`provider_type`, `provider_subject`). This spec adds the missing resend/reset
 endpoint for both tenant and platform tiers (see Backend API above).
 
+**Scoping decision on the old token**: resend's contract is "a fresh working link exists,"
+not "the old link is revoked." `InvitationStore` is deliberately keyed by the hash of each
+token with no reverse index from `app_user_id` back to a token — tokens are meant to be
+un-enumerable. Building one just to revoke a stale token on resend would mean extending
+that protocol for marginal benefit: the dominant real case (someone stuck in `"invited"`
+status) already means their old link's 72h TTL has lapsed, so there's usually no live
+duplicate at all; the token itself carries no PHI (workforce invite). This was confirmed
+during implementation (an earlier draft added a full-keyspace Redis SCAN to find and
+revoke the old token, which was rejected as disproportionate — see the plan's Task 6 notes).
+
 ## Testing plan
 
 **Backend:**
 - Migration test: permission seeded + attached to `SUPER_ADMIN`, idempotent re-run.
 - Invite creates `account_type=platform, tenant_id=NULL` + immediate `SUPER_ADMIN` grant.
 - Accept always returns MFA QR (no skip branch) regardless of any setting.
-- Resend: stale `UserIdentity` deleted, fresh token issued, old token invalidated;
-  409s if invitee already went active.
+- Resend: stale `UserIdentity` deleted, fresh token issued (the old token is deliberately
+  NOT invalidated — see "Known gap being fixed" below); 409s if invitee already went active.
 - Lockout: last active platform operator cannot be deactivated; second-to-last can.
 - Session-shape: an elevated tenant session gets 403 on all four new platform endpoints.
 - RBAC invariant test extended: `platform:users:invite` / `platform:users:read` can never
@@ -220,8 +230,9 @@ endpoint for both tenant and platform tiers (see Backend API above).
   code computed and submitted) → verify landing as an active platform operator → verify
   the new operator shows `active` in the list.
 - Resend flow (both tiers): invite a user, force the token to expire (manipulate the
-  Redis TTL in the test harness), click **Resend invitation**, verify the new link works
-  and the stale one is rejected.
+  Redis TTL in the test harness), click **Resend invitation**, verify the new link works.
+  (The stale link is not expected to be actively revoked — see "Known gap being fixed"
+  below — so this step doesn't assert on it.)
 - Lockout guard: attempt to deactivate the last active platform operator via the UI,
   verify the action is blocked with a clear error rather than silently allowed.
 
