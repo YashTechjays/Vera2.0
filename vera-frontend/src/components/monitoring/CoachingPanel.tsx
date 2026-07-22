@@ -10,10 +10,11 @@ import { sendCoachMessage, transcribeWhisper, type CoachOrigin } from "@/lib/api
 const MAX_MESSAGE_LENGTH = 200
 
 /**
- * Coaching input: type a note, or hold the mic to whisper it. Both paths land
- * on the same box — a completed whisper transcription just fills it in for
- * review/edit before the supervisor hits Send. Independent of Intervene: this
- * renders whenever the caller may coach, in both listen and intervene mode.
+ * Coaching input: type a note, or click the mic to whisper it (click again to
+ * stop and transcribe). Both paths land on the same box — a completed whisper
+ * transcription just fills it in for review/edit before the supervisor hits
+ * Send. Independent of Intervene: this renders whenever the caller may coach,
+ * in both listen and intervene mode.
  */
 export function CoachingPanel({
   callId,
@@ -124,10 +125,21 @@ export function CoachingPanel({
     }
   }
 
+  function handleMicClick() {
+    // startingRef covers the gap between clicking start and `recording`
+    // actually flipping true (getUserMedia hasn't resolved yet) - without it,
+    // a quick second click here would be misread as "start" again.
+    if (recording || startingRef.current) {
+      void stopRecordingAndTranscribe()
+    } else {
+      void startRecording()
+    }
+  }
+
   function statusHint(): string {
     if (error !== null) return error
     if (transcribing) return "Transcribing…"
-    if (recording) return "Recording — release to transcribe"
+    if (recording) return "Recording — click to stop and transcribe"
     if (truncated) return `Cut to ${MAX_MESSAGE_LENGTH} characters — review before sending.`
     if (origin === "whisper" && message) return "Review the transcription, then send."
     return ""
@@ -171,18 +183,8 @@ export function CoachingPanel({
           size="icon"
           variant={recording ? "destructive" : "outline"}
           disabled={disabled || transcribing || sending}
-          title={recording ? "Release to transcribe" : "Hold to whisper"}
-          onMouseDown={() => void startRecording()}
-          onMouseUp={() => void stopRecordingAndTranscribe()}
-          onMouseLeave={() => recording && void stopRecordingAndTranscribe()}
-          onTouchStart={(e) => {
-            e.preventDefault()
-            void startRecording()
-          }}
-          onTouchEnd={(e) => {
-            e.preventDefault()
-            void stopRecordingAndTranscribe()
-          }}
+          title={recording ? "Click to stop and transcribe" : "Click to whisper"}
+          onClick={handleMicClick}
         >
           {recording ? <Square className="size-3.5" /> : <Mic className="size-4" />}
         </Button>
