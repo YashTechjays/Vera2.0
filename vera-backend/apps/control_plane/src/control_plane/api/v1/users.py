@@ -324,7 +324,6 @@ async def resend_invitation(
         namespace=INVITE_NS,
         app_user=user,
         ttl_seconds=settings.invite_ttl_seconds,
-        redis=request.app.state.redis,
     )
     invite_url = (
         f"{settings.frontend_base_url}/tenants/{caller.tenant_slug}/accept-invite?token={token}"
