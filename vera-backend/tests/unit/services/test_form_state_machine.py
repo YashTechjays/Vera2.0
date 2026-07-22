@@ -194,3 +194,17 @@ def test_ready_cannot_jump_to_exception_review_via_ai_processing() -> None:
     form = _form(FormStatus.IN_QUEUE)
     with pytest.raises(InvalidTransitionError):
         FormStateMachine().transition(form, FormStatus.EXCEPTION_REVIEW, tenant_max_retries=5)
+
+
+def test_ai_processing_to_in_queue_retries_and_increments() -> None:
+    form = _form(FormStatus.AI_PROCESSING)
+    form.retry_count = 0
+    FormStateMachine().transition(form, FormStatus.IN_QUEUE, tenant_max_retries=3)
+    assert form.status == FormStatus.IN_QUEUE.value and form.retry_count == 1
+
+
+def test_ai_processing_to_in_queue_blocked_when_cap_hit() -> None:
+    form = _form(FormStatus.AI_PROCESSING)
+    form.retry_count = 3
+    with pytest.raises(InvalidTransitionError):
+        FormStateMachine().transition(form, FormStatus.IN_QUEUE, tenant_max_retries=3)
