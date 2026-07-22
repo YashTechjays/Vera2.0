@@ -103,7 +103,9 @@ async def coach_call(
 ) -> ResponseModel[None]:
     response.headers["Cache-Control"] = "no-store"
     call = await _load_live_call(call_id, caller.user_id, session)
-    await authorize_or_403(call, tenant_id, caller, session, resolver, audit, request)
+    await authorize_or_403(
+        call, tenant_id, caller, session, resolver, audit, request, audit_log_allows=False
+    )
     await check_rate_limit(rate_limiter, call_id)
 
     role = ROLE_WHISPER if body.origin == "whisper" else ROLE_COACHING
@@ -172,7 +174,9 @@ async def on_demand_transcribe(
     counting one whisper action as two records."""
     response.headers["Cache-Control"] = "no-store"
     call = await _load_live_call(call_id, caller.user_id, session)
-    await authorize_or_403(call, tenant_id, caller, session, resolver, audit, request)
+    await authorize_or_403(
+        call, tenant_id, caller, session, resolver, audit, request, audit_log_allows=False
+    )
     await check_rate_limit(rate_limiter, call_id)
 
     audio_bytes = await audio.read(_MAX_WHISPER_AUDIO_BYTES + 1)

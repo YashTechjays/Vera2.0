@@ -55,24 +55,34 @@ async def authorize_or_403(
     resolver: PermissionResolver,
     audit: AuditSink,
     request: Request,
+    *,
+    audit_log_allows: bool = True,
 ) -> None:
     """`authorize_publish` + the standard authz audit (same shape `require()`
     writes) + a 403 on denial — the full check-and-raise wrapper shared by
     join_token's intervene branch and both coaching endpoints, so they can't
-    drift onto slightly different audit/error shapes."""
+    drift onto slightly different audit/error shapes.
+
+    `audit_log_allows=False` skips the WORM `audit_log` write on a granted
+    call (a denial is still logged either way — rare and security-relevant).
+    Coaching passes this: its per-message trail already lives in
+    `InterventionEvent`, and a WORM row per coaching message would be exactly
+    the high-frequency noise that ledger is meant to avoid.
+    """
     allowed, granted_via = await authorize_publish(
         call, tenant_id, caller.user_id, session, resolver
     )
-    await emit_authz_audit(
-        audit,
-        request,
-        tenant_id=tenant_id,
-        user_id=caller.user_id,
-        actor_label=caller.email or caller.subject,
-        permission="calls:intervene",
-        allowed=allowed,
-        detail={"granted_via": granted_via},
-    )
+    if not allowed or audit_log_allows:
+        await emit_authz_audit(
+            audit,
+            request,
+            tenant_id=tenant_id,
+            user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            permission="calls:intervene",
+            allowed=allowed,
+            detail={"granted_via": granted_via},
+        )
     if not allowed:
         raise CustomAPIException(
             DefaultExceptionCode.FORBIDDEN, message="missing permission calls:intervene"

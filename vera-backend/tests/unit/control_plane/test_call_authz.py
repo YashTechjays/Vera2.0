@@ -4,16 +4,30 @@ resolver is faked, and `Call` is a plain in-memory ORM instance (no query,
 no flush)."""
 
 from typing import TYPE_CHECKING, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
+from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver
-from control_plane.call_authz import authorize_publish, call_hidden_from
+from control_plane.call_authz import authorize_or_403, authorize_publish, call_hidden_from
+from control_plane.exceptions import CustomAPIException
+from tests.unit.auth.conftest import SpyAudit, make_request
 from vera_core.models import Call
+from vera_core.models.enums import AccountType
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def _caller(user_id: UUID | None = None) -> VerifiedIdentity:
+    return VerifiedIdentity(
+        user_id=user_id or uuid4(),
+        subject="a@example.com",
+        email="a@example.com",
+        tenant_id=uuid4(),
+        account_type=AccountType.TENANT,
+    )
 
 
 class _FakeResolver:
@@ -73,6 +87,80 @@ async def test_non_owner_with_the_permission_is_authorized() -> None:
     )
 
     assert (allowed, granted_via) == (True, "permission")
+
+
+@pytest.mark.asyncio
+async def test_authorize_or_403_audits_a_denial_regardless_of_audit_log_allows() -> None:
+    """A denial is rare and security-relevant — it must reach the WORM
+    audit_log even when the caller (e.g. coaching) asked to skip the noisy
+    per-allow write."""
+    call = Call(initiated_by_id=uuid4())  # someone else's call
+    resolver = _FakeResolver(frozenset())
+    spy_audit = SpyAudit()
+    request = make_request(spy_audit)
+
+    with pytest.raises(CustomAPIException):
+        await authorize_or_403(
+            call,
+            uuid4(),
+            _caller(),
+            cast("AsyncSession", None),
+            cast(PermissionResolver, resolver),
+            spy_audit,
+            request,
+            audit_log_allows=False,
+        )
+
+    assert len(spy_audit.records) == 1
+    assert spy_audit.records[0].decision == "deny"
+
+
+@pytest.mark.asyncio
+async def test_authorize_or_403_skips_the_worm_log_on_allow_when_disabled() -> None:
+    """Coaching's per-message trail already lives in InterventionEvent — a WORM
+    row per coaching message would be exactly the noise that ledger avoids."""
+    owner_id = uuid4()
+    call = Call(initiated_by_id=owner_id)
+    resolver = _FakeResolver(frozenset())
+    spy_audit = SpyAudit()
+    request = make_request(spy_audit)
+
+    await authorize_or_403(
+        call,
+        uuid4(),
+        _caller(owner_id),
+        cast("AsyncSession", None),
+        cast(PermissionResolver, resolver),
+        spy_audit,
+        request,
+        audit_log_allows=False,
+    )
+
+    assert spy_audit.records == []
+
+
+@pytest.mark.asyncio
+async def test_authorize_or_403_audits_an_allow_by_default() -> None:
+    """join_token's intervene branch relies on the default: a session-level
+    grant is low-frequency and worth the WORM record."""
+    owner_id = uuid4()
+    call = Call(initiated_by_id=owner_id)
+    resolver = _FakeResolver(frozenset())
+    spy_audit = SpyAudit()
+    request = make_request(spy_audit)
+
+    await authorize_or_403(
+        call,
+        uuid4(),
+        _caller(owner_id),
+        cast("AsyncSession", None),
+        cast(PermissionResolver, resolver),
+        spy_audit,
+        request,
+    )
+
+    assert len(spy_audit.records) == 1
+    assert spy_audit.records[0].decision == "allow"
 
 
 @pytest.mark.asyncio
