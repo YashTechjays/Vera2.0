@@ -1032,17 +1032,31 @@ async def test_provider_toggle_and_mfa_rule(
     )
     assert bad.status_code == 400, bad.text
 
-    good = await client.patch(
-        "/api/v1/auth/providers/password",
-        headers=_auth(rbac_world.admin_token),
-        json={"enabled": True, "enforce_mfa": True},
-    )
-    assert good.status_code == 200, good.text
+    try:
+        good = await client.patch(
+            "/api/v1/auth/providers/password",
+            headers=_auth(rbac_world.admin_token),
+            json={"enabled": True, "enforce_mfa": True},
+        )
+        assert good.status_code == 200, good.text
 
-    listing = await client.get("/api/v1/auth/providers", headers=_auth(rbac_world.admin_token))
-    password = next(p for p in listing.json()["data"] if p["provider_type"] == "password")
-    assert password["enabled"] is True
-    assert password["enforce_mfa"] is True
+        listing = await client.get("/api/v1/auth/providers", headers=_auth(rbac_world.admin_token))
+        password = next(p for p in listing.json()["data"] if p["provider_type"] == "password")
+        assert password["enabled"] is True
+        assert password["enforce_mfa"] is True
+    finally:
+        # The `sso_provider` row is real tenant-scoped state living in rbac_world's
+        # session-scoped DB, not something rolled back between tests (unlike the
+        # in-memory fakes reset_livekit_knobs cleans up above). Leaving enforce_mfa=True
+        # here changes accept_invitation's behavior (user.status stays "invited" instead
+        # of flipping to "active") for every later test in this file that accepts an
+        # invite — restore the default so this test's mutation doesn't leak forward.
+        reset = await client.patch(
+            "/api/v1/auth/providers/password",
+            headers=_auth(rbac_world.admin_token),
+            json={"enabled": False, "enforce_mfa": False},
+        )
+        assert reset.status_code == 200, reset.text
 
 
 async def test_provider_unknown_type_rejected(
