@@ -49,6 +49,9 @@ _WRAP_UP_DIRECTIVE = (
     "time, say a brief goodbye, then call end_call."
 )
 
+# Spoken after a task's intro to make the bot proactively lead into the task
+_OPENING_DIRECTIVE = "Continue the call now by asking your next unanswered question."
+
 
 def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
@@ -100,6 +103,7 @@ class PlanTaskAgent(Agent):
         opening = self._controller.opening_line(self._task.intro)
         if opening:
             self.session.say(opening)
+            self.session.generate_reply(instructions=_OPENING_DIRECTIVE)
 
     @llm.function_tool(
         name="task_complete",
