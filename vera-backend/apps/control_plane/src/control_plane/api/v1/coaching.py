@@ -126,9 +126,11 @@ async def coach_call(
             payload_ref={"message": body.message},
         )
     )
-    # This single publish gets the message into the live SSE transcript, the DB
-    # finalizer (once the call ends), and the agent worker's coaching listener —
-    # all for free, no extra plumbing per consumer.
+    # This single publish reaches the live SSE transcript, the DB finalizer
+    # (once the call ends), and the agent worker's coaching listener - no extra
+    # plumbing per consumer. Not atomic with the InterventionEvent row above:
+    # that commits when the request ends, this runs inline before it - a crash
+    # in between would publish the note with no row behind it (rare).
     await call_stream.publish_turn(
         room_name_for_call(tenant_id, call.id),
         role,
