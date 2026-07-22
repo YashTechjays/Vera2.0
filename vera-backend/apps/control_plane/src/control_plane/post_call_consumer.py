@@ -1,50 +1,63 @@
 """Post-call eval consumer: drains vera:post-call, re-reads each finished call's
-transcript, and runs evaluate_call. The group/ack/reclaim loop lives in
-`stream_consumer.StreamGroupConsumer`; this subclass supplies the job parsing and
-the evaluation itself.
+transcript, and runs evaluate_call. Mirrors worker_events.WorkerEventConsumer for the
+group/ack/reclaim + idle-TimeoutError discipline.
 
 Jobs are enqueued by the worker-events close path (see worker_events._close_and_refill)
 right after call_closeout parks the form in AI_PROCESSING. evaluate_call owns the
 transition out of AI_PROCESSING; a form the eval finds already resolved (e.g. the
-pipeline sweeper got there first) is skipped — redelivery is harmless.
-"""
+pipeline sweeper got there first) is skipped — redelivery is harmless."""
 
+import asyncio
 import logging
-from typing import Any
+import os
+import socket
+from typing import Any, cast
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from control_plane.stream_consumer import StreamGroupConsumer
+from control_plane.call_summary import snapshot_turns
 from vera_core.audit import AuditSink
-from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamService
+from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
-from vera_core.events import PostCallJob, PostCallJobBus, parse_post_call_job
-from vera_core.forms.review import REVIEW_CONFIDENCE_FLOOR
+from vera_core.events import (
+    POST_CALL_GROUP,
+    POST_CALL_STREAM,
+    PostCallJob,
+    PostCallJobBus,
+    parse_post_call_job,
+)
 from vera_core.integrations.llm import LLMClient, TranscriptTurn
-from vera_core.observability.correlation import room_name_for_call
 from vera_core.services.post_call_eval import EvalDeps, evaluate_call
 
 logger = logging.getLogger("control_plane.post_call_consumer")
 
+type _StreamEntries = list[tuple[str, dict[str, str]]]
+
+# A job that keeps failing (poison: bad schema shape, persistent DB violation)
+# is dropped after this many deliveries instead of re-billing the LLM on every
+# reclaim forever. The form stays in AI_PROCESSING; the pipeline sweeper's
+# sweep_stuck_ai_processing resolves it to EXCEPTION_REVIEW after its grace.
+MAX_DELIVERIES = 5
+
 
 async def build_turns(
-    call_stream: CallStreamService, tenant_id: UUID, call_id: UUID
+    call_stream: CallStreamService,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    call_id: UUID,
 ) -> list[TranscriptTurn]:
-    room = room_name_for_call(tenant_id, call_id)
-    events = await call_stream.read_all(room)
-    return [
-        TranscriptTurn(seq=i, role=e.data["role"], text=e.data["text"])
-        for i, e in enumerate(e for e in events if e.type == TYPE_TRANSCRIPT)
-    ]
+    # dev's snapshot_turns reads the live Redis stream while it exists, else the
+    # persisted Transcript rows. Adapt its (source, role, text) turns to the
+    # eval's own TranscriptTurn (seq is the extraction/evidence index).
+    snap = await snapshot_turns(call_stream, sessionmaker, tenant_id, call_id)
+    return [TranscriptTurn(seq=i, role=t.role, text=t.text) for i, t in enumerate(snap)]
 
 
-class PostCallConsumer(StreamGroupConsumer[PostCallJob]):
-    stream = PostCallJobBus.stream
-    group = PostCallJobBus.group
-    payload_field = PostCallJobBus.payload_field
-
+class PostCallConsumer:
     def __init__(
         self,
         redis: Redis,
@@ -59,17 +72,15 @@ class PostCallConsumer(StreamGroupConsumer[PostCallJob]):
         plan_service: Any = None,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
-        review_floor: int = REVIEW_CONFIDENCE_FLOOR,
+        review_floor: int = 60,
         consumer_name: str | None = None,
     ) -> None:
-        super().__init__(
-            redis,
-            block_ms=block_ms,
-            reclaim_idle_ms=reclaim_idle_ms,
-            consumer_name=consumer_name,
-        )
+        self._redis = redis
         self._sessionmaker = sessionmaker
         self._call_stream = call_stream
+        self._block_ms = block_ms
+        self._reclaim_idle_ms = reclaim_idle_ms
+        self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._bus = PostCallJobBus(redis)
         self._deps = EvalDeps(
             llm=llm,
@@ -81,14 +92,97 @@ class PostCallConsumer(StreamGroupConsumer[PostCallJob]):
             floor=review_floor,
         )
 
-    async def _ensure_group(self) -> None:
-        await self._bus.ensure_group()
+    async def run(self) -> None:
+        group_ready = False
+        while True:
+            try:
+                if not group_ready:
+                    await self._bus.ensure_group()
+                    group_ready = True
+                await self._reclaim_stale()
+                await self._read_once()
+            except asyncio.CancelledError:
+                raise
+            except RedisError:
+                logger.exception("post-call consumer Redis error; backing off")
+                await asyncio.sleep(1.0)
 
-    def _parse(self, raw: str) -> PostCallJob:
-        return parse_post_call_job(raw)
+    async def _read_once(self) -> None:
+        try:
+            resp = await self._redis.xreadgroup(
+                POST_CALL_GROUP,
+                self._consumer,
+                {POST_CALL_STREAM: ">"},
+                count=16,
+                block=self._block_ms,
+            )
+        except RedisTimeoutError:
+            return  # idle tick — see CLAUDE.md
+        if not resp:
+            return
+        streams = cast("list[tuple[str, _StreamEntries]]", resp)
+        _, entries = streams[0]
+        await self._dispatch(entries)
 
-    async def _handle(self, entry_id: str, job: PostCallJob) -> None:
-        turns = await build_turns(self._call_stream, job.tenant_id, job.call_id)
+    async def _reclaim_stale(self) -> None:
+        result = await self._redis.xautoclaim(
+            POST_CALL_STREAM,
+            POST_CALL_GROUP,
+            self._consumer,
+            min_idle_time=self._reclaim_idle_ms,
+            start_id="0-0",
+            count=16,
+        )
+        # _cursor ignored: any stale entries beyond `count` drain on the next run() pass.
+        _cursor, entries, _deleted = cast("tuple[str, _StreamEntries, list[str]]", result)
+        await self._dispatch(entries)
+
+    async def _dispatch(self, entries: _StreamEntries) -> None:
+        await asyncio.gather(*(self._process(eid, f) for eid, f in entries))
+
+    async def _process(self, entry_id: str, fields: dict[str, str]) -> None:
+        raw = fields.get("job")
+        if raw is None:
+            await self._ack(entry_id)
+            return
+        try:
+            job = parse_post_call_job(raw)
+        except Exception:
+            logger.exception("dropping unparseable post-call job %s", entry_id)
+            await self._ack(entry_id)
+            return
+        try:
+            await self._process_job(job)
+        except Exception:
+            if await self._deliveries(entry_id) >= MAX_DELIVERIES:
+                logger.exception(
+                    "post-call job %s failed %d times; dropping (form %s left in "
+                    "AI_PROCESSING for the pipeline sweeper)",
+                    entry_id,
+                    MAX_DELIVERIES,
+                    job.form_id,
+                )
+                await self._ack(entry_id)
+                return
+            logger.exception("post-call job %s failed; leaving unacked for reclaim", entry_id)
+            return  # do NOT ack → XAUTOCLAIM retries (at-least-once)
+        await self._ack(entry_id)
+
+    async def _deliveries(self, entry_id: str) -> int:
+        """Delivery count for one pending entry; 0 when it can't be determined
+        (the safe direction — the entry stays unacked and retries)."""
+        try:
+            pending = await self._redis.xpending_range(
+                POST_CALL_STREAM, POST_CALL_GROUP, min=entry_id, max=entry_id, count=1
+            )
+        except RedisError:
+            return 0
+        if not pending:
+            return 0
+        return int(pending[0].get("times_delivered", 0))
+
+    async def _process_job(self, job: PostCallJob) -> None:
+        turns = await build_turns(self._call_stream, self._sessionmaker, job.tenant_id, job.call_id)
         async with tenant_session(self._sessionmaker, job.tenant_id) as session:
             outcome = await evaluate_call(
                 session,
@@ -105,3 +199,6 @@ class PostCallConsumer(StreamGroupConsumer[PostCallJob]):
             outcome.answers_written,
             len(outcome.reviewed_fields),
         )
+
+    async def _ack(self, entry_id: str) -> None:
+        await self._redis.xack(POST_CALL_STREAM, POST_CALL_GROUP, entry_id)

@@ -218,8 +218,8 @@ def create_app(
                 form_auto_retry_enabled=settings.form_auto_retry_enabled,
                 recording=recording_config,
                 call_plans=_call_plans,
-                notifications=_notifications,
                 post_call_bus=app.state.post_call_bus if post_call_eval_ready else None,
+                notifications=_notifications,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))

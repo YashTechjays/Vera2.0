@@ -222,7 +222,7 @@ export function IbvProvider({
     [],
   )
 
-  // Load a patient form by id from the API. setState happens in the
+  // Real path: load a patient form by id from the API. setState happens in the
   // event handler + async callbacks, never synchronously inside an effect.
   const openFormById = useCallback(
     (id: string) => {

@@ -1,6 +1,6 @@
 """OTel -> self-hosted Langfuse wiring.
 
-Langfuse ingests OTLP traces at /api/public/otel. This module owns the
+Langfuse ingests OTLP traces at /api/public/otel/v1/traces. This module owns the
 TracerProvider setup for BOTH processes; when no Langfuse host is configured
 (local dev, CI) tracing stays a no-op and code paths that create spans still
 work against the default no-op tracer.
@@ -46,7 +46,7 @@ def configure_observability(settings: Settings) -> TracerProvider | None:
         resource=Resource.create({"service.name": settings.otel_service_name})
     )
     exporter = OTLPSpanExporter(
-        endpoint=f"{settings.langfuse_host.rstrip('/')}/api/public/otel",
+        endpoint=f"{settings.langfuse_host.rstrip('/')}/api/public/otel/v1/traces",
         headers=headers,
     )
     provider.add_span_processor(BatchSpanProcessor(exporter))

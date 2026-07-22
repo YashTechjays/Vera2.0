@@ -68,6 +68,7 @@ def build_session(
         llm=google.LLM(
             model="gemini-2.5-flash",
             vertexai=True,
+            location="global",
             thinking_config=ThinkingConfig(thinking_budget=0),
         ),
         tts=cartesia.TTS(model="sonic-3.5", emotion=["confident"]),

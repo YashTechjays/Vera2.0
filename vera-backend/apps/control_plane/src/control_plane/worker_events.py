@@ -139,8 +139,8 @@ class WorkerEventConsumer:
         form_auto_retry_enabled: bool = False,
         recording: "RecordingConfig | None" = None,
         call_plans: CallPlanService | None = None,
-        notifications: NotificationService | None = None,
         post_call_bus: PostCallJobBus | None = None,
+        notifications: NotificationService | None = None,
     ) -> None:
         self._redis = redis
         self._livekit = livekit
@@ -155,8 +155,8 @@ class WorkerEventConsumer:
         self._form_auto_retry_enabled = form_auto_retry_enabled
         self._recording = recording
         self._call_plans = call_plans
-        self._notifications = notifications
         self._post_call_bus = post_call_bus
+        self._notifications = notifications
         self._bus = WorkerEventBus(redis)
         self._handlers: dict[str, EventHandler] = {
             "call.failed": self._handle_call_failed,
