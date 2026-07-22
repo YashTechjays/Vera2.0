@@ -284,13 +284,20 @@ async def test_platform_accept_invalid_token_is_unauthorized(
     assert resp.status_code == 401, resp.text
 
 
-async def test_elevated_tenant_session_cannot_reach_platform_user_endpoints(
+async def test_plain_tenant_admin_session_cannot_reach_platform_user_endpoints(
     client: httpx.AsyncClient, rbac_world: "RBACWorld"
 ) -> None:
-    """A tenant admin who elevates into break-glass access must not be able to
-    reach the platform-operator endpoints — these require an actual platform
-    session (no tenant GUC), not an elevated tenant one."""
-    resp = await client.get(
-        "/api/v1/platform/users", headers=_auth(rbac_world.admin_token)
-    )
+    """A plain (never-elevated) TENANT_ADMIN session must not be able to reach the
+    platform-operator endpoints — these require an actual platform session
+    (`account_type='platform'`), which a tenant admin's token never carries.
+
+    NOTE: `rbac_world.admin_token` is a plain tenant session, not a break-glass
+    elevated one — there is no such thing as a tenant admin "elevating" (only a
+    SUPER_ADMIN elevates INTO a tenant). The genuinely interesting elevated case —
+    a SUPER_ADMIN mid-elevation attempting a platform-tier endpoint — is covered by
+    test_platform_elevation.py::test_elevated_super_admin_still_reaches_platform_tier_endpoints,
+    which (after reading how `platform_require`/`platform_scoped_session` resolve
+    identity) is expected to ALLOW, not deny: elevation changes the tenant GUC, not
+    the caller's `account_type`."""
+    resp = await client.get("/api/v1/platform/users", headers=_auth(rbac_world.admin_token))
     assert resp.status_code in (401, 403), resp.text

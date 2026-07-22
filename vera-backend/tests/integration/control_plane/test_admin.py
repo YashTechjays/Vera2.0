@@ -470,6 +470,31 @@ async def test_create_role_rejects_platform_permission(
     assert resp.status_code == 403
 
 
+async def test_create_role_rejects_platform_users_permissions(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # The two new platform:users:* codes must be rejected by the same guard as
+    # every other platform-tier permission — a seed bug attaching either of these
+    # SPECIFIC codes to a tenant role must not slip past create_role undetected.
+    async with admin_sessionmaker() as session:
+        rows = await session.execute(
+            text(
+                "SELECT id FROM permission "
+                "WHERE code IN ('platform:users:invite', 'platform:users:read')"
+            )
+        )
+        platform_perm_ids = list(rows.scalars())
+    assert len(platform_perm_ids) == 2
+    resp = await client.post(
+        "/api/v1/roles",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "SNEAKY_USERS", "permission_ids": [str(i) for i in platform_perm_ids]},
+    )
+    assert resp.status_code == 403
+
+
 async def test_list_permissions_hides_platform_tier(
     client: httpx.AsyncClient, rbac_world: RBACWorld
 ) -> None:
