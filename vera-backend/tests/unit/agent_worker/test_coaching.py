@@ -94,7 +94,10 @@ async def test_coaching_turn_injected_as_a_system_message_never_a_reply() -> Non
     assert "ask about the deductible" in content
     # Never a bare copy of the customer's words — the note is clearly marked
     # as out-of-band so the LLM never mistakes it for something said on the call.
-    assert "coaching note" in content.lower()
+    assert "supervisor instruction" in content.lower()
+    # Framed as mandatory, not a suggestion the model can weigh against its own
+    # sense of conversation flow and quietly skip.
+    assert "must" in content.lower()
 
 
 @pytest.mark.asyncio

@@ -22,14 +22,19 @@ from vera_core.transcript import ROLE_COACHING, ROLE_WHISPER
 
 logger = logging.getLogger("agent_worker")
 
-# The customer must never learn a note was received, and Vera must never
-# mistake it for something the caller/rep said — hence a system-role message
-# (folded into the LLM's system instructions, not a conversational turn) with
-# an explicit "don't mention this" instruction.
+# A directive, not a suggestion: the model must not weigh this against its own
+# sense of conversational flow and quietly skip it because the topic already
+# passed - it must act on it next turn regardless. The customer must never
+# learn a note was received, and Vera must never mistake it for something the
+# caller/rep said - hence a system-role message (folded into the LLM's system
+# instructions, not a conversational turn) with an explicit "don't mention
+# this" instruction.
 _COACHING_NOTE_PREFIX = (
-    "[Supervisor coaching note - the customer did not say this. Weave the "
-    "guidance into your next reply naturally; never mention that a note was "
-    "received.] "
+    "[MANDATORY supervisor instruction - the customer did not say this. You "
+    "MUST act on this on your very next turn, even if it means returning to "
+    "a topic already covered - this takes priority over your own judgment "
+    "about conversation flow. Phrase it naturally so the customer never "
+    "realizes an instruction was received.] "
 )
 
 
