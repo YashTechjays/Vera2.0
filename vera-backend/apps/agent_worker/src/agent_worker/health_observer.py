@@ -80,6 +80,7 @@ class CallHealthObserver:
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None:
         if self._closed:
             return

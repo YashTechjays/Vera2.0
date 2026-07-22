@@ -30,12 +30,9 @@ from control_plane.api.v1.common import (
     emit_phi_read_audit,
 )
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import (
-    PermissionResolver,
-    emit_authz_audit,
-    get_resolver,
-    require,
-)
+from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.call_authz import authorize_or_403 as _authorize_or_403
+from control_plane.call_authz import call_hidden_from as _call_hidden_from
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.call_summary import (
     CallSummaryResponse,
@@ -88,7 +85,6 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
-from vera_core.services.call_visibility import call_hidden_from
 
 logger = logging.getLogger(__name__)
 
@@ -146,17 +142,6 @@ async def _holder_still_present(livekit: LiveKit, room_name: str, holder: UUID) 
     except TimeoutError:
         return True
     return _supervisor_identity(holder) in identities
-
-
-def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
-    """Whether *user_id* must NOT see this call (→ the same 404 as a missing row,
-    so a private call is never revealed by enumeration).
-
-    A non-owner sees it only when it is published or ownerless. Shared by
-    join-token, the event stream, end, and (via vera_core.services.call_visibility)
-    the call-attempt recording enrichment, so the visibility gates never diverge.
-    """
-    return call_hidden_from(call.initiated_by_id, call.published, user_id)
 
 
 # A just-minted intervene token belongs to a user not yet connected to LiveKit, so
@@ -253,24 +238,7 @@ async def join_token(
     stolen_from: UUID | None = None
     if intervene:
         # Checked AFTER the visibility 404s so a private call never turns into a 403.
-        user_id, permissions = await resolver.effective_permissions(
-            session, tenant_id, caller.user_id
-        )
-        allowed = "calls:intervene" in permissions
-        # Same audit shape as rbac.require (carries reason + elevation_session_id).
-        await emit_authz_audit(
-            audit,
-            request,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            actor_label=caller.email or caller.subject,
-            permission="calls:intervene",
-            allowed=allowed,
-        )
-        if not allowed:
-            raise CustomAPIException(
-                DefaultExceptionCode.FORBIDDEN, message="missing permission calls:intervene"
-            )
+        await _authorize_or_403(call, tenant_id, caller, session, resolver, audit, request)
         if call.current_status in TERMINAL_VALUES:
             raise ConflictError(message="call already ended")
 

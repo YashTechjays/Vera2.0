@@ -36,7 +36,11 @@ class _MemStore:
         return bool(self.events) or self.ended
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         self.last_read_deadline = first_entry_deadline_s
         for i, event in enumerate(self.events):

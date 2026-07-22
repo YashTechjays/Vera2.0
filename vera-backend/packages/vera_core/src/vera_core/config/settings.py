@@ -173,7 +173,27 @@ class Settings(BaseSettings):
     observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]
     observer_extract_attempt_timeout_seconds: float = 8.0
 
-    @field_validator("summary_fallback_models", "observer_extract_fallback_models", mode="before")
+    # --- coaching mode (control plane) ---------------------------------------
+    # Shared rolling-window cap on coaching + whisper-transcribe actions PER CALL
+    # (one counter, not per supervisor) — any number of authorized supervisors
+    # coaching the same call draw from it, so a runaway client can't flood Vera's
+    # context or the whisper STT provider.
+    coaching_rate_limit_per_minute: int = 15  # VERA_COACHING_RATE_LIMIT_PER_MINUTE
+    coaching_rate_limit_window_seconds: int = 60  # VERA_COACHING_RATE_LIMIT_WINDOW_SECONDS
+    # Fault-tolerant whisper-transcribe chain (vera_core.stt.ResilientSTT), same
+    # "provider:model" selector shape as the summarizer. AssemblyAI has no API key
+    # provisioned yet — its factory exists but fails at construction and is
+    # dropped with a warning until ASSEMBLYAI_API_KEY is added; Deepgram alone is
+    # expected to serve every whisper request until then.
+    whisper_stt_primary_model: str = "deepgram:flux-general-en"  # VERA_WHISPER_STT_PRIMARY_MODEL
+    whisper_stt_fallback_models: list[str] = ["assemblyai:best"]  # VERA_WHISPER_STT_FALLBACK_MODELS
+
+    @field_validator(
+        "summary_fallback_models",
+        "observer_extract_fallback_models",
+        "whisper_stt_fallback_models",
+        mode="before",
+    )
     @classmethod
     def _split_fallback_models(cls, value: object) -> object:
         return _split_csv(value)

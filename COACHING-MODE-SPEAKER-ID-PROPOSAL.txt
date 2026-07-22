@@ -1,0 +1,169 @@
+Coaching Mode + Speaker-ID Attribution
+R&D Proposal (Conceptual – No Code)
+
+1. Context
+Today, a supervisor monitoring a live call has two options:
+Watch silently, or
+Intervene, where Vera goes silent and the supervisor takes over the remainder of the conversation.
+We propose introducing a third option:
+Coaching
+A supervisor can send Vera a short instruction during the call (typed or spoken). Vera incorporates that instruction into her next natural response without interrupting the conversation. The customer remains unaware that coaching has occurred.
+Alongside this feature, we also identified a limitation in the current Intervene implementation:
+Although transcripts identify whether a line was spoken by Vera, the Rep, or a Supervisor, they do not record which specific supervisor spoke. Every transcript event—including intervention speech and future coaching messages—should store the actual supervisor's user ID.
+
+2. Confirmed Requirements
+The following requirements have already been confirmed:
+Coaching guides Vera rather than replacing her.
+Version 1 supports both:
+Typed coaching
+Hold-to-whisper (speech converted to text)
+Coaching uses the same permissions as Intervene.
+No new permission model is required.
+Coaching messages appear as their own transcript event type in database transcript table role = coaching/whisper, source = supervisor.
+Every coaching message is tagged with the sender's user ID.
+Speaker attribution also applies to intervention speech.
+
+3. Scope
+This proposal consists of two related features:
+Feature A
+Speaker Attribution
+Record exactly who spoke every supervisor transcript line.
+Feature B
+Coaching Mode
+Allow supervisors to guide Vera during a call using typed or spoken coaching messages.
+Feature B depends on Feature A.
+
+Feature A – Speaker Attribution
+Current Limitation
+Currently, transcripts identify the speaker type but not the individual supervisor.
+The supervisor shown in today's UI is inferred from the current intervention session rather than being stored permanently. This becomes inaccurate if multiple supervisors intervene during the same call.
+
+Proposed Changes
+Database
+Add a new field to transcript records:
+Speaker User ID
+This field:
+Stores the supervisor's account ID.
+Remains empty for:
+Vera
+External phone representatives
+
+Live Transcript
+Every transcript event should include the speaker ID while the call is in progress.
+
+Intervention Pipeline
+The intervention system already knows which supervisor is speaking because the account information is present in the connection metadata.
+Instead of discarding this information, preserve it and attach it to every transcript entry.
+
+Persistence
+Speaker attribution should remain consistent across:
+Live transcript
+Database storage
+Historical transcript playback
+
+Backward Compatibility
+Historical transcript entries remain unchanged.
+Since previous calls never stored speaker IDs, they cannot be reconstructed.
+
+Outcome
+Supervisor attribution becomes a permanent fact instead of a runtime estimate.
+This also provides the foundation required for Coaching Mode.
+
+Feature B – Coaching Mode
+Overview
+Coaching allows supervisors to influence Vera's next response without taking over the conversation.
+Vera simply incorporates the instruction into her next reply.
+The customer never hears or sees the coaching message.
+
+Message Flow
+The coaching flow is:
+Supervisor sends a coaching instruction.
+Backend validates permissions.
+Backend records an audit event.
+Backend publishes the coaching instruction through the existing call-event transcript/event stream.
+Vera receives the instruction.
+Vera stores it as conversational context.
+Vera naturally incorporates the instruction into her next response.
+Nothing interrupts the live conversation.
+
+Internal Analogy
+Vera maintains an internal "notebook" containing the current conversation context.
+A coaching message simply inserts a note into that notebook.
+When Vera generates her next response, she naturally considers the new note. Livekit already offers sdk methods to implement this efficiently.
+
+Architecture
+Coaching follows the same architecture as other call actions:
+Supervisor Browser → Backend → Vera
+A direct browser-to-Vera connection is intentionally avoided because:
+Backend permission checks remain centralized.
+Audit logging remains consistent.
+Coaching events automatically become part of the transcript stream.
+
+Typed Coaching
+The supervisor enters text into a coaching box and sends it.
+
+Hold-to-Whisper
+The supervisor:
+Holds a button.
+Speaks naturally.
+Browser sends the audio chunk to backend new endpoint /on-demand-transcribe this new endpoint is gated with same permission as Intervene. converts speech to text locally.
+Backend new endpoint will be using fall tolerant Resillient STT utility class just like the same pattern we have for Resilient LLM. The primary provider will be Deepgram Flux, the fallback will be Assembly AI 3.5 pro (we don't have the api key at the point for assembly ai but we will integrate it later on, our primary provider will do for now). And the backend after transcribing the whisper to text will return back to the frontend ui.
+Users will check the transcribed text and confirm if it is correct or not, even they can edit if needed before sending the whisper message.
+NOTE: Whisper internally will use the same text base coaching path. Just only difference is that in this mode a user can quickly take action by voice instead of typing it out. So in the frontend ui we can use the same input box for both. And the input box may have one voice icon to activte the whisper. Only the text is transmitted.
+Characteristics:
+Audio never leaves the browser.
+No external speech service receives the audio.
+The customer never hears the whisper.
+Vera receives only text.
+
+Permissions
+Coaching uses the exact same permissions as Intervene.
+No additional permission model is introduced.
+
+Multiple Supervisors
+Unlike Intervene, Coaching is not restricted to a single supervisor.
+Any authorized supervisor may send coaching instructions at any time. So generally this means that if a call is not published to tenant level users only the call initiator is able to send the coaching or whispering. But if a call is published to tenant level all user so anyone can send these coaching or whisper messages.
+
+Transcript Representation
+Coaching/whispers appears as its own transcript event type and visually represents different ways in the frontend.
+It is:
+Separate from normal speech
+Separate from DTMF
+Filterable
+Version 1 presents both typed and spoken coaching as a single Coaching category.
+Internally, the system still records whether the coaching originated from text or speech.
+
+Audit Logging
+Every coaching/whisper action also generates an audit record in the existing audit intervention log.
+This enables reporting without scanning transcript records.
+
+Implementation Sequence
+Phase 1 – Feature A
+Ship Speaker Attribution first because it:
+Solves an existing production issue.
+Requires minimal changes.
+Introduces no new UI.
+Introduces no new permissions.
+Introduces no new background services.
+
+Phase 2 – Feature B
+Build Coaching Mode on top of Speaker Attribution.
+This phase adds:
+Browser-to-backend coaching requests
+Vera coaching listener
+On demand whisper transcriber endpoint in backend which is used to integrate whisper feature by flowing through the same coaching mode. Browser speech-to-text support
+The two phases can ship separately, but Feature B depends on Feature A.
+
+Confirmed Decisions
+Coaching messages always pass through the backend. - Yes
+Backend performs permission checks and logging. - Yes
+Coaching is available to any authorized supervisor. - Yes
+Typed and spoken coaching appear as different one transcript categories category in Version 1. -  (coaching/whisper).
+Coaching uses existing Intervene permissions. - Yes
+Coaching guides Vera's next natural response rather than interrupting the conversation. - Yes
+
+Open Questions
+Should call owners automatically have coaching rights, even without explicit Intervene permission? - Yes for now.
+Is it acceptable for historical transcript entries to continue displaying best-effort supervisor attribution? - No need to do any work for historical transcript entries, no backfill is needed.
+Is a one-time browser speech model download (~100 MB) acceptable for Hold-to-Whisper? - No
+Should coaching messages have any rate limit or cooldown? - Yes, set to 15 per minute for now, keep it configurable. Share this same 15 per minute rate limit to the new on demand transcribe endpoint also.

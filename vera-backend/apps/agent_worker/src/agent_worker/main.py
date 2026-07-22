@@ -30,6 +30,7 @@ from redis.asyncio import Redis
 
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
+from agent_worker.coaching import CoachingListener
 from agent_worker.health_observer import CallHealthObserver, build_health_observer
 from agent_worker.intervention import AgentTakeoverController, intervener_present
 from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
@@ -532,6 +533,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 callee_identity=speaker.identity,
             )
 
+        # Coaching listener started once the session is running (below, after
+        # session.start) — declared here so _on_shutdown can always reference it.
+        coaching_task: asyncio.Task[None] | None = None
+
         async def _flush_turn_emitter() -> None:
             # Order is load-bearing: flush held turns BEFORE any service's end(). end()
             # appends the sentinel that stops readers, so a turn flushed after it would be
@@ -612,6 +617,10 @@ async def entrypoint(ctx: JobContext) -> None:
                     await takeover_transcriber.aclose()  # before end(): flush its turns first
                 except Exception:
                     logger.exception("failed to close takeover transcriber for %s", room_name)
+            if coaching_task is not None:
+                coaching_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await coaching_task
             if health_observer is not None:
                 try:
                     await health_observer.aclose()  # before the call stream ends
@@ -702,6 +711,24 @@ async def entrypoint(ctx: JobContext) -> None:
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
         record=False,
     )
+
+    # Coaching mode: fold a supervisor's coaching/whisper message into Vera's
+    # context on her next turn. Same real-call gate as the takeover transcriber
+    # (publish_events) — coaching only makes sense where the call-event stream
+    # (and thus the control plane's /coach endpoint) is actually wired up.
+    if call_stream is not None:
+
+        def _log_coaching_exit(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is not None:
+                logger.error(
+                    "coaching listener exited unexpectedly for %s",
+                    room_name,
+                    exc_info=task.exception(),
+                )
+
+        coaching_listener = CoachingListener(session, call_stream, room_name)
+        coaching_task = asyncio.create_task(coaching_listener.run())
+        coaching_task.add_done_callback(_log_coaching_exit)
 
     # Supervisor takeover: the first time a participant carries the intervene mode
     # attribute, silence the agent for the rest of the call (one-way, never resumes)

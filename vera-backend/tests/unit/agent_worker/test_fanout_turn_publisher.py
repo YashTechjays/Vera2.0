@@ -18,7 +18,14 @@ class _AnnotatedBoomSink:
     command, including the turn text."""
 
     async def publish_turn(
-        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        self,
+        room_name: str,
+        role: str,
+        text: str,
+        *,
+        ts: int,
+        source: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         raise RuntimeError(f"Command # 1 (XADD stream '*' text {text!r}) of pipeline: OOM")
 
@@ -29,14 +36,28 @@ class _RecordingSink:
         self.calls: list[tuple[str, str, str, int, str | None]] = []
 
     async def publish_turn(
-        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        self,
+        room_name: str,
+        role: str,
+        text: str,
+        *,
+        ts: int,
+        source: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         self.calls.append((room_name, role, text, ts, source))
 
 
 class _BoomSink:
     async def publish_turn(
-        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        self,
+        room_name: str,
+        role: str,
+        text: str,
+        *,
+        ts: int,
+        source: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         raise RuntimeError("sink down")
 
@@ -50,7 +71,14 @@ async def test_publishes_to_all_sinks_in_registration_order() -> None:
             self._name = name
 
         async def publish_turn(
-            self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+            self,
+            room_name: str,
+            role: str,
+            text: str,
+            *,
+            ts: int,
+            source: str | None = None,
+            user_id: str | None = None,
         ) -> None:
             order.append(self._name)
 
