@@ -34,7 +34,7 @@ from agent_worker.health_observer import CallHealthObserver, build_health_observ
 from agent_worker.intervention import AgentTakeoverController, intervener_present
 from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
-from agent_worker.prompt import parse_persona_tweak, retry_focus_block
+from agent_worker.prompt import parse_persona_tweak
 from agent_worker.takeover_transcript import TakeoverTranscriber
 from agent_worker.transcript_publisher import (
     FanOutTurnPublisher,
@@ -392,19 +392,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 run_state = PlanRunStateService(
                     RedisPlanRunStateStore(plan_redis, ttl_seconds=settings.call_plan_ttl_seconds)
                 )
-                # RETRY calls carry the still-missing field labels (non-PHI schema
-                # titles) in dispatch metadata; the focus block overlays every plan
-                # agent the same way tenant extra_instructions do. Fail-safe: a
-                # malformed value degrades to the full plan, never a dead call.
-                raw_retry = meta.get("retry_fields")
-                retry_extra = (
-                    retry_focus_block([str(f) for f in raw_retry])
-                    if isinstance(raw_retry, list) and raw_retry
-                    else None
-                )
-                combined_extra = "\n\n".join(
-                    part for part in (retry_extra, tweak.extra_instructions) if part
-                )
+                # A RETRY call carries no retry framing: the control plane stages a
+                # plan already narrowed to the still-missing fields (focus_call_plan),
+                # so the agent simply runs the plan it's given and is never told a
+                # prior call happened — nothing leaks to the payer rep.
                 try:
                     controller = PlanRunController(
                         plan,
@@ -413,7 +404,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         # An explicit tenant greeting overrides the plan's first-task
                         # intro; extra_instructions overlay every plan agent.
                         greeting=tweak.greeting,
-                        extra_instructions=combined_extra or None,
+                        extra_instructions=tweak.extra_instructions or None,
                     )
                 except Exception:
                     logger.exception(

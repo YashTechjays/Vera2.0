@@ -115,18 +115,6 @@ def build_voice_lab_instructions(tweak: PersonaTweak | None = None) -> str:
     return "\n\n".join(parts)
 
 
-def retry_focus_block(retry_fields: list[str]) -> str:
-    """The RETRY-call focus overlay: rides PlanRunController's extra_instructions
-    so every plan agent collects only the still-missing fields. Labels are schema
-    titles (non-PHI), set by the dispatcher as `retry_fields` room metadata."""
-    return (
-        "RETRY CALL. A previous call already collected most of this verification. "
-        "You must collect ONLY the following still-missing data points, confirm them, "
-        "then politely close and end the call: " + ", ".join(retry_fields) + ". "
-        "Do not re-verify anything else."
-    )
-
-
 def resolve_voice_lab_greeting(tweak: PersonaTweak | None = None) -> str:
     """The Voice Lab opener: the tenant override when set, else the base preview greeting."""
     if tweak is not None and tweak.greeting:

@@ -23,13 +23,14 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
-from vera_core.forms.call_plan import CallPlan, PrefillFuser, compile_call_plan
+from vera_core.forms.call_plan import CallPlan, PrefillFuser, compile_call_plan, focus_call_plan
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
 from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
-    field_labels,
+    expand_to_groups,
+    has_call_reference,
     retryable_required_paths,
 )
 from vera_core.integrations.credentials import get_integration_credentials
@@ -75,9 +76,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EASTERN = ZoneInfo("America/New_York")
-
-# Maximum number of field labels to embed in RETRY room metadata.
-MAX_RETRY_FIELDS = 25
 
 # Form statuses that count toward the tenant's concurrency cap.
 _ACTIVE_FORM_STATUSES = (
@@ -360,6 +358,30 @@ async def try_dispatch(
         if tweak_fields:
             metadata["persona_tweak"] = tweak_fields
 
+        # Retry scope: with a call reference number captured, the retry is FOCUSED —
+        # stage a plan narrowed to the still-missing (group-expanded) fields so the
+        # agent asks ONLY those, never announcing a prior call. Without a reference
+        # number it retries FRESH (the full plan, a call from the top).
+        if call_mode == CallMode.RETRY and staged_plan is not None:
+            version = schema_versions.get(form.schema_version_id)
+            if version is None:
+                version = (
+                    await session.execute(
+                        select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+                    )
+                ).scalar_one()
+                schema_versions[form.schema_version_id] = version
+            doc = FormSchemaDoc.model_validate(version.schema_json)
+            status_by_path = await load_field_status(session, form.id)
+            if has_call_reference(status_by_path, doc):
+                retryable = retryable_required_paths(
+                    status_by_path, version.schema_json, floor=retry_floor
+                )
+                focus = expand_to_groups(doc, retryable)
+                if focus:
+                    plan, plan_prompt_version_id = staged_plan
+                    staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
+
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-dispatched calls earlier in the same pass.
         # The plan is staged to Redis (non-transactional) BEFORE create_call_room so
@@ -386,28 +408,13 @@ async def try_dispatch(
                 )
                 session.add(call)
                 await session.flush()
-                # For RETRY calls: compute unsatisfied field labels for the
-                # partial-script prompt nudge and find the most-recent prior
-                # call so we can write a CallLineage row.
+                # For RETRY calls: find the most-recent prior call so we can write a
+                # CallLineage row. The retry is SCOPED by the plan itself (a focused
+                # retry stages a narrowed plan via focus_call_plan above), never by a
+                # prompt overlay — the agent is never told this is a retry, so nothing
+                # leaks to the payer rep.
                 parent_call_id = None
                 if call_mode == CallMode.RETRY:
-                    version = schema_versions.get(form.schema_version_id)
-                    if version is None:
-                        version = (
-                            await session.execute(
-                                select(SchemaVersion).where(
-                                    SchemaVersion.id == form.schema_version_id
-                                )
-                            )
-                        ).scalar_one()
-                        schema_versions[form.schema_version_id] = version
-                    status_by_path = await load_field_status(session, form.id)
-                    paths = retryable_required_paths(
-                        status_by_path, version.schema_json, floor=retry_floor
-                    )
-                    labels = field_labels(version.schema_json, paths)[:MAX_RETRY_FIELDS]
-                    if labels:
-                        metadata["retry_fields"] = labels
                     parent_call_id = (
                         await session.execute(
                             select(Call.id)

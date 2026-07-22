@@ -41,8 +41,6 @@ class TestTransitionMap:
             (FormStatus.IN_CALL, FormStatus.CALL_FAILED),
             (FormStatus.AI_PROCESSING, FormStatus.EXCEPTION_REVIEW),
             (FormStatus.AI_PROCESSING, FormStatus.IN_QUEUE),
-            # The post-call eval completes a form only when no field needs review.
-            (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.CALL_FAILED, FormStatus.IN_QUEUE),
             (FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE),
             (FormStatus.EXCEPTION_REVIEW, FormStatus.COMPLETED),
@@ -58,9 +56,11 @@ class TestTransitionMap:
             (FormStatus.EXPIRED, FormStatus.IN_QUEUE),
             (FormStatus.IN_QUEUE, FormStatus.COMPLETED),
             (FormStatus.IN_CALL, FormStatus.IN_QUEUE),
-            # A call ending never completes the form directly — COMPLETED comes
-            # from a reviewer's approve or a nothing-to-review post-call eval.
+            # COMPLETED is a human-only edge out of EXCEPTION_REVIEW — the pipeline
+            # never completes a form directly, not from a call ending and not from
+            # the post-call eval even when nothing needs review.
             (FormStatus.IN_CALL, FormStatus.COMPLETED),
+            (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED),
             (FormStatus.READY_FOR_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.READY_FOR_PROCESSING, FormStatus.CALL_FAILED),
@@ -184,10 +184,12 @@ def test_ai_processing_can_go_to_exception_review() -> None:
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
 
 
-def test_ai_processing_can_still_complete() -> None:
+def test_ai_processing_cannot_complete_directly() -> None:
+    # The pipeline never auto-completes: an all-satisfied form parks in
+    # EXCEPTION_REVIEW for human sign-off; COMPLETED is a human-only edge.
     form = _form(FormStatus.AI_PROCESSING)
-    FormStateMachine().transition(form, FormStatus.COMPLETED, tenant_max_retries=5)
-    assert form.status == FormStatus.COMPLETED.value
+    with pytest.raises(InvalidTransitionError):
+        FormStateMachine().transition(form, FormStatus.COMPLETED, tenant_max_retries=5)
 
 
 def test_ready_cannot_jump_to_exception_review_via_ai_processing() -> None:

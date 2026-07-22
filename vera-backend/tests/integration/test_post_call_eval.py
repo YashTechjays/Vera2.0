@@ -2,7 +2,8 @@
 
 Exercises the three key behaviours against a real Docker-Postgres instance
 (the same test-database as the other integration suites):
-  1. happy path: writes FieldAnswer + FieldEvaluation rows, form → COMPLETED.
+  1. happy path: writes FieldAnswer + FieldEvaluation rows, form → EXCEPTION_REVIEW
+     (all-satisfied still parks for human sign-off — the pipeline never auto-COMPLETEs).
   2. token-valued field: skips the write, routes form → EXCEPTION_REVIEW.
   3. redelivery: second call is a no-op (idempotency guard).
 
@@ -378,7 +379,7 @@ async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(
     assert rows[0].value["value"] == "in-network"  # last occurrence won
 
 
-async def test_evaluate_call_writes_answers_and_completes(
+async def test_evaluate_call_writes_answers_and_parks_for_review(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
     fake_livekit: _FakeLiveKit,
@@ -404,7 +405,9 @@ async def test_evaluate_call_writes_answers_and_completes(
         turns=turns,
     )
 
-    assert outcome.status == FormStatus.COMPLETED
+    # Even with every required field satisfied, the pipeline parks the form in
+    # EXCEPTION_REVIEW for human sign-off — it never auto-COMPLETEs.
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
     assert outcome.answers_written == 1
     rows = (
         (
