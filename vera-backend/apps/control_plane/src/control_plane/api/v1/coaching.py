@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from control_plane.api.v1.common import Audit, TenantId, TenantSession
+from control_plane.api.v1.common import Audit, TenantId, TenantSession, emit_phi_read_audit
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_authz import authorize_or_403, call_hidden_from
@@ -195,4 +195,13 @@ async def on_demand_transcribe(
             DefaultExceptionCode.SERVICE_UNAVAILABLE,
             message="transcription temporarily unavailable",
         ) from exc
+    await emit_phi_read_audit(
+        audit,
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="whisper_transcript",
+        resource_id=str(call.id),
+        fields=["text"],
+    )
     return ok(WhisperTranscribeResponse(text=text))
