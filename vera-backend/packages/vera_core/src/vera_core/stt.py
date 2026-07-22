@@ -21,6 +21,7 @@ from livekit import rtc
 from vera_core.config.secrets import SecretProvider
 
 if TYPE_CHECKING:
+    import aiohttp
     from livekit.agents.stt import STT
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ ASSEMBLYAI_API_KEY_SECRET = "ASSEMBLYAI_API_KEY"
 # STTv2's own default — no resampling needed between decode output and input.
 _DECODE_SAMPLE_RATE = 16000
 
-type ProviderFactory = Callable[["STTSpec", SecretProvider | None], "STT[Any]"]
+type ProviderFactory = Callable[
+    ["STTSpec", SecretProvider | None, "aiohttp.ClientSession"], "STT[Any]"
+]
 
 
 class STTUnavailableError(Exception):
@@ -57,20 +60,28 @@ class STTSpec:
         return cls(provider=provider.strip(), model=model.strip())
 
 
-def _build_deepgram(spec: STTSpec, secrets: SecretProvider | None) -> STT[Any]:
+def _build_deepgram(
+    spec: STTSpec, secrets: SecretProvider | None, http_session: aiohttp.ClientSession
+) -> STT[Any]:
     from livekit.plugins import deepgram
 
     if secrets is None:
         raise ValueError("deepgram provider requires a SecretProvider for DEEPGRAM_API_KEY")
+    # An explicit session is required outside the agent worker's job context —
+    # left unset, the plugin looks up a job-scoped session that only exists
+    # inside a real LiveKit job, and this runs in the control plane instead.
     return deepgram.STTv2(
         model=spec.model,
         sample_rate=_DECODE_SAMPLE_RATE,
         api_key=secrets.get(DEEPGRAM_API_KEY_SECRET),
+        http_session=http_session,
         **spec.extra,
     )
 
 
-def _build_assemblyai(spec: STTSpec, secrets: SecretProvider | None) -> STT[Any]:
+def _build_assemblyai(
+    spec: STTSpec, secrets: SecretProvider | None, http_session: aiohttp.ClientSession
+) -> STT[Any]:
     # AssemblyAI isn't provisioned yet (per the coaching proposal): neither the
     # livekit-plugins-assemblyai package nor ASSEMBLYAI_API_KEY exists. This factory
     # keeps the provider slot real — until both are added the import raises
@@ -81,7 +92,9 @@ def _build_assemblyai(spec: STTSpec, secrets: SecretProvider | None) -> STT[Any]
 
     if secrets is None:
         raise ValueError("assemblyai provider requires a SecretProvider for ASSEMBLYAI_API_KEY")
-    stt: STT[Any] = assemblyai.STT(api_key=secrets.get(ASSEMBLYAI_API_KEY_SECRET), **spec.extra)
+    stt: STT[Any] = assemblyai.STT(
+        api_key=secrets.get(ASSEMBLYAI_API_KEY_SECRET), http_session=http_session, **spec.extra
+    )
     return stt
 
 
@@ -136,10 +149,18 @@ class ResilientSTT:
                 raise ValueError(f"unknown STT provider {spec.provider!r}")
         self._stts: list[STT[Any]] = []
         self._chain: Any = None
+        self._http_session: aiohttp.ClientSession | None = None
 
     def _adapter(self) -> Any:
         if self._chain is None:
+            import aiohttp
             from livekit.agents.stt import FallbackAdapter
+
+            # Plugins need an explicit session here: left unset, they look up a
+            # job-scoped session that only exists inside a real agent worker
+            # job, and this class runs in the control plane instead. Owned by
+            # this instance, closed in aclose().
+            self._http_session = aiohttp.ClientSession()
 
             # A provider whose client can't even be constructed (missing plugin
             # package, absent secret) is dropped from the chain with a warning —
@@ -148,7 +169,9 @@ class ResilientSTT:
             stts: list[STT[Any]] = []
             for spec in self._specs:
                 try:
-                    stts.append(self._registry[spec.provider](spec, self._secrets))
+                    stts.append(
+                        self._registry[spec.provider](spec, self._secrets, self._http_session)
+                    )
                 except Exception as exc:
                     logger.warning(
                         "STT provider %s (%s) unavailable at construction: %s",
@@ -189,9 +212,11 @@ class ResilientSTT:
             await stream.aclose()
 
     async def aclose(self) -> None:
-        chain, stts = self._chain, self._stts
-        self._chain, self._stts = None, []
+        chain, stts, session = self._chain, self._stts, self._http_session
+        self._chain, self._stts, self._http_session = None, [], None
         if chain is not None:
             await chain.aclose()
         for s in stts:
             await s.aclose()
+        if session is not None:
+            await session.close()

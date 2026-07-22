@@ -18,6 +18,7 @@ from vera_core.config.secrets import SecretProvider
 from vera_core.stt import ResilientSTT, STTSpec, STTUnavailableError
 
 if TYPE_CHECKING:
+    import aiohttp
     from livekit.agents.stt import STT
 
 
@@ -43,7 +44,9 @@ def test_known_provider_accepted_at_construction_without_building_a_client() -> 
     as ResilientLLM)."""
     calls = 0
 
-    def _factory(spec: STTSpec, secrets: SecretProvider | None) -> "STT[Any]":
+    def _factory(
+        spec: STTSpec, secrets: SecretProvider | None, http_session: "aiohttp.ClientSession"
+    ) -> "STT[Any]":
         nonlocal calls
         calls += 1
         raise AssertionError("should not be called at construction time")
@@ -58,7 +61,9 @@ async def test_all_providers_failing_at_construction_raises_unavailable() -> Non
     take down the whole chain by itself — but an EMPTY chain (every provider
     failed) is the one fatal case."""
 
-    def _boom(spec: STTSpec, secrets: SecretProvider | None) -> "STT[Any]":
+    def _boom(
+        spec: STTSpec, secrets: SecretProvider | None, http_session: "aiohttp.ClientSession"
+    ) -> "STT[Any]":
         raise RuntimeError("no secret configured")
 
     stt = ResilientSTT(
@@ -75,3 +80,48 @@ async def test_all_providers_failing_at_construction_raises_unavailable() -> Non
 async def test_aclose_before_any_use_is_a_safe_no_op() -> None:
     stt = ResilientSTT(STTSpec(provider="deepgram", model="flux-general-en"))
     await stt.aclose()  # must not raise even though _adapter() was never called
+
+
+@pytest.mark.asyncio
+async def test_adapter_passes_a_real_open_session_to_each_provider() -> None:
+    """Regression test: providers used outside the agent worker's job context
+    (this class runs in the control plane) need an explicit http_session or
+    they fail immediately trying to look up a job-scoped one that doesn't
+    exist here."""
+    import aiohttp
+
+    seen: list[aiohttp.ClientSession] = []
+
+    def _factory(
+        spec: STTSpec, secrets: SecretProvider | None, http_session: "aiohttp.ClientSession"
+    ) -> "STT[Any]":
+        seen.append(http_session)
+        raise RuntimeError("stub - only the session matters here")
+
+    stt = ResilientSTT(STTSpec(provider="fake", model="x"), registry={"fake": _factory})
+    with pytest.raises(STTUnavailableError):
+        stt._adapter()
+
+    assert len(seen) == 1
+    assert isinstance(seen[0], aiohttp.ClientSession)
+    assert not seen[0].closed
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_the_owned_http_session() -> None:
+    import aiohttp
+
+    seen: list[aiohttp.ClientSession] = []
+
+    def _factory(
+        spec: STTSpec, secrets: SecretProvider | None, http_session: "aiohttp.ClientSession"
+    ) -> "STT[Any]":
+        seen.append(http_session)
+        raise RuntimeError("stub - only the session matters here")
+
+    stt = ResilientSTT(STTSpec(provider="fake", model="x"), registry={"fake": _factory})
+    with pytest.raises(STTUnavailableError):
+        stt._adapter()
+
+    await stt.aclose()
+    assert seen[0].closed
