@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Mic, Send, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -28,13 +28,29 @@ export function CoachingPanel({
   const [transcribing, setTranscribing] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [truncated, setTruncated] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
+  // Guards the getUserMedia race: a tap short enough that the mic isn't ready
+  // until after release would otherwise leave a stream open with no way to
+  // stop it. mountedRef covers the same race on unmount.
+  const startingRef = useRef(false)
+  const stopRequestedRef = useRef(false)
+  const mountedRef = useRef(true)
 
   const busy = recording || transcribing || sending
 
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      recorderRef.current?.stop() // releases the mic if a recording is still open
+    }
+  }, [])
+
   function handleMessageChange(next: string) {
     setMessage(next)
+    setTruncated(false)
     // Clearing the box is treated as starting a fresh note — otherwise a
     // whisper-origin tag would stick around after the supervisor deletes the
     // transcription and types something unrelated.
@@ -42,6 +58,9 @@ export function CoachingPanel({
   }
 
   async function startRecording() {
+    if (startingRef.current || recorderRef.current) return // already starting/recording
+    startingRef.current = true
+    stopRequestedRef.current = false
     setError(null)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -59,16 +78,27 @@ export function CoachingPanel({
       )
       recorder.start()
       recorderRef.current = recorder
-      setRecording(true)
+      // The user already released (or the component unmounted) while the mic
+      // was still starting up - stop it right away instead of leaving it open.
+      if (stopRequestedRef.current || !mountedRef.current) {
+        recorder.stop()
+        recorderRef.current = null
+        if (mountedRef.current) setRecording(false)
+      } else {
+        setRecording(true)
+      }
     } catch {
-      setError("Microphone access denied.")
+      if (mountedRef.current) setError("Microphone access denied.")
+    } finally {
+      startingRef.current = false
     }
   }
 
   async function stopRecordingAndTranscribe() {
+    stopRequestedRef.current = true
     const recorder = recorderRef.current
+    if (!recorder) return // still starting up - startRecording will stop itself
     recorderRef.current = null
-    if (!recorder) return
     setRecording(false)
     setTranscribing(true)
     try {
@@ -81,12 +111,16 @@ export function CoachingPanel({
         recorder.stop()
       })
       const { text } = await transcribeWhisper(callId, blob)
+      if (!mountedRef.current) return
+      setTruncated(text.length > MAX_MESSAGE_LENGTH)
       setMessage(text.slice(0, MAX_MESSAGE_LENGTH))
       setOrigin("whisper")
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Could not transcribe.")
+      if (mountedRef.current) {
+        setError(e instanceof ApiError ? e.message : "Could not transcribe.")
+      }
     } finally {
-      setTranscribing(false)
+      if (mountedRef.current) setTranscribing(false)
     }
   }
 
@@ -94,6 +128,7 @@ export function CoachingPanel({
     if (error !== null) return error
     if (transcribing) return "Transcribing…"
     if (recording) return "Recording — release to transcribe"
+    if (truncated) return `Cut to ${MAX_MESSAGE_LENGTH} characters — review before sending.`
     if (origin === "whisper" && message) return "Review the transcription, then send."
     return ""
   }
@@ -107,6 +142,7 @@ export function CoachingPanel({
       await sendCoachMessage(callId, trimmed, origin)
       setMessage("")
       setOrigin("typed")
+      setTruncated(false)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not send coaching note.")
     } finally {
