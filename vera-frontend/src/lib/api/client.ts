@@ -56,6 +56,8 @@ type RequestOptions = {
   auth?: boolean
   /** Extra headers (e.g. Idempotency-Key). */
   headers?: Record<string, string>
+  /** Cancel the in-flight request (e.g. on unmount) — nothing is sent past abort. */
+  signal?: AbortSignal
 }
 
 /** apiRequest for binary downloads: returns the raw Blob. Failures still arrive
@@ -97,7 +99,7 @@ export async function apiRequestBlob(path: string, opts: RequestOptions = {}): P
 }
 
 export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, auth = true, headers: extraHeaders } = opts
+  const { method = "GET", body, auth = true, headers: extraHeaders, signal } = opts
 
   // A FormData body (multipart upload) must NOT get a JSON Content-Type or be
   // stringified — the browser sets its own boundary-bearing header when the
@@ -118,6 +120,7 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
       method,
       headers,
       body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body),
+      signal,
     })
   } catch {
     throw new ApiError(0, "NETWORK_ERROR", "Could not reach the server. Is the API running?")

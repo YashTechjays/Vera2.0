@@ -29,11 +29,15 @@ export type WhisperTranscribeResponse = {
  *  recording; the caller reviews/edits the returned text and sends it via
  *  `sendCoachMessage(callId, text, "whisper")` themselves. Does not itself
  *  record anything — only an actual send does. */
-export function transcribeWhisper(callId: string, audio: Blob): Promise<WhisperTranscribeResponse> {
+export function transcribeWhisper(
+  callId: string,
+  audio: Blob,
+  signal?: AbortSignal,
+): Promise<WhisperTranscribeResponse> {
   const form = new FormData()
   form.append("audio", audio, "whisper.webm")
   return apiRequest<WhisperTranscribeResponse>(
     `/calls/${encodeURIComponent(callId)}/on-demand-transcribe`,
-    { method: "POST", body: form },
+    { method: "POST", body: form, signal },
   )
 }

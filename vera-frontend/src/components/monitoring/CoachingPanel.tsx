@@ -38,6 +38,7 @@ export function CoachingPanel({
   const startingRef = useRef(false)
   const stopRequestedRef = useRef(false)
   const mountedRef = useRef(true)
+  const uploadAbortRef = useRef<AbortController | null>(null)
 
   const busy = recording || transcribing || sending
 
@@ -46,6 +47,7 @@ export function CoachingPanel({
     return () => {
       mountedRef.current = false
       recorderRef.current?.stop() // releases the mic if a recording is still open
+      uploadAbortRef.current?.abort() // don't let an in-flight whisper upload outlive the panel
     }
   }, [])
 
@@ -117,7 +119,9 @@ export function CoachingPanel({
         )
         recorder.stop()
       })
-      const { text } = await transcribeWhisper(callId, blob)
+      const controller = new AbortController()
+      uploadAbortRef.current = controller
+      const { text } = await transcribeWhisper(callId, blob, controller.signal)
       if (!mountedRef.current) return
       setTruncated(text.length > MAX_MESSAGE_LENGTH)
       setMessage(text.slice(0, MAX_MESSAGE_LENGTH))
@@ -127,6 +131,7 @@ export function CoachingPanel({
         setError(e instanceof ApiError ? e.message : "Could not transcribe.")
       }
     } finally {
+      uploadAbortRef.current = null
       if (mountedRef.current) setTranscribing(false)
     }
   }
