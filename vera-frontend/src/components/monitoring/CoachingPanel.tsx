@@ -70,13 +70,14 @@ export function CoachingPanel({
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data)
       }
-      recorder.addEventListener(
-        "stop",
-        () => {
-          for (const track of stream.getTracks()) track.stop()
-        },
-        { once: true },
-      )
+      // Release the mic on whichever event ends the recording — a mid-record
+      // failure (device unplugged, stream goes bad) fires "error" instead of
+      // "stop", and the stream must not leak on that path either.
+      const releaseStream = () => {
+        for (const track of stream.getTracks()) track.stop()
+      }
+      recorder.addEventListener("stop", releaseStream, { once: true })
+      recorder.addEventListener("error", releaseStream, { once: true })
       recorder.start()
       recorderRef.current = recorder
       // The user already released (or the component unmounted) while the mic
@@ -103,10 +104,15 @@ export function CoachingPanel({
     setRecording(false)
     setTranscribing(true)
     try {
-      const blob = await new Promise<Blob>((resolve) => {
+      const blob = await new Promise<Blob>((resolve, reject) => {
         recorder.addEventListener(
           "stop",
           () => resolve(new Blob(chunksRef.current, { type: "audio/webm" })),
+          { once: true },
+        )
+        recorder.addEventListener(
+          "error",
+          () => reject(new Error("Recording failed.")),
           { once: true },
         )
         recorder.stop()
