@@ -88,6 +88,7 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
+from vera_core.services.call_visibility import call_hidden_from
 
 logger = logging.getLogger(__name__)
 
@@ -152,11 +153,10 @@ def _call_hidden_from(call: Call, user_id: UUID | None) -> bool:
     so a private call is never revealed by enumeration).
 
     A non-owner sees it only when it is published or ownerless. Shared by
-    join-token, the event stream, and end so the visibility gates never diverge.
+    join-token, the event stream, end, and (via vera_core.services.call_visibility)
+    the call-attempt recording enrichment, so the visibility gates never diverge.
     """
-    if call.initiated_by_id == user_id:
-        return False
-    return call.initiated_by_id is not None and not call.published
+    return call_hidden_from(call.initiated_by_id, call.published, user_id)
 
 
 # A just-minted intervene token belongs to a user not yet connected to LiveKit, so
