@@ -22,6 +22,9 @@ from vera_core.transcript import ROLE_COACHING, ROLE_WHISPER
 
 logger = logging.getLogger("agent_worker")
 
+# Cap so a long call doesn't accumulate unbounded notes resent every turn.
+_MAX_COACHING_NOTES = 10
+
 # A directive, not a suggestion: the model must not weigh this against its own
 # sense of conversational flow and quietly skip it because the topic already
 # passed - it must act on it next turn regardless. The customer must never
@@ -105,4 +108,18 @@ class CoachingListener:
         agent = self._session.current_agent
         ctx = agent.chat_ctx.copy()
         ctx.add_message(role="system", content=_COACHING_NOTE_PREFIX + text)
+
+        notes = [item for item in ctx.items if _is_coaching_note(item)]
+        if len(notes) > _MAX_COACHING_NOTES:
+            evict_ids = {item.id for item in notes[: len(notes) - _MAX_COACHING_NOTES]}
+            ctx.items = [item for item in ctx.items if item.id not in evict_ids]
+
         await agent.update_chat_ctx(ctx)
+
+
+def _is_coaching_note(item: Any) -> bool:
+    # Duck-typed, not isinstance - stays decoupled from the concrete livekit type.
+    if getattr(item, "role", None) != "system":
+        return False
+    text = getattr(item, "text_content", None)
+    return isinstance(text, str) and text.startswith(_COACHING_NOTE_PREFIX)

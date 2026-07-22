@@ -6,23 +6,40 @@ from typing import Any
 
 import pytest
 
-from agent_worker.coaching import CoachingListener
+from agent_worker.coaching import _MAX_COACHING_NOTES, CoachingListener
 from vera_core.call_stream import TYPE_CALL_STATUS, TYPE_TRANSCRIPT, CallStreamEvent
+
+
+class _FakeChatItem:
+    """Mimics the sliver of the real ChatMessage shape _inject relies on
+    (.id/.role/.text_content) so the eviction logic can run against it."""
+
+    _next_id = 0
+
+    def __init__(self, role: str, content: str) -> None:
+        _FakeChatItem._next_id += 1
+        self.id = f"item-{_FakeChatItem._next_id}"
+        self.role = role
+        self.text_content = content
 
 
 class _FakeChatContext:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, str]] = []
+        self.items: list[_FakeChatItem] = []
 
     def copy(self) -> "_FakeChatContext":
         # Real ChatContext.copy() returns a new instance; messages already
         # added stay in the source, matching the shape _inject relies on.
         new = _FakeChatContext()
-        new.messages = list(self.messages)
+        new.items = list(self.items)
         return new
 
     def add_message(self, *, role: str, content: str) -> None:
-        self.messages.append((role, content))
+        self.items.append(_FakeChatItem(role, content))
+
+    @property
+    def messages(self) -> list[tuple[str, str]]:
+        return [(item.role, item.text_content) for item in self.items]
 
 
 class _FakeAgent:
@@ -154,6 +171,24 @@ async def test_injection_targets_current_agent_at_injection_time_handoff_safe() 
 
     assert first_agent.update_calls == []
     assert len(second_agent.update_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_coaching_notes_are_capped_evicting_the_oldest_first() -> None:
+    """A long call must not accumulate unbounded notes in the chat context —
+    once the cap is exceeded, the oldest note is dropped, not the newest."""
+    agent = _FakeAgent()
+    total = _MAX_COACHING_NOTES + 3
+    stream = _FakeStream([(f"{i}-0", _coaching_event(f"note {i}")) for i in range(1, total + 1)])
+
+    await CoachingListener(_FakeSession(agent), stream, "room-1").run()
+
+    final_ctx = agent.update_calls[-1]
+    assert len(final_ctx.items) == _MAX_COACHING_NOTES
+    contents = [content for _, content in final_ctx.messages]
+    # endswith, not `in` - "note 1" is a substring of "note 11", "note 12"...
+    assert not any(c.endswith(f"note {i}") for i in range(1, 4) for c in contents)
+    assert any(c.endswith(f"note {total}") for c in contents)  # newest kept
 
 
 @pytest.mark.asyncio
