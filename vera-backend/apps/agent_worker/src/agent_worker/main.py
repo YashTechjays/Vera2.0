@@ -324,6 +324,7 @@ async def entrypoint(ctx: JobContext) -> None:
     call_stream_redis: Redis | None = None
     plan_redis: Redis | None = None
     observer_redis: Redis | None = None
+    coaching_redis: Redis | None = None
     observer_manager: ObserverManager | None = None
     extract_llm: ResilientLLM | None = None
     health_observer: CallHealthObserver | None = None
@@ -621,6 +622,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 coaching_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await coaching_task
+            if coaching_redis is not None:
+                try:
+                    await coaching_redis.aclose()
+                except Exception:
+                    logger.exception("failed to close coaching redis for %s", room_name)
             if health_observer is not None:
                 try:
                     await health_observer.aclose()  # before the call stream ends
@@ -726,7 +732,17 @@ async def entrypoint(ctx: JobContext) -> None:
                     exc_info=task.exception(),
                 )
 
-        coaching_listener = CoachingListener(session, call_stream, room_name)
+        # Own read client, like the Observer — a blocking XREAD would otherwise
+        # pin a pooled connection shared with the turn publishes.
+        coaching_redis = create_redis(settings.redis_url)
+        coaching_stream = CallStreamService(
+            RedisCallStreamStore(
+                coaching_redis,
+                ttl_seconds=settings.transcript_stream_ttl_seconds,
+                end_grace_seconds=settings.transcript_end_grace_seconds,
+            )
+        )
+        coaching_listener = CoachingListener(session, coaching_stream, room_name)
         coaching_task = asyncio.create_task(coaching_listener.run())
         coaching_task.add_done_callback(_log_coaching_exit)
 
