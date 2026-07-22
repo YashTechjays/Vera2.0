@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
+import pyotp
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -191,3 +192,92 @@ async def test_deactivate_operator_blocks_the_last_active_operator(
         headers=_auth(pw.super_admin_token),
     )
     assert resp.status_code == 409, resp.text
+
+
+async def test_resend_operator_invitation_reissues_a_working_token(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    client, pw = platform_world
+    invite = await client.post(
+        "/api/v1/platform/users/invitations",
+        headers={**_auth(pw.super_admin_token), **_idem()},
+        json={"email": "stuck-op@test.example", "name": "", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    stale_token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+
+    resend = await client.post(
+        f"/api/v1/platform/users/{user_id}/resend-invitation",
+        headers={**_auth(pw.super_admin_token), **_idem()},
+    )
+    assert resend.status_code == 200, resend.text
+    fresh_token = resend.json()["data"]["invite_url"].split("token=", 1)[1]
+    assert fresh_token != stale_token
+
+    # As with the tenant resend endpoint (Task 6), the stale token is deliberately
+    # NOT invalidated — see that task's note. Resend's contract is "a fresh working
+    # link exists," not "the old one is revoked."
+    fresh_check = await client.get(
+        "/api/v1/platform/auth/invitations/validate", params={"token": fresh_token}
+    )
+    assert fresh_check.json()["data"]["state"] == "valid"
+
+
+async def test_full_platform_invite_accept_activate_flow(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    client, pw = platform_world
+    invite = await client.post(
+        "/api/v1/platform/users/invitations",
+        headers={**_auth(pw.super_admin_token), **_idem()},
+        json={"email": "flow-op@test.example", "name": "Flow Op", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    user_id = invite.json()["data"]["user_id"]
+    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+
+    valid = await client.get("/api/v1/platform/auth/invitations/validate", params={"token": token})
+    assert valid.json()["data"]["state"] == "valid"
+
+    accept = await client.post(
+        "/api/v1/platform/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert accept.status_code == 200, accept.text
+    accept_body = accept.json()["data"]
+    assert accept_body["mfa_required"] is True
+    assert accept_body["provisioning_uri"] is not None
+    mfa_token = accept_body["mfa_token"]
+
+    # Extract the TOTP secret from the provisioning URI to compute a live code.
+    secret = pyotp.parse_uri(accept_body["provisioning_uri"]).secret
+    code = pyotp.TOTP(secret).now()
+
+    activate = await client.post(
+        "/api/v1/platform/auth/invitations/activate-mfa",
+        json={"mfa_token": mfa_token, "code": code},
+    )
+    assert activate.status_code == 200, activate.text
+
+    # The token is single-use — replaying validate now shows "invalid" (accepted).
+    revalidate = await client.get(
+        "/api/v1/platform/auth/invitations/validate", params={"token": token}
+    )
+    assert revalidate.json()["data"]["state"] == "invalid"
+
+    listed = await client.get("/api/v1/platform/users", headers=_auth(pw.super_admin_token))
+    row = next(r for r in listed.json()["data"] if r["id"] == user_id)
+    assert row["status"] == "active"
+
+
+async def test_platform_accept_invalid_token_is_unauthorized(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    # Only needs a client — reuses platform_world for that, ignoring its persona
+    # data, rather than standing up a second app-construction fixture for one test.
+    client, _pw = platform_world
+    resp = await client.post(
+        "/api/v1/platform/auth/invitations/accept",
+        json={"token": "not-a-real-token", "password": "whatever-password"},
+    )
+    assert resp.status_code == 401, resp.text
