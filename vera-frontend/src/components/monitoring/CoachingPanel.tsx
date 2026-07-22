@@ -3,9 +3,11 @@ import { Mic, Send, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
 import { sendCoachMessage, transcribeWhisper, type CoachOrigin } from "@/lib/api/coaching"
+
+// backend allows up to 2000; this is a tighter UI guardrail
+const MAX_MESSAGE_LENGTH = 200
 
 /**
  * Coaching input: type a note, or hold the mic to whisper it. Both paths land
@@ -79,7 +81,7 @@ export function CoachingPanel({
         recorder.stop()
       })
       const { text } = await transcribeWhisper(callId, blob)
-      setMessage(text)
+      setMessage(text.slice(0, MAX_MESSAGE_LENGTH))
       setOrigin("whisper")
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not transcribe.")
@@ -125,6 +127,7 @@ export function CoachingPanel({
             }
           }}
           placeholder="Coach Vera — she'll weave this into her next reply…"
+          maxLength={MAX_MESSAGE_LENGTH}
           disabled={disabled || busy}
         />
         <Button
@@ -157,8 +160,13 @@ export function CoachingPanel({
           <Send className="size-4" />
         </Button>
       </div>
-      <div className={cn("h-4 text-xs", error ? "text-destructive" : "text-muted-foreground")}>
-        {statusHint()}
+      <div className="flex h-4 items-center justify-between text-xs">
+        <span className={error ? "text-destructive" : "text-muted-foreground"}>{statusHint()}</span>
+        {message && (
+          <span className="text-muted-foreground">
+            {message.length}/{MAX_MESSAGE_LENGTH}
+          </span>
+        )}
       </div>
     </div>
   )
