@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import {
   allLeaves,
+  applicabilityReason,
   completionPercent,
   contradictionWarnings,
   fieldUsageOf,
@@ -12,12 +13,11 @@ import {
   isRequired,
   optionsOf,
   parseSchema,
-  prerequisiteFieldPaths,
   sectionEntriesOf,
   suggestionsOf,
   systemFieldPaths,
 } from "./schema"
-import type { FormSchema, FormValues } from "./types"
+import type { FormValues } from "./types"
 
 // The backend's compiled artifact (imported from its source of truth) is the
 // test fixture — the same document the backend serves per schema_version_id.
@@ -93,6 +93,24 @@ describe("gate chaining (applicable_when)", () => {
   })
 })
 
+describe("applicabilityReason", () => {
+  it("collapses identically-rendered any-of branches to one clause", () => {
+    // The auth-department gate is an any-of over ~27 per-CPT prior_auth leaves,
+    // every one titled "Prior Authorization Required" — the tooltip must say it
+    // once, not 27 times.
+    const l = leaf("sections.authorization_department.auth_department_name")
+    const reason = applicabilityReason(schema, l.gates, {})
+    expect(reason).toBe('Only applicable when "Prior Authorization Required" is "Yes"')
+  })
+
+  it("keeps distinct clauses of a compound condition", () => {
+    const l = leaf("sections.male_partner_coverage.male_partner_covered")
+    const reason = applicabilityReason(schema, l.gates, { [COVERAGE]: "Family" })
+    expect(reason).toContain("Spouse Gender")
+    expect(reason).not.toContain(" or \"Spouse Gender\" is \"Male\" or ")
+  })
+})
+
 describe("isRequired", () => {
   it("handles static and conditional requiredness", () => {
     expect(
@@ -146,14 +164,19 @@ describe("getSectionTable", () => {
     )
   })
 
-  it("models diagnostic_testing: one row per leaf-only CPT group", () => {
+  it("models diagnostic_testing: nested CPT rows under one ICD-10-coded parent group", () => {
     const t = getSectionTable("diagnostic_testing", schema.sections.diagnostic_testing)!
-    expect(t.groups).toHaveLength(8)
+    expect(t.groups).toHaveLength(1)
     expect(t.extraColumns).toEqual([])
-    expect(t.groups[0].label).toBe("CPT 58340")
-    expect(t.groups[0].rows[0].path).toBe("sections.diagnostic_testing.cpt_58340")
+    expect(t.groups[0].label).toBe("Labs, Xray/Ultrasound")
+    expect(t.groups[0].icd10).toBe("Z31.41")
+    expect(t.groups[0].rows).toHaveLength(8)
+    expect(t.groups[0].rows[0].label).toBe("CPT 58340")
+    expect(t.groups[0].rows[0].path).toBe(
+      "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340"
+    )
     expect(t.groups[0].rows[0].cells.covered?.path).toBe(
-      "sections.diagnostic_testing.cpt_58340.covered"
+      "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"
     )
   })
 
@@ -321,42 +344,5 @@ describe("contradictionWarnings", () => {
       "mandate_requires_infertility_coverage",
     ])
     expect(warnings[0].reason).toBeTruthy()
-  })
-})
-
-describe("prerequisiteFieldPaths", () => {
-  it("returns a Set of paths from prerequisite_fields", () => {
-    const paths = prerequisiteFieldPaths(schema)
-    expect(paths.has("sections.appointment_information.appointment_date")).toBe(true)
-    expect(paths.has("sections.appointment_information.appointment_type")).toBe(true)
-    expect(paths.has("sections.verification_information.callback_number")).toBe(true)
-  })
-
-  it("returns empty Set when prerequisite_fields is absent", () => {
-    const schemaWithout: FormSchema = { ...schema, prerequisite_fields: undefined }
-    expect(prerequisiteFieldPaths(schemaWithout).size).toBe(0)
-  })
-
-  it("spouse_gender is NOT in prerequisiteFieldPaths — stays context (defect #26)", () => {
-    expect(prerequisiteFieldPaths(schema).has(SPOUSE_GENDER)).toBe(false)
-  })
-})
-
-describe("fieldUsageOf — prerequisite vs system", () => {
-  const usage = (path: string) => fieldUsageOf(schema, path, leaf(path).field)
-
-  it("prerequisite wins over system for the 3 call-prerequisite fields", () => {
-    expect(usage("sections.appointment_information.appointment_date")).toBe("prerequisite")
-    expect(usage("sections.appointment_information.appointment_type")).toBe("prerequisite")
-    expect(usage("sections.verification_information.callback_number")).toBe("prerequisite")
-  })
-
-  it("spouse_gender stays context — not prerequisite", () => {
-    expect(usage(SPOUSE_GENDER)).toBe("context")
-  })
-
-  it("other system fields (not in prerequisite_fields) stay system", () => {
-    expect(usage("sections.patient_information.chart_number")).toBe("system")
-    expect(usage("sections.patient_information.patient_name")).toBe("system")
   })
 })

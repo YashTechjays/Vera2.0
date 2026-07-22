@@ -7,6 +7,7 @@ from control_plane.api.v1.form_schemas import router as form_schemas_router
 from control_plane.api.v1.insurance_providers import router as insurance_providers_router
 from control_plane.api.v1.integrations import router as integrations_router
 from control_plane.api.v1.ivr_playbooks import router as ivr_playbooks_router
+from control_plane.api.v1.notifications import router as notifications_router
 from control_plane.api.v1.patient_forms import router as patient_forms_router
 from control_plane.api.v1.platform import router as platform_router
 from control_plane.api.v1.platform_auth import router as platform_auth_router
@@ -20,6 +21,7 @@ from control_plane.api.v1.voice_lab import router as voice_lab_router
 router = APIRouter(prefix="/api/v1")
 router.include_router(auth_router)
 router.include_router(calls_router)
+router.include_router(notifications_router)
 router.include_router(patient_forms_router)
 router.include_router(platform_router)
 router.include_router(prompts_router)

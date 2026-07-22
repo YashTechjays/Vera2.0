@@ -1,6 +1,6 @@
 ---
 name: livekit
-description: Vera's LiveKit conventions — self-hosted OSS voice pipeline (control-plane room/token gateway + agent-worker Deepgram→Gemini→Cartesia cascade). Use when creating/joining rooms, dispatching the agent worker, touching the AgentSession/turn-handling config, the stt/tts PHI seams, or LiveKit settings/secrets.
+description: Vera's LiveKit conventions — self-hosted OSS voice pipeline (control-plane room/token gateway + agent-worker Deepgram→Gemini→Cartesia cascade). Use when creating/joining rooms, dispatching the agent worker, touching the AgentSession/turn-handling config, or LiveKit settings/secrets.
 ---
 
 # LiveKit (Vera voice pipeline)
@@ -18,8 +18,6 @@ and the **agent worker** (the Deepgram→Gemini→Cartesia cascade that joins th
 - **NEVER let interruption ("barge-in") auto-select** — left to auto-detect it picks the
   Cloud-only *adaptive* ML detector (401s against the gateway, streams audio off-box).
   Pin `interruption.mode="vad"` (local Silero VAD). See `apps/agent_worker/.../cascade.py`.
-- **NEVER let raw PHI cross a LiveKit node un-redacted** — redact at `stt_node`, hydrate at
-  `tts_node`; audio is the only PHI surface (see "PHI seams" below).
 - **NEVER put the API secret in plaintext config or logs** — it lets an attacker create
   rooms, join calls, and eavesdrop (`adr/devops-todo.md` #3).
 
@@ -69,21 +67,14 @@ state. Canonical form: `call--<tenant_uuid>--<call_uuid>`.
   preemptive_generation, turn_detection, interruption). It's mutually exclusive with the
   deprecated flat `AgentSession` kwargs — split them and the omitted pieces are silently dropped.
 
-## PHI seams — the only crossings (`agent.py` + `seams.py`)
+## No PHI seams (tokenization removed)
 
-`VeraAgent` overrides LiveKit nodes to route through `PHIBoundaryProtocol` (today
-`PassthroughPHIBoundary`, a no-op until the codec lands — see `adr/devops-todo.md` #8):
-
-- `stt_node`: redact **FINAL + PREFLIGHT** transcript events before the LLM
-  (`seams.redact_event`). Redact here, not `on_user_turn_completed` (it misses PREFLIGHT and
-  breaks preemptive generation).
-- `tts_node`: hydrate the TTS-bound text only (`seams.hydrate_stream`) — audio stays the only
-  PHI surface.
-- `transcription_node`: inert pass-through today; the deliberate one-line seam for a future
-  tokenized live-transcript stream.
-
-Keep node plumbing in `agent.py` and the redact/hydrate logic in `seams.py` (testable in
-isolation, `tests/.../test_seams.py`).
+The stt/tts PHI redact/hydrate seams (`vera_core.phi` + `seams.py`) were **removed on
+2026-07-13**: agents are plain LiveKit agents and the transcript reaches the LLM as raw
+values. Every pipeline hop is inside the BAA-covered boundary (repo-root `CLAUDE.md`), so
+there is no in-pipeline de-identification — do not re-add `stt_node`/`tts_node` redact/hydrate
+overrides without a compliance decision. PHI discipline that remains: never log/trace raw
+transcript text, and never put PHI in a room name (spans carry tenant/call UUIDs only).
 
 ## Settings & secrets
 

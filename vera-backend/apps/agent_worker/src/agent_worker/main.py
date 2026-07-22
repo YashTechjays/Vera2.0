@@ -10,11 +10,13 @@ import contextlib
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from google.genai.types import ThinkingConfig
 from livekit import rtc
 from livekit.agents import (
     NOT_GIVEN,
+    Agent,
     JobContext,
     JobProcess,
     NotGiven,
@@ -22,12 +24,18 @@ from livekit.agents import (
     WorkerOptions,
     cli,
 )
+from livekit.plugins import deepgram
 from opentelemetry import trace
 from redis.asyncio import Redis
 
 from agent_worker.agent import build_agent
 from agent_worker.cascade import _build_vad, build_session
-from agent_worker.prompt import build_instructions, parse_persona_tweak, resolve_greeting
+from agent_worker.health_observer import CallHealthObserver, build_health_observer
+from agent_worker.intervention import AgentTakeoverController, intervener_present
+from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
+from agent_worker.plan_runtime import PlanRunController
+from agent_worker.prompt import parse_persona_tweak
+from agent_worker.takeover_transcript import TakeoverTranscriber
 from agent_worker.transcript_publisher import (
     FanOutTurnPublisher,
     ReorderingEmitter,
@@ -35,6 +43,7 @@ from agent_worker.transcript_publisher import (
     attach_transcript_publisher,
 )
 from vera_core.call_stream import CallStreamService, RedisCallStreamStore
+from vera_core.config import EnvSecretProvider
 from vera_core.config.settings import get_settings
 from vera_core.events import (
     CallAnsweredEvent,
@@ -43,15 +52,21 @@ from vera_core.events import (
     CallFailureReason,
     WorkerEventBus,
 )
+from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.observability.correlation import (
+    PARTICIPANT_MODE_ATTR,
     call_trace_attributes,
     is_observer_identity,
     parse_room_name,
 )
 from vera_core.observability.otel import configure_observability
-from vera_core.phi import build_phi_boundary
+from vera_core.plan_store import (
+    CallPlanService,
+    PlanRunStateService,
+    RedisCallPlanStore,
+    RedisPlanRunStateStore,
+)
 from vera_core.redis import create_redis
-from vera_core.transcript import RedisTranscriptStore, TranscriptService
 
 logger = logging.getLogger("agent_worker")
 
@@ -266,7 +281,7 @@ def resolve_session(room_name: str, *, is_local: bool) -> str | None:
 
 
 def _fan_out_sink(sinks: list[TurnPublisher]) -> TurnPublisher | None:
-    """Collapse the enabled stream sinks (transcript service, call stream) behind one
+    """Collapse the enabled stream sinks (the call stream today) behind one
     TurnPublisher, so at most one ReorderingEmitter is ever attached per job: None with
     nothing enabled, the sink itself with exactly one, a FanOutTurnPublisher otherwise."""
     if not sinks:
@@ -303,9 +318,14 @@ async def entrypoint(ctx: JobContext) -> None:
         bus = WorkerEventBus(events_redis, maxlen=settings.worker_events_stream_maxlen)
         lifecycle = CallLifecycleEmitter(bus, room_name)
 
-    # Declared here (not inside try) so the except below can always safely reference it,
-    # even if setup fails before the publish_events block runs.
+    # Declared here (not inside try) so the except below can always safely reference them,
+    # even if setup fails before their blocks run.
     call_stream_redis: Redis | None = None
+    plan_redis: Redis | None = None
+    observer_redis: Redis | None = None
+    observer_manager: ObserverManager | None = None
+    extract_llm: ResilientLLM | None = None
+    health_observer: CallHealthObserver | None = None
 
     try:
         # Attach correlation attributes to the active OTel span so every pipeline
@@ -348,35 +368,59 @@ async def entrypoint(ctx: JobContext) -> None:
             if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
                 await lifecycle.answered(now_ms=int(time.time() * 1000))
 
-        boundary = build_phi_boundary(settings)
-        await boundary.open_session(session_id)
-
         # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
-        # plane). Fail-safe: bad/missing metadata falls back to the base persona.
+        # plane). Fail-safe: bad/missing metadata yields the no-op tweak.
         tweak = parse_persona_tweak(ctx.job.metadata if ctx.job is not None else None)
-        instructions = build_instructions(tweak)
-        greeting = resolve_greeting(tweak)
 
-        session = build_session(vad=ctx.proc.userdata.get("vad"))
-
-        # Live transcript publishing (Voice Lab opt-in via dispatch metadata; /calls unset).
-        transcript_redis: Redis | None = None
-        transcript_service: TranscriptService | None = None
-        if meta.get("publish_transcript"):
-            transcript_redis = create_redis(settings.redis_url)
-            transcript_service = TranscriptService(
-                RedisTranscriptStore(
-                    transcript_redis,
-                    ttl_seconds=settings.transcript_stream_ttl_seconds,
-                    end_grace_seconds=settings.transcript_end_grace_seconds,
-                )
+        # Compiled Call Plan (dispatcher opt-in via use_call_plan): the control plane
+        # staged it in Redis at dispatch. PLAN-ONLY — the compiled plan is the sole
+        # verification prompt source. If the plan can't be loaded/built, the call
+        # fails fast (hangs up) instead of running any generic script; it never runs
+        # a verification without a plan.
+        plan_service: CallPlanService | None = None
+        run_state: PlanRunStateService | None = None
+        controller: PlanRunController | None = None
+        if meta.get("use_call_plan"):
+            plan_redis = create_redis(settings.redis_url)
+            plan_service = CallPlanService(
+                RedisCallPlanStore(plan_redis, ttl_seconds=settings.call_plan_ttl_seconds)
             )
+            plan = await plan_service.get(room_name)
+            if plan is None:
+                logger.warning("use_call_plan set but no plan for %s — failing fast", room_name)
+            else:
+                run_state = PlanRunStateService(
+                    RedisPlanRunStateStore(plan_redis, ttl_seconds=settings.call_plan_ttl_seconds)
+                )
+                try:
+                    controller = PlanRunController(
+                        plan,
+                        room_name=room_name,
+                        run_state=run_state,
+                        # An explicit tenant greeting overrides the plan's first-task
+                        # intro; extra_instructions overlay every plan agent.
+                        greeting=tweak.greeting,
+                        extra_instructions=tweak.extra_instructions,
+                    )
+                except Exception:
+                    logger.exception(
+                        "call plan for %s failed to build a runtime — failing fast", room_name
+                    )
+        else:
+            logger.info("no use_call_plan for %s — voice-lab preview (plan-less)", room_name)
 
-        # Real-call envelope stream (dispatcher opt-in via publish_events): transcript
-        # turns + call_status frames for the /calls/{id}/events SSE. Reuses the
-        # transcript TTL settings — same lifecycle, different stream.
+        session = build_session(
+            vad=ctx.proc.userdata.get("vad"),
+            key_terms=controller.plan.stt_key_terms if controller is not None else None,
+        )
+
+        # THE call event stream: transcript turns + call_status frames, feeding the
+        # /calls/{id}/events SSE, the Voice-Lab SSE, the transcript finalizer, and the
+        # Observer. Written for the SSE opt-ins (publish_events / publish_transcript) AND
+        # unconditionally for every plan-backed call — the Observer tails it to extract
+        # answers, so a plan call must always populate vera:call-events:{room}, opt-in or not.
         call_stream: CallStreamService | None = None
-        if meta.get("publish_events"):
+        if meta.get("publish_events") or meta.get("publish_transcript") or controller is not None:
             call_stream_redis = create_redis(settings.redis_url)
             call_stream = CallStreamService(
                 RedisCallStreamStore(
@@ -386,19 +430,94 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             )
 
-        # One reordering emitter fanned out to every enabled sink — the barge-in reorder
-        # state machine lives once per job, not once per stream (see transcript_publisher).
+        # The Observer TAILS the call-event stream (with its OWN read client, so tearing
+        # down the write path at shutdown can't kill the reader) to extract answers from the
+        # live call. It routes turns per active task and does nothing during IVR/wrap-up, so
+        # it is inert until the conversation path begins. Started for a plan-backed canonical
+        # room; the controller gets the session so a rule fire can interrupt/redirect the bot.
+        if controller is not None and run_state is not None and bus is not None:
+            controller.attach_session(session)
+            observer_redis = create_redis(settings.redis_url)
+            # Out-of-pipeline extraction chain (Gemini primary → OpenAI fallback), the
+            # mandated seam for non-cascade LLM calls. thinking_budget=0 is pinned on a
+            # Gemini primary to keep extraction low-latency (ignored by the OpenAI fallback);
+            # a missing OPENAI_API_KEY safely degrades the chain to Gemini-only.
+            extract_primary = LLMSpec.parse(settings.observer_extract_primary_model)
+            if extract_primary.provider == "google":
+                extract_primary = replace(
+                    extract_primary, extra={"thinking_config": ThinkingConfig(thinking_budget=0)}
+                )
+            extract_llm = ResilientLLM(
+                extract_primary,
+                [LLMSpec.parse(s) for s in settings.observer_extract_fallback_models],
+                options=FallbackOptions(
+                    attempt_timeout=settings.observer_extract_attempt_timeout_seconds
+                ),
+                secrets=EnvSecretProvider(),
+            )
+            observer_manager = ObserverManager(
+                controller.plan,
+                controller=controller,
+                run_state=run_state,
+                bus=bus,
+                extractor=ResilientAnswerExtractor(extract_llm),
+                transcript=RedisCallStreamStore(
+                    observer_redis,
+                    ttl_seconds=settings.transcript_stream_ttl_seconds,
+                    end_grace_seconds=settings.transcript_end_grace_seconds,
+                ),
+                room_name=room_name,
+            )
+            observer_manager.start()
+
+        # Call-health observer (real /calls flow only: needs both the per-call
+        # event stream and the worker-event bus). An extra fan-out sink — it sees
+        # the same ordered turns as every other stream and never blocks them.
+        if call_stream is not None and bus is not None:
+            try:
+                health_observer = build_health_observer(
+                    session,
+                    room_name=room_name,
+                    settings=settings,
+                    call_stream=call_stream,
+                    bus=bus,
+                )
+            except Exception as exc:
+                # A static misconfiguration (bad model selector, etc.) must degrade to
+                # "no observer", never break call setup. Type name only (PHI rule).
+                logger.warning(
+                    "build_health_observer failed for %s (%s); continuing without an observer",
+                    room_name,
+                    type(exc).__name__,
+                )
+
+        # One reordering emitter driving the stream — the barge-in reorder state machine
+        # lives once per job (see transcript_publisher). Kept as a fan-out seam so a second
+        # sink can be added without reshaping the emitter wiring.
+        # (The Observer is NOT a sink — it reads the stream this sink writes.)
         sinks: list[TurnPublisher] = [
-            svc for svc in (transcript_service, call_stream) if svc is not None
+            svc for svc in (call_stream, health_observer) if svc is not None
         ]
         turn_sink = _fan_out_sink(sinks)
         turn_emitter: ReorderingEmitter | None = None
         if turn_sink is not None:
             turn_emitter = attach_transcript_publisher(session, turn_sink, room_name)
 
+        # After a supervisor takes over, the bot's STT is muted; a dedicated per-track
+        # STT transcribes the caller + supervisor so the live transcript keeps going.
         if call_stream is not None and speaker is not None:
             # the callee already answered during wait_for_speaker
             await call_stream.publish_status(room_name, "active", ts=int(time.time() * 1000))
+
+        takeover_transcriber: TakeoverTranscriber | None = None
+        if turn_sink is not None and speaker is not None:
+            takeover_transcriber = TakeoverTranscriber(
+                ctx.room,
+                turn_sink,
+                room_name,
+                stt_factory=lambda: deepgram.STT(model="nova-3"),
+                callee_identity=speaker.identity,
+            )
 
         async def _flush_turn_emitter() -> None:
             # Order is load-bearing: flush held turns BEFORE any service's end(). end()
@@ -409,18 +528,6 @@ async def entrypoint(ctx: JobContext) -> None:
                     await turn_emitter.aclose()
                 except Exception:  # best-effort; never block shutdown
                     logger.exception("failed to flush turn emitter for %s", room_name)
-
-        async def _end_transcript_stream() -> None:
-            if transcript_service is not None:
-                try:
-                    await transcript_service.end(room_name)
-                except Exception:  # best-effort; never block shutdown
-                    logger.exception("failed to mark transcript ended for %s", room_name)
-            if transcript_redis is not None:
-                try:
-                    await transcript_redis.aclose()
-                except Exception:
-                    logger.exception("failed to close transcript redis for %s", room_name)
 
         async def _end_call_stream() -> None:
             if call_stream is not None:
@@ -435,22 +542,87 @@ async def entrypoint(ctx: JobContext) -> None:
                 except Exception:
                     logger.exception("failed to close call stream redis for %s", room_name)
 
-        async def _on_shutdown() -> None:
-            # Sequential, spec-pinned order: flush the shared emitter once, then
-            # transcript-stream teardown, then call-stream teardown, then the PHI boundary.
-            # Each step inside the helpers is best-effort (own try/except), so a failure
-            # never skips the rest.
-            await _flush_turn_emitter()
-            await _end_transcript_stream()
-            await _end_call_stream()
-            await boundary.close_session(session_id)
+        async def _end_observer() -> None:
+            # Runs AFTER _end_call_stream (so the tail drains through the end sentinel it
+            # writes — without that the drain would burn its full timeout and lose trailing
+            # turns) and BEFORE the plan-run state is cleared (its final drain writes
+            # record_answer). Safe against _end_call_stream closing its Redis client: the
+            # Observer reads on its own.
+            if observer_manager is not None:
+                try:
+                    await observer_manager.aclose()
+                except Exception:  # best-effort; never block shutdown
+                    logger.exception("failed to close observer for %s", room_name)
+            if observer_redis is not None:
+                try:
+                    await observer_redis.aclose()
+                except Exception:
+                    logger.exception("failed to close observer redis for %s", room_name)
+            if extract_llm is not None:
+                try:
+                    await extract_llm.aclose()  # close the provider chain's aiohttp sessions
+                except Exception:
+                    logger.exception("failed to close extract llm for %s", room_name)
 
-            # Last: signal call end (the consumer completes the form and refills the
-            # slot), then release the events client. A hard worker crash skips this —
-            # the control plane's pipeline sweeper reconciles that case (room gone +
-            # call still non-terminal → failed).
-            if lifecycle is not None:
-                await lifecycle.ended(now_ms=int(time.time() * 1000))
+        async def _end_plan_run() -> None:
+            # Best-effort cleanup of the plan blob + run state; the rolling TTL is
+            # the backstop when this is skipped (hard crash) or Redis is down.
+            if controller is not None:
+                with contextlib.suppress(Exception):
+                    await controller.drain_cursor_writes()
+            if run_state is not None:
+                try:
+                    await run_state.clear(room_name)
+                except Exception:
+                    logger.exception("failed to clear plan run state for %s", room_name)
+            if plan_service is not None:
+                try:
+                    await plan_service.clear(room_name)
+                except Exception:
+                    logger.exception("failed to clear call plan for %s", room_name)
+            if plan_redis is not None:
+                try:
+                    await plan_redis.aclose()
+                except Exception:
+                    logger.exception("failed to close plan redis for %s", room_name)
+
+        async def _on_shutdown() -> None:
+            # Sequential, spec-pinned order: flush the shared emitter once, then the takeover
+            # transcriber (so its turns land before any sentinel), then call-stream teardown
+            # (which WRITES the end sentinel), then the Observer — its tail drains through
+            # that sentinel, so it must come after — then the plan run's Redis keys. Each step
+            # inside the helpers is best-effort (own try/except), so a failure never skips the
+            # rest.
+            await _flush_turn_emitter()
+            if takeover_transcriber is not None:
+                try:
+                    await takeover_transcriber.aclose()  # before end(): flush its turns first
+                except Exception:
+                    logger.exception("failed to close takeover transcriber for %s", room_name)
+            if health_observer is not None:
+                try:
+                    await health_observer.aclose()  # before the call stream ends
+                except Exception:
+                    logger.exception("failed to close health observer for %s", room_name)
+            await _end_call_stream()
+            await _end_observer()
+            await _end_plan_run()
+
+            # Last: signal the terminal event. Normally call.ended (the consumer
+            # completes the form and refills the slot). But when the dispatcher
+            # staged a plan (use_call_plan) yet the worker couldn't build one, the
+            # call failed fast without a session — that's an infra fault (plan
+            # missing from Redis / build failure), not a completed verification.
+            # Emit call.failed instead so the control plane RE-DISPATCHES it
+            # (re-staging the plan, which self-heals) rather than banking a
+            # completed-with-no-answers form.
+            # A hard worker crash skips this — the pipeline sweeper reconciles that.
+            now_ms = int(time.time() * 1000)
+            if meta.get("use_call_plan") and controller is None and bus is not None:
+                logger.warning("no usable plan for %s — emitting call.failed", room_name)
+                await _emit_call_failed(bus, room_name, CallFailureReason.FAILED, now_ms=now_ms)
+            elif lifecycle is not None:
+                await lifecycle.ended(now_ms=now_ms)
             if events_redis is not None:
                 try:
                     await events_redis.aclose()
@@ -469,6 +641,22 @@ async def entrypoint(ctx: JobContext) -> None:
         if call_stream_redis is not None:
             with contextlib.suppress(Exception):
                 await call_stream_redis.aclose()
+        if plan_redis is not None:
+            with contextlib.suppress(Exception):
+                await plan_redis.aclose()
+        if observer_manager is not None:
+            # Cancel/drain the tail task BEFORE closing the client it reads from.
+            with contextlib.suppress(Exception):
+                await observer_manager.aclose()
+        if observer_redis is not None:
+            with contextlib.suppress(Exception):
+                await observer_redis.aclose()
+        if extract_llm is not None:
+            with contextlib.suppress(Exception):
+                await extract_llm.aclose()
+        if health_observer is not None:
+            with contextlib.suppress(Exception):
+                await health_observer.aclose()
         raise
     # record=False disables livekit-agents session recording. Left unset it defers to the
     # server's enable_recording flag, which uploads a session report — including call AUDIO
@@ -477,21 +665,48 @@ async def entrypoint(ctx: JobContext) -> None:
     # observability is the self-hosted Langfuse/OTel pipeline (configure_observability), which
     # is independent of this. Disabling it also removes the recording byte-stream sends that
     # error with "engine is closed" as the room is torn down.
+    # A REAL call that expected a plan (use_call_plan) but has no controller FAILS
+    # FAST — real calls never dispatch plan-less (the dispatcher skips a form whose
+    # plan can't be prepared), so this is a Redis-loss race / build failure. Return
+    # without starting a session; the shutdown callback emits call.failed so the
+    # control plane re-dispatches it (self-heal).
+    if controller is None and meta.get("use_call_plan"):
+        logger.warning("no usable plan for %s — failing fast without a session", room_name)
+        return
+    # build_agent picks the agent: the plan chain when a controller is present, or a
+    # conversational VoiceLabAgent for a Voice Lab preview (no plan) — see its docstring.
+    agent: Agent = build_agent(
+        meta,
+        controller=controller,
+        tweak=tweak,
+        # A successful IVR keypad press rides the live transcript as a dtmf turn
+        # (evidence of the action); rooms with no stream enabled report nowhere.
+        on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
+    )
     await session.start(
-        agent=build_agent(
-            meta,
-            boundary=boundary,
-            session_id=session_id,
-            instructions=instructions,
-            greeting=greeting,
-            # A successful IVR keypad press rides the live transcript as a dtmf turn
-            # (evidence of the action); rooms with no stream enabled report nowhere.
-            on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
-        ),
+        agent=agent,
         room=ctx.room,
         room_input_options=build_room_input_options(speaker.identity if speaker else NOT_GIVEN),
         record=False,
     )
+
+    # Supervisor takeover: the first time a participant carries the intervene mode
+    # attribute, silence the agent for the rest of the call (one-way, never resumes)
+    # and start transcribing the human conversation.
+    takeover_ctl = AgentTakeoverController(
+        session,
+        on_engage=takeover_transcriber.start if takeover_transcriber is not None else None,
+    )
+
+    def _check_takeover(*_args: object) -> None:
+        if intervener_present(
+            p.attributes.get(PARTICIPANT_MODE_ATTR) for p in ctx.room.remote_participants.values()
+        ):
+            takeover_ctl.engage()
+
+    ctx.room.on("participant_connected", _check_takeover)
+    ctx.room.on("participant_attributes_changed", _check_takeover)
+    _check_takeover()  # an intervener may already be present
 
 
 def build_worker_options() -> WorkerOptions:

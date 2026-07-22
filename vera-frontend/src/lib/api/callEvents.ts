@@ -10,8 +10,9 @@ import { getToken } from "@/lib/auth/storage"
 
 export type CallStreamEvent = { type: string; data: Record<string, unknown>; ts: number }
 
-/** Who acted (the constrained actor set — drives which side a turn renders on). */
-export type TranscriptTurnSource = "rep" | "bot"
+/** Who acted (the constrained actor set — drives which side a turn renders on).
+ *  "supervisor" is a human who took over the call (transcribed post-intervene). */
+export type TranscriptTurnSource = "rep" | "bot" | "supervisor"
 /** What kind of turn it was ("dtmf" = a keypad press whose text is the digits sent). */
 export type TranscriptTurnRole = "user" | "agent" | "dtmf"
 export type TranscriptTurn = {
@@ -32,6 +33,10 @@ function isTurnRole(role: unknown): role is TranscriptTurnRole {
   return role === "user" || role === "agent" || role === "dtmf"
 }
 
+function isTurnSource(source: unknown): source is TranscriptTurnSource {
+  return source === "rep" || source === "bot" || source === "supervisor"
+}
+
 /** Narrow an envelope to a transcript turn; null for other/malformed event types. */
 export function asTranscriptTurn(e: CallStreamEvent): TranscriptTurn | null {
   if (e.type !== "transcript") return null
@@ -39,7 +44,7 @@ export function asTranscriptTurn(e: CallStreamEvent): TranscriptTurn | null {
   if (!isTurnRole(role) || typeof text !== "string") return null
   return {
     role,
-    source: source === "rep" || source === "bot" ? source : SOURCE_BY_ROLE[role],
+    source: isTurnSource(source) ? source : SOURCE_BY_ROLE[role],
     text,
     ts: e.ts,
   }
@@ -50,6 +55,25 @@ export function asCallStatus(e: CallStreamEvent): string | null {
   if (e.type !== "call_status") return null
   const { status } = e.data as { status?: unknown }
   return typeof status === "string" ? status : null
+}
+
+/** One call-health-observer assessment (the "health" envelope). */
+export type CallHealth = {
+  /** 0-100; higher is healthier. */
+  score: number
+  /** "none" (healthy) or an intervention category (conversation_loop, ...). */
+  flag: string
+  /** LLM's one-line justification (PHI — session-scoped state only). */
+  reason: string | null
+  ts: number
+}
+
+/** Narrow an envelope to a health assessment; null for other/malformed types. */
+export function asCallHealth(e: CallStreamEvent): CallHealth | null {
+  if (e.type !== "health") return null
+  const { score, flag, reason } = e.data as { score?: unknown; flag?: unknown; reason?: unknown }
+  if (typeof score !== "number" || typeof flag !== "string") return null
+  return { score, flag, reason: typeof reason === "string" ? reason : null, ts: e.ts }
 }
 
 // The worker publishes "ended" on its live stream; the DB replay of an already-terminal

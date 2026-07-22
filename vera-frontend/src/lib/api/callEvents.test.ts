@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 vi.mock("@/lib/auth/storage", () => ({ getToken: () => "tok" }))
 
 import {
+  asCallHealth,
   asCallStatus,
   asTranscriptTurn,
   isTerminalCallStatus,
@@ -184,5 +185,35 @@ describe("terminalStatusMessage", () => {
   it("reads as a normal ending otherwise", () => {
     expect(terminalStatusMessage("ended")).toBe("Call ended — no longer live.")
     expect(terminalStatusMessage("completed")).toBe("Call ended — no longer live.")
+  })
+})
+
+describe("asCallHealth", () => {
+  it("narrows a health envelope", () => {
+    const e: CallStreamEvent = {
+      type: "health",
+      data: { score: 35, flag: "conversation_loop", reason: "loop detected" },
+      ts: 9,
+    }
+    expect(asCallHealth(e)).toEqual({
+      score: 35,
+      flag: "conversation_loop",
+      reason: "loop detected",
+      ts: 9,
+    })
+  })
+
+  it("returns null for other or malformed envelopes", () => {
+    expect(asCallHealth({ type: "transcript", data: { text: "x" }, ts: 1 })).toBeNull()
+    expect(asCallHealth({ type: "health", data: { flag: "other" }, ts: 1 })).toBeNull()
+  })
+
+  it("tolerates a missing reason", () => {
+    expect(asCallHealth({ type: "health", data: { score: 80, flag: "none" }, ts: 2 })).toEqual({
+      score: 80,
+      flag: "none",
+      reason: null,
+      ts: 2,
+    })
   })
 })

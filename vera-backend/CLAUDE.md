@@ -12,8 +12,17 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
 
 ## Build, test & layout (`just` runs everything; see README.md for detail)
 
-- `just check` — the full CI gate: `lint` (ruff) + `typecheck` (mypy --strict) + `test` (pytest).
-  Run it before claiming work is done.
+- `just check` — the full CI gate: `lint` (ruff **check + format --check**) + `typecheck`
+  (mypy --strict) + `test` (pytest). Run it before claiming work is done, and re-run it after
+  ANY later commit (a fixup, an appended test, a formatting pass) — the last run must be on the
+  exact tree you push. **Run `just check` verbatim — never a hand-picked subset of its steps.**
+  Partial reconstructions silently drop steps: `ruff check` (lint) and `ruff format --check`
+  (formatting) are DIFFERENT gates, and running only the former is exactly how a
+  formatting-only failure reached dev CI post-merge (PR #105 → hotfix PR #107). If a gate step
+  fails on something you believe predates your branch: prove it (run the same check on the
+  merge-base), verify your own changed files pass that check in isolation
+  (`git diff --name-only <base>...HEAD | xargs uv run ruff format --check`), and say so in the
+  PR body — never wave a red step through as "pre-existing" on say-so.
 - **After every implementation, run the `/simplify` skill** on the change (reuse /
   simplification / efficiency / altitude cleanup — quality only, not bug-hunting), then
   re-run `just check`, before claiming done or committing. Skip only for truly trivial edits
@@ -80,29 +89,31 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   window elapses with no new entries — they do NOT return an empty result. A tailing consumer MUST
   catch `TimeoutError as RedisTimeoutError` around the blocking read and treat it as a normal idle
   tick; otherwise a broad `except RedisError` miscatches every idle poll as an error (traceback +
-  back-off log spam every window). Copy the canonical handling in `RedisTranscriptStore.read`
-  (`vera_core/transcript.py`) and `control_plane/worker_events.py::_read_once`.
-- uv workspace: `vera_core` (shared core) + `phi_codec` (vendored) → consumed by `control_plane`
-  (FastAPI, owns Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
-- **Vendored `packages/phi_codec` is excluded from ruff & mypy** — don't lint/retype it; integrate
-  at the `vera_core.phi` boundary only.
+  back-off log spam every window). Copy the canonical handling in `RedisCallStreamStore.read`
+  (`vera_core/call_stream.py`) and `control_plane/worker_events.py::_read_once`.
+- uv workspace: `vera_core` (shared core) → consumed by `control_plane` (FastAPI, owns
+  Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
 
 ## Prime directive
 
 PHI never leaves the trust boundary in plaintext. It never lands in a log, trace,
-span, URL, path, query string, or cache. It never reaches the LLM as raw values, and
-never reaches the browser as ciphertext or with a key. **A smaller boundary is a safer
-boundary. When you cannot tell whether something is PHI, treat it as PHI.**
+span, URL, path, query string, or cache. It reaches the browser only inside an
+authorized, authenticated session, and never as ciphertext with a key. Inside the
+boundary PHI does flow in plaintext (every hop is BAA-covered — see Trust boundary).
+**A smaller boundary is a safer boundary. When you cannot tell whether something is
+PHI, treat it as PHI.**
 
 ## Trust boundary
 
 **INSIDE** (BAA-covered — PHI may flow): FastAPI control plane, agent worker, Cloud SQL
 Postgres, Memorystore Redis, Deepgram (STT), Cartesia (TTS), Twilio (SIP), LiveKit
-(self-hosted OSS — never LiveKit Cloud), Vertex AI Gemini (LLM), self-hosted Langfuse on GKE.
+(self-hosted OSS — never LiveKit Cloud), Vertex AI Gemini (LLM), OpenAI API (LLM — BAA signed 2026-07; fallback tier for out-of-pipeline calls via vera_core.llm), self-hosted Langfuse on GKE.
 
-**De-identification point:** between STT output and LLM input. Raw identifiers in the
-transcript are swapped for `[[TYPE_N]]` tokens before any LLM sees them and re-identified
-only at the TTS / payer-tool seams (`vera_core.phi`). Structured PHI at rest is protected by
+**No in-pipeline de-identification.** The former STT→LLM tokenization wall (`vera_core.phi`,
+`[[TYPE_N]]` tokens) was **removed (2026-07-13)**: every live-pipeline hop (Deepgram, Vertex
+Gemini, Cartesia, Twilio, LiveKit) sits inside the BAA-covered boundary above, so the
+transcript reaches the LLM as raw values. De-identification now applies only to what *leaves*
+the boundary — logs, traces, spans (see Bright lines). Structured PHI at rest is protected by
 Google **CMEK** at the storage layer (Cloud SQL + Memorystore); application-level envelope
 encryption of PHI columns is **deferred to a later decision** — do not introduce it.
 
@@ -115,10 +126,13 @@ any analytics / observability / error-tracking SaaS.
 - ⛔ NEVER log, print, trace, or attach to a Langfuse span: plaintext PHI.
 - ⛔ NEVER put PHI in a URL, path, query string, route template, or Referer.
 - NEVER persist PHI in browser storage (localStorage / sessionStorage / IndexedDB / cookies).
-- NEVER put raw PHI in an LLM prompt — tokenize at the STT→LLM boundary (`vera_core.phi.redact`).
-- NEVER store **plaintext** PHI in Redis. The session vault holds raw values **encrypted at
-  rest**, keyed per session and wiped at call end; everything else caches tokens / opaque
-  reference IDs, never values.
+- NEVER send PHI to an LLM outside the BAA boundary. The BAA-covered LLMs are Vertex AI Gemini
+  (the live pipeline's only LLM) and the OpenAI API (fallback tier for out-of-pipeline calls, via
+  vera_core.llm only); raw transcript PHI reaching them is expected (no tokenization) — but never
+  route a prompt or PHI to any other model or API.
+- NEVER write PHI to a Redis outside the BAA boundary. Memorystore is in-boundary and
+  CMEK-protected at rest, so PHI may live there (the call-plan blob and live transcript hold raw
+  intake / transcript values); per-call keys are wiped or TTL-expired at call end.
 - NEVER use `livekit.agents.inference.*` (Cloud-only — we self-host LiveKit OSS): it streams
   call audio off-box to `agent-gateway.livekit.cloud`. Keep audio/turn models local/plugin —
   e.g. pin `interruption.mode="vad"`, never the auto-selected adaptive detector (`cascade.py`).

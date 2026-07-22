@@ -178,7 +178,7 @@ def treatment_group(
     section: str,
     key: str,
     title: str,
-    icd10: str,
+    icd10: str | None,
     cpt_codes: list[str],
     group_ask: str,
 ) -> Group:
@@ -193,7 +193,7 @@ def treatment_group(
         type="group",
         title=title,
         applicable_when=ref("infertility_covered"),
-        codes=Codes(icd10=[icd10]),
+        codes=Codes(icd10=[icd10] if icd10 else None),
         prompt=ask(group_ask),
         fields=fields,
     )

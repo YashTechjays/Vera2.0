@@ -8,8 +8,14 @@ import pytest
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import (
     InvalidIntakeValue,
+    date_leaf_paths,
     iter_leaf_answers,
     missing_required,
+    normalize_date_answers,
+    normalize_date_value,
+    normalize_phone_answers,
+    normalize_phone_prefix,
+    phone_promoted_paths,
     promote_columns,
     required_intake_fields,
     resolve_path,
@@ -65,6 +71,7 @@ V2_SCHEMA = {
         "insurance_provider": "sections.patient_information.patient_name",
         "insurance_provider_phone_number": "sections.patient_information.patient_name",
     },
+    "rep_call_reference_number_field": "sections.patient_information.patient_name",
     "sections": {
         "patient_information": {
             "title": "Patient Information",
@@ -276,19 +283,39 @@ _CANONICAL_PROMOTED: dict[str, str] = {
 }
 
 
-def _doc_with_promoted_fields(overrides: dict[str, str] | None = None) -> FormSchemaDoc:
+def _doc_with_promoted_fields(
+    overrides: dict[str, str] | None = None,
+    leaf_types: dict[str, str] | None = None,
+    extra_leaves: dict[str, dict[str, Any]] | None = None,
+) -> FormSchemaDoc:
     """A minimal v2 document promoting all eight columns (PromotedFields is total).
-    `overrides` repoints individual columns; system_fields (required for dsl.py
-    validation) exactly mirror the merged map, and every referenced path gets a
-    context text leaf."""
+    `overrides` repoints individual columns; `leaf_types` repoints an individual
+    promoted column's leaf `type` (default "text") — used to exercise type-specific
+    promotion logic (e.g. phone). `extra_leaves` adds NON-promoted leaves at
+    additional root-anchored paths (path -> leaf dict, e.g.
+    "sections.patient_information.spouse_partner_dob" -> {"type": "date", ...}) —
+    used to prove a behavior is keyed on `leaf.type`, not promoted_fields
+    membership. system_fields (required for dsl.py validation) exactly mirror the
+    merged promoted map, and every referenced path gets a context leaf."""
     promoted_fields = {**_CANONICAL_PROMOTED, **(overrides or {})}
+    leaf_types = leaf_types or {}
     sections: dict[str, Any] = {}
-    for path in promoted_fields.values():
+    for column, path in promoted_fields.items():
         _, section_key, field_key = path.split(".")
         sections.setdefault(
             section_key,
             {"title": section_key, "role": "context", "fields": {}},
-        )["fields"][field_key] = {"type": "text", "title": field_key, "role": "context"}
+        )["fields"][field_key] = {
+            "type": leaf_types.get(column, "text"),
+            "title": field_key,
+            "role": "context",
+        }
+    for path, leaf in (extra_leaves or {}).items():
+        _, section_key, field_key = path.split(".")
+        sections.setdefault(
+            section_key,
+            {"title": section_key, "role": "context", "fields": {}},
+        )["fields"][field_key] = leaf
     return FormSchemaDoc.model_validate(
         {
             "dsl_version": "2.1",
@@ -296,6 +323,7 @@ def _doc_with_promoted_fields(overrides: dict[str, str] | None = None) -> FormSc
             "insurance_type": "test_type",
             "system_fields": dict(promoted_fields),
             "promoted_fields": promoted_fields,
+            "rep_call_reference_number_field": promoted_fields["patient_name"],
             "sections": sections,
             # All fixture sections are role="context" (no voice collection needed for
             # these tests), so none may be assigned to a task (dsl.py: "only collect
@@ -394,6 +422,7 @@ def _doc_with_date_format(date_format: str) -> FormSchemaDoc:
             "insurance_type": "test_type",
             "system_fields": {"patient_dob": dob_path, "filler": filler_path},
             "promoted_fields": promoted_fields,
+            "rep_call_reference_number_field": filler_path,
             "sections": {
                 "patient_information": {
                     "title": "Patient Information",
@@ -437,3 +466,181 @@ class TestPromoteColumnsDateFormatFallback:
         with pytest.raises(InvalidIntakeValue) as exc:
             promote_columns(lambda p: resolve_path(payload, p), doc)
         assert exc.value.field_path == "sections.patient_information.patient_dob"
+
+
+class TestNormalizePhonePrefix:
+    def test_adds_plus_when_missing(self) -> None:
+        assert normalize_phone_prefix("15550001234") == "+15550001234"
+
+    def test_leaves_existing_plus_untouched(self) -> None:
+        assert normalize_phone_prefix("+15550001234") == "+15550001234"
+
+    def test_trims_surrounding_whitespace_before_checking(self) -> None:
+        assert normalize_phone_prefix("  15550001234  ") == "+15550001234"
+
+    def test_does_not_touch_internal_separators(self) -> None:
+        # Adding '+' is the only reformatting — a value with internal spaces/dashes
+        # still isn't E.164-shaped, and that's left to the validation step.
+        assert normalize_phone_prefix("555-000-1234") == "+555-000-1234"
+
+    def test_blank_string_passes_through_untouched(self) -> None:
+        assert normalize_phone_prefix("") == ""
+        assert normalize_phone_prefix("   ") == "   "
+
+    def test_non_string_passes_through_untouched(self) -> None:
+        assert normalize_phone_prefix(None) is None
+
+
+class TestPhonePromotedPaths:
+    def test_finds_the_phone_typed_promoted_column(self) -> None:
+        doc = _doc_with_promoted_fields(leaf_types={"insurance_provider_phone_number": "phone"})
+        assert phone_promoted_paths(doc) == {
+            "sections.insurance_reference_information.insurance_phone_number"
+        }
+
+    def test_empty_when_no_promoted_column_is_phone_typed(self) -> None:
+        assert phone_promoted_paths(_FULL_DOC) == set()
+
+
+class TestNormalizePhoneAnswers:
+    def test_prefixes_only_the_phone_promoted_path(self) -> None:
+        doc = _doc_with_promoted_fields(leaf_types={"insurance_provider_phone_number": "phone"})
+        answers = [
+            ("sections.insurance_reference_information.insurance_phone_number", "15550001234"),
+            ("sections.patient_information.patient_name", "Jane Doe"),
+        ]
+        assert normalize_phone_answers(answers, doc) == [
+            ("sections.insurance_reference_information.insurance_phone_number", "+15550001234"),
+            ("sections.patient_information.patient_name", "Jane Doe"),
+        ]
+
+    def test_no_op_when_nothing_is_phone_typed(self) -> None:
+        answers = [("sections.patient_information.patient_name", "Jane Doe")]
+        assert normalize_phone_answers(answers, _FULL_DOC) == answers
+
+
+class TestPromoteColumnsPhone:
+    """`insurance_provider_phone_number` is handled by the leaf's declared `type ==
+    "phone"`, not by column name — dynamic per schema, matching every real IBV catalog
+    leaf (`ibv_standard.py`'s `insurance_phone_number` is `type="phone"`). `_FULL_DOC`
+    types every promoted leaf "text", so `TestPromoteColumns` above continues to
+    exercise the unchanged generic path; these tests use a doc that actually types the
+    column "phone"."""
+
+    def test_missing_plus_gets_prefixed_and_accepted(self) -> None:
+        doc = _doc_with_promoted_fields(leaf_types={"insurance_provider_phone_number": "phone"})
+        payload = {"insurance_reference_information": {"insurance_phone_number": "15550001234"}}
+        promoted = promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert promoted.insurance_provider_phone_number == "+15550001234"
+
+    def test_already_prefixed_valid_number_is_untouched(self) -> None:
+        doc = _doc_with_promoted_fields(leaf_types={"insurance_provider_phone_number": "phone"})
+        payload = {"insurance_reference_information": {"insurance_phone_number": "+15550001234"}}
+        promoted = promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert promoted.insurance_provider_phone_number == "+15550001234"
+
+    def test_missing_plus_and_still_invalid_raises(self) -> None:
+        doc = _doc_with_promoted_fields(leaf_types={"insurance_provider_phone_number": "phone"})
+        payload = {"insurance_reference_information": {"insurance_phone_number": "555 000 1234"}}
+        with pytest.raises(InvalidIntakeValue) as exc:
+            promote_columns(lambda p: resolve_path(payload, p), doc)
+        assert (
+            exc.value.field_path
+            == "sections.insurance_reference_information.insurance_phone_number"
+        )
+
+    def test_already_prefixed_but_invalid_raises(self) -> None:
+        doc = _doc_with_promoted_fields(leaf_types={"insurance_provider_phone_number": "phone"})
+        payload = {"insurance_reference_information": {"insurance_phone_number": "+1 555 0100"}}
+        with pytest.raises(InvalidIntakeValue):
+            promote_columns(lambda p: resolve_path(payload, p), doc)
+
+    def test_absent_value_stays_none_with_no_validation_error(self) -> None:
+        doc = _doc_with_promoted_fields(leaf_types={"insurance_provider_phone_number": "phone"})
+        promoted = promote_columns(lambda p: None, doc)
+        assert promoted.insurance_provider_phone_number is None
+
+    def test_non_phone_typed_column_keeps_the_old_whitespace_only_behavior(self) -> None:
+        # Regression guard: proves the branch is keyed on leaf.type, not the column
+        # name — _FULL_DOC never types this column "phone".
+        payload = {"insurance_reference_information": {"insurance_phone_number": " +1 555 0100 "}}
+        promoted = promote_columns(lambda p: resolve_path(payload, p), _FULL_DOC)
+        assert promoted.insurance_provider_phone_number == "+1 555 0100"
+
+
+_SPOUSE_DOB_PATH = "sections.patient_information.spouse_partner_dob"
+
+
+def _spouse_dob_leaf(date_format: str | None) -> dict[str, Any]:
+    leaf: dict[str, Any] = {"type": "date", "title": "Spouse DOB", "role": "context"}
+    if date_format is not None:
+        leaf["validation"] = {"date_format": date_format}
+    return leaf
+
+
+class TestDateLeafPaths:
+    def test_finds_every_date_typed_leaf_with_its_declared_format(self) -> None:
+        doc = _doc_with_promoted_fields(
+            leaf_types={"patient_dob": "date"},
+            extra_leaves={_SPOUSE_DOB_PATH: _spouse_dob_leaf("M/D/YYYY")},
+        )
+        assert date_leaf_paths(doc) == {
+            "sections.patient_information.patient_dob": None,
+            _SPOUSE_DOB_PATH: "M/D/YYYY",
+        }
+
+    def test_empty_when_nothing_is_date_typed(self) -> None:
+        assert date_leaf_paths(_FULL_DOC) == {}
+
+
+class TestNormalizeDateValue:
+    def test_reformats_iso_input_to_the_declared_format(self) -> None:
+        assert normalize_date_value("1999-12-04", "path", "M/D/YYYY") == "12/4/1999"
+
+    def test_reformats_declared_format_input_to_itself(self) -> None:
+        assert normalize_date_value("12/4/1999", "path", "M/D/YYYY") == "12/4/1999"
+
+    def test_pads_to_the_declared_format_width(self) -> None:
+        assert normalize_date_value("1999-12-04", "path", "MM/DD/YYYY") == "12/04/1999"
+
+    def test_falls_back_to_iso_when_the_leaf_declares_no_format(self) -> None:
+        assert normalize_date_value("1999-12-04", "path", None) == "1999-12-04"
+
+    def test_blank_string_passes_through_untouched(self) -> None:
+        assert normalize_date_value("", "path", "M/D/YYYY") == ""
+
+    def test_none_passes_through_untouched(self) -> None:
+        assert normalize_date_value(None, "path", "M/D/YYYY") is None
+
+    def test_raises_on_an_unparseable_value(self) -> None:
+        with pytest.raises(InvalidIntakeValue) as exc:
+            normalize_date_value("not-a-date", "sections.a.b", "M/D/YYYY")
+        assert exc.value.field_path == "sections.a.b"
+
+
+class TestNormalizeDateAnswers:
+    def test_reformats_only_date_typed_paths(self) -> None:
+        doc = _doc_with_promoted_fields(
+            extra_leaves={_SPOUSE_DOB_PATH: _spouse_dob_leaf("M/D/YYYY")}
+        )
+        answers = [
+            (_SPOUSE_DOB_PATH, "1999-12-04"),
+            ("sections.patient_information.patient_name", "Jane Doe"),
+        ]
+        assert normalize_date_answers(answers, doc) == [
+            (_SPOUSE_DOB_PATH, "12/4/1999"),
+            ("sections.patient_information.patient_name", "Jane Doe"),
+        ]
+
+    def test_no_op_when_nothing_is_date_typed(self) -> None:
+        answers = [("sections.patient_information.patient_name", "Jane Doe")]
+        assert normalize_date_answers(answers, _FULL_DOC) == answers
+
+    def test_raises_with_the_offending_path(self) -> None:
+        doc = _doc_with_promoted_fields(
+            extra_leaves={_SPOUSE_DOB_PATH: _spouse_dob_leaf("M/D/YYYY")}
+        )
+        answers = [(_SPOUSE_DOB_PATH, "not-a-date")]
+        with pytest.raises(InvalidIntakeValue) as exc:
+            normalize_date_answers(answers, doc)
+        assert exc.value.field_path == _SPOUSE_DOB_PATH

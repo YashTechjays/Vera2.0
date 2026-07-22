@@ -1,30 +1,35 @@
-# vera_core — PHI codec, crypto, RLS, audit, observability (scoped)
+# vera_core — crypto, RLS, audit, observability (scoped)
 
 Inherits the repo root `vera-backend/CLAUDE.md`. This is the security-critical core;
-changes here carry the highest blast radius in the repo. Vendored `packages/phi_codec`
-is upstream — do not rewrite it; integrate at the `vera_core.phi` boundary.
+changes here carry the highest blast radius in the repo.
 
-## PHI tokenization wall (the voice pipeline)
+## No PHI tokenization (the voice pipeline)
 
-`vera_core.phi.PHIBoundary` over `phi_codec`. Three crossings, and only three:
-
-- `redact(session, text)` — STT text → `[[TYPE_N]]` tokens, **before** the LLM. Every
-  transcript crosses here first; the LLM never sees raw identifiers.
-- `hydrate_for_speech(session, text)` — LLM text → raw, before TTS. **FAIL-SAFE**: an
-  unknown token becomes a neutral phrase ("that information"), logged + audited; the call
-  continues and nothing leaks.
-- `hydrate_raw(session, args)` — LLM tool args → raw, before a payer connector.
-  **STRICT / FAIL-CLOSED**: any unresolved token raises `UnresolvedPHITokenError` and is
-  audited — a wrong identifier must never reach a payer API.
-
-The vault is session-scoped; `close_session()` wipes it at call end — raw PHI does not
-outlive the call. Raw values live encrypted at rest only (`phi_codec.vault.crypto`); never
-persist them in plaintext.
+The `vera_core.phi` tokenization wall (`PHIBoundary` over `phi_codec`; the `redact` /
+`hydrate_for_speech` / `hydrate_raw` crossings and the session vault) was **removed on
+2026-07-13**, along with the vendored `phi_codec` package. PHI now flows in **plaintext**
+through the live pipeline — every hop (Deepgram, Vertex Gemini, Cartesia, Twilio, LiveKit)
+is inside the BAA-covered trust boundary (repo-root `CLAUDE.md`). Do not reintroduce a
+codec/boundary here without a compliance decision. De-identification survives only for what
+LEAVES the boundary — logs, traces, spans (see Observability below).
 
 **PHI at rest:** structured PHI in Postgres/Redis relies on Google **CMEK** at the storage
 layer (Cloud SQL + Memorystore). Application-level column envelope encryption (`protect` /
 `reveal`, `*_ct` columns) is **deferred to a later decision** — do not introduce it here
 until that decision is made.
+
+## Out-of-pipeline LLM calls go through `vera_core.llm.ResilientLLM` — always
+
+Any LLM call outside the live voice cascade (summaries, analytics, extraction,
+post-call processing) MUST be made through `vera_core.llm.ResilientLLM` with
+`LLMSpec` provider/model selectors — never by instantiating a provider SDK or a
+LiveKit plugin LLM client directly at a call site. ResilientLLM wraps
+livekit-agents' FallbackAdapter (ordered provider chain, per-attempt timeout,
+retries) and is the single place provider construction, secret resolution
+(`OPENAI_API_KEY` via SecretProvider), and PHI-safe error logging live. Adding a
+provider means one entry in `vera_core.llm.PROVIDERS`, nothing else. The live
+cascade's LLM (the agent worker's AgentSession) is separate and stays in
+`apps/agent_worker` — do not route it through ResilientLLM.
 
 ## Envelope encryption (`vera_core.config.kms`)
 
@@ -36,13 +41,6 @@ same pattern. Never store the plaintext DEK or the plaintext seed anywhere outsi
 In dev, `LocalDevKMS` wraps DEKs with AES-256-GCM under `LOCAL_KMS_MASTER_KEY` (env var).
 In prod, `GCPCloudKMS` delegates to Cloud KMS (Workload Identity, see `adr/devops-todo.md` #2).
 `build_kms(settings)` selects the implementation: set `VERA_KMS_KEY_NAME` → GCP; unset → local.
-
-## Asymmetric fail behavior — preserve it
-
-- **Strict `hydrate_raw` fails CLOSED**: any unresolved token raises; never substitute a
-  fallback value or swallow the error — a wrong identifier must not reach a payer API.
-- `hydrate_for_speech` is the one deliberate **fail-safe** exception (neutralize + audit),
-  because a dropped word mid-call is safer than a crash. Do not copy that leniency anywhere else.
 
 ## RLS is authorization, not encryption
 
@@ -79,5 +77,7 @@ future-bounds are DB-computed (`tenant_elevation.expires_at = now() + interval`)
 
 Structured logs and Langfuse spans are **outside** the PHI-plaintext set — scrub before emit.
 Never `logger.*(f"...{plaintext}...")`. Trace token IDs, reference IDs, counts, and shapes —
-never raw values. `redact()` must precede any trace or log of transcript content. Langfuse
-may carry tokenized text and timings (operational shape), never raw PHI.
+never raw values. Any trace or log of transcript content must be scrubbed to IDs / counts /
+shapes first — there is no in-pipeline tokenizer to lean on now (`vera_core.phi` is gone), so
+treat raw transcript text as unloggable. Langfuse may carry reference IDs and timings
+(operational shape), never raw PHI.

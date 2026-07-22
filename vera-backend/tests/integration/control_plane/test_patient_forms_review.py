@@ -118,6 +118,7 @@ async def _make_form_with_dispute(
     tenant_id: UUID,
     schema_version_id: UUID,
     status: FormStatus = FormStatus.EXCEPTION_REVIEW,
+    appointment_date: date | None = None,
 ) -> UUID:
     """Create a form with one undisputed INTAKE field, plus a disputed field: an INTAKE
     baseline answer + a current AI_CALL answer that diverges from it (the dispute signal
@@ -130,6 +131,7 @@ async def _make_form_with_dispute(
             status=status.value,
             intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
             patient_name="jane doe",
+            appointment_date=appointment_date,
             completion_pct=0,
             retry_count=0,
         )
@@ -186,6 +188,7 @@ async def dispute_form(
 
 
 INSURANCE_PROVIDER_NAME = "sections.insurance_reference_information.insurance_provider_name"
+INSURANCE_PHONE = "sections.insurance_reference_information.insurance_phone_number"
 
 
 async def _make_form_with_promoted_field(
@@ -304,6 +307,54 @@ async def test_list_total_reflects_full_filtered_count_not_just_the_page(
     body = resp.json()["data"]
     assert len(body["items"]) == 1
     assert body["total"] == 2
+
+
+async def test_list_sorts_by_appointment_date_with_nulls_last(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """Server-side sort drives the Data Management worklist: the chosen column
+    orders the whole result set (not just one page), dateless forms sink to the
+    end in either direction."""
+    dated = {
+        d: await _make_form_with_dispute(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            schema_version_id=schema_version_id,
+            appointment_date=d,
+        )
+        for d in (date(2026, 7, 10), date(2026, 7, 20))
+    }
+    undated = await _make_form_with_dispute(
+        admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+    )
+
+    async def _ids(sort_dir: str) -> list[str]:
+        resp = await client.get(
+            "/api/v1/patient-forms",
+            params={"sort_by": "appointment_date", "sort_dir": sort_dir},
+            headers=_auth(rbac_world.admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        return [row["id"] for row in resp.json()["data"]["items"]]
+
+    newest_first = [str(dated[date(2026, 7, 20)]), str(dated[date(2026, 7, 10)]), str(undated)]
+    assert await _ids("desc") == newest_first
+    assert await _ids("asc") == [newest_first[1], newest_first[0], newest_first[2]]
+
+
+async def test_list_rejects_unknown_sort_column(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        "/api/v1/patient-forms",
+        params={"sort_by": "intake_payload"},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
 
 
 async def test_list_requires_forms_read(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
@@ -609,7 +660,7 @@ async def test_resolve_leaves_promoted_columns_untouched_for_a_non_promoted_fiel
 ) -> None:
     resp = await client.post(
         f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
-        json={"form_data": {"sections.patient_verification.patient_on_plan": "Yes"}},
+        json={"form_data": {"sections.patient_verification.is_insurance_active": "Yes"}},
         headers=_auth(rbac_world.admin_token),
     )
     assert resp.status_code == 200, resp.text
@@ -662,6 +713,135 @@ async def test_resolve_accepts_a_date_in_the_leafs_declared_format(
             await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
         ).scalar_one()
         assert form.patient_dob == date(1999, 12, 4)
+
+
+async def test_resolve_reformats_a_non_promoted_date_leaf_to_its_declared_format(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """spouse_partner_dob is a date leaf but NOT one of the eight promoted
+    columns — proves the fix isn't scoped to patient_dob/appointment_date:
+    resolve must reformat ANY date leaf's ISO-submitted value to the leaf's
+    declared date_format ("M/D/YYYY" for ibv_standard), matching what the review
+    UI's edit-form validator expects when it re-populates from the stored value."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.spouse_partner_dob": "1999-12-04"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        current = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == "sections.patient_information.spouse_partner_dob",
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert current.value == {"value": "12/4/1999"}
+
+
+async def test_resolve_with_invalid_non_promoted_date_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    """Same 422 contract as the promoted-column case
+    (`test_resolve_with_invalid_promoted_date_returns_422`), now for a date leaf
+    that isn't one of the eight promoted columns."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.spouse_partner_dob": "not-a-date"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["data"]["fields"] == ["sections.patient_information.spouse_partner_dob"]
+
+
+async def test_resolve_auto_formats_missing_plus_on_insurance_phone(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "15550100"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15550100"
+
+        answer = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == INSURANCE_PHONE,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15550100"}
+        assert answer.source == "human"
+
+
+async def test_resolve_leaves_already_prefixed_phone_unchanged(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """A number that already has a leading '+' is left exactly as submitted — no
+    reformatting is applied beyond adding a missing '+' (2026-07-15 design doc)."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "+15559990000"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15559990000"
+
+        answer = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == INSURANCE_PHONE,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15559990000"}
+        assert answer.source == "human"
+
+
+async def test_resolve_with_invalid_promoted_phone_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "555 000 1234"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["data"]["fields"] == [INSURANCE_PHONE]
 
 
 # ---- baseline-derived dispute behavior --------------------------------------

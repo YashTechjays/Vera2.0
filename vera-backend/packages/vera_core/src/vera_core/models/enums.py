@@ -66,6 +66,18 @@ class TranscriptSource(enum.StrEnum):
     SUPERVISOR = "supervisor"
 
 
+class RecordingStatus(enum.StrEnum):
+    """recording lifecycle. PENDING at egress start; AVAILABLE once the object is
+    sha256-verified; FAILED (egress start or run failed); DISCARDED (no-answer/busy
+    call — object deleted at verify time); DELETED (retention-sweep tombstone)."""
+
+    PENDING = "pending"
+    AVAILABLE = "available"
+    FAILED = "failed"
+    DISCARDED = "discarded"
+    DELETED = "deleted"
+
+
 class DisputeActionType(enum.StrEnum):
     ACCEPT = "accept"
     OVERRIDE = "override"
@@ -83,6 +95,23 @@ class InterventionCategory(enum.StrEnum):
     """First-class column so the intervention-by-category report is a GROUP BY,
     not a JSONB scan (ADR §6)."""
 
+    REPEATED_QUESTIONS = "repeated_questions"
+    HALLUCINATION = "hallucination"
+    CONVERSATION_LOOP = "conversation_loop"
+    LONG_SILENCE = "long_silence"
+    OFF_SCRIPT = "off_script"
+    LOW_CONFIDENCE = "low_confidence"
+    OTHER = "other"
+
+
+class CallHealthFlag(enum.StrEnum):
+    """Call-health observer verdict vocabulary: the InterventionCategory values
+    (kept in sync so intervention reports and observer flags speak one language)
+    plus `none` (healthy) and `supervisor_requested` (the rep/IVR asked for a
+    human). Stored on call.health_flag and in call_event HEALTH rows."""
+
+    NONE = "none"
+    SUPERVISOR_REQUESTED = "supervisor_requested"
     REPEATED_QUESTIONS = "repeated_questions"
     HALLUCINATION = "hallucination"
     CONVERSATION_LOOP = "conversation_loop"
@@ -183,6 +212,8 @@ class AuthEvent(enum.StrEnum):
     # Token-scoped self-logout (/auth/logout). Tenant users write a tenant-scoped
     # row; platform operators (tenant_id IS NULL) go through log_auth_event.
     LOGOUT = "logout"
+    # Tenant-level recording retention policy updated (old/new day counts, no PHI).
+    RETENTION_POLICY_UPDATED = "retention_policy_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

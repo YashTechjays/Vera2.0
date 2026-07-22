@@ -15,12 +15,15 @@ from control_plane.auth.invitations import InvitationStore, RedisInvitationStore
 from control_plane.auth.permission_cache import PermissionCache, RedisPermissionCache
 from control_plane.auth.rbac import PermissionResolver
 from control_plane.auth.session import RedisSessionStore, SessionStore, SessionVerifier
+from control_plane.call_summary import RedisSummaryCache, SummaryCache
 from control_plane.dispatch import drain_pending
 from control_plane.email import EmailSender, SmtpEmailSender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
 from control_plane.pipeline_sweeper import PipelineSweeper
+from control_plane.recording_jobs import RecordingVerifier, RetentionSweeper
+from control_plane.recording_storage import GCSRecordingStorage, RecordingStorage
 from control_plane.request_context import RequestIdMiddleware
 from control_plane.worker_events import WorkerEventConsumer
 from vera_core.audit import (
@@ -33,16 +36,20 @@ from vera_core.call_stream import CallStreamService, RedisCallStreamStore
 from vera_core.config import EnvSecretProvider, SecretProvider, Settings, get_settings
 from vera_core.config.kms import KeyManagementService, build_kms
 from vera_core.db import create_engine, create_sessionmaker
+from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
+from vera_core.notifications import NotificationService, RedisNotificationStore
 from vera_core.observability.otel import configure_observability
+from vera_core.plan_store import CallPlanService, RedisCallPlanStore
 from vera_core.redis import create_redis
-from vera_core.transcript import RedisTranscriptStore, TranscriptService
+from vera_core.services.recordings import recording_config_from
 
 logger = logging.getLogger("control_plane.main")
 
 
 def _log_task_exit(label: str) -> Callable[[asyncio.Task[None]], None]:
     """Build a done-callback that surfaces an unexpected exit of a lifespan
-    background task (the worker-event consumer, the pipeline sweeper).
+    background task (the worker-event consumer, the pipeline sweeper, the
+    recording verifier / retention sweeper).
 
     `run()` only returns via cancellation (shutdown) or an uncaught exception; without
     this callback the latter would die silently ("Task exception was never retrieved").
@@ -53,6 +60,16 @@ def _log_task_exit(label: str) -> Callable[[asyncio.Task[None]], None]:
             logger.error("%s exited unexpectedly", label, exc_info=task.exception())
 
     return _on_done
+
+
+async def _cancel_task(task: asyncio.Task[None] | None) -> None:
+    """Cancel a background task on shutdown and await its exit, swallowing the
+    expected CancelledError. No-op when the task was never started."""
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 def create_app(
@@ -69,8 +86,11 @@ def create_app(
     invitation_store: InvitationStore | None = None,
     livekit: LiveKitGateway | None = None,
     secrets: SecretProvider | None = None,
-    transcript_service: TranscriptService | None = None,
     call_stream_service: CallStreamService | None = None,
+    call_plan_service: CallPlanService | None = None,
+    summary_llm: ResilientLLM | None = None,
+    summary_cache: SummaryCache | None = None,
+    notification_service: NotificationService | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -91,8 +111,8 @@ def create_app(
         # Build the Redis client lazily — only for the backends we weren't
         # handed (tests inject both and never touch Redis).
         redis: Redis | None = None
-        transcript_redis: Redis | None = None
         call_stream_redis: Redis | None = None
+        notifications_redis: Redis | None = None
 
         def _redis() -> Redis:
             nonlocal redis
@@ -113,22 +133,22 @@ def create_app(
             if settings.livekit_url is not None
             else None
         )
-        # A DEDICATED Redis client (separate pool) for transcript streaming: a tailing
+        # Fault-tolerant summarizer chain. Construction is lazy inside
+        # ResilientLLM (no provider client until first use), so this is safe
+        # even when the OpenAI key is absent in an env that never summarizes.
+        owns_summary_llm = summary_llm is None
+        app.state.summary_llm = summary_llm or ResilientLLM(
+            LLMSpec.parse(settings.summary_primary_model),
+            [LLMSpec.parse(selector) for selector in settings.summary_fallback_models],
+            options=FallbackOptions(attempt_timeout=settings.summary_attempt_timeout_seconds),
+            secrets=app.state.secrets,
+        )
+        app.state.summary_cache = summary_cache or RedisSummaryCache(_redis())
+        # A DEDICATED Redis client (separate pool) for call-event streaming: a tailing
         # SSE stream holds a connection for its lifetime, so it must not draw from the
         # shared pool that serves session/permission/idempotency Redis (auth DoS risk).
-        _transcript_service = transcript_service
-        if _transcript_service is None:
-            transcript_redis = create_redis(settings.redis_url)
-            _transcript_service = TranscriptService(
-                RedisTranscriptStore(
-                    transcript_redis,
-                    ttl_seconds=settings.transcript_stream_ttl_seconds,
-                    end_grace_seconds=settings.transcript_end_grace_seconds,
-                )
-            )
-        app.state.transcript_service = _transcript_service
-        # Same dedicated-client reasoning as the transcript stream above: a tailing
-        # SSE pins a connection, so this must not draw from the shared pool.
+        # This one stream backs both SSE endpoints (real-call and Voice Lab), the
+        # transcript finalizer, the summariser, and the worker's Observer.
         _call_stream_service = call_stream_service
         if _call_stream_service is None:
             call_stream_redis = create_redis(settings.redis_url)
@@ -140,6 +160,20 @@ def create_app(
                 )
             )
         app.state.call_stream_service = _call_stream_service
+        # User-scoped realtime notifications (intervention alerts). Same
+        # dedicated-client reasoning as the SSE streams above: every connected
+        # user pins a blocking XREAD, which must not starve the shared pool.
+        _notifications = notification_service
+        if _notifications is None:
+            notifications_redis = create_redis(settings.redis_url)
+            _notifications = NotificationService(RedisNotificationStore(notifications_redis))
+        app.state.notifications = _notifications
+        # Call-plan staging (dispatch writes, worker reads). One-shot SET/GET —
+        # no tailing/blocking reads — so the shared pool is fine.
+        _call_plans = call_plan_service or CallPlanService(
+            RedisCallPlanStore(_redis(), ttl_seconds=settings.call_plan_ttl_seconds)
+        )
+        app.state.call_plans = _call_plans
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)
@@ -154,6 +188,9 @@ def create_app(
         # started when SIP/LiveKit is unconfigured (tests / local without a trunk).
         worker_events_redis: Redis | None = None
         worker_event_task: asyncio.Task[None] | None = None
+        # Derived once; None when the bucket is unset (recording disabled) — every
+        # consumer (dispatch refill, sweeper wake-up, verifier reap) shares it.
+        recording_config = recording_config_from(settings)
         sweeper_task: asyncio.Task[None] | None = None
         if settings.livekit_url is not None and app.state.livekit is not None:
             worker_events_redis = create_redis(settings.redis_url)
@@ -168,6 +205,9 @@ def create_app(
                 reclaim_idle_ms=settings.worker_events_reclaim_idle_ms,
                 teardown_grace_ms=settings.call_failed_teardown_grace_ms,
                 form_auto_retry_enabled=settings.form_auto_retry_enabled,
+                recording=recording_config,
+                call_plans=_call_plans,
+                notifications=_notifications,
             )
             worker_event_task = asyncio.create_task(consumer.run())
             worker_event_task.add_done_callback(_log_task_exit("worker-event consumer"))
@@ -186,20 +226,55 @@ def create_app(
                 stuck_grace_s=settings.call_stuck_grace_seconds,
                 max_call_duration_s=settings.call_max_duration_seconds,
                 form_auto_retry_enabled=settings.form_auto_retry_enabled,
+                recording=recording_config,
+                call_plans=_call_plans,
             )
             sweeper_task = asyncio.create_task(sweeper.run())
             sweeper_task.add_done_callback(_log_task_exit("pipeline sweeper"))
 
+        # Recording verifier: reconciles PENDING egresses → AVAILABLE (sha256) /
+        # FAILED / DISCARDED. Only runs when recording is configured AND LiveKit
+        # is available (it queries egress status).
+        recording_storage: RecordingStorage | None = None
+        verifier_task: asyncio.Task[None] | None = None
+        retention_sweeper_task: asyncio.Task[None] | None = None
+        if settings.recording_bucket is not None:
+            recording_storage = GCSRecordingStorage()
+        app.state.recording_storage = recording_storage
+        if recording_storage is not None and app.state.livekit is not None:
+            verifier = RecordingVerifier(
+                sessionmaker,
+                app.state.livekit,
+                recording_storage,
+                app.state.audit,
+                interval_seconds=settings.recording_verify_interval_seconds,
+                retention_days_default=settings.recording_retention_days_default,
+                recording_config=recording_config,
+                orphan_grace_seconds=settings.recording_orphan_grace_seconds,
+            )
+            verifier_task = asyncio.create_task(verifier.run())
+            verifier_task.add_done_callback(_log_task_exit("recording verifier"))
+        # Retention sweeper: deletes recordings past retention_until with before/after
+        # audit snapshots. Needs storage but NOT LiveKit (no egress queries).
+        if recording_storage is not None:
+            retention_sweeper = RetentionSweeper(
+                sessionmaker,
+                recording_storage,
+                app.state.audit,
+                interval_seconds=settings.retention_sweep_interval_seconds,
+            )
+            retention_sweeper_task = asyncio.create_task(retention_sweeper.run())
+            retention_sweeper_task.add_done_callback(_log_task_exit("retention sweeper"))
+
         configure_observability(settings)
         yield
-        if worker_event_task is not None:
-            worker_event_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker_event_task
-        if sweeper_task is not None:
-            sweeper_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await sweeper_task
+        # Stop background loops in reverse start order before closing their clients.
+        await _cancel_task(retention_sweeper_task)
+        await _cancel_task(verifier_task)
+        await _cancel_task(sweeper_task)
+        await _cancel_task(worker_event_task)
+        if owns_summary_llm:
+            await app.state.summary_llm.aclose()
         # Detached dispatch tasks (post-commit enqueue / consumer refill) must finish
         # before the engine goes away — they hold their own sessions off this engine.
         await drain_pending()
@@ -207,10 +282,10 @@ def create_app(
             await worker_events_redis.aclose()
         if redis is not None:
             await redis.aclose()
-        if transcript_redis is not None:
-            await transcript_redis.aclose()
         if call_stream_redis is not None:
             await call_stream_redis.aclose()
+        if notifications_redis is not None:
+            await notifications_redis.aclose()
         await engine.dispose()
 
     app = FastAPI(title="Vera Control Plane", version="0.1.0", lifespan=lifespan)

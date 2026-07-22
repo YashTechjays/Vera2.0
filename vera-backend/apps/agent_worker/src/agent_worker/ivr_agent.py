@@ -1,13 +1,12 @@
 """IVR navigator agent and its turn-handling config.
 
-`IvrNavigatorAgent` (see the class) is the generic IVR navigator: a plain agent with no
-PHI-wall node overrides that navigates the payer's IVR and hands off to `VeraAgent` — a
-one-way swap — once a live human rep answers (from then on the PHI-wall overrides apply).
-`ivr_turn_handling()` is the navigator's per-agent turn config: patient end-of-turn detection
-for the IVR phase that reverts to the snappy human default at the handoff.
+`IvrNavigatorAgent` (see the class) is the generic IVR navigator: a plain agent that
+navigates the payer's IVR and hands off to the verification agent — a one-way swap —
+once a live human rep answers. `ivr_turn_handling()` is the navigator's per-agent turn
+config: patient end-of-turn detection for the IVR phase that reverts to the snappy
+human default at the handoff.
 """
 
-import functools
 import logging
 import re
 from collections.abc import AsyncIterable, AsyncIterator, Callable
@@ -24,9 +23,10 @@ from livekit.agents import (
 )
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
+from agent_worker.handoff import carry_chat_ctx
+from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from vera_core.config.settings import get_settings
-from vera_core.phi import PHIBoundaryProtocol
 from vera_core.schemas import IvrPlaybookConfig
 
 logger = logging.getLogger("agent_worker")
@@ -131,34 +131,22 @@ class IvrNavigatorAgent(Agent):
     and pressing keypad digits (DTMF) via the `press_keypad` tool. Runs as a plain agent —
     no PHI-wall node overrides.
 
-    It holds a factory for its VeraAgent handoff target so that, once a live human rep
-    answers, `transfer_to_verification` can hand off to a VeraAgent (which greets the rep
-    and runs the benefits conversation)."""
+    It holds a factory for its handoff target so that, once a live human rep answers,
+    `transfer_to_verification` can hand off to the plan's first task agent (which greets
+    the rep and runs the benefits conversation)."""
 
     def __init__(
         self,
-        boundary: PHIBoundaryProtocol,
-        session_id: str,
         *,
+        verification_agent_factory: Callable[[], Agent],
         playbook: IvrPlaybookConfig | None = None,
         context: dict[str, str] | None = None,
-        verification_instructions: str | None = None,
-        verification_greeting: str | None = None,
         on_keypress: Callable[[str], None] | None = None,
     ) -> None:
-        # Deferred import breaks the agent <-> ivr_agent import cycle: agent.py imports
-        # IvrNavigatorAgent, and the navigator only needs VeraAgent at construction time.
-        from agent_worker.agent import VeraAgent
-
-        # The navigator runs plain (no PHI-wall overrides); it keeps only a factory for the
-        # VeraAgent it hands off to once a human answers (see transfer_to_verification).
-        self._make_verification_agent = functools.partial(
-            VeraAgent,
-            boundary,
-            session_id,
-            instructions=verification_instructions,
-            greeting=verification_greeting,
-        )
+        # The navigator keeps only a factory for the agent it hands off to once a human
+        # answers (see transfer_to_verification) — the plan's first task agent, injected
+        # by build_agent. The navigator only ever runs on a plan-backed call.
+        self._make_verification_agent = verification_agent_factory
         self._turns = 0  # IVR turns taken; the give-up backstop caps this
         self._final_turn_used = False  # spent the one grace turn granted at the cap
         # Reports the digits of a successful press to the live transcript (evidence of the
@@ -177,6 +165,7 @@ class IvrNavigatorAgent(Agent):
     def tts_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
     ) -> AsyncIterable[rtc.AudioFrame]:
+        # Strips the silence sentinel and <spell>-wraps ID tokens for Cartesia.
         return Agent.default.tts_node(self, _tts_spoken_text(text), model_settings)
 
     def transcription_node(
@@ -188,6 +177,9 @@ class IvrNavigatorAgent(Agent):
     def _end_navigation(self, reason: str) -> None:
         """Hang up the call cleanly (drain pending audio), to bail out of an unresolvable IVR
         loop rather than thrash forever. Mirrors VeraAgent's end_call."""
+        if takeover_engaged(self.session):
+            logger.info("IVR end-navigation refused: supervisor has taken over the call")
+            return
         logger.warning("IVR navigator: ending call — %s", reason)
         self.session.shutdown(drain=True)
 
@@ -225,7 +217,11 @@ class IvrNavigatorAgent(Agent):
         representative has clearly greeted you — a personal name paired with an open request
         for your info (e.g. "Hi, this is Martha, who am I speaking with?")."""
         logger.info("handoff: IVR navigator -> verification agent")
-        return self._make_verification_agent()
+        verifier = self._make_verification_agent()
+        # Carry the IVR conversation (incl. the member ID already spoken) into the
+        # plan agent so it doesn't re-ask what the navigator already established.
+        await carry_chat_ctx(self, verifier)
+        return verifier
 
     @function_tool
     async def press_keypad(self, digits: str) -> str:

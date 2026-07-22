@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom"
 import { AppShell } from "@/components/layout/AppShell"
 import { RequireAuth } from "@/components/auth/RequireAuth"
 import { RequireNavRoute } from "@/components/auth/RequireNavRoute"
+import { NotificationsProvider } from "@/components/notifications/NotificationsProvider"
 import { useAppDispatch } from "@/store/hooks"
 import { fetchMe } from "@/store/authSlice"
 import { getToken } from "@/lib/auth/storage"
@@ -49,7 +50,13 @@ function App() {
           {/* AppShell owns the Suspense boundary around its <Outlet>, so a lazy
               page (e.g. Voice Lab) shows a spinner in the content area while the
               sidebar/topbar stay mounted. */}
-          <Route element={<AppShell />}>
+          <Route
+            element={
+              <NotificationsProvider>
+                <AppShell />
+              </NotificationsProvider>
+            }
+          >
             <Route
               index
               element={<RequireNavRoute to="/"><LiveMonitoring /></RequireNavRoute>}

@@ -17,14 +17,22 @@ Every PHI response audits field **names** only (never values).
 import asyncio
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from control_plane.api.v1.common import Kms, LiveKit, TenantId, TenantSession, emit_phi_read_audit
+from control_plane.api.v1.common import (
+    AppSettings,
+    CallPlans,
+    Kms,
+    LiveKit,
+    TenantId,
+    TenantSession,
+    emit_phi_read_audit,
+)
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
@@ -45,10 +53,15 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     PromotedIdentifiers,
+    date_leaf_paths,
     iter_leaf_answers,
     missing_required,
+    normalize_date_answers,
+    normalize_date_value,
+    normalize_phone_answers,
+    normalize_phone_prefix,
+    phone_promoted_paths,
     promote_columns,
-    resolve_path,
     unknown_payload_paths,
 )
 from vera_core.forms.review import (
@@ -76,7 +89,9 @@ from vera_core.models.enums import (
     FormStatus,
     ProviderStatus,
 )
+from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.recordings import recording_config_from
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -105,17 +120,44 @@ def _v2_doc(schema_json: dict[str, Any]) -> FormSchemaDoc | None:
     return FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
 
 
+def _raise_422(exc: InvalidIntakeValue) -> NoReturn:
+    raise CustomAPIException(
+        DefaultExceptionCode.VALIDATION_ERROR,
+        message="invalid field value",
+        data={"fields": [exc.field_path]},
+    ) from exc
+
+
 def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
     """`promote_columns`, translated to the API's validation-error contract — the
     error-wrapping shared by intake and dispute-resolve column promotion."""
     try:
         return promote_columns(get_value, doc)
     except InvalidIntakeValue as exc:
-        raise CustomAPIException(
-            DefaultExceptionCode.VALIDATION_ERROR,
-            message="invalid field value",
-            data={"fields": [exc.field_path]},
-        ) from exc
+        _raise_422(exc)
+
+
+def _normalize_date_answers_or_422(
+    answers: list[tuple[str, Any]], doc: FormSchemaDoc
+) -> list[tuple[str, Any]]:
+    """`normalize_date_answers`, translated to the API's validation-error
+    contract — every date-typed leaf's intake value gets reformatted to its
+    declared `date_format`, not just the promoted `patient_dob`/
+    `appointment_date` columns `_promote_or_422` covers."""
+    try:
+        return normalize_date_answers(answers, doc)
+    except InvalidIntakeValue as exc:
+        _raise_422(exc)
+
+
+def _normalize_date_value_or_422(value: Any, field_path: str, date_format: str | None) -> Any:
+    """`normalize_date_value`, translated to the API's validation-error contract —
+    the single-leaf counterpart to `_normalize_date_answers_or_422`, used when a
+    dispute-resolve edit reformats one date leaf's answer to its declared format."""
+    try:
+        return normalize_date_value(value, field_path, date_format)
+    except InvalidIntakeValue as exc:
+        _raise_422(exc)
 
 
 @router.post(
@@ -162,9 +204,29 @@ async def upload_patient_form(
                 data={"fields": missing},
             )
         doc = _v2_doc(version.schema_json)
-        promoted = PromotedIdentifiers()
+
+        # Flattened + phone-normalized intake answers: one INTAKE-source field_answer per
+        # provided leaf. v2 documents use root-anchored paths (`sections.…` — spec §4.2), so
+        # the payload (nested by section_key) is flattened under a `sections` root. v1
+        # schemas have no leaf set to validate against, so the unknown-path check and phone
+        # normalization both live in the `doc is not None` branch. Building `answers` before
+        # promotion (rather than after) lets `promote_columns` read the already-`+`-prefixed
+        # value, so field_answer and the promoted column agree on it (2026-07-15 design doc).
         if doc is not None:
-            promoted = _promote_or_422(lambda p: resolve_path(body.intake_payload, p), doc)
+            answers = list(iter_leaf_answers({"sections": body.intake_payload}))
+            unrecognized = unknown_payload_paths(answers, doc)
+            if unrecognized:
+                raise CustomAPIException(
+                    DefaultExceptionCode.VALIDATION_ERROR,
+                    message="intake payload contains unknown field paths",
+                    data={"fields": unrecognized},
+                )
+            answers = normalize_phone_answers(answers, doc)
+            answers = _normalize_date_answers_or_422(answers, doc)
+            promoted = _promote_or_422(dict(answers).get, doc)
+        else:
+            answers = list(iter_leaf_answers(body.intake_payload))
+            promoted = PromotedIdentifiers()
 
         form = PatientForm(
             tenant_id=principal.tenant_id,
@@ -185,24 +247,6 @@ async def upload_patient_form(
         session.add(form)
         await session.flush()
 
-        # Normalized intake answers: one INTAKE-source field_answer per provided leaf.
-        # v2 documents use root-anchored paths (`sections.…` — spec §4.2), so the
-        # payload (nested by section_key) is flattened under a `sections` root.
-        # v1 schemas have no leaf set to validate against, so the unknown-path check
-        # is v2-only (doc is not None); the ternary and the guard share one branch.
-        if doc is not None:
-            payload_root: dict[str, Any] = {"sections": body.intake_payload}
-            answers = list(iter_leaf_answers(payload_root))
-            unrecognized = unknown_payload_paths(answers, doc)
-            if unrecognized:
-                raise CustomAPIException(
-                    DefaultExceptionCode.VALIDATION_ERROR,
-                    message="intake payload contains unknown field paths",
-                    data={"fields": unrecognized},
-                )
-        else:
-            payload_root = body.intake_payload
-            answers = list(iter_leaf_answers(payload_root))
         session.add_all(
             FieldAnswer(
                 tenant_id=principal.tenant_id,
@@ -280,6 +324,26 @@ class PaginatedForms(BaseModel):
     page: int
     page_size: int
     total: int
+
+
+SortKey = Literal[
+    "appointment_date",
+    "appointment_type",
+    "patient_name",
+    "member_id",
+    "insurance_provider",
+    "status",
+    "created_at",
+]
+_SORT_COLUMNS = {
+    "appointment_date": PatientForm.appointment_date,
+    "appointment_type": PatientForm.appointment_type,
+    "patient_name": PatientForm.patient_name,
+    "member_id": PatientForm.member_id,
+    "insurance_provider": PatientForm.insurance_provider,
+    "status": PatientForm.status,
+    "created_at": PatientForm.created_at,
+}
 
 
 class DisputeView(BaseModel):
@@ -437,6 +501,8 @@ async def list_patient_forms(
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = Query(None),
     q: str | None = Query(None),
+    sort_by: SortKey = "created_at",
+    sort_dir: Literal["asc", "desc"] = "desc",
     caller: VerifiedIdentity = require("forms:read"),
 ) -> ResponseModel[PaginatedForms]:
     response.headers["Cache-Control"] = "no-store"
@@ -445,6 +511,8 @@ async def list_patient_forms(
         conds.append(PatientForm.status == status)
     if q:
         conds.append(PatientForm.patient_name.ilike(f"%{q.lower()}%"))
+    sort_col = _SORT_COLUMNS[sort_by]
+    primary = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
 
     async def _fetch_page() -> tuple[list[PatientForm], int]:
         """One round trip: the page rows with the filtered total as a window
@@ -454,7 +522,8 @@ async def list_patient_forms(
             await session.execute(
                 select(PatientForm, func.count().over())
                 .where(*conds)
-                .order_by(PatientForm.created_at.desc())
+                # created_at tie-break keeps pages stable when the sort key repeats.
+                .order_by(primary.nulls_last(), PatientForm.created_at.desc())
                 .offset((page - 1) * page_size)
                 .limit(page_size)
             )
@@ -623,6 +692,17 @@ async def resolve_disputes(
     if form is None:
         raise NotFoundError(message="patient form not found")
 
+    # Fetched here (not after the edit loop, as before) so phone-typed promoted paths
+    # are known before normalizing incoming edits below (2026-07-15 design doc).
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    doc = _v2_doc(version.schema_json)
+    phone_paths = phone_promoted_paths(doc) if doc is not None else set()
+    date_paths = date_leaf_paths(doc) if doc is not None else {}
+
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
     open_paths = await _open_dispute_paths(session, form_id)
@@ -684,6 +764,10 @@ async def resolve_disputes(
         session.add(_human_answer(cur.field_path, raw))
 
     for path, new_value in body.form_data.items():
+        if path in phone_paths:
+            new_value = normalize_phone_prefix(new_value)
+        if path in date_paths:
+            new_value = _normalize_date_value_or_422(new_value, path, date_paths[path])
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).
@@ -718,25 +802,11 @@ async def resolve_disputes(
     # disputes only records the human answers/actions; re-asked fields are surfaced
     # in the audit for the worker, and re-queueing is a manual status change.
     await session.flush()
-    current_values: dict[str, Any] = {
-        path: unwrap_value(value)
-        for path, value in (
-            await session.execute(
-                select(FieldAnswer.field_path, FieldAnswer.value).where(
-                    FieldAnswer.form_id == form_id, FieldAnswer.is_current.is_(True)
-                )
-            )
-        ).all()
-    }
-    version = (
-        await session.execute(
-            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one()
-    doc = _v2_doc(version.schema_json)
-    # Re-derive promoted patient_form columns from the post-write current answers —
-    # any resolve call that changes a promoted field's value (dispute or plain edit)
-    # keeps the worklist columns in sync, not just intake (2026-07-10 design doc).
+    current_values: dict[str, Any] = await current_values_by_path(session, form_id)
+    # doc/phone_paths already resolved above. Re-derive promoted patient_form columns
+    # from the post-write current answers — any resolve call that changes a promoted
+    # field's value (dispute or plain edit) keeps the worklist columns in sync, not
+    # just intake (2026-07-10 design doc).
     if doc is not None:
         promoted = _promote_or_422(current_values.get, doc)
         for column, _path in doc.promoted_fields.items():
@@ -906,6 +976,8 @@ async def update_patient_form_status(
     tenant_id: TenantId,
     livekit: LiveKit,
     kms: Kms,
+    settings: AppSettings,
+    call_plans: CallPlans,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormStatusResponse]:
     """Change a patient form's lifecycle status — the only endpoint that mutates
@@ -1040,6 +1112,8 @@ async def update_patient_form_status(
             kms,
             audit,
             wait_for_form_id=form_id,
+            recording=recording_config_from(settings),
+            plan_service=call_plans,
         )
 
     return ok(
