@@ -31,6 +31,7 @@ from control_plane.api.v1.common import (
 )
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import INVITE_NS, InviteData
+from control_plane.auth.invite_reset import reset_and_reissue_invite
 from control_plane.auth.rbac import require
 from control_plane.deps import client_ip, get_idempotency_store
 from control_plane.email import EmailMessage
@@ -271,3 +272,93 @@ async def deactivate_user(
         meta={"target_user": str(user_id)},
     )
     return ok(None, message="User deactivated.")
+
+
+@router.post(
+    "/users/{user_id}/resend-invitation",
+    response_model=ResponseModel[InviteUserResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def resend_invitation(
+    user_id: UUID,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: AuthAudit,
+    settings: AppSettings,
+    invites: Invites,
+    email_sender: Email,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    caller: VerifiedIdentity = require("users:manage"),
+) -> ResponseModel[InviteUserResponse]:
+    """Reissue a fresh invite link for a user stuck in status="invited" (their
+    original link or MFA bridge token expired before they finished onboarding).
+    Deletes any stale password UserIdentity and mints a new INVITE_NS token."""
+    if caller.tenant_slug is None:
+        raise UnauthorizedError(message="malformed session: tenant slug missing")
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
+    user = (
+        await session.execute(select(AppUser).where(AppUser.id == user_id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise NotFoundError(message="no such user in this tenant")
+    if user.status != "invited":
+        raise CustomAPIException(
+            DefaultExceptionCode.CONFLICT, message="user is not in invited status"
+        )
+
+    token = await reset_and_reissue_invite(
+        session,
+        invites,
+        namespace=INVITE_NS,
+        app_user=user,
+        ttl_seconds=settings.invite_ttl_seconds,
+        redis=request.app.state.redis,
+    )
+    invite_url = (
+        f"{settings.frontend_base_url}/tenants/{caller.tenant_slug}/accept-invite?token={token}"
+    )
+
+    email_sent = False
+    try:
+        await email_sender.send(
+            EmailMessage(
+                to=user.email,
+                subject="You're invited to Vera",
+                body=(
+                    f"Hello{(' ' + user.name) if user.name else ''},\n\n"
+                    "Here is a fresh link to set your password "
+                    f"(valid for {settings.invite_ttl_seconds // 3600} hours):\n\n"
+                    f"{invite_url}\n\n"
+                    "If you didn't expect this, you can ignore this email."
+                ),
+            )
+        )
+        email_sent = True
+    except Exception:
+        logger.warning("resend invitation email to %s could not be sent", user.email, exc_info=True)
+
+    await emit_auth_event(
+        audit,
+        tenant_id=tenant_id,
+        event=AuthEvent.INVITE_RESENT,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"target_user": str(user.id), "delivery": "email" if email_sent else "link"},
+    )
+    return ok(
+        InviteUserResponse(
+            user_id=user.id, email=user.email, invite_url=invite_url, email_sent=email_sent
+        )
+    )

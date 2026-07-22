@@ -1159,3 +1159,64 @@ async def test_api_key_name_reusable_after_revoke(
         json={"name": "rotate", "scope": "intake:write"},
     )
     assert again.status_code == 200, again.text
+
+
+# --- resend invitation -------------------------------------------------------
+
+
+async def test_resend_invitation_reissues_a_working_token(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "stuck@test.example", "name": "Stuck", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    user_id = invite.json()["data"]["user_id"]
+    stale_token = _extract_token(invite)
+
+    resend = await client.post(
+        f"/api/v1/users/{user_id}/resend-invitation",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+    )
+    assert resend.status_code == 200, resend.text
+    fresh_token = _extract_token(resend)
+    assert fresh_token != stale_token
+
+    # The stale token no longer validates; the fresh one does.
+    tid = rbac_world.tenant_id
+    stale_check = await client.get(
+        f"/api/v1/tenants/{tid}/auth/invitations/validate", params={"token": stale_token}
+    )
+    assert stale_check.json()["data"]["state"] == "invalid"
+    fresh_check = await client.get(
+        f"/api/v1/tenants/{tid}/auth/invitations/validate", params={"token": fresh_token}
+    )
+    assert fresh_check.json()["data"]["state"] == "valid"
+
+
+async def test_resend_invitation_409s_if_already_accepted(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "already-active@test.example", "name": "", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    token = _extract_token(invite)
+    tid = rbac_world.tenant_id
+    accept = await client.post(
+        f"/api/v1/tenants/{tid}/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert accept.status_code == 200, accept.text
+
+    resend = await client.post(
+        f"/api/v1/users/{user_id}/resend-invitation",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+    )
+    assert resend.status_code == 409, resend.text
