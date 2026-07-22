@@ -32,7 +32,7 @@ from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState, takeover_engaged
-from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
+from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.conditions import evaluate
 from vera_core.plan_store import PlanRunStateService
@@ -53,9 +53,10 @@ _WRAP_UP_DIRECTIVE = (
 def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
-    the Cartesia TTS markup guide — fused once, at build time. The markup guide
-    keeps CPT codes `<spell>`-wrapped (the compiled prompts carry no TTS
-    guidance)."""
+    the scope-discipline guardrail + the Cartesia TTS markup guide — fused once, at
+    build time. The scope guardrail keeps the LLM on the compiled question list (no
+    invented off-script questions); the markup guide keeps CPT codes `<spell>`-wrapped
+    (the compiled prompts carry no TTS guidance)."""
     parts = [
         f"# Persona\n{plan.session.persona}",
         f"# Goal\n{plan.session.goal}",
@@ -73,6 +74,7 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
     if extra_instructions:
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
+    parts.append(SCOPE_DISCIPLINE)
     parts.append(CARTESIA_MARKUP_GUIDE)
     return "\n\n".join(parts)
 

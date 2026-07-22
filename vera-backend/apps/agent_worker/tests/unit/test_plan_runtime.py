@@ -114,6 +114,13 @@ class TestConstruction:
         # <spell> guidance, so plan-only must add it here)
         assert "<spell>" in instructions
 
+    def test_scope_discipline_appended_to_every_agent(self) -> None:
+        # The off-script guardrail must reach every plan agent (and wrap-up), so the
+        # LLM never invents questions outside the compiled task list.
+        controller, _ = _controller()
+        for agent in [*controller.agents, controller.wrap_up_agent]:
+            assert "only the questions listed" in agent.instructions.lower()
+
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")
         for agent in [*controller.agents, controller.wrap_up_agent]:
