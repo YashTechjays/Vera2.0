@@ -161,3 +161,33 @@ async def test_list_operators_includes_the_new_invite(
     assert resp.status_code == 200, resp.text
     emails = {row["email"] for row in resp.json()["data"]}
     assert "listed-op@test.example" in emails
+
+
+async def test_deactivate_operator_succeeds_when_another_active_operator_remains(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    client, pw = platform_world
+    invite = await client.post(
+        "/api/v1/platform/users/invitations",
+        headers={**_auth(pw.super_admin_token), **_idem()},
+        json={"email": "second-op@test.example", "name": "", "send_email": False},
+    )
+    second_id = invite.json()["data"]["user_id"]
+    # Deactivating an invited (not yet active) second operator is fine — the lockout
+    # guard only counts ACTIVE operators, and the seeded super_admin is still active.
+    resp = await client.post(
+        f"/api/v1/platform/users/{second_id}/deactivate",
+        headers=_auth(pw.super_admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_deactivate_operator_blocks_the_last_active_operator(
+    platform_world: tuple[httpx.AsyncClient, PlatformWorld],
+) -> None:
+    client, pw = platform_world
+    resp = await client.post(
+        f"/api/v1/platform/users/{pw.super_admin_id}/deactivate",
+        headers=_auth(pw.super_admin_token),
+    )
+    assert resp.status_code == 409, resp.text

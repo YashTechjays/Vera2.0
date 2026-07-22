@@ -12,17 +12,23 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.common import AppSettings, AuthAudit, Email, Invites
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import PLATFORM_INVITE_NS, InviteData
-from control_plane.auth.platform_provisioning import create_operator_invite
+from control_plane.auth.platform_provisioning import create_operator_invite, set_operator_status
 from control_plane.auth.rbac import platform_require
 from control_plane.deps import client_ip, get_idempotency_store, platform_scoped_session
 from control_plane.email import EmailMessage
-from control_plane.exceptions import CustomAPIException, CustomAPIResponse, DefaultExceptionCode
+from control_plane.exceptions import (
+    ConflictError,
+    CustomAPIException,
+    CustomAPIResponse,
+    DefaultExceptionCode,
+    NotFoundError,
+)
 from control_plane.idempotency import (
     PLATFORM_IDEM_SCOPE,
     claim_or_conflict,
@@ -31,7 +37,7 @@ from control_plane.idempotency import (
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import emit_auth_event
 from vera_core.models import AppUser
-from vera_core.models.enums import AuthEvent
+from vera_core.models.enums import AccountType, AuthEvent
 
 logger = logging.getLogger(__name__)
 
@@ -173,3 +179,55 @@ async def list_operators(
 ) -> ResponseModel[list[OperatorResponse]]:
     rows = (await session.execute(select(AppUser).order_by(AppUser.email))).scalars().all()
     return ok([_to_response(r) for r in rows])
+
+
+@router.post(
+    "/users/{user_id}/deactivate",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def deactivate_operator(
+    user_id: UUID,
+    request: Request,
+    session: PlatformSession,
+    audit: AuthAudit,
+    caller: Annotated[VerifiedIdentity, platform_require("platform:users:invite")],
+) -> ResponseModel[None]:
+    user = (
+        await session.execute(select(AppUser).where(AppUser.id == user_id))
+    ).scalar_one_or_none()
+    if user is None:
+        raise NotFoundError(message="no such platform operator")
+
+    if user.status == "active":
+        active_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(AppUser)
+                .where(
+                    AppUser.account_type == AccountType.PLATFORM.value,
+                    AppUser.status == "active",
+                )
+            )
+        ).scalar_one()
+        if active_count <= 1:
+            raise ConflictError(message="cannot deactivate the last active platform operator")
+
+    flipped = await set_operator_status(session, app_user_id=user_id, status="deactivated")
+    if not flipped:
+        raise NotFoundError(message="no such platform operator")
+
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.PLATFORM_USER_DEACTIVATED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"target_user": str(user_id)},
+    )
+    return ok(None, message="Platform operator deactivated.")
