@@ -1,12 +1,25 @@
 """Unit tests for the coaching/whisper rate limiter — one shared window per
 call_id (not per supervisor), per the confirmed product decision."""
 
+from typing import cast
 from uuid import uuid4
 
+import fakeredis.aioredis
 import pytest
+from redis.asyncio import Redis
 
 from control_plane.exceptions import CustomAPIException, DefaultExceptionCode
-from control_plane.rate_limit import InMemoryCallRateLimiter, check_rate_limit
+from control_plane.rate_limit import (
+    InMemoryCallRateLimiter,
+    RedisCallRateLimiter,
+    _key,
+    check_rate_limit,
+)
+
+
+@pytest.fixture
+def redis() -> Redis:
+    return cast(Redis, fakeredis.aioredis.FakeRedis(decode_responses=True))
 
 
 @pytest.mark.asyncio
@@ -52,3 +65,40 @@ async def test_check_rate_limit_raises_429_over_the_limit() -> None:
         await check_rate_limit(limiter, call_id)
 
     assert exc_info.value.code is DefaultExceptionCode.RATE_LIMIT_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_redis_limiter_allows_actions_up_to_the_limit(redis: Redis) -> None:
+    limiter = RedisCallRateLimiter(redis, limit=3, window_seconds=60)
+    call_id = uuid4()
+
+    assert await limiter.check_and_increment(call_id) is True
+    assert await limiter.check_and_increment(call_id) is True
+    assert await limiter.check_and_increment(call_id) is True
+    assert await limiter.check_and_increment(call_id) is False  # 4th in the same window
+
+
+@pytest.mark.asyncio
+async def test_redis_limiter_sets_a_ttl_on_the_first_hit(redis: Redis) -> None:
+    """The INCR+EXPIRE must land as one atomic step — a key that's incremented
+    but never expires would permanently lock the call out of coaching."""
+    limiter = RedisCallRateLimiter(redis, limit=5, window_seconds=60)
+    call_id = uuid4()
+
+    await limiter.check_and_increment(call_id)
+
+    ttl = await redis.ttl(_key(call_id))
+    assert 0 < ttl <= 60
+
+
+@pytest.mark.asyncio
+async def test_redis_limiter_does_not_reset_the_ttl_on_later_hits(redis: Redis) -> None:
+    limiter = RedisCallRateLimiter(redis, limit=5, window_seconds=60)
+    call_id = uuid4()
+    key = _key(call_id)
+
+    await limiter.check_and_increment(call_id)
+    await redis.expire(key, 1)  # simulate time passing within the window
+    await limiter.check_and_increment(call_id)
+
+    assert await redis.ttl(key) <= 1

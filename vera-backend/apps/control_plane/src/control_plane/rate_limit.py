@@ -3,9 +3,12 @@
 A fixed rolling window, ONE Redis counter per `call_id` — not per (call_id,
 supervisor_id) — shared by every supervisor coaching that call AND by the
 whisper transcribe endpoint (the confirmed product decision: coaching and
-whisper draw from the same combined budget, not two separate ones). `INCR` +
-`EXPIRE` on the first hit is the atomic window: the counter self-clears after
-`window_seconds`, so there is nothing to reset or garbage-collect.
+whisper draw from the same combined budget, not two separate ones). `INCR`
+and `EXPIRE ... NX` (only sets the TTL if the key doesn't already have one)
+run together in one `MULTI`/`EXEC` transaction — a single round trip, so a
+cancelled/killed request can never observe the increment without the expiry
+(two separate awaits, INCR then a conditional EXPIRE, would leave an
+orphaned, never-expiring key if the process died in between).
 """
 
 import time
@@ -49,8 +52,8 @@ class InMemoryCallRateLimiter:
 
 
 class RedisCallRateLimiter:
-    """Production. `INCR` + `EXPIRE` (only on the window's first hit) is the
-    atomic rolling window — a single round trip per action."""
+    """Production. `INCR` + `EXPIRE ... NX` run in one `MULTI`/`EXEC`
+    transaction (see module docstring) — a single round trip per action."""
 
     def __init__(self, redis: Redis, *, limit: int, window_seconds: int) -> None:
         self._redis = redis
@@ -59,10 +62,11 @@ class RedisCallRateLimiter:
 
     async def check_and_increment(self, call_id: UUID) -> bool:
         key = _key(call_id)
-        count = await self._redis.incr(key)
-        if count == 1:
-            await self._redis.expire(key, self._window_seconds)
-        return count <= self._limit
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            pipe.expire(key, self._window_seconds, nx=True)
+            count, _ = await pipe.execute()
+        return int(count) <= self._limit
 
 
 async def check_rate_limit(limiter: CallRateLimiter, call_id: UUID) -> None:
