@@ -113,3 +113,12 @@ export type LiveCallSummary = {
 export function getCallSummary(callId: string): Promise<LiveCallSummary> {
   return apiRequest<LiveCallSummary>(`/calls/${encodeURIComponent(callId)}/summary`)
 }
+
+/** Short-lived signed playback URL for a call's recording (GET /calls/{id}/recording).
+ *  Every fetch is audited server-side (RECORDING_ACCESSED) — call it only on an
+ *  explicit user action, never to probe availability (the attempt DTO carries that). */
+export type RecordingPlayback = { url: string; expires_at: string }
+
+export function getRecordingPlayback(callId: string): Promise<RecordingPlayback> {
+  return apiRequest<RecordingPlayback>(`/calls/${encodeURIComponent(callId)}/recording`)
+}

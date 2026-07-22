@@ -24,6 +24,7 @@ from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
 from control_plane.llm import VertexLLMClient
 from control_plane.pipeline_sweeper import PipelineSweeper
 from control_plane.post_call_consumer import PostCallConsumer
+from control_plane.rate_limit import CallRateLimiter, RedisCallRateLimiter
 from control_plane.recording_jobs import RecordingVerifier, RetentionSweeper
 from control_plane.recording_storage import GCSRecordingStorage, RecordingStorage
 from control_plane.request_context import RequestIdMiddleware
@@ -45,6 +46,7 @@ from vera_core.observability.otel import configure_observability
 from vera_core.plan_store import CallPlanService, RedisCallPlanStore
 from vera_core.redis import create_redis
 from vera_core.services.recordings import recording_config_from
+from vera_core.stt import ResilientSTT, STTSpec
 
 logger = logging.getLogger("control_plane.main")
 
@@ -94,6 +96,8 @@ def create_app(
     summary_llm: ResilientLLM | None = None,
     summary_cache: SummaryCache | None = None,
     notification_service: NotificationService | None = None,
+    call_rate_limiter: CallRateLimiter | None = None,
+    whisper_stt: ResilientSTT | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
 
@@ -147,6 +151,22 @@ def create_app(
             secrets=app.state.secrets,
         )
         app.state.summary_cache = summary_cache or RedisSummaryCache(_redis())
+        # Coaching + whisper rate limit — one-shot INCR/EXPIRE, no tailing/blocking
+        # reads, so the shared pool is fine (same reasoning as call_plans below).
+        app.state.call_rate_limiter = call_rate_limiter or RedisCallRateLimiter(
+            _redis(),
+            limit=settings.coaching_rate_limit_per_minute,
+            window_seconds=settings.coaching_rate_limit_window_seconds,
+        )
+        # Whisper's fault-tolerant STT chain. Construction is lazy inside
+        # ResilientSTT (no provider client until first transcribe()), so this is
+        # safe even before ASSEMBLYAI_API_KEY exists.
+        owns_whisper_stt = whisper_stt is None
+        app.state.whisper_stt = whisper_stt or ResilientSTT(
+            STTSpec.parse(settings.whisper_stt_primary_model),
+            [STTSpec.parse(selector) for selector in settings.whisper_stt_fallback_models],
+            secrets=app.state.secrets,
+        )
         # A DEDICATED Redis client (separate pool) for call-event streaming: a tailing
         # SSE stream holds a connection for its lifetime, so it must not draw from the
         # shared pool that serves session/permission/idempotency Redis (auth DoS risk).
@@ -314,6 +334,8 @@ def create_app(
         await _cancel_task(worker_event_task)
         if owns_summary_llm:
             await app.state.summary_llm.aclose()
+        if owns_whisper_stt:
+            await app.state.whisper_stt.aclose()
         # Detached dispatch tasks (post-commit enqueue / consumer refill) must finish
         # before the engine goes away — they hold their own sessions off this engine.
         await drain_pending()

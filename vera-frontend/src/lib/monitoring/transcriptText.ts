@@ -9,12 +9,15 @@ export function turnLabel(source: TranscriptTurnSource, supervisorLabel: string)
   return "Rep"
 }
 
-/** One line per turn; keypad presses read as an action, speech as "Label: text". */
+/** One line per turn; keypad presses read as an action, coaching/whisper notes
+ *  are marked as such (they were never heard on the call), speech as "Label: text". */
 export function transcriptText(turns: (TranscriptTurn & { supervisorLabel: string })[]): string {
   return turns
     .map((t) => {
       const label = turnLabel(t.source, t.supervisorLabel)
-      return t.role === "dtmf" ? `${label} pressed ${t.text} on the keypad` : `${label}: ${t.text}`
+      if (t.role === "dtmf") return `${label} pressed ${t.text} on the keypad`
+      if (t.role === "coaching" || t.role === "whisper") return `${label} (coaching): ${t.text}`
+      return `${label}: ${t.text}`
     })
     .join("\n")
 }

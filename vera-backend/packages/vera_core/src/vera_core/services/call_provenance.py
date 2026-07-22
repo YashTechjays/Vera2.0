@@ -18,8 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.models.call import Call, CallLineage
-from vera_core.models.enums import AnswerSource
+from vera_core.models.enums import AnswerSource, RecordingStatus
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
+from vera_core.models.transcript import Recording
 from vera_core.services.field_status import latest_eval_subquery
 
 _MISSING = object()
@@ -48,6 +49,11 @@ class CallAttempt:
     created_at: datetime
     retry_of: UUID | None
     changed_paths: list[str]
+    # Visibility inputs + playability for the caller-aware `recording` DTO field
+    # (vera_core stays caller-agnostic; the API layer applies call_hidden_from).
+    initiated_by_id: UUID | None = None
+    published: bool = False
+    recording_available: bool = False
 
 
 def snapshot_changed_paths(
@@ -65,7 +71,14 @@ async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallA
     (created_at, then id — UUIDv7 — as the deterministic tie-break)."""
     calls = (
         await session.execute(
-            select(Call.id, Call.mode, Call.current_status, Call.created_at)
+            select(
+                Call.id,
+                Call.mode,
+                Call.current_status,
+                Call.created_at,
+                Call.initiated_by_id,
+                Call.published,
+            )
             .where(Call.form_id == form_id)
             .order_by(Call.created_at.asc(), Call.id.asc())
         )
@@ -95,6 +108,17 @@ async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallA
             )
         ).all()
     }
+    playable = {
+        row.call_id
+        for row in (
+            await session.execute(
+                select(Recording.call_id).where(
+                    Recording.call_id.in_(ids),
+                    Recording.status == RecordingStatus.AVAILABLE.value,
+                )
+            )
+        ).all()
+    }
     out: list[CallAttempt] = []
     for attempt, c in enumerate(calls, start=1):
         before, after = snapshots.get(c.id, (None, None))
@@ -107,6 +131,9 @@ async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallA
                 created_at=c.created_at,
                 retry_of=retry_of.get(c.id),
                 changed_paths=snapshot_changed_paths(before, after),
+                initiated_by_id=c.initiated_by_id,
+                published=c.published,
+                recording_available=c.id in playable,
             )
         )
     return out

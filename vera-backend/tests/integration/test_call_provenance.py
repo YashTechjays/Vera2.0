@@ -11,10 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from vera_core.db import tenant_session, uuid7
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.call import Call, CallLineage
-from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, InsuranceType
+from vera_core.models.enums import (
+    AnswerSource,
+    CallStatus,
+    FormStatus,
+    InsuranceType,
+    RecordingStatus,
+)
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
+from vera_core.models.transcript import Recording
 from vera_core.services.call_provenance import load_call_attempts, load_field_provenance
 
 pytestmark = pytest.mark.integration
@@ -154,6 +161,25 @@ async def two_call_form_ctx(
                 after_state={"cov.a": "x", "cov.b": "y"},
             )
         )
+        # Recordings: call1 PENDING (not playable), call2 AVAILABLE (playable)
+        session.add(
+            Recording(
+                id=uuid7(),
+                tenant_id=tenant_id,
+                call_id=call1_id,
+                gcs_uri=f"gs://bucket/recordings/{tenant_id}/{call1_id}.ogg",
+                status=RecordingStatus.PENDING.value,
+            )
+        )
+        session.add(
+            Recording(
+                id=uuid7(),
+                tenant_id=tenant_id,
+                call_id=call2_id,
+                gcs_uri=f"gs://bucket/recordings/{tenant_id}/{call2_id}.ogg",
+                status=RecordingStatus.AVAILABLE.value,
+            )
+        )
         # FieldAnswer: cov.b from call2, current ai_call answer
         answer_id = uuid7()
         session.add(
@@ -196,6 +222,7 @@ async def two_call_form_ctx(
                 "field_answer",
                 "call_form_snapshot",
                 "call_lineage",
+                "recording",
                 "call",
                 "patient_form",
             ):
@@ -231,6 +258,10 @@ async def test_attempts_lineage_and_diffs(two_call_form_ctx: _TwoCallFormCtx) ->
     assert attempts[1].retry_of == attempts[0].id
     assert attempts[0].changed_paths == ["cov.a"]
     assert attempts[1].changed_paths == ["cov.b"]
+    assert attempts[0].recording_available is False  # PENDING is not playable
+    assert attempts[1].recording_available is True
+    assert attempts[0].published is False
+    assert attempts[0].initiated_by_id is None
 
     prov = await load_field_provenance(
         ctx.session, ctx.form_id, {a.id: (a.attempt, a.mode) for a in attempts}

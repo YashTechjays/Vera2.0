@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Hash, MessageSquare } from "lucide-react"
+import { Hash, Mic, MessageSquare, PenLine } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
@@ -121,8 +121,10 @@ export function CallTranscript({
   return (
     <div className="flex-1 space-y-2 overflow-y-auto p-4">
       {turns.map((t, i) => {
-        // `role` decides the shape — speech renders as a bubble, a keypad press as an action chip.
+        // `role` decides the shape — speech renders as a bubble, a keypad press or a
+        // coaching/whisper note (never heard on the call) as a distinct action chip.
         const { onRight, label, bubble } = turnStyle(t.source, t.supervisorLabel)
+        const isCoachingNote = t.role === "coaching" || t.role === "whisper"
         return (
           <div key={`${t.ts}-${i}`} className={cn("flex", onRight ? "justify-end" : "justify-start")}>
             {t.role === "dtmf" ? (
@@ -131,6 +133,20 @@ export function CallTranscript({
                 <span>
                   {label} pressed {t.text} on the keypad
                 </span>
+              </div>
+            ) : isCoachingNote ? (
+              <div className="flex max-w-[85%] items-start gap-1.5 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-foreground">
+                {t.role === "whisper" ? (
+                  <Mic className="mt-0.5 size-3.5 shrink-0 text-amber-600" aria-hidden />
+                ) : (
+                  <PenLine className="mt-0.5 size-3.5 shrink-0 text-amber-600" aria-hidden />
+                )}
+                <div>
+                  <span className="mb-0.5 block text-[10px] font-medium uppercase tracking-wide text-amber-700">
+                    {label} coaching
+                  </span>
+                  {t.text}
+                </div>
               </div>
             ) : (
               <div className={cn("max-w-[85%] rounded-lg px-3 py-2 text-sm", bubble)}>

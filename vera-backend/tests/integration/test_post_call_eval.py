@@ -48,8 +48,8 @@ _SCHEMA_JSON: dict[str, object] = {
     # system_fields target — point them all at the single leaf (the same
     # shortcut tests/unit/forms/test_conditions.py uses).
     "system_fields": {"in_network": "sections.coverage.in_network"},
-    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.coverage.in_network"),
     "rep_call_reference_number_field": "sections.coverage.in_network",
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.coverage.in_network"),
     "sections": {
         "coverage": {
             "title": "Coverage",
