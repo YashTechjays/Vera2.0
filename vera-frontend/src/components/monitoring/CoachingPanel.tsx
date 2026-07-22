@@ -30,6 +30,9 @@ export function CoachingPanel({
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [truncated, setTruncated] = useState(false)
+  // Tapping the mic twice fast (stop lands before getUserMedia resolves) cancels
+  // the start with no recording made — surfaced so the button doesn't look dead.
+  const [canceledEarly, setCanceledEarly] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   // Guards the getUserMedia race: a tap short enough that the mic isn't ready
@@ -54,6 +57,7 @@ export function CoachingPanel({
   function handleMessageChange(next: string) {
     setMessage(next)
     setTruncated(false)
+    setCanceledEarly(false)
     // Clearing the box is treated as starting a fresh note — otherwise a
     // whisper-origin tag would stick around after the supervisor deletes the
     // transcription and types something unrelated.
@@ -65,6 +69,7 @@ export function CoachingPanel({
     startingRef.current = true
     stopRequestedRef.current = false
     setError(null)
+    setCanceledEarly(false)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" })
@@ -87,7 +92,10 @@ export function CoachingPanel({
       if (stopRequestedRef.current || !mountedRef.current) {
         recorder.stop()
         recorderRef.current = null
-        if (mountedRef.current) setRecording(false)
+        if (mountedRef.current) {
+          setRecording(false)
+          if (stopRequestedRef.current) setCanceledEarly(true)
+        }
       } else {
         setRecording(true)
       }
@@ -151,6 +159,7 @@ export function CoachingPanel({
     if (error !== null) return error
     if (transcribing) return "Transcribing…"
     if (recording) return "Recording — click to stop and transcribe"
+    if (canceledEarly) return "Canceled — click the mic to try again."
     if (truncated) return `Cut to ${MAX_MESSAGE_LENGTH} characters — review before sending.`
     if (origin === "whisper" && message) return "Review the transcription, then send."
     return ""
@@ -166,6 +175,7 @@ export function CoachingPanel({
       setMessage("")
       setOrigin("typed")
       setTruncated(false)
+      setCanceledEarly(false)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not send coaching note.")
     } finally {
