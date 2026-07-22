@@ -153,9 +153,24 @@ per the project-wide idempotency seam requirement.
 
 ### Session-shape enforcement
 
-All four new authenticated platform endpoints require an actual `platform_session` (no
-tenant GUC set) — never an `elevated_session` (break-glass tenant elevation). A tenant
-admin who is currently elevated into a tenant must not be able to reach these routes.
+All four new authenticated platform endpoints require the caller's `account_type` to be
+`'platform'` — resolved by `platform_require`/`platform_scoped_session` straight from the
+verified identity, with no dependence on tenant elevation state. A genuinely non-elevated
+tenant session (`account_type='tenant'`) is denied (401/403): its token never carries a
+platform-tier grant, so `platform_require`'s permission resolution over the platform
+session finds nothing to match.
+
+**Verified during implementation (Task 11):** an elevated SUPER_ADMIN session is correctly
+still ALLOWED on these routes, not denied. Break-glass elevation only pins the tenant GUC
+for `/api/v1/*` tenant routes (`tenant_context`/`tenant_scoped_session`); it never changes
+the operator's own `account_type`, which stays `'platform'` throughout. `platform_require`
+never consults the elevation grant at all. There is also no scenario of a *tenant admin*
+being elevated — only a platform-tier SUPER_ADMIN can create an elevation grant in the
+first place, so "an elevated tenant session" describes a state that cannot exist. See
+`tests/integration/control_plane/test_platform_elevation.py::test_elevated_super_admin_still_reaches_platform_tier_endpoints`
+for the passing proof, and
+`tests/integration/control_plane/test_platform_users.py::test_plain_tenant_admin_session_cannot_reach_platform_user_endpoints`
+(plus its mutation-endpoint sibling) for the plain-tenant-denial side.
 
 ## Frontend
 
@@ -214,7 +229,10 @@ revoke the old token, which was rejected as disproportionate — see the plan's 
 - Resend: stale `UserIdentity` deleted, fresh token issued (the old token is deliberately
   NOT invalidated — see "Known gap being fixed" below); 409s if invitee already went active.
 - Lockout: last active platform operator cannot be deactivated; second-to-last can.
-- Session-shape: an elevated tenant session gets 403 on all four new platform endpoints.
+- Session-shape: a plain (non-elevated) tenant session is denied (401/403) on all four
+  new platform endpoints; an elevated SUPER_ADMIN session correctly still reaches them
+  (elevation pins the tenant GUC, never `account_type`) — see "Session-shape enforcement"
+  above for the verified invariant and the tests that prove it.
 - RBAC invariant test extended: `platform:users:invite` / `platform:users:read` can never
   attach to a tenant-scoped role.
 

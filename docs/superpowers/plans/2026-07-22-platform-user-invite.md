@@ -2182,33 +2182,53 @@ git commit -m "feat(platform): add platform accept-invite flow with mandatory MF
 
 - [ ] **Step 1: Write the failing tests**
 
+**Correction (post-implementation, final review round):** the scenario this task
+originally planned to test — "a tenant admin who elevates into break-glass access" —
+does not exist: only a platform-tier SUPER_ADMIN can create an elevation grant in the
+first place, so a tenant admin session is never in an elevated state. What actually
+needed covering is the plain (non-elevated) tenant session, which IS denied, alongside
+the elevated SUPER_ADMIN session, which is correctly ALLOWED (elevation pins the tenant
+GUC for `/api/v1/*` routes; it never changes `account_type`). The shipped tests, under
+their real names:
+
 ```python
-# In tests/integration/control_plane/test_platform_users.py
-async def test_elevated_tenant_session_cannot_reach_platform_user_endpoints(
-    client: httpx.AsyncClient,
-    rbac_world: RBACWorld,  # the existing tenant-tier fixture from conftest.py
+# tests/integration/control_plane/test_platform_users.py
+async def test_plain_tenant_admin_session_cannot_reach_platform_user_endpoints(
+    client: httpx.AsyncClient, rbac_world: "RBACWorld",
 ) -> None:
-    """A tenant admin who elevates into break-glass access must not be able to
-    reach the platform-operator endpoints — these require an actual platform
-    session (no tenant GUC), not an elevated tenant one."""
-    resp = await client.get(
-        "/api/v1/platform/users", headers=_auth(rbac_world.admin_token)
-    )
+    """A plain (never-elevated) TENANT_ADMIN session must not be able to reach the
+    platform-operator endpoints — these require an actual platform session
+    (`account_type='platform'`), which a tenant admin's token never carries."""
+    resp = await client.get("/api/v1/platform/users", headers=_auth(rbac_world.admin_token))
     assert resp.status_code in (401, 403), resp.text
+
+# + test_plain_tenant_admin_session_cannot_reach_platform_mutation_endpoints (same
+# file) covering the three mutating endpoints (invitations / deactivate / resend).
+
+# tests/integration/control_plane/test_platform_elevation.py
+async def test_elevated_super_admin_still_reaches_platform_tier_endpoints(
+    world: tuple[httpx.AsyncClient, World],
+) -> None:
+    """An active elevation grant changes the DB session's tenant GUC for /api/v1/*
+    tenant routes, but it does NOT change the caller's account_type — the identity
+    resolved from the bearer token is still 'platform'. So a SUPER_ADMIN who is
+    mid-elevation into a tenant is still, and correctly, allowed to reach
+    platform-tier endpoints like GET /platform/users."""
+    ...
 ```
 
 For the RBAC invariant extension, find the existing test (likely named something like `test_platform_permission_cannot_be_granted_to_tenant_role` — search `tests/` for `roles_grant_platform_permission` usages in test files) and add `platform:users:invite`/`platform:users:read` to whatever parametrized list or explicit assertion it already runs, following that test's existing style exactly (do not invent a new test file for this — extend the existing one).
 
 - [ ] **Step 2: Run test to verify it fails or passes for the right reason**
 
-Run: `cd vera-backend && uv run pytest tests/integration/control_plane/test_platform_users.py -k elevated_tenant_session -v`
-Expected: this should already PASS if the endpoints correctly gate on `platform_require`/`platform_scoped_session` (which only recognize `account_type='platform'` identities) — a tenant admin's token, even elevated, carries `account_type='tenant'`, so `platform_require`'s permission resolution over `platform_scoped_session` won't find any grant. If it unexpectedly passes with a 200, that's a real bug to fix in Tasks 7–10's route dependencies before proceeding — don't treat an unexpected pass as success.
+Run: `cd vera-backend && uv run pytest tests/integration/control_plane/test_platform_users.py tests/integration/control_plane/test_platform_elevation.py -k "plain_tenant_admin or elevated_super_admin" -v`
+Expected: the plain-tenant-session tests PASS (denied) because the endpoints correctly gate on `platform_require`/`platform_scoped_session` (which only recognize `account_type='platform'` identities) — a tenant admin's token carries `account_type='tenant'`, so `platform_require`'s permission resolution over `platform_scoped_session` finds no grant. The elevated-SUPER_ADMIN test PASSES as an ALLOW (200) — that is the correct, shipped behavior, not a bug; do not "fix" the route to deny it.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add tests/integration/control_plane/test_platform_users.py <the extended RBAC invariant test file>
-git commit -m "test(platform): verify elevated tenant sessions can't reach platform-user endpoints"
+git add tests/integration/control_plane/test_platform_users.py tests/integration/control_plane/test_platform_elevation.py <the extended RBAC invariant test file>
+git commit -m "test(platform): verify session-shape gating on platform-user endpoints"
 ```
 
 ---
