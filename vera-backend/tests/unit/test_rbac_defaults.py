@@ -70,3 +70,11 @@ def test_platform_users_permissions_are_seeded() -> None:
 def test_super_admin_holds_the_new_platform_permissions() -> None:
     assert "platform:users:invite" in SYSTEM_ROLES["SUPER_ADMIN"]
     assert "platform:users:read" in SYSTEM_ROLES["SUPER_ADMIN"]
+
+
+def test_platform_users_permissions_are_catalogued_and_super_admin_only() -> None:
+    for code in ("platform:users:invite", "platform:users:read"):
+        assert code in PLATFORM_PERMISSIONS
+        # Platform perms go only to SUPER_ADMIN (never a tenant role).
+        assert code in SYSTEM_ROLES["SUPER_ADMIN"]
+        assert code not in SYSTEM_ROLES["TENANT_ADMIN"]

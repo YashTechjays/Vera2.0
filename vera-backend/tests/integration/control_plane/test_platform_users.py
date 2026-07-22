@@ -17,6 +17,7 @@ from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import InMemorySessionStore, SessionData
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
+from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.config import Settings
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
@@ -281,3 +282,15 @@ async def test_platform_accept_invalid_token_is_unauthorized(
         json={"token": "not-a-real-token", "password": "whatever-password"},
     )
     assert resp.status_code == 401, resp.text
+
+
+async def test_elevated_tenant_session_cannot_reach_platform_user_endpoints(
+    client: httpx.AsyncClient, rbac_world: "RBACWorld"
+) -> None:
+    """A tenant admin who elevates into break-glass access must not be able to
+    reach the platform-operator endpoints — these require an actual platform
+    session (no tenant GUC), not an elevated tenant one."""
+    resp = await client.get(
+        "/api/v1/platform/users", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code in (401, 403), resp.text
