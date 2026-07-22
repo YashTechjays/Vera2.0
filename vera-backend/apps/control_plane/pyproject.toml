@@ -16,6 +16,7 @@ dependencies = [
     "pyotp>=2.9",
     "aiosmtplib>=3.0",
     "livekit-api>=1.0",
+    "google-genai>=1.0",
     "email-validator>=2.0",
     "vera-core",
 ]

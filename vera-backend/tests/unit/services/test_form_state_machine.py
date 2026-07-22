@@ -8,6 +8,7 @@ responsibility (using `func.now()`, the DB clock) after a successful IN_QUEUE
 transition. The state machine only manages `status` and `retry_count`.
 """
 
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,10 @@ from vera_core.services.form_state_machine import (
     FormStateMachine,
     InvalidTransitionError,
 )
+
+
+def _form(status: FormStatus) -> types.SimpleNamespace:
+    return types.SimpleNamespace(status=status.value, retry_count=0, enqueued_at=None)
 
 
 class TestTransitionMap:
@@ -36,6 +41,8 @@ class TestTransitionMap:
             (FormStatus.IN_CALL, FormStatus.CALL_FAILED),
             (FormStatus.AI_PROCESSING, FormStatus.EXCEPTION_REVIEW),
             (FormStatus.AI_PROCESSING, FormStatus.IN_QUEUE),
+            # The post-call eval completes a form only when no field needs review.
+            (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.CALL_FAILED, FormStatus.IN_QUEUE),
             (FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE),
             (FormStatus.EXCEPTION_REVIEW, FormStatus.COMPLETED),
@@ -51,10 +58,9 @@ class TestTransitionMap:
             (FormStatus.EXPIRED, FormStatus.IN_QUEUE),
             (FormStatus.IN_QUEUE, FormStatus.COMPLETED),
             (FormStatus.IN_CALL, FormStatus.IN_QUEUE),
-            # COMPLETED is reachable only from EXCEPTION_REVIEW (manual approve) —
-            # a call ending must never complete the form directly.
+            # A call ending never completes the form directly — COMPLETED comes
+            # from a reviewer's approve or a nothing-to-review post-call eval.
             (FormStatus.IN_CALL, FormStatus.COMPLETED),
-            (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED),
             (FormStatus.READY_FOR_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.READY_FOR_PROCESSING, FormStatus.CALL_FAILED),
@@ -165,3 +171,26 @@ class TestFormStateMachine:
         # Same status → no-op, no error
         sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
         assert form.status == FormStatus.IN_QUEUE.value
+
+
+# ---------------------------------------------------------------------------
+# AI_PROCESSING edge cases (merged from vera_core unit tests)
+# ---------------------------------------------------------------------------
+
+
+def test_ai_processing_can_go_to_exception_review() -> None:
+    form = _form(FormStatus.AI_PROCESSING)
+    FormStateMachine().transition(form, FormStatus.EXCEPTION_REVIEW, tenant_max_retries=5)
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+
+
+def test_ai_processing_can_still_complete() -> None:
+    form = _form(FormStatus.AI_PROCESSING)
+    FormStateMachine().transition(form, FormStatus.COMPLETED, tenant_max_retries=5)
+    assert form.status == FormStatus.COMPLETED.value
+
+
+def test_ready_cannot_jump_to_exception_review_via_ai_processing() -> None:
+    form = _form(FormStatus.IN_QUEUE)
+    with pytest.raises(InvalidTransitionError):
+        FormStateMachine().transition(form, FormStatus.EXCEPTION_REVIEW, tenant_max_retries=5)

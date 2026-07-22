@@ -23,9 +23,13 @@ ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
         {FormStatus.IN_CALL, FormStatus.EXPIRED, FormStatus.CALL_FAILED}
     ),
     FormStatus.IN_CALL: frozenset({FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED}),
-    # → EXCEPTION_REVIEW when post-call processing finishes; → IN_QUEUE is the
-    # system auto-retry on low completion (guarded by the retry cap below).
-    FormStatus.AI_PROCESSING: frozenset({FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE}),
+    # → EXCEPTION_REVIEW when the post-call eval leaves fields needing human
+    # review; → COMPLETED when it leaves none (post_call_eval.evaluate_call);
+    # → IN_QUEUE is the system auto-retry on low completion (guarded by the
+    # retry cap below).
+    FormStatus.AI_PROCESSING: frozenset(
+        {FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE, FormStatus.COMPLETED}
+    ),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
 }

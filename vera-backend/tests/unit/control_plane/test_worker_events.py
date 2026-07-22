@@ -37,6 +37,7 @@ from vera_core.events import (
 from vera_core.models import Call, PatientForm, SchemaVersion, Tenant
 from vera_core.models.audit_log import AuditEvent
 from vera_core.models.enums import CallEventType, CallStatus, FormStatus
+from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer
 from vera_core.observability.correlation import room_name_for_call
 
 _VALID_ROOM = f"call--{uuid4()}--{uuid4()}"
@@ -217,6 +218,7 @@ def _consumer(
     session: _FakeSession | None = None,
     call_stream: _FakeCallStream | None = None,
     form_auto_retry_enabled: bool = False,
+    post_call_bus: Any = None,
 ) -> _Wired:
     """Wire a consumer to a fake DB seam and a fake dispatch pass. `tenant_session`
     is monkeypatched in `worker_events` (the answered handler), `call_closeout` (the
@@ -260,6 +262,7 @@ def _consumer(
         fake_call_stream,  # type: ignore[arg-type]
         teardown_grace_ms=0,
         form_auto_retry_enabled=form_auto_retry_enabled,
+        post_call_bus=post_call_bus,
     )
     return _Wired(
         consumer=consumer,
@@ -508,6 +511,70 @@ async def test_call_ended_routes_form_through_ai_processing_to_review(
 
     assert len(wired.dispatch_calls) == 1
     assert wired.dispatch_calls[0][0] == tenant_id  # refill ran for the freed tenant
+    assert redis.acked == ["1-0"]
+
+
+class _EmptyRows:
+    """SELECT result with no rows — supports .all() and the scalar accessors."""
+
+    def all(self) -> list[Any]:
+        return []
+
+    def scalar_one_or_none(self) -> Any:
+        return None
+
+
+class _EvalSeamSession(_FakeSession):
+    """Extends the entity router for the enqueue seam's FieldAnswer /
+    CallFormSnapshot lookups (no rows: fresh form, no prior snapshot)."""
+
+    async def execute(self, stmt: Any) -> Any:
+        if not isinstance(stmt, Insert):
+            entity = stmt.column_descriptions[0]["entity"]
+            if entity in (FieldAnswer, CallFormSnapshot):
+                return _EmptyRows()
+        return await super().execute(stmt)
+
+
+@pytest.mark.asyncio
+async def test_call_ended_with_eval_bus_snapshots_and_enqueues_instead_of_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the post-call eval consumer is wired, closeout hands it the
+    resolution: the form stays in AI_PROCESSING, a before-state CallFormSnapshot
+    is written, exactly one PostCallJob is emitted, and the refill still runs."""
+
+    class _SpyBus:
+        def __init__(self) -> None:
+            self.emitted: list[Any] = []
+
+        async def emit(self, job: Any) -> None:
+            self.emitted.append(job)
+
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=40.0)
+    tenant = _tenant(id=tenant_id, max_retries=3)
+    session = _EvalSeamSession(call=call, form=form, tenant=tenant)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    bus = _SpyBus()
+    wired = _consumer(monkeypatch, redis, livekit, session=session, post_call_bus=bus)
+
+    event = CallEndedEvent(room_name=room, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert call.current_status == CallStatus.COMPLETED.value
+    # The eval consumer owns the transition out of AI_PROCESSING — closeout
+    # must NOT resolve synchronously when the bus is wired.
+    assert form.status == FormStatus.AI_PROCESSING.value
+    snapshots = [obj for obj in session.added if isinstance(obj, CallFormSnapshot)]
+    assert len(snapshots) == 1
+    assert snapshots[0].after_state == {}
+    assert [(j.tenant_id, j.form_id, j.call_id) for j in bus.emitted] == [
+        (tenant_id, form_id, call_id)
+    ]
+    assert len(wired.dispatch_calls) == 1  # slotwise refill still runs
     assert redis.acked == ["1-0"]
 
 

@@ -28,6 +28,7 @@ from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
+from vera_core.events import PostCallJob
 from vera_core.integrations.credentials import seal_credentials
 from vera_core.models import (
     AppUser,
@@ -53,6 +54,19 @@ class MintedToken(NamedTuple):
     name: str | None
     attributes: dict[str, str] | None
     ttl: timedelta
+
+
+class FakePostCallBus:
+    """Records emitted PostCallJobs for test assertions; no Redis required."""
+
+    def __init__(self) -> None:
+        self.emitted: list[PostCallJob] = []
+
+    async def emit(self, job: PostCallJob) -> None:
+        self.emitted.append(job)
+
+    async def ensure_group(self) -> None:
+        pass
 
 
 class FakeLiveKit(LiveKitGateway):
@@ -120,6 +134,18 @@ class FakeLiveKit(LiveKitGateway):
 @pytest.fixture(scope="session")
 def fake_livekit() -> FakeLiveKit:
     return FakeLiveKit()
+
+
+@pytest.fixture(scope="session")
+def fake_post_call_bus() -> FakePostCallBus:
+    return FakePostCallBus()
+
+
+@pytest.fixture(autouse=True)
+def reset_fake_bus(fake_post_call_bus: FakePostCallBus) -> Iterator[None]:
+    """Clear the bus before each test so emissions don't bleed across tests."""
+    fake_post_call_bus.emitted.clear()
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -426,6 +452,7 @@ async def authz_app(
     email_sender: InMemoryEmailSender,
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
+    fake_post_call_bus: FakePostCallBus,
     call_stream_service: CallStreamService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
@@ -446,6 +473,7 @@ async def authz_app(
         call_stream_service=call_stream_service,
     )
     async with app.router.lifespan_context(app):
+        app.state.post_call_bus = fake_post_call_bus
         yield app
 
 
