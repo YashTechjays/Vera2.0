@@ -15,7 +15,7 @@ from control_plane.auth.platform_provisioning import (
     set_operator_status,
 )
 from scripts.seed import _seed_permissions, _seed_system_roles
-from vera_core.db import platform_session
+from vera_core.db import platform_session, tenant_session, uuid7
 from vera_core.models import AppUser, UserIdentity, UserRole
 
 # No `pytestmark = pytest.mark.anyio` here: this repo is asyncio-only
@@ -162,3 +162,32 @@ async def test_set_operator_status_rejects_invalid_status(
     async with platform_session(rls_sessionmaker) as session:
         with pytest.raises(DBAPIError):
             await set_operator_status(session, app_user_id=user_id, status="not-a-real-status")
+
+
+async def test_create_operator_invite_rejected_outside_platform_session(
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression test for the guard fix: `current_setting('app.platform', true)`
+    reads SQL NULL (not 'off') on a connection that never opened a platform session,
+    and plpgsql's `IF NOT (NULL)` is falsy — a bare `NOT (guard)` would silently skip
+    the RAISE and let an ordinary tenant caller through. `tenant_session` is a real
+    RLS-bound session that never sets `app.platform`, so calling a definer function
+    from inside it exercises exactly that unset-GUC path and proves `IS NOT TRUE`
+    fails closed instead of open."""
+    async with tenant_session(rls_sessionmaker, uuid7()) as session:
+        with pytest.raises(DBAPIError):
+            await create_operator_invite(
+                session, email="attacker@example.com", name="", invited_by=None
+            )
+
+
+async def test_set_operator_status_returns_false_for_nonexistent_user(
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The documented "quiet no-op" contract: from within a genuine platform session
+    (guard passes), an id matching no AppUser row updates zero rows and returns
+    False rather than raising."""
+    async with platform_session(rls_sessionmaker) as session:
+        flipped = await set_operator_status(session, app_user_id=uuid7(), status="active")
+        await session.commit()
+        assert flipped is False
