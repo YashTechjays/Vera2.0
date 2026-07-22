@@ -4,6 +4,7 @@ import {
   CONNECTION_PHASE_LABEL,
   PARTICIPANT_MODE_BADGE,
   agentJoined,
+  coachingPanelVisible,
   connectionPhase,
   interveneButtonState,
   isWaitingForCall,
@@ -190,6 +191,24 @@ describe("interveneButtonState", () => {
     const state = interveneButtonState(true, { ...live, otherIntervener: true })
     expect(state.disabled).toBe(true)
     expect(state.title).toBe("Another supervisor is intervening")
+  })
+})
+
+describe("coachingPanelVisible", () => {
+  it("visible for an intervene-permission holder on a live call", () => {
+    expect(coachingPanelVisible(true, false, false)).toBe(true)
+  })
+
+  it("visible for the call owner even without the permission", () => {
+    expect(coachingPanelVisible(false, true, false)).toBe(true)
+  })
+
+  it("hidden without either the permission or ownership", () => {
+    expect(coachingPanelVisible(false, false, false)).toBe(false)
+  })
+
+  it("hidden once the call has ended, regardless of permission/ownership", () => {
+    expect(coachingPanelVisible(true, true, true)).toBe(false)
   })
 })
 

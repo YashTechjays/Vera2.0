@@ -128,6 +128,18 @@ export function interveneButtonState(
   return { visible: true, disabled: false }
 }
 
+/** Coaching is independent of Intervene's single-mic lock — visible whenever the
+ *  caller may publish on this call (owns it, or holds calls:intervene) and the
+ *  call hasn't ended, in both listen and intervene mode. Server enforces the
+ *  real rule regardless; this only gates whether the UI is shown. */
+export function coachingPanelVisible(
+  canIntervene: boolean,
+  isOwner: boolean,
+  callEnded: boolean,
+): boolean {
+  return (canIntervene || isOwner) && !callEnded
+}
+
 export type SpeakerButtonState = {
   action: "unlock" | "mute" | "unmute"
   title: string
