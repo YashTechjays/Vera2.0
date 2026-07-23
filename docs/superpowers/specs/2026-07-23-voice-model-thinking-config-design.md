@@ -228,9 +228,11 @@ a second parameter. `src/pages/llmConfig.helpers.ts` gains
 exactly) and a `THINKING_LEVELS` constant. `src/pages/LlmConfig.tsx` gains two more
 local inputs (thinking-budget text, thinking-level select), swapping which one
 renders based on `isGemini3Model(input)` on the *current* model text — not just the
-saved value — and clearing the now-irrelevant field on a family switch so a stale
-value from before can't be silently submitted. History table gains a "Thinking"
-column summarizing whichever field is set (or "—" for a default/reset row).
+saved value. The save payload is built by reading only whichever field is
+currently relevant (the same `isGemini3Model(input)` check), so a stale value
+left in the hidden field can never be submitted — no separate clear-on-switch
+effect needed. History table gains a "Thinking" column summarizing whichever
+field is set (or "—" for a default/reset row).
 
 ## Error handling
 
