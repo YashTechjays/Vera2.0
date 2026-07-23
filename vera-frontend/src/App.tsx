@@ -21,6 +21,7 @@ import { AgentPrompt } from "@/pages/AgentPrompt"
 import { InsuranceProviders } from "@/pages/InsuranceProviders"
 import { IvrPlaybooks } from "@/pages/IvrPlaybooks"
 import { FormSchemas } from "@/pages/FormSchemas"
+import { LlmConfig } from "@/pages/LlmConfig"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -90,6 +91,8 @@ function App() {
             <Route path="ivr-playbooks" element={<IvrPlaybooks />} />
             {/* Super-admin-only read-only form-schema catalog. */}
             <Route path="form-schemas" element={<FormSchemas />} />
+            {/* Super-admin-only voice cascade LLM model override. */}
+            <Route path="voice-model" element={<LlmConfig />} />
             <Route path="settings" element={<Settings />} />
             <Route path="*" element={<Placeholder title="Not Found" />} />
           </Route>
