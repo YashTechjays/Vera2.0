@@ -155,7 +155,7 @@ export function LlmConfig() {
           <div className="flex gap-3">
             <Button
               onClick={onSave}
-              disabled={busy || !hasPendingChange(input, current)}
+              disabled={busy || !hasPendingChange(input, null, current)}
               className="min-w-[100px]"
             >
               {busy ? "Saving…" : "Save"}
