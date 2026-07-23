@@ -2,7 +2,9 @@
 run against a real RLS-enforcing Postgres (not mocked), since the whole point of
 these functions is to work around a real RLS restriction."""
 
+import asyncio
 from collections.abc import AsyncGenerator
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text
@@ -191,3 +193,67 @@ async def test_set_operator_status_returns_false_for_nonexistent_user(
         flipped = await set_operator_status(session, app_user_id=uuid7(), status="active")
         await session.commit()
         assert flipped is False
+
+
+async def test_concurrent_deactivate_of_the_last_two_active_operators_blocks_exactly_one(
+    rls_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression for the TOCTOU lockout race (PR #126 review, closed by migration
+    9cec58e69e92): with exactly 2 active platform operators, two concurrent
+    `deactivate` calls against the two DIFFERENT operators must not both succeed —
+    that would leave zero active platform operators, which is unrecoverable (no
+    bootstrap path once any platform operator has ever existed).
+
+    This exercises REAL concurrency: two separate connections (each its own
+    `platform_session`), driven via `asyncio.gather` against the real RLS-enforcing
+    test database — not two sequential calls, which would never touch the race, and
+    not a mock, which couldn't reproduce a Postgres row-lock interaction at all. One
+    transaction is made to hold its lock open (a `pg_sleep` before its own commit)
+    long enough that the other genuinely blocks on `platform_set_operator_status`'s
+    internal `FOR UPDATE` before either commits — the same interleaving used to
+    manually catch the snapshot bug in the migration's first draft (see its
+    docstring), now automated so it can't regress silently."""
+    async with platform_session(rls_sessionmaker) as session:
+        user_a = await create_operator_invite(
+            session, email="race-a@example.com", name="", invited_by=None
+        )
+        user_b = await create_operator_invite(
+            session, email="race-b@example.com", name="", invited_by=None
+        )
+        await session.commit()
+    async with platform_session(rls_sessionmaker) as session:
+        assert await set_operator_status(session, app_user_id=user_a, status="active") is True
+        assert await set_operator_status(session, app_user_id=user_b, status="active") is True
+        await session.commit()
+
+    async def _deactivate(
+        user_id: UUID, *, hold_seconds: float = 0, delay: float = 0
+    ) -> bool | None:
+        if delay:
+            await asyncio.sleep(delay)
+        async with platform_session(rls_sessionmaker) as session:
+            result = await set_operator_status(session, app_user_id=user_id, status="deactivated")
+            if hold_seconds:
+                # Keep this transaction's FOR UPDATE lock open past the point where the
+                # other coroutine's call has started, forcing it to genuinely block on
+                # the lock rather than relying on incidental asyncio scheduling luck.
+                await session.execute(text("SELECT pg_sleep(:s)").bindparams(s=hold_seconds))
+            await session.commit()
+            return result
+
+    result_a, result_b = await asyncio.gather(
+        _deactivate(user_a, hold_seconds=1.0),
+        _deactivate(user_b, delay=0.3),
+    )
+
+    assert {result_a, result_b} == {True, None}, (result_a, result_b)
+
+    async with platform_session(rls_sessionmaker) as session:
+        remaining_active = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM app_user WHERE id = ANY(:ids) AND status = 'active'"
+                ).bindparams(ids=[user_a, user_b])
+            )
+        ).scalar_one()
+    assert remaining_active == 1

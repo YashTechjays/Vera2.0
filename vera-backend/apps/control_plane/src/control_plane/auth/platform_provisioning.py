@@ -42,13 +42,20 @@ async def create_password_identity(
     return identity_id
 
 
-async def set_operator_status(session: AsyncSession, *, app_user_id: UUID, status: str) -> bool:
-    """Flip a platform operator's status to 'active' or 'deactivated'. Returns
-    whether a row was actually updated (False if the id doesn't match a platform
-    operator)."""
+async def set_operator_status(
+    session: AsyncSession, *, app_user_id: UUID, status: str
+) -> bool | None:
+    """Flip a platform operator's status to 'active' or 'deactivated'. The definer
+    function's three-way result (migration d226261a20ca / 9cec58e69e92) round-trips
+    here unchanged: `True` (flipped), `False` (no such platform operator), or `None`
+    (blocked by the last-active-operator lockout guard — deactivating this row would
+    drop the active platform-operator count to zero). The lockout check itself is
+    atomic inside the SQL function (locks the active set before counting it); this
+    wrapper does not re-check anything, only relays the signal."""
     result = await session.execute(
         text("SELECT platform_set_operator_status(CAST(:app_user_id AS uuid), :status)").bindparams(
             app_user_id=app_user_id, status=status
         )
     )
-    return bool(result.scalar_one())
+    value = result.scalar_one()
+    return None if value is None else bool(value)

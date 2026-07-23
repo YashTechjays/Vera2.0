@@ -145,6 +145,7 @@ async def validate_platform_invitation(
 async def accept_platform_invitation(
     body: AcceptInviteRequest,
     request: Request,
+    response: Response,
     sessionmaker: Sessionmaker,
     kms: KMS,
     audit: AuthAudit,
@@ -155,6 +156,7 @@ async def accept_platform_invitation(
     ALWAYS required for platform operators — no enforce_mfa branch, unlike the
     tenant flow — this always returns a provisioning URI + bridge mfa_token and
     leaves status "invited" until activate-mfa. Single-use (token consumed here)."""
+    response.headers["Cache-Control"] = "no-store"
     invite = await invites.get(PLATFORM_INVITE_NS, body.token)
     if invite is None or invite.tenant_id is not None:
         raise _unauthorized()

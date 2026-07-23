@@ -12,7 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.common import AppSettings, AuthAudit, Email, Invites, Resolver
@@ -38,7 +38,7 @@ from control_plane.idempotency import (
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import emit_auth_event
 from vera_core.models import AppUser
-from vera_core.models.enums import AccountType, AuthEvent
+from vera_core.models.enums import AuthEvent
 
 logger = logging.getLogger(__name__)
 
@@ -225,27 +225,16 @@ async def deactivate_operator(
     resolver: Resolver,
     caller: Annotated[VerifiedIdentity, platform_require("platform:users:invite")],
 ) -> ResponseModel[None]:
-    user = (
-        await session.execute(select(AppUser).where(AppUser.id == user_id))
-    ).scalar_one_or_none()
-    if user is None:
-        raise NotFoundError(message="no such platform operator")
-
-    if user.status == "active":
-        active_count = (
-            await session.execute(
-                select(func.count())
-                .select_from(AppUser)
-                .where(
-                    AppUser.account_type == AccountType.PLATFORM.value,
-                    AppUser.status == "active",
-                )
-            )
-        ).scalar_one()
-        if active_count <= 1:
-            raise ConflictError(message="cannot deactivate the last active platform operator")
-
+    # The last-active-operator lockout guard is atomic inside `platform_set_operator_status`
+    # itself (locks the active set before counting it — see migration 9cec58e69e92); a
+    # Python-side count-then-check here would be a TOCTOU race (two concurrent deactivates
+    # against two different active operators could each read the pre-write count and both
+    # commit, leaving zero active operators — unrecoverable, no bootstrap path once any
+    # platform operator has ever existed). `flipped` is `None` when the guard blocked the
+    # write, `False` when `user_id` doesn't match a platform operator, `True` on success.
     flipped = await set_operator_status(session, app_user_id=user_id, status="deactivated")
+    if flipped is None:
+        raise ConflictError(message="cannot deactivate the last active platform operator")
     if not flipped:
         raise NotFoundError(message="no such platform operator")
 
