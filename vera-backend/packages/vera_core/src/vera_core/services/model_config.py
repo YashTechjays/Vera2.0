@@ -43,8 +43,9 @@ def normalize_model_name(raw: str) -> str:
 
 
 async def get_active_llm_config(session: AsyncSession) -> VoiceModelConfig | None:
-    """The newest voice_model_config row for the llm stage, or None if never written.
-    Either way, `model is None` (row or no row) means "use the hardcoded default"."""
+    """The newest voice_model_config row for the llm stage with an active override, or None
+    if never written OR if the newest row is an explicit reset (model IS NULL). A None return
+    always means "use the hardcoded default"—never returns a row with .model is None."""
     config = (
         await session.execute(
             select(VoiceModelConfig)
@@ -98,7 +99,7 @@ async def reset_llm_model(
     """No-op (returns None) if already at default; otherwise inserts an explicit reset
     row (provider/model both NULL) so history shows who cleared it and when."""
     current = await get_active_llm_config(session)
-    if current is None or current.model is None:
+    if current is None:
         return None
     row = VoiceModelConfig(
         stage=VoiceModelStage.LLM,
@@ -121,5 +122,5 @@ async def add_llm_model_override_metadata(session: AsyncSession, metadata: dict[
     except Exception as exc:
         logger.warning("llm model override lookup failed (%s) — using default", type(exc).__name__)
         return
-    if current is not None and current.model:
+    if current is not None:
         metadata["llm_model_override"] = current.model
