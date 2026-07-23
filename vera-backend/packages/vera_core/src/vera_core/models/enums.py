@@ -232,6 +232,17 @@ class AuthEvent(enum.StrEnum):
     LOGOUT = "logout"
     # Tenant-level recording retention policy updated (old/new day counts, no PHI).
     RETENTION_POLICY_UPDATED = "retention_policy_updated"
+    # Tenant-tier invite resend (fixes a gap: neither the invite link nor the MFA
+    # bridge token had any recovery path before this feature).
+    INVITE_RESENT = "invite_resent"
+    # Platform-operator lifecycle — kept distinct from the tenant USER_INVITED /
+    # INVITE_ACCEPTED / USER_DEACTIVATED events so privilege-granting activity is
+    # separately auditable.
+    PLATFORM_USER_INVITED = "platform_user_invited"
+    PLATFORM_INVITE_ACCEPTED = "platform_invite_accepted"
+    PLATFORM_USER_ACTIVATED = "platform_user_activated"
+    PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
+    PLATFORM_INVITE_RESENT = "platform_invite_resent"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

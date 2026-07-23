@@ -3,7 +3,7 @@
 // work while an active grant exists. All require a platform session + the
 // platform:elevations:* permissions (held by SUPER_ADMIN).
 
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, randomId } from "@/lib/api/client"
 
 /** Max break-glass window the backend accepts (8 hours). */
 export const MAX_ELEVATION_MINUTES = 480
@@ -49,4 +49,58 @@ export function endElevation(id: string) {
   return apiRequest<null>(`/platform/elevations/${encodeURIComponent(id)}/end`, {
     method: "POST",
   })
+}
+
+export type Operator = {
+  id: string
+  email: string
+  name: string
+  /** "invited" | "active" | "deactivated" */
+  status: string
+  last_login_at: string | null
+}
+
+export type InviteOperatorInput = {
+  email: string
+  name: string
+  sendEmail: boolean
+}
+
+export type InviteOperatorResult = {
+  user_id: string
+  email: string
+  invite_url: string
+  email_sent: boolean
+}
+
+/** List all platform operators. Requires `platform:users:read`. */
+export function listOperators() {
+  return apiRequest<Operator[]>("/platform/users")
+}
+
+/** Invite a new platform operator (always granted SUPER_ADMIN). Requires
+ *  `platform:users:invite`. */
+export function inviteOperator(input: InviteOperatorInput) {
+  return apiRequest<InviteOperatorResult>("/platform/users/invitations", {
+    method: "POST",
+    body: { email: input.email, name: input.name, send_email: input.sendEmail },
+    headers: { "Idempotency-Key": randomId() },
+  })
+}
+
+/** Deactivate a platform operator. Requires `platform:users:invite`. Blocked
+ *  (409) if this would leave zero active operators. */
+export function deactivateOperator(id: string) {
+  return apiRequest<null>(`/platform/users/${encodeURIComponent(id)}/deactivate`, {
+    method: "POST",
+  })
+}
+
+/** Reissue a fresh invite link for an operator stuck in status="invited".
+ *  Requires `platform:users:invite`. */
+export function resendOperatorInvitation(id: string) {
+  return apiRequest<InviteOperatorResult>(
+    `/platform/users/${encodeURIComponent(id)}/resend-invitation`,
+    { method: "POST", headers: { "Idempotency-Key": randomId() } },
+  )
 }
