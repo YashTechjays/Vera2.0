@@ -48,6 +48,8 @@ PLATFORM_PERMISSIONS: Final[dict[str, str]] = {
     "platform:ivr_playbooks:read": "View IVR playbooks",
     "platform:ivr_playbooks:write": "Create and manage IVR playbooks",
     "platform:form_schemas:read": "View form schemas and their versions",
+    "platform:llm_config:read": "View the active voice cascade LLM model override",
+    "platform:llm_config:write": "Set or reset the voice cascade LLM model override",
 }
 
 # The full catalog seeded into `permission` (tenant + platform).
