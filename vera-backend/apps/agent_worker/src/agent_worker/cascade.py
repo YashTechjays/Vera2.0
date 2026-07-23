@@ -23,6 +23,7 @@ from livekit.plugins import cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.english import EnglishModel
 
 from agent_worker.intervention import TakeoverState
+from vera_core.services.model_config import is_gemini_3_model
 
 _VAD_SILENCE_DURATION = 0.4
 _DEFAULT_LLM_MODEL = "gemini-2.5-flash"
@@ -35,6 +36,28 @@ def _build_vad() -> Any:
 def resolve_llm_model(llm_model: str | None) -> str:
     """The runtime override if set (non-empty), else the hardcoded cascade default."""
     return llm_model or _DEFAULT_LLM_MODEL
+
+
+def resolve_thinking_attrs(
+    model: str, thinking_override: dict[str, Any] | None
+) -> dict[str, int | str]:
+    """The resolved (budget-or-level) values in plain-value form — exactly one key,
+    matching the same pairing ThinkingOverride/validate_extra_config enforce at save
+    time. No override + Gemini 3 -> an explicit "low" (not an empty ThinkingConfig
+    left for the plugin's own private auto-selection) so this is always accurate."""
+    if thinking_override:
+        return dict(thinking_override)
+    if is_gemini_3_model(model):
+        return {"thinking_level": "low"}
+    return {"thinking_budget": 0}
+
+
+def resolve_thinking_config(model: str, thinking_override: dict[str, Any] | None) -> ThinkingConfig:
+    return ThinkingConfig(**resolve_thinking_attrs(model, thinking_override))
+
+
+def llm_trace_attributes(model: str, thinking_attrs: dict[str, int | str]) -> dict[str, str | int]:
+    return {"vera.llm.model": model, **{f"vera.llm.{k}": v for k, v in thinking_attrs.items()}}
 
 
 def cascade_session_kwargs(turn_detector: Any) -> dict[str, Any]:
@@ -67,7 +90,9 @@ def build_session(
     *,
     key_terms: list[str] | None = None,
     llm_model: str | None = None,
+    thinking_override: dict[str, Any] | None = None,
 ) -> AgentSession[TakeoverState]:
+    model = resolve_llm_model(llm_model)
     # The latch must exist from construction: agents read it before speaking or hanging up.
     return AgentSession(
         userdata=TakeoverState(),
@@ -75,10 +100,10 @@ def build_session(
             model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms)
         ),
         llm=google.LLM(
-            model=resolve_llm_model(llm_model),
+            model=model,
             vertexai=True,
             location="global",
-            thinking_config=ThinkingConfig(thinking_budget=0),
+            thinking_config=resolve_thinking_config(model, thinking_override),
         ),
         tts=cartesia.TTS(model="sonic-3.5", emotion=["confident"]),
         vad=vad if vad is not None else _build_vad(),

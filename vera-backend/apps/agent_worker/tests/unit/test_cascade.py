@@ -1,4 +1,10 @@
-from agent_worker.cascade import cascade_session_kwargs, resolve_llm_model
+from agent_worker.cascade import (
+    cascade_session_kwargs,
+    llm_trace_attributes,
+    resolve_llm_model,
+    resolve_thinking_attrs,
+    resolve_thinking_config,
+)
 
 
 def test_cascade_uses_turn_handling_only() -> None:
@@ -58,3 +64,35 @@ def test_resolve_llm_model_falls_back_to_default_when_unset() -> None:
 
 def test_resolve_llm_model_falls_back_on_empty_string() -> None:
     assert resolve_llm_model("") == "gemini-2.5-flash"
+
+
+def test_resolve_thinking_attrs_returns_explicit_override_verbatim() -> None:
+    assert resolve_thinking_attrs("gemini-2.5-flash", {"thinking_budget": 500}) == {
+        "thinking_budget": 500
+    }
+    assert resolve_thinking_attrs("gemini-3.5-flash", {"thinking_level": "high"}) == {
+        "thinking_level": "high"
+    }
+
+
+def test_resolve_thinking_attrs_default_for_gemini_3_without_override() -> None:
+    assert resolve_thinking_attrs("gemini-3.5-flash", None) == {"thinking_level": "low"}
+
+
+def test_resolve_thinking_attrs_default_for_pre_3_without_override() -> None:
+    assert resolve_thinking_attrs("gemini-2.5-flash", None) == {"thinking_budget": 0}
+
+
+def test_resolve_thinking_config_builds_a_real_thinking_config_object() -> None:
+    cfg = resolve_thinking_config("gemini-3.5-flash", {"thinking_level": "high"})
+    assert cfg.thinking_budget is None
+    assert cfg.thinking_level is not None
+
+    cfg2 = resolve_thinking_config("gemini-2.5-flash", None)
+    assert cfg2.thinking_budget == 0
+    assert cfg2.thinking_level is None
+
+
+def test_llm_trace_attributes_prefixes_vera_llm() -> None:
+    attrs = llm_trace_attributes("gemini-3.5-flash", {"thinking_level": "low"})
+    assert attrs == {"vera.llm.model": "gemini-3.5-flash", "vera.llm.thinking_level": "low"}
