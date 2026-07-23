@@ -401,6 +401,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         # intro; extra_instructions overlay every plan agent.
                         greeting=tweak.greeting,
                         extra_instructions=tweak.extra_instructions,
+                        gap_pass_enabled=settings.gap_pass_enabled,
                     )
                 except Exception:
                     logger.exception(
