@@ -25,7 +25,7 @@ from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.models import Transcript
 from vera_core.observability.correlation import room_name_for_call
-from vera_core.transcript import ROLE_DTMF, TurnRole, source_for_role
+from vera_core.transcript import ROLE_COACHING, ROLE_DTMF, ROLE_WHISPER, TurnRole, source_for_role
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 # Fewer real speech turns than this and there is nothing to brief — the endpoint
 # reports "pending" without spending an LLM call.
 _MIN_SPEECH_TURNS = 2
+
+# Coaching/whisper turns are a supervisor talking to Vera, not to anyone on the
+# call — they must never be rendered into the handoff summary's transcript (the
+# LLM would read them as something a supervisor said on the call) nor count
+# toward whether there's enough real speech to summarize.
+_NON_SPEECH_ROLES = frozenset({ROLE_DTMF, ROLE_COACHING, ROLE_WHISPER})
 
 SUMMARY_SYSTEM_PROMPT = """\
 You are briefing a human supervisor who is about to take over or monitor a live
@@ -76,9 +82,14 @@ class TranscriptTurn:
 
 
 def format_diarized(turns: Sequence[TranscriptTurn]) -> str:
-    """Render speaker-labelled lines: `Vera (agent): ...` / `Payer rep: ...`."""
+    """Render speaker-labelled lines: `Vera (agent): ...` / `Payer rep: ...`.
+    Coaching/whisper turns are never rendered — they're a supervisor talking to
+    Vera, not part of the call, and must not reach the summarization LLM as if
+    someone said them on the call."""
     lines: list[str] = []
     for turn in turns:
+        if turn.role in (ROLE_COACHING, ROLE_WHISPER):
+            continue
         label = _SPEAKER_LABELS.get(turn.source, turn.source)
         if turn.role == ROLE_DTMF:
             label = f"{label} [keypad]"
@@ -241,7 +252,7 @@ async def summarize_call(
 
     turns = await snapshot_turns(stream, sessionmaker, tenant_id, call_id)
     generated_at = int(time.time() * 1000)
-    speech_turns = [t for t in turns if t.role != ROLE_DTMF]
+    speech_turns = [t for t in turns if t.role not in _NON_SPEECH_ROLES]
     if len(speech_turns) < _MIN_SPEECH_TURNS:
         return CallSummaryResponse(
             status="pending", summary=None, generated_at=generated_at, turn_count=len(turns)

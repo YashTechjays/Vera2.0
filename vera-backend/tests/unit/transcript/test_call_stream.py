@@ -36,7 +36,11 @@ class _MemStore:
         return bool(self.events) or self.ended
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         self.last_read_deadline = first_entry_deadline_s
         for i, event in enumerate(self.events):
@@ -84,6 +88,34 @@ async def test_publish_turn_keeps_an_explicit_source() -> None:
             type="transcript", data={"role": "dtmf", "source": "bot", "text": "3"}, ts=42
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_publish_turn_stamps_user_id_when_present() -> None:
+    store = _MemStore()
+    svc = CallStreamService(store)
+    await svc.publish_turn("r", "coaching", "ask about the deductible", ts=42, user_id="u-1")
+    assert store.events == [
+        CallStreamEvent(
+            type="transcript",
+            data={
+                "role": "coaching",
+                "source": "supervisor",
+                "text": "ask about the deductible",
+                "user_id": "u-1",
+            },
+            ts=42,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_turn_omits_user_id_when_absent() -> None:
+    """No shape change for existing consumers that never pass user_id."""
+    store = _MemStore()
+    svc = CallStreamService(store)
+    await svc.publish_turn("r", "agent", "hello", ts=42)
+    assert "user_id" not in store.events[0].data
 
 
 @pytest.mark.asyncio

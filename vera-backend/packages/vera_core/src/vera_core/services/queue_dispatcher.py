@@ -23,14 +23,21 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
-from vera_core.forms.call_plan import CallPlan, PrefillFuser, compile_call_plan
+from vera_core.forms.call_plan import CallPlan, PrefillFuser, compile_call_plan, focus_call_plan
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
+from vera_core.forms.review import (
+    REVIEW_CONFIDENCE_FLOOR,
+    expand_to_groups,
+    has_call_reference,
+    retryable_required_paths,
+)
 from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models import (
     Call,
     CallEvent,
+    CallLineage,
     InsuranceProvider,
     PatientForm,
     PromptVersion,
@@ -49,6 +56,7 @@ from vera_core.observability.correlation import room_name_for_call
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.ivr_selection import (
     add_active_playbook_metadata,
@@ -108,6 +116,7 @@ async def try_dispatch(
     recording: RecordingConfig | None = None,
     dial_pacing_s: float = 1.0,
     plan_service: CallPlanService | None = None,
+    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -130,6 +139,10 @@ async def try_dispatch(
     audit:
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
+    retry_floor:
+        Confidence floor for which field labels to embed in RETRY room
+        metadata. Best-effort prompt guidance only — the authoritative
+        retry-vs-review decision happened earlier in ``evaluate_call``.
     recording:
         Optional ``RecordingConfig``. When provided, audio egress is started
         for each successfully dialed call (fail-open — a recording failure
@@ -301,6 +314,9 @@ async def try_dispatch(
     # fuse each form's intake prefill into its own per-form plan.
     plan_cache: _PlanCache = {}
 
+    # Forms in one pass typically share a schema version — fetch each once.
+    schema_versions: dict[UUID, SchemaVersion] = {}
+
     for form in candidates:
         # 4b. Working-hours re-check at dial time — the SQL gate above used the
         # pass-start clock, and the window can close mid-pass (dial pacing).
@@ -342,6 +358,30 @@ async def try_dispatch(
         if tweak_fields:
             metadata["persona_tweak"] = tweak_fields
 
+        # Retry scope: with a call reference number captured, the retry is FOCUSED —
+        # stage a plan narrowed to the still-missing (group-expanded) fields so the
+        # agent asks ONLY those, never announcing a prior call. Without a reference
+        # number it retries FRESH (the full plan, a call from the top).
+        if call_mode == CallMode.RETRY and staged_plan is not None:
+            version = schema_versions.get(form.schema_version_id)
+            if version is None:
+                version = (
+                    await session.execute(
+                        select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+                    )
+                ).scalar_one()
+                schema_versions[form.schema_version_id] = version
+            doc = FormSchemaDoc.model_validate(version.schema_json)
+            status_by_path = await load_field_status(session, form.id)
+            if has_call_reference(status_by_path, doc):
+                retryable = retryable_required_paths(
+                    status_by_path, version.schema_json, floor=retry_floor
+                )
+                focus = expand_to_groups(doc, retryable)
+                if focus:
+                    plan, plan_prompt_version_id = staged_plan
+                    staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
+
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-dispatched calls earlier in the same pass.
         # The plan is staged to Redis (non-transactional) BEFORE create_call_room so
@@ -368,6 +408,22 @@ async def try_dispatch(
                 )
                 session.add(call)
                 await session.flush()
+                # For RETRY calls: find the most-recent prior call so we can write a
+                # CallLineage row. The retry is SCOPED by the plan itself (a focused
+                # retry stages a narrowed plan via focus_call_plan above), never by a
+                # prompt overlay — the agent is never told this is a retry, so nothing
+                # leaks to the payer rep.
+                parent_call_id = None
+                if call_mode == CallMode.RETRY:
+                    parent_call_id = (
+                        await session.execute(
+                            select(Call.id)
+                            .where(Call.form_id == form.id, Call.id != call.id)
+                            .order_by(Call.created_at.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+
                 room_name = room_name_for_call(tenant_id, call.id)
                 if plan_service is not None and staged_plan is not None:
                     plan, plan_prompt_version_id = staged_plan
@@ -403,6 +459,15 @@ async def try_dispatch(
                         event_value=CallStatus.INITIATED.value,
                     )
                 )
+
+                if parent_call_id is not None:
+                    session.add(
+                        CallLineage(
+                            tenant_id=tenant_id,
+                            parent_call_id=parent_call_id,
+                            retry_call_id=call.id,
+                        )
+                    )
         except Exception:
             logger.exception(
                 "dispatch: failed to dispatch form %s — reverting to IN_QUEUE", form.id

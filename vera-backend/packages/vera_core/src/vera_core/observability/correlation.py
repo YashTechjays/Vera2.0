@@ -35,6 +35,18 @@ def is_observer_identity(identity: str) -> bool:
     return identity.startswith(_OBSERVER_PREFIXES)
 
 
+def supervisor_user_id(identity: str) -> UUID | None:
+    """The user id embedded in a supervisor-{uuid} identity (see
+    control_plane.api.v1.calls._supervisor_identity), or None if *identity*
+    isn't a supervisor's, or is malformed."""
+    if not identity.startswith(SUPERVISOR_IDENTITY_PREFIX):
+        return None
+    try:
+        return UUID(identity[len(SUPERVISOR_IDENTITY_PREFIX) :])
+    except ValueError:
+        return None
+
+
 class RoomRef(NamedTuple):
     tenant_id: UUID
     call_id: UUID

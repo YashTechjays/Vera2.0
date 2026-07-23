@@ -42,7 +42,11 @@ class _FakeStreamStore:
         return bool(self._events)
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         return
         yield  # pragma: no cover — never invoked; read_all is this fake's only reader
@@ -98,6 +102,20 @@ def test_format_diarized_labels_speakers() -> None:
         "Payer rep: Member ID please?\n"
         "Vera (agent) [keypad]: 1234\n"
         "Supervisor: Taking over."
+    )
+
+
+def test_format_diarized_excludes_coaching_and_whisper() -> None:
+    """A coaching/whisper turn is a supervisor talking to Vera, not on the call —
+    it must never appear in the transcript handed to the summarization LLM."""
+    turns = [
+        TranscriptTurn(source="rep", role="user", text="Member ID please?"),
+        TranscriptTurn(source="supervisor", role="coaching", text="ask about the deductible"),
+        TranscriptTurn(source="supervisor", role="whisper", text="mention the copay"),
+        TranscriptTurn(source="bot", role="agent", text="Sure, one moment."),
+    ]
+    assert format_diarized(turns) == (
+        "Payer rep: Member ID please?\nVera (agent): Sure, one moment."
     )
 
 
@@ -180,6 +198,19 @@ async def test_summarize_dtmf_not_counted_as_speech() -> None:
     result = await _summarize(events, cache, llm)
     assert result.status == "pending"
     assert result.turn_count == 2
+
+
+@pytest.mark.asyncio
+async def test_summarize_coaching_not_counted_as_speech_and_not_sent_to_llm() -> None:
+    cache, llm = _DictCache(), _StubLLM()
+    events = [
+        _turn_event("bot", "agent", "hi"),
+        _turn_event("supervisor", "coaching", "ask about the deductible"),
+        _turn_event("supervisor", "whisper", "mention the copay"),
+    ]
+    result = await _summarize(events, cache, llm)
+    assert result.status == "pending"  # only 1 real speech turn ("hi")
+    assert llm.calls == 0
 
 
 @pytest.mark.asyncio

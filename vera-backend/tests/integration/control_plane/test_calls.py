@@ -1175,6 +1175,44 @@ async def test_intervene_token_requires_calls_intervene(
 
 
 @pytest.mark.asyncio
+async def test_owner_without_calls_intervene_can_still_intervene(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The listener role holds only calls:read — but owning the call is enough on
+    its own, per the confirmed owner-OR-permission rule (applies to Intervene too,
+    not just the new Coaching feature)."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.listener_id,
+        status="active",
+        published=False,
+    )
+
+    claim = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.listener_token),
+    )
+
+    assert claim.status_code == 200, claim.text
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.event_type == "authz.allow",
+            AuditLog.resource_id == f"/api/v1/calls/{call_id}/join-token",
+            AuditLog.permission_key == "calls:intervene",
+        )
+    )
+    rows = result.scalars().all()
+    assert len(rows) == 1
+    assert rows[0].detail.get("granted_via") == "owner"  # not "permission" — it never held it
+
+
+@pytest.mark.asyncio
 async def test_intervene_on_ownerless_call_requires_permission_too(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

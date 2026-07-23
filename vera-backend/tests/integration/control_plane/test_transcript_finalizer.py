@@ -137,6 +137,32 @@ async def test_finalize_persists_rows_under_the_correct_tenant_and_clears_stream
     assert await call_stream_service.read_all(room) == []  # stream cleared
 
 
+async def test_finalize_persists_the_speaker_user_id_for_supervisor_turns(
+    authz_app: FastAPI,
+    rbac_world: RBACWorld,
+    call_stream_service: CallStreamService,
+    call_id: UUID,
+) -> None:
+    """A coaching/supervisor turn stamped with `user_id` in the envelope persists
+    it on the row; a rep/agent turn with no `user_id` stays NULL."""
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    supervisor_id = rbac_world.supervisor_id  # speaker_user_id FK requires a real app_user row
+    await call_stream_service.publish_turn(room, "user", "hello", ts=1000)
+    await call_stream_service.publish_turn(
+        room, "coaching", "ask about the deductible", ts=2000, user_id=str(supervisor_id)
+    )
+    ref = RoomRef(tenant_id=rbac_world.tenant_id, call_id=call_id)
+
+    count = await finalize_transcript(authz_app.state.sessionmaker, call_stream_service, ref, room)
+
+    assert count == 2
+    rows = await _rows(authz_app, rbac_world.tenant_id, call_id)
+    assert rows[0].speaker_user_id is None
+    assert rows[1].role == "coaching"
+    assert rows[1].source == "supervisor"
+    assert rows[1].speaker_user_id == supervisor_id
+
+
 async def test_finalize_on_a_redelivered_call_ended_does_not_duplicate_rows(
     authz_app: FastAPI,
     rbac_world: RBACWorld,

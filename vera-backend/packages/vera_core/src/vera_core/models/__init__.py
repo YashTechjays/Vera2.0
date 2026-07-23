@@ -12,13 +12,13 @@ from .auth import (
 )
 from .authoring import FormSchema, Prompt, PromptVersion, SchemaVersion
 from .call import Call, CallEvent, CallLineage
+from .export_artifact import ExportArtifact
 from .field_answer import CallFormSnapshot, DisputeAction, FieldAnswer, FieldEvaluation
 from .insurance import InsuranceProvider, IvrPlaybook
 from .integrations import ApiKey, Integration, IntegrationType
 from .oversight import (
     CallProviderUsage,
     EvalRun,
-    ExportArtifact,
     HumanRating,
     InterventionEvent,
 )

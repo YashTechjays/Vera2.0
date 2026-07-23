@@ -39,6 +39,8 @@ from vera_core.events import (
     CallFailedEvent,
     CallFailureReason,
     CallHealthEvent,
+    PostCallJob,
+    PostCallJobBus,
     WorkerEvent,
     WorkerEventBus,
     parse_worker_event,
@@ -46,6 +48,7 @@ from vera_core.events import (
 from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AnswerSource, CallEventType, CallHealthFlag, CallStatus
+from vera_core.models.field_answer import CallFormSnapshot
 from vera_core.notifications import (
     TYPE_INTERVENTION_NEEDED,
     Notification,
@@ -54,9 +57,14 @@ from vera_core.notifications import (
 )
 from vera_core.observability.correlation import parse_room_name
 from vera_core.plan_store import CallPlanService
-from vera_core.services.field_answers import recompute_form_projection, record_answer
+from vera_core.services.field_answers import (
+    current_values_by_path,
+    recompute_form_projection,
+    record_answer,
+)
 
 if TYPE_CHECKING:
+    from vera_core.observability.correlation import RoomRef
     from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger("control_plane.worker_events")
@@ -131,6 +139,7 @@ class WorkerEventConsumer:
         form_auto_retry_enabled: bool = False,
         recording: "RecordingConfig | None" = None,
         call_plans: CallPlanService | None = None,
+        post_call_bus: PostCallJobBus | None = None,
         notifications: NotificationService | None = None,
     ) -> None:
         self._redis = redis
@@ -146,6 +155,7 @@ class WorkerEventConsumer:
         self._form_auto_retry_enabled = form_auto_retry_enabled
         self._recording = recording
         self._call_plans = call_plans
+        self._post_call_bus = post_call_bus
         self._notifications = notifications
         self._bus = WorkerEventBus(redis)
         self._handlers: dict[str, EventHandler] = {
@@ -577,17 +587,22 @@ class WorkerEventConsumer:
             ref, applied = closed  # applied may be CANCELED (user-requested end wins)
             await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
             if applied in (CallStatus.COMPLETED, CallStatus.CANCELED):
-                # Both park the form in AI_PROCESSING; resolve the lifecycle's
-                # next system edge (EXCEPTION_REVIEW or low-completion
-                # auto-requeue — suppressed for a canceled call) before
-                # refilling — either way a slot is freed.
-                await resolve_ai_processing(
-                    self._sessionmaker,
-                    self._audit,
-                    ref,
-                    trigger=trigger,
-                    auto_retry_enabled=self._form_auto_retry_enabled,
-                )
+                # Both park the form in AI_PROCESSING. When the post-call eval
+                # consumer is wired, hand it the resolution: snapshot the form's
+                # pre-eval answers and enqueue a job — evaluate_call owns the
+                # transition out of AI_PROCESSING (and its own dispatch pass).
+                # Without it (no GCP project), resolve synchronously as before;
+                # either way the sweeper still covers a crash in between.
+                if self._post_call_bus is not None:
+                    await self._enqueue_post_call_eval(ref)
+                else:
+                    await resolve_ai_processing(
+                        self._sessionmaker,
+                        self._audit,
+                        ref,
+                        trigger=trigger,
+                        auto_retry_enabled=self._form_auto_retry_enabled,
+                    )
             await run_dispatch_pass(
                 self._sessionmaker,
                 ref.tenant_id,
@@ -597,3 +612,34 @@ class WorkerEventConsumer:
                 recording=self._recording,
                 plan_service=self._call_plans,
             )
+
+    async def _enqueue_post_call_eval(self, ref: "RoomRef") -> None:
+        """Write the pre-eval CallFormSnapshot and enqueue the eval job.
+
+        Redelivery-safe: a second closeout of the same call finds the form no
+        longer in AI_PROCESSING inside evaluate_call, which skips it."""
+        assert self._post_call_bus is not None
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id))
+            ).scalar_one_or_none()
+            if call is None:
+                return  # voice-lab room — no pipeline form
+            form_id = call.form_id
+            existing = (
+                await session.execute(
+                    select(CallFormSnapshot.id).where(CallFormSnapshot.call_id == ref.call_id)
+                )
+            ).scalar_one_or_none()
+            if existing is None:  # redelivered closeout → snapshot already taken
+                session.add(
+                    CallFormSnapshot(
+                        tenant_id=ref.tenant_id,
+                        call_id=ref.call_id,
+                        before_state=await current_values_by_path(session, form_id),
+                        after_state={},
+                    )
+                )
+        await self._post_call_bus.emit(
+            PostCallJob(tenant_id=ref.tenant_id, form_id=form_id, call_id=ref.call_id)
+        )

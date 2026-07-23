@@ -28,15 +28,18 @@ from control_plane.auth.session import SessionStore
 from control_plane.call_summary import SummaryCache
 from control_plane.email import EmailSender
 from control_plane.idempotency import IdempotencyStore
+from control_plane.rate_limit import CallRateLimiter
 from vera_core.audit import AuditSink, AuthAuditSink
 from vera_core.call_stream import CallStreamService
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import elevated_session, platform_session, tenant_session
+from vera_core.events import PostCallJobBus
 from vera_core.llm import ResilientLLM
 from vera_core.models.enums import AccountType
 from vera_core.notifications import NotificationService
 from vera_core.plan_store import CallPlanService
+from vera_core.stt import ResilientSTT
 
 if TYPE_CHECKING:
     from control_plane.livekit_gateway import LiveKitGateway
@@ -142,6 +145,16 @@ def get_idempotency_store(request: Request) -> IdempotencyStore:
     return store
 
 
+def get_call_rate_limiter(request: Request) -> CallRateLimiter:
+    limiter: CallRateLimiter = request.app.state.call_rate_limiter
+    return limiter
+
+
+def get_whisper_stt(request: Request) -> ResilientSTT:
+    stt: ResilientSTT = request.app.state.whisper_stt
+    return stt
+
+
 def get_email_sender(request: Request) -> EmailSender:
     sender: EmailSender = request.app.state.email_sender
     return sender
@@ -150,6 +163,13 @@ def get_email_sender(request: Request) -> EmailSender:
 def get_invitation_store(request: Request) -> InvitationStore:
     store: InvitationStore = request.app.state.invitation_store
     return store
+
+
+def get_post_call_bus(request: Request) -> PostCallJobBus:
+    bus: PostCallJobBus | None = getattr(request.app.state, "post_call_bus", None)
+    if bus is None:
+        raise RuntimeError("PostCallJobBus not configured")
+    return bus
 
 
 async def current_identity(

@@ -9,6 +9,7 @@ from vera_core.forms.call_plan import (
     PlanTask,
     _render_value,
     compile_call_plan,
+    focus_call_plan,
     fuse_prefill,
 )
 from vera_core.forms.conditions import leaf_gates
@@ -284,3 +285,37 @@ class TestRulesAndRoundTrip:
 
     def test_json_round_trip(self) -> None:
         assert CallPlan.model_validate_json(PLAN.model_dump_json()) == PLAN
+
+
+class TestFocusCallPlan:
+    """focus_call_plan narrows a fused plan to a FOCUSED retry (only the given
+    fields) — the mechanism that replaced the retry-announcing prompt overlay."""
+
+    def _all_paths(self, plan: CallPlan) -> list[str]:
+        return [f.path for t in plan.tasks for f in t.fields]
+
+    def test_keeps_only_requested_fields(self) -> None:
+        target = self._all_paths(PLAN)[0]
+        focused = focus_call_plan(PLAN, {target})
+        assert self._all_paths(focused) == [target]
+
+    def test_drops_tasks_left_empty(self) -> None:
+        target = self._all_paths(PLAN)[0]
+        focused = focus_call_plan(PLAN, {target})
+        assert all(t.fields for t in focused.tasks)
+        assert len(focused.tasks) == 1
+
+    def test_clears_on_file_values_but_keeps_persona(self) -> None:
+        target = self._all_paths(PLAN)[0]
+        focused = focus_call_plan(PLAN, {target})
+        assert focused.on_file_values is None
+        assert focused.session == PLAN.session
+        assert focused.stt_key_terms == PLAN.stt_key_terms
+
+    def test_empty_focus_yields_no_tasks(self) -> None:
+        assert focus_call_plan(PLAN, set()).tasks == []
+
+    def test_original_plan_not_mutated(self) -> None:
+        before = len(self._all_paths(PLAN))
+        focus_call_plan(PLAN, {self._all_paths(PLAN)[0]})
+        assert len(self._all_paths(PLAN)) == before
