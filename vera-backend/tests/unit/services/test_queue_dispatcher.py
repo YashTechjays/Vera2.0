@@ -36,8 +36,9 @@ from vera_core.models import (
     PromptVersion,
     SchemaVersion,
     Tenant,
+    VoiceModelConfig,
 )
-from vera_core.models.enums import CallStatus, FormStatus
+from vera_core.models.enums import CallStatus, FormStatus, VoiceModelStage
 from vera_core.plan_store import CallPlanService
 from vera_core.services import queue_dispatcher
 from vera_core.services.queue_dispatcher import is_within_working_hours, try_dispatch
@@ -156,6 +157,7 @@ class FakeSession:
         schema_version: SchemaVersion | None = None,
         prompt_version: PromptVersion | None = None,
         field_answers: dict[Any, list[tuple[str, Any]]] | None = None,
+        voice_model: VoiceModelConfig | None = None,
     ) -> None:
         self.tenant = tenant
         self.active_count = active_count
@@ -166,6 +168,8 @@ class FakeSession:
         self.prompt_version = prompt_version
         # form_id -> [(field_path, stored value)] current field_answer rows
         self.field_answers = field_answers or {}
+        # add_llm_model_override_metadata's read — None means "no override, use default".
+        self.voice_model = voice_model
         self.added: list[Any] = []
 
     async def execute(self, stmt: Any) -> _Result:
@@ -198,6 +202,8 @@ class FakeSession:
         if entity is FieldAnswer:
             form_id = _bound_value(stmt, "form_id")
             return _Result(rows=self.field_answers.get(form_id, []))
+        if entity is VoiceModelConfig:
+            return _Result(scalar=self.voice_model)
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
 
@@ -376,6 +382,41 @@ async def test_ivr_navigation_key_absent_when_form_opts_out(
     assert metadata is not None
     assert "enable_ivr_navigation" not in metadata
     assert "persona_tweak" not in metadata  # tenant.persona_tweak is empty
+
+
+async def test_llm_model_override_carries_into_dispatch_metadata(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    tenant = _tenant()
+    form = _form(tenant.id)
+    voice_model = VoiceModelConfig(
+        stage=VoiceModelStage.LLM, provider="google", model="gemini-3.5-flash"
+    )
+    session = FakeSession(tenant=tenant, candidates=[form], voice_model=voice_model)
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    metadata = livekit.dispatch_metadata[0]
+    assert metadata is not None
+    assert metadata["llm_model_override"] == "gemini-3.5-flash"
+
+
+async def test_llm_model_override_absent_when_never_set(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    tenant = _tenant()
+    form = _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form])  # voice_model defaults to None
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    metadata = livekit.dispatch_metadata[0]
+    assert metadata is not None
+    assert "llm_model_override" not in metadata
 
 
 async def test_dispatch_without_trunk_leaves_forms_queued(

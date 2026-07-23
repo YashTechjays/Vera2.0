@@ -74,7 +74,13 @@ def normalize_model_name(raw: str) -> str:
     """Trim + validate a freeform model name. Deliberately permissive charset (letters,
     digits, dot, hyphen, underscore) — covers every real Gemini model id — while still
     rejecting empty/whitespace-only input and anything absurdly long. No live Vertex AI
-    check (control_plane has no aiplatform IAM grant yet — adr/devops-todo.md)."""
+    check (control_plane has no aiplatform IAM grant yet — adr/devops-todo.md): a
+    plausible-but-nonexistent model name only fails when the agent worker actually
+    constructs the LLM client on the next real call. The fast way to notice a bad save
+    without waiting for a failed call: the admin page reflects the new value immediately
+    (`_state()`'s `model`/`is_default`) and `list_llm_config_history` keeps every prior
+    value, so a bad entry is visible and one `reset` away from rollback as soon as
+    someone looks at the page — not just discoverable after a call fails."""
     trimmed = raw.strip()
     if not trimmed:
         raise InvalidModelName("model name must not be empty")

@@ -443,6 +443,8 @@ async def try_dispatch(
                     await add_active_playbook_metadata(session, provider.id, metadata)
                 if form.ivr_navigation_enabled:
                     await add_agent_context_metadata(session, form, metadata)
+                # Unlike the two calls above, this one never raises — a broken config-table
+                # read degrades to the hardcoded default instead of failing the dispatch.
                 await add_llm_model_override_metadata(session, metadata)
                 try:
                     await livekit.create_call_room(room_name, metadata=metadata)
