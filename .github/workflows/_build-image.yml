@@ -73,7 +73,7 @@ jobs:
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       # The frontend's Docker build context is vera-frontend/ only, but its source
       # imports the backend's schema JSON straight from the sibling vera-backend/
@@ -85,12 +85,12 @@ jobs:
         run: ./scripts/stage-backend-schema-for-docker.sh
 
       - id: auth
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.wif_provider }}
           service_account: ${{ secrets.deployer_sa }}
 
-      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Configure docker for Artifact Registry
         run: gcloud auth configure-docker ${{ inputs.gcp_region }}-docker.pkg.dev --quiet
@@ -100,9 +100,9 @@ jobs:
         run: |
           echo "image=${{ inputs.gcp_region }}-docker.pkg.dev/${{ inputs.gcp_project_id }}/${{ inputs.ar_repo }}/${{ inputs.component }}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
