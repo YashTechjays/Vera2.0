@@ -32,12 +32,22 @@ describe("llmConfig api client", () => {
     expect(apiRequest).toHaveBeenCalledWith("/platform/llm-config/history")
   })
 
-  it("PUTs the model with the conventional Idempotency-Key", async () => {
+  it("PUTs the model with no extra_config when omitted", async () => {
     vi.mocked(apiRequest).mockResolvedValue({})
     await saveLlmConfig("gemini-3.5-flash")
     expect(apiRequest).toHaveBeenCalledWith("/platform/llm-config", {
       method: "PUT",
-      body: { model: "gemini-3.5-flash" },
+      body: { model: "gemini-3.5-flash", extra_config: null },
+      headers: { "Idempotency-Key": "test-idempotency-key" },
+    })
+  })
+
+  it("PUTs the model with a thinking override when provided", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({})
+    await saveLlmConfig("gemini-3.5-flash", { thinking_level: "high" })
+    expect(apiRequest).toHaveBeenCalledWith("/platform/llm-config", {
+      method: "PUT",
+      body: { model: "gemini-3.5-flash", extra_config: { thinking_level: "high" } },
       headers: { "Idempotency-Key": "test-idempotency-key" },
     })
   })

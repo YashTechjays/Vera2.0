@@ -5,6 +5,7 @@ import type { LlmConfigState } from "@/lib/api/llmConfig"
 const state = (overrides: Partial<LlmConfigState> = {}): LlmConfigState => ({
   provider: "google",
   model: "gemini-2.5-flash",
+  extra_config: null,
   is_default: false,
   created_at: "2026-07-23T10:00:00Z",
   created_by_user_id: "u1",
