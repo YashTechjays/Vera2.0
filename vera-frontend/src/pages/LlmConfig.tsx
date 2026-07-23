@@ -14,12 +14,13 @@ import {
   resetLlmConfig,
   saveLlmConfig,
   type LlmConfigState,
-  type ThinkingOverride,
 } from "@/lib/api/llmConfig"
 import {
   SUGGESTED_MODELS,
   THINKING_LEVELS,
+  buildThinkingOverride,
   canReset,
+  formatThinkingOverride,
   formatUpdatedAt,
   hasPendingChange,
   isGemini3Model,
@@ -86,13 +87,7 @@ export function LlmConfig() {
   }, [isSuperAdmin])
 
   const showLevel = isGemini3Model(input)
-  const extraConfig: ThinkingOverride | null = showLevel
-    ? thinkingLevelInput
-      ? ({ thinking_level: thinkingLevelInput } as ThinkingOverride)
-      : null
-    : thinkingBudgetInput.trim() !== ""
-      ? { thinking_budget: Number(thinkingBudgetInput) }
-      : null
+  const extraConfig = buildThinkingOverride(input, thinkingBudgetInput, thinkingLevelInput)
 
   async function onSave() {
     setError(null)
@@ -258,11 +253,7 @@ export function LlmConfig() {
                     {row.model ?? "Reset to default"}
                   </TableCell>
                   <TableCell className="font-mono text-sm text-muted-foreground">
-                    {row.extra_config
-                      ? "thinking_budget" in row.extra_config
-                        ? `budget: ${row.extra_config.thinking_budget}`
-                        : `level: ${row.extra_config.thinking_level}`
-                      : "—"}
+                    {formatThinkingOverride(row.extra_config)}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatUpdatedAt(row.created_at)}

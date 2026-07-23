@@ -2,6 +2,10 @@
 STT/TTS for a future iteration. Global, append-only: `get_active_llm_config` and
 `list_llm_config_history` only read `voice_model_config`; `save_llm_model` and
 `reset_llm_model` only ever INSERT, mirroring VoiceModelConfig's append-only shape.
+
+An optional per-model `ThinkingOverride` (stored in `extra_config`) tunes Gemini's
+reasoning effort; `validate_extra_config` enforces the model-family pairing (a token
+`thinking_budget` on pre-3 models, a `thinking_level` enum on Gemini 3) at save time.
 """
 
 import logging

@@ -16,6 +16,28 @@ export function isGemini3Model(model: string): boolean {
   return model.toLowerCase().includes("gemini-3")
 }
 
+/** Derive the ThinkingOverride to save from the raw control inputs. The control that
+ *  applies depends on the model family (level Select for Gemini 3, numeric budget for
+ *  pre-3, matching isGemini3Model); an empty input on the applicable control means "no
+ *  override" (null). */
+export function buildThinkingOverride(
+  model: string,
+  budgetInput: string,
+  levelInput: string,
+): ThinkingOverride | null {
+  if (isGemini3Model(model)) {
+    return levelInput ? ({ thinking_level: levelInput } as ThinkingOverride) : null
+  }
+  return budgetInput.trim() !== "" ? { thinking_budget: Number(budgetInput) } : null
+}
+
+/** One-line summary of a saved thinking override for the history table; "—" when none. */
+export function formatThinkingOverride(extraConfig: ThinkingOverride | null): string {
+  if (!extraConfig) return "—"
+  if ("thinking_budget" in extraConfig) return `budget: ${extraConfig.thinking_budget}`
+  return `level: ${extraConfig.thinking_level}`
+}
+
 /** Whether either the model input or the thinking override differs from what's
  *  currently saved — gates the Save button so a no-op save isn't offered. A
  *  default (model: null) reads as "". */

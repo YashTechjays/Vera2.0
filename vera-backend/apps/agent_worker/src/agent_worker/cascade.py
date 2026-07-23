@@ -1,7 +1,9 @@
 """Deepgram(Flux) -> Gemini -> Cartesia cascade, latency-tuned per the POC.
 
-The biggest wins: preemptive_generation fed by Deepgram Flux's eager EOT, and
-Gemini thinking_budget=0. Keep EnglishModel turn detection — dropping it falls
+The biggest wins: preemptive_generation fed by Deepgram Flux's eager EOT, and a
+minimal Gemini thinking config (`thinking_budget=0` on pre-3 models, the lowest
+`thinking_level="low"` on Gemini 3, which has no zero-reasoning setting — see
+`resolve_thinking_attrs`). Keep EnglishModel turn detection — dropping it falls
 back to dumb VAD-silence detection, which is worse.
 
 Self-hosted LiveKit OSS only — never LiveKit Cloud. So no `livekit.agents.inference.*`

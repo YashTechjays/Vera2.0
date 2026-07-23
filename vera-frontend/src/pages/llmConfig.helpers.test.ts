@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { THINKING_LEVELS, canReset, formatUpdatedAt, hasPendingChange, isGemini3Model } from "@/pages/llmConfig.helpers"
+import {
+  THINKING_LEVELS,
+  buildThinkingOverride,
+  canReset,
+  formatThinkingOverride,
+  formatUpdatedAt,
+  hasPendingChange,
+  isGemini3Model,
+} from "@/pages/llmConfig.helpers"
 import type { LlmConfigState } from "@/lib/api/llmConfig"
 
 const state = (overrides: Partial<LlmConfigState> = {}): LlmConfigState => ({
@@ -71,5 +79,37 @@ describe("isGemini3Model", () => {
 describe("THINKING_LEVELS", () => {
   it("is the full four-value enum, in order", () => {
     expect(THINKING_LEVELS).toEqual(["minimal", "low", "medium", "high"])
+  })
+})
+
+describe("buildThinkingOverride", () => {
+  it("Gemini 3: builds a level override from a non-empty level, null when empty", () => {
+    expect(buildThinkingOverride("gemini-3.5-flash", "", "high")).toEqual({
+      thinking_level: "high",
+    })
+    expect(buildThinkingOverride("gemini-3.5-flash", "", "")).toBeNull()
+  })
+  it("pre-3: builds a numeric budget override, null when the field is blank", () => {
+    expect(buildThinkingOverride("gemini-2.5-flash", "500", "")).toEqual({ thinking_budget: 500 })
+    expect(buildThinkingOverride("gemini-2.5-flash", "0", "")).toEqual({ thinking_budget: 0 })
+    expect(buildThinkingOverride("gemini-2.5-flash", "  ", "")).toBeNull()
+  })
+  it("ignores the control that does not apply to the model family", () => {
+    // Gemini 3 reads the level, not the budget field.
+    expect(buildThinkingOverride("gemini-3.5-flash", "500", "")).toBeNull()
+    // Pre-3 reads the budget, not the level field.
+    expect(buildThinkingOverride("gemini-2.5-flash", "", "high")).toBeNull()
+  })
+})
+
+describe("formatThinkingOverride", () => {
+  it("dash when there is no override", () => {
+    expect(formatThinkingOverride(null)).toBe("—")
+  })
+  it("summarizes a budget override", () => {
+    expect(formatThinkingOverride({ thinking_budget: 0 })).toBe("budget: 0")
+  })
+  it("summarizes a level override", () => {
+    expect(formatThinkingOverride({ thinking_level: "high" })).toBe("level: high")
   })
 })

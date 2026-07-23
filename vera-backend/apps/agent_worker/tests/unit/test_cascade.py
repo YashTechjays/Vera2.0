@@ -92,6 +92,11 @@ def test_resolve_thinking_config_builds_a_real_thinking_config_object() -> None:
     assert cfg2.thinking_budget == 0
     assert cfg2.thinking_level is None
 
+    # The no-override Gemini-3 default path resolves to thinking_level="low".
+    cfg3 = resolve_thinking_config("gemini-3.5-flash", None)
+    assert cfg3.thinking_budget is None
+    assert cfg3.thinking_level is not None
+
 
 def test_llm_trace_attributes_prefixes_vera_llm() -> None:
     attrs = llm_trace_attributes("gemini-3.5-flash", {"thinking_level": "low"})
