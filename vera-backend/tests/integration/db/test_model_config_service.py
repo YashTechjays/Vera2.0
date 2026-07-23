@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vera_core.models import VoiceModelConfig
 from vera_core.services import model_config
 from vera_core.services.model_config import (
+    InvalidThinkingOverride,
+    ThinkingOverride,
     add_llm_model_override_metadata,
     get_active_llm_config,
     list_llm_config_history,
@@ -40,7 +42,9 @@ async def test_save_then_get_active_returns_the_saved_row(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     async with admin_sessionmaker() as s, s.begin():
-        saved = await save_llm_model(s, " gemini-3.5-flash ", created_by_user_id=None)
+        saved = await save_llm_model(
+            s, " gemini-3.5-flash ", extra_config=None, created_by_user_id=None
+        )
         assert saved.model == "gemini-3.5-flash"
         assert saved.provider == "google"
 
@@ -61,7 +65,7 @@ async def test_reset_after_save_clears_and_history_shows_it(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     async with admin_sessionmaker() as s, s.begin():
-        await save_llm_model(s, "gemini-3.5-flash", created_by_user_id=None)
+        await save_llm_model(s, "gemini-3.5-flash", extra_config=None, created_by_user_id=None)
     async with admin_sessionmaker() as s, s.begin():
         reset_row = await reset_llm_model(s, created_by_user_id=None)
         assert reset_row is not None
@@ -79,7 +83,7 @@ async def test_add_llm_model_override_metadata_sets_key_when_active(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     async with admin_sessionmaker() as s, s.begin():
-        await save_llm_model(s, "gemini-3.6-flash", created_by_user_id=None)
+        await save_llm_model(s, "gemini-3.6-flash", extra_config=None, created_by_user_id=None)
 
     async with admin_sessionmaker() as s:
         metadata: dict[str, object] = {}
@@ -106,3 +110,62 @@ async def test_add_llm_model_override_metadata_degrades_to_default_on_read_failu
         with patch.object(model_config, "get_active_llm_config", side_effect=RuntimeError("boom")):
             await add_llm_model_override_metadata(s, metadata)
         assert metadata == {}
+
+
+async def test_save_with_matching_thinking_override_succeeds(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as s, s.begin():
+        saved = await save_llm_model(
+            s,
+            "gemini-3.5-flash",
+            extra_config=ThinkingOverride(thinking_level="high"),
+            created_by_user_id=None,
+        )
+        assert saved.extra_config == {"thinking_level": "high"}
+
+
+async def test_save_rejects_mismatched_thinking_override(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as s, s.begin():
+        with pytest.raises(InvalidThinkingOverride):
+            await save_llm_model(
+                s,
+                "gemini-3.5-flash",
+                extra_config=ThinkingOverride(thinking_budget=0),
+                created_by_user_id=None,
+            )
+
+
+async def test_add_llm_model_override_metadata_threads_thinking_override(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as s, s.begin():
+        await save_llm_model(
+            s,
+            "gemini-3.6-flash",
+            extra_config=ThinkingOverride(thinking_level="minimal"),
+            created_by_user_id=None,
+        )
+
+    async with admin_sessionmaker() as s:
+        metadata: dict[str, object] = {}
+        await add_llm_model_override_metadata(s, metadata)
+        assert metadata == {
+            "llm_model_override": "gemini-3.6-flash",
+            "llm_thinking_override": {"thinking_level": "minimal"},
+        }
+
+
+async def test_add_llm_model_override_metadata_omits_thinking_key_when_not_set(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as s, s.begin():
+        await save_llm_model(s, "gemini-2.5-flash", extra_config=None, created_by_user_id=None)
+
+    async with admin_sessionmaker() as s:
+        metadata: dict[str, object] = {}
+        await add_llm_model_override_metadata(s, metadata)
+        assert metadata == {"llm_model_override": "gemini-2.5-flash"}
+        assert "llm_thinking_override" not in metadata

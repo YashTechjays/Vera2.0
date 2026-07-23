@@ -7,9 +7,10 @@ STT/TTS for a future iteration. Global, append-only: `get_active_llm_config` and
 import logging
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
+from pydantic import BaseModel, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +26,44 @@ _LLM_PROVIDER = "google"
 
 class InvalidModelName(ValueError):
     pass
+
+
+class ThinkingOverride(BaseModel):
+    thinking_budget: int | None = None
+    thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "ThinkingOverride":
+        if (self.thinking_budget is None) == (self.thinking_level is None):
+            raise ValueError("exactly one of thinking_budget or thinking_level must be set")
+        return self
+
+
+def is_gemini_3_model(model: str) -> bool:
+    """Mirrors livekit-plugins-google's own detection (llm.py::_is_gemini_3_model) —
+    keep this in lockstep with that heuristic; drift here would let an incompatible
+    thinking_level/thinking_budget pairing reach the plugin, which raises ValueError
+    for thinking_level on a pre-3 model."""
+    return "gemini-3" in model.lower()
+
+
+class InvalidThinkingOverride(ValueError):
+    pass
+
+
+def validate_extra_config(model: str, extra_config: ThinkingOverride | None) -> None:
+    if extra_config is None:
+        return
+    is_gemini_3 = is_gemini_3_model(model)
+    if extra_config.thinking_level is not None and not is_gemini_3:
+        raise InvalidThinkingOverride(
+            f"thinking_level requires a Gemini 3 model; {model!r} is not Gemini 3"
+        )
+    if extra_config.thinking_budget is not None and is_gemini_3:
+        raise InvalidThinkingOverride(
+            f"thinking_budget is not supported on Gemini 3 models ({model!r}) — "
+            "use thinking_level instead"
+        )
 
 
 def normalize_model_name(raw: str) -> str:
@@ -80,12 +119,19 @@ async def list_llm_config_history(
 
 
 async def save_llm_model(
-    session: AsyncSession, raw_model: str, *, created_by_user_id: UUID | None
+    session: AsyncSession,
+    raw_model: str,
+    *,
+    extra_config: ThinkingOverride | None,
+    created_by_user_id: UUID | None,
 ) -> VoiceModelConfig:
+    model = normalize_model_name(raw_model)
+    validate_extra_config(model, extra_config)
     row = VoiceModelConfig(
         stage=VoiceModelStage.LLM,
         provider=_LLM_PROVIDER,
-        model=normalize_model_name(raw_model),
+        model=model,
+        extra_config=extra_config.model_dump(exclude_none=True) if extra_config else None,
         created_by_user_id=created_by_user_id,
     )
     session.add(row)
@@ -124,3 +170,5 @@ async def add_llm_model_override_metadata(session: AsyncSession, metadata: dict[
         return
     if current is not None:
         metadata["llm_model_override"] = current.model
+        if current.extra_config:
+            metadata["llm_thinking_override"] = current.extra_config

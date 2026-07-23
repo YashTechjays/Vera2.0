@@ -123,7 +123,9 @@ async def save_llm_config(
         settings.idempotency_lock_ttl_seconds,
     )
     try:
-        row = await save_llm_model(session, body.model, created_by_user_id=caller.user_id)
+        row = await save_llm_model(
+            session, body.model, extra_config=None, created_by_user_id=caller.user_id
+        )
     except InvalidModelName as exc:
         raise CustomAPIException(DefaultExceptionCode.VALIDATION_ERROR, message=str(exc)) from exc
     return ok(_state(row))
