@@ -2,11 +2,16 @@
 
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from livekit.agents import stt as agents_stt
 
-from agent_worker.takeover_transcript import classify_source, publish_final_turns
+from agent_worker.takeover_transcript import (
+    SpeakerAttribution,
+    classify_source,
+    publish_final_turns,
+)
 from vera_core.transcript import (
     ROLE_USER,
     SOURCE_REP,
@@ -17,16 +22,26 @@ from vera_core.transcript import (
 
 
 def test_classify_source() -> None:
-    assert classify_source("callee", None, "callee") == SOURCE_REP
-    assert classify_source("callee", "listener", "callee") == SOURCE_REP  # callee wins
-    assert classify_source("sup-1", "intervener", "callee") == SOURCE_SUPERVISOR
-    assert classify_source("sup-1", "listener", "callee") is None  # a watcher is skipped
-    assert classify_source("sup-1", None, "callee") is None
+    supervisor_id = uuid4()
+    assert classify_source("callee", None, "callee") == SpeakerAttribution(SOURCE_REP, None)
+    # callee wins even with a listener attribute
+    assert classify_source("callee", "listener", "callee") == SpeakerAttribution(SOURCE_REP, None)
+    assert classify_source(f"supervisor-{supervisor_id}", "intervener", "callee") == (
+        SpeakerAttribution(SOURCE_SUPERVISOR, supervisor_id)
+    )
+    # a watcher (non-intervener) is skipped
+    assert classify_source(f"supervisor-{supervisor_id}", "listener", "callee") is None
+    assert classify_source(f"supervisor-{supervisor_id}", None, "callee") is None
+
+
+def test_classify_source_malformed_supervisor_identity_has_no_user_id() -> None:
+    attribution = classify_source("supervisor-not-a-uuid", "intervener", "callee")
+    assert attribution == SpeakerAttribution(SOURCE_SUPERVISOR, None)
 
 
 class _FakeSink:
     def __init__(self) -> None:
-        self.turns: list[tuple[str, TurnRole, str, TurnSource | None]] = []
+        self.turns: list[tuple[str, TurnRole, str, TurnSource | None, str | None]] = []
 
     async def publish_turn(
         self,
@@ -36,8 +51,9 @@ class _FakeSink:
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None:
-        self.turns.append((room_name, role, text, source))
+        self.turns.append((room_name, role, text, source, user_id))
 
 
 class _Data:
@@ -67,10 +83,25 @@ async def test_publish_final_turns_only_finals_stripped_nonempty() -> None:
             _Event(agents_stt.SpeechEventType.FINAL_TRANSCRIPT, None),  # no alternatives
         ]
     )
+    supervisor_id = uuid4()
 
-    await publish_final_turns(events, sink, "room-1", SOURCE_SUPERVISOR)
+    await publish_final_turns(
+        events, sink, "room-1", SpeakerAttribution(SOURCE_SUPERVISOR, supervisor_id)
+    )
 
-    assert sink.turns == [("room-1", ROLE_USER, "hello there", SOURCE_SUPERVISOR)]
+    assert sink.turns == [
+        ("room-1", ROLE_USER, "hello there", SOURCE_SUPERVISOR, str(supervisor_id))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_final_turns_rep_has_no_user_id() -> None:
+    sink = _FakeSink()
+    events = _aiter([_Event(agents_stt.SpeechEventType.FINAL_TRANSCRIPT, "hi")])
+
+    await publish_final_turns(events, sink, "room-1", SpeakerAttribution(SOURCE_REP, None))
+
+    assert sink.turns == [("room-1", ROLE_USER, "hi", SOURCE_REP, None)]
 
 
 @pytest.mark.asyncio
@@ -80,4 +111,5 @@ async def test_publish_final_turns_swallows_sink_errors() -> None:
             raise RuntimeError("redis down")
 
     events = _aiter([_Event(agents_stt.SpeechEventType.FINAL_TRANSCRIPT, "hi")])
-    await publish_final_turns(events, _BoomSink(), "room-1", SOURCE_REP)  # must not raise
+    # must not raise
+    await publish_final_turns(events, _BoomSink(), "room-1", SpeakerAttribution(SOURCE_REP, None))

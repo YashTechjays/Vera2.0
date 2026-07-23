@@ -22,6 +22,7 @@ import {
   getCallStats,
   getCallSummary,
   getJoinToken,
+  getRecordingPlayback,
   listCalls,
   publishCall,
   type CallStats,
@@ -156,5 +157,13 @@ describe("calls API client", () => {
       new ApiError(503, "SERVICE_UNAVAILABLE", "summary temporarily unavailable"),
     )
     await expect(getCallSummary("c1")).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it("getRecordingPlayback fetches the signed playback URL", async () => {
+    const playback = { url: "https://storage.example/sig", expires_at: "2026-07-22T01:00:00Z" }
+    vi.mocked(apiRequest).mockResolvedValueOnce(playback)
+
+    await expect(getRecordingPlayback("call-1")).resolves.toEqual(playback)
+    expect(apiRequest).toHaveBeenCalledWith("/calls/call-1/recording")
   })
 })

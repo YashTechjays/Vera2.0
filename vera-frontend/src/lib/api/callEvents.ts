@@ -13,13 +13,18 @@ export type CallStreamEvent = { type: string; data: Record<string, unknown>; ts:
 /** Who acted (the constrained actor set — drives which side a turn renders on).
  *  "supervisor" is a human who took over the call (transcribed post-intervene). */
 export type TranscriptTurnSource = "rep" | "bot" | "supervisor"
-/** What kind of turn it was ("dtmf" = a keypad press whose text is the digits sent). */
-export type TranscriptTurnRole = "user" | "agent" | "dtmf"
+/** What kind of turn it was: "dtmf" = a keypad press whose text is the digits
+ *  sent; "coaching"/"whisper" = a supervisor note to Vera (typed vs. spoken),
+ *  never heard by anyone on the call. */
+export type TranscriptTurnRole = "user" | "agent" | "dtmf" | "coaching" | "whisper"
 export type TranscriptTurn = {
   role: TranscriptTurnRole
   source: TranscriptTurnSource
   text: string
   ts: number
+  /** The specific supervisor who spoke/coached this line, if known — absent for
+   *  Vera, the rep, and any turn published before speaker attribution existed. */
+  speakerUserId?: string
 }
 
 // Fallback for envelopes published before `source` existed (or with a corrupted one).
@@ -27,10 +32,18 @@ const SOURCE_BY_ROLE: Record<TranscriptTurnRole, TranscriptTurnSource> = {
   user: "rep",
   agent: "bot",
   dtmf: "bot",
+  coaching: "supervisor",
+  whisper: "supervisor",
 }
 
 function isTurnRole(role: unknown): role is TranscriptTurnRole {
-  return role === "user" || role === "agent" || role === "dtmf"
+  return (
+    role === "user" ||
+    role === "agent" ||
+    role === "dtmf" ||
+    role === "coaching" ||
+    role === "whisper"
+  )
 }
 
 function isTurnSource(source: unknown): source is TranscriptTurnSource {
@@ -40,13 +53,19 @@ function isTurnSource(source: unknown): source is TranscriptTurnSource {
 /** Narrow an envelope to a transcript turn; null for other/malformed event types. */
 export function asTranscriptTurn(e: CallStreamEvent): TranscriptTurn | null {
   if (e.type !== "transcript") return null
-  const { role, source, text } = e.data as { role?: unknown; source?: unknown; text?: unknown }
+  const { role, source, text, user_id } = e.data as {
+    role?: unknown
+    source?: unknown
+    text?: unknown
+    user_id?: unknown
+  }
   if (!isTurnRole(role) || typeof text !== "string") return null
   return {
     role,
     source: isTurnSource(source) ? source : SOURCE_BY_ROLE[role],
     text,
     ts: e.ts,
+    speakerUserId: typeof user_id === "string" ? user_id : undefined,
   }
 }
 

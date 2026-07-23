@@ -13,20 +13,22 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
-from typing import Any, Protocol
+from typing import Any, NamedTuple
+from uuid import UUID
 
 from livekit import rtc
 from livekit.agents import stt as agents_stt
 
+from agent_worker.transcript_publisher import TurnPublisher
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     PARTICIPANT_MODE_INTERVENER,
+    supervisor_user_id,
 )
 from vera_core.transcript import (
     ROLE_USER,
     SOURCE_REP,
     SOURCE_SUPERVISOR,
-    TurnRole,
     TurnSource,
 )
 
@@ -35,34 +37,29 @@ logger = logging.getLogger("agent_worker")
 _SAMPLE_RATE = 16000
 
 
-class TurnSink(Protocol):
-    async def publish_turn(
-        self,
-        room_name: str,
-        role: TurnRole,
-        text: str,
-        *,
-        ts: int,
-        source: TurnSource | None = None,
-    ) -> None: ...
+class SpeakerAttribution(NamedTuple):
+    source: TurnSource
+    user_id: UUID | None
 
 
 def classify_source(
     identity: str, mode_attr: str | None, callee_identity: str
-) -> TurnSource | None:
-    """The transcript source for a participant, or None to skip (listeners, the agent)."""
+) -> SpeakerAttribution | None:
+    """The transcript source (+ speaker's user id, if known) for a participant, or
+    None to skip (listeners, the agent)."""
     if identity == callee_identity:
-        return SOURCE_REP
+        return SpeakerAttribution(SOURCE_REP, None)
     if mode_attr == PARTICIPANT_MODE_INTERVENER:
-        return SOURCE_SUPERVISOR
+        return SpeakerAttribution(SOURCE_SUPERVISOR, supervisor_user_id(identity))
     return None
 
 
 async def publish_final_turns(
-    events: AsyncIterator[Any], sink: TurnSink, room_name: str, source: TurnSource
+    events: AsyncIterator[Any], sink: TurnPublisher, room_name: str, attribution: SpeakerAttribution
 ) -> None:
     """Publish each FINAL STT event as a turn; skip interim/empty. Publish failures
     are logged, never raised — a transcript hiccup must not break the call."""
+    source, user_id = attribution
     async for ev in events:
         if ev.type != agents_stt.SpeechEventType.FINAL_TRANSCRIPT or not ev.alternatives:
             continue
@@ -72,7 +69,12 @@ async def publish_final_turns(
         logger.info("takeover turn: source=%s len=%d", source, len(text))  # never the text (PHI)
         try:
             await sink.publish_turn(
-                room_name, ROLE_USER, text, ts=int(time.time() * 1000), source=source
+                room_name,
+                ROLE_USER,
+                text,
+                ts=int(time.time() * 1000),
+                source=source,
+                user_id=str(user_id) if user_id is not None else None,
             )
         except Exception:
             logger.exception("takeover transcript publish failed for %s", room_name)
@@ -84,7 +86,7 @@ class TakeoverTranscriber:
     def __init__(
         self,
         room: rtc.Room,
-        sink: TurnSink,
+        sink: TurnPublisher,
         room_name: str,
         *,
         stt_factory: Callable[[], agents_stt.STT[Any]],
@@ -119,26 +121,28 @@ class TakeoverTranscriber:
         existing = self._tasks.get(track.sid)
         if existing is not None and not existing.done():
             return  # a finished task (resub with the same SID) is replaced below
-        source = classify_source(
+        attribution = classify_source(
             participant.identity,
             participant.attributes.get(PARTICIPANT_MODE_ATTR),
             self._callee_identity,
         )
-        if source is None:
+        if attribution is None:
             return
-        logger.info("takeover: transcribing %s as source=%s", participant.identity, source)
-        self._tasks[track.sid] = asyncio.create_task(self._transcribe_track(track, source))
+        logger.info(
+            "takeover: transcribing %s as source=%s", participant.identity, attribution.source
+        )
+        self._tasks[track.sid] = asyncio.create_task(self._transcribe_track(track, attribution))
 
-    async def _transcribe_track(self, track: rtc.Track, source: TurnSource) -> None:
+    async def _transcribe_track(self, track: rtc.Track, attribution: SpeakerAttribution) -> None:
         audio = rtc.AudioStream(track, sample_rate=_SAMPLE_RATE, num_channels=1)
         stream = self._stt_factory().stream()
         pump = asyncio.create_task(self._pump(audio, stream))
         try:
-            await publish_final_turns(stream, self._sink, self._room_name, source)
+            await publish_final_turns(stream, self._sink, self._room_name, attribution)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("takeover transcribe failed (source=%s)", source)
+            logger.exception("takeover transcribe failed (source=%s)", attribution.source)
         finally:
             pump.cancel()
             with contextlib.suppress(asyncio.CancelledError):

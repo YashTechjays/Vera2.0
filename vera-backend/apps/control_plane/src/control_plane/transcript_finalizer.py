@@ -21,6 +21,7 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -32,6 +33,18 @@ from vera_core.observability.correlation import RoomRef
 from vera_core.transcript import resolve_turn_source
 
 logger = logging.getLogger(__name__)
+
+
+def _row_speaker_user_id(data: dict[str, Any]) -> UUID | None:
+    """The supervisor id to persist, or None (Vera/rep turns, or a malformed envelope
+    value — never fail the whole turn over an unparseable id)."""
+    raw = data.get("user_id")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
 
 
 def _build_rows(
@@ -62,6 +75,7 @@ def _build_rows(
                 "role": str(event.data.get("role", "")),
                 "message": str(event.data.get("text", "")),
                 "spoke_at": datetime.fromtimestamp(event.ts / 1000, tz=UTC),
+                "speaker_user_id": _row_speaker_user_id(event.data),
             }
         )
         seq += 1

@@ -8,6 +8,7 @@ responsibility (using `func.now()`, the DB clock) after a successful IN_QUEUE
 transition. The state machine only manages `status` and `retry_count`.
 """
 
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,10 @@ from vera_core.services.form_state_machine import (
     FormStateMachine,
     InvalidTransitionError,
 )
+
+
+def _form(status: FormStatus) -> types.SimpleNamespace:
+    return types.SimpleNamespace(status=status.value, retry_count=0, enqueued_at=None)
 
 
 class TestTransitionMap:
@@ -51,8 +56,9 @@ class TestTransitionMap:
             (FormStatus.EXPIRED, FormStatus.IN_QUEUE),
             (FormStatus.IN_QUEUE, FormStatus.COMPLETED),
             (FormStatus.IN_CALL, FormStatus.IN_QUEUE),
-            # COMPLETED is reachable only from EXCEPTION_REVIEW (manual approve) —
-            # a call ending must never complete the form directly.
+            # COMPLETED is a human-only edge out of EXCEPTION_REVIEW — the pipeline
+            # never completes a form directly, not from a call ending and not from
+            # the post-call eval even when nothing needs review.
             (FormStatus.IN_CALL, FormStatus.COMPLETED),
             (FormStatus.AI_PROCESSING, FormStatus.COMPLETED),
             (FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED),
@@ -165,3 +171,42 @@ class TestFormStateMachine:
         # Same status → no-op, no error
         sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=5)
         assert form.status == FormStatus.IN_QUEUE.value
+
+
+# ---------------------------------------------------------------------------
+# AI_PROCESSING edge cases (merged from vera_core unit tests)
+# ---------------------------------------------------------------------------
+
+
+def test_ai_processing_can_go_to_exception_review() -> None:
+    form = _form(FormStatus.AI_PROCESSING)
+    FormStateMachine().transition(form, FormStatus.EXCEPTION_REVIEW, tenant_max_retries=5)
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+
+
+def test_ai_processing_cannot_complete_directly() -> None:
+    # The pipeline never auto-completes: an all-satisfied form parks in
+    # EXCEPTION_REVIEW for human sign-off; COMPLETED is a human-only edge.
+    form = _form(FormStatus.AI_PROCESSING)
+    with pytest.raises(InvalidTransitionError):
+        FormStateMachine().transition(form, FormStatus.COMPLETED, tenant_max_retries=5)
+
+
+def test_ready_cannot_jump_to_exception_review_via_ai_processing() -> None:
+    form = _form(FormStatus.IN_QUEUE)
+    with pytest.raises(InvalidTransitionError):
+        FormStateMachine().transition(form, FormStatus.EXCEPTION_REVIEW, tenant_max_retries=5)
+
+
+def test_ai_processing_to_in_queue_retries_and_increments() -> None:
+    form = _form(FormStatus.AI_PROCESSING)
+    form.retry_count = 0
+    FormStateMachine().transition(form, FormStatus.IN_QUEUE, tenant_max_retries=3)
+    assert form.status == FormStatus.IN_QUEUE.value and form.retry_count == 1
+
+
+def test_ai_processing_to_in_queue_blocked_when_cap_hit() -> None:
+    form = _form(FormStatus.AI_PROCESSING)
+    form.retry_count = 3
+    with pytest.raises(InvalidTransitionError):
+        FormStateMachine().transition(form, FormStatus.IN_QUEUE, tenant_max_retries=3)

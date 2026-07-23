@@ -15,12 +15,13 @@ Every PHI response audits field **names** only (never values).
 """
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -35,7 +36,7 @@ from control_plane.api.v1.common import (
 )
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import require
+from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.deps import get_audit, get_sessionmaker
 from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
@@ -50,6 +51,7 @@ from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.export import build_workbook
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     PromotedIdentifiers,
@@ -75,6 +77,7 @@ from vera_core.forms.review import (
 )
 from vera_core.models import (
     DisputeAction,
+    ExportArtifact,
     FieldAnswer,
     FormSchema,
     InsuranceProvider,
@@ -89,7 +92,15 @@ from vera_core.models.enums import (
     FormStatus,
     ProviderStatus,
 )
+from vera_core.services.call_provenance import (
+    CallAttempt,
+    FieldProvenance,
+    load_call_attempts,
+    load_field_provenance,
+)
+from vera_core.services.call_visibility import call_hidden_from
 from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
 
@@ -315,6 +326,7 @@ class PatientFormSummary(BaseModel):
     insurance_provider: str | None
     insurance_provider_phone_number: str | None
     completion_pct: float
+    review_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -354,12 +366,41 @@ class DisputeView(BaseModel):
     reasoning: str | None
 
 
+class JudgeView(BaseModel):
+    confidence: int | None
+    supported: bool
+    evidence: str | None
+
+
+class ProvenanceView(BaseModel):
+    attempt: int
+    mode: str
+    judge: JudgeView | None
+
+
 class FieldView(BaseModel):
     field_path: str
     value: Any
     source: str
     confidence: int | None
     dispute: DisputeView | None
+    provenance: ProvenanceView | None = None
+
+
+def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
+    # Explicit field mapping: the view models ARE the API contract, so a service-
+    # dataclass rename or new field must be an explicit decision here — not a
+    # silent splat-through (or runtime TypeError) via dataclasses.asdict.
+    if p is None:
+        return None
+    judge = (
+        JudgeView(
+            confidence=p.judge.confidence, supported=p.judge.supported, evidence=p.judge.evidence
+        )
+        if p.judge is not None
+        else None
+    )
+    return ProvenanceView(attempt=p.attempt, mode=p.mode, judge=judge)
 
 
 class PatientFormDetail(BaseModel):
@@ -380,6 +421,35 @@ class PatientFormDetail(BaseModel):
     # toggle pre-loads from here so an operator's earlier choice round-trips.
     ivr_navigation_enabled: bool
     fields: list[FieldView]
+
+
+class CallAttemptView(BaseModel):
+    id: UUID
+    attempt: int
+    mode: str
+    status: str
+    created_at: datetime
+    retry_of: UUID | None
+    changed_paths: list[str]
+    # True only when THIS caller may actually fetch the recording: it is
+    # AVAILABLE, the call passes the playback endpoint's owner-or-published
+    # gate, and the caller holds recordings:read — the DTO must never
+    # advertise a recording the playback endpoint would refuse.
+    recording_available: bool
+
+
+def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
+    visible = not call_hidden_from(a.initiated_by_id, a.published, caller_id)
+    return CallAttemptView(
+        id=a.id,
+        attempt=a.attempt,
+        mode=a.mode,
+        status=a.status,
+        created_at=a.created_at,
+        retry_of=a.retry_of,
+        changed_paths=a.changed_paths,
+        recording_available=a.recording_available and visible and can_play,
+    )
 
 
 class ResolveRequest(BaseModel):
@@ -468,6 +538,15 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         )
     ).scalar_one()
 
+    attempts = await load_call_attempts(session, form.id)
+    # No calls → no ai_call answers → nothing to join; skip the provenance query
+    # (this runs on every form-detail GET, incl. intake-only forms).
+    prov = (
+        await load_field_provenance(session, form.id, {a.id: (a.attempt, a.mode) for a in attempts})
+        if attempts
+        else {}
+    )
+
     return PatientFormDetail(
         id=form.id,
         status=form.status,
@@ -479,9 +558,13 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         patient_name=form.patient_name,
         chart_number=form.chart_number,
         appointment_date=form.appointment_date,
+        member_id=form.member_id,
         insurance_provider=form.insurance_provider,
         ivr_navigation_enabled=form.ivr_navigation_enabled,
-        fields=[FieldView(**view) for view in views],
+        fields=[
+            FieldView(**view, provenance=_provenance_view(prov.get(view["field_path"])))
+            for view in views
+        ],
     )
 
 
@@ -582,6 +665,7 @@ async def list_patient_forms(
             insurance_provider=r.insurance_provider,
             insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
+            review_reason=r.review_reason,
             created_at=r.created_at,
             updated_at=r.updated_at,
         )
@@ -658,6 +742,49 @@ async def get_patient_form(
         fields=[f.field_path for f in detail.fields],
     )
     return ok(detail)
+
+
+@router.get(
+    "/patient-forms/{form_id}/calls",
+    response_model=ResponseModel[list[CallAttemptView]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_form_calls(
+    form_id: UUID,
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
+    caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[list[CallAttemptView]]:
+    """The form's call-attempt timeline: mode, status, lineage, and which field
+    paths each call changed. Paths and timings only — no field values."""
+    response.headers["Cache-Control"] = "no-store"
+    form = (
+        await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+    attempts = await load_call_attempts(session, form_id)
+    await emit_phi_read_audit(
+        get_audit(request),
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="patient_form",
+        resource_id=str(form_id),
+        fields=sorted({p for a in attempts for p in a.changed_paths}),
+    )
+    # recordings:read shapes recording_available only (no 403 — the timeline
+    # itself needs just forms:read); the playback endpoint re-enforces it.
+    _, permissions = await resolver.effective_permissions(session, tenant_id, caller.user_id)
+    can_play = "recordings:read" in permissions
+    return ok([_call_attempt_view(a, caller.user_id, can_play) for a in attempts])
 
 
 @router.post(
@@ -856,6 +983,88 @@ async def resolve_disputes(
         )
     )
     return ok(detail, message="Disputes resolved.")
+
+
+# ---------------------------------------------------------------------------
+# XLSX export (binary — errors still ride the standard envelope)
+# ---------------------------------------------------------------------------
+
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.post(
+    "/patient-forms/{form_id}/export",
+    response_class=Response,
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def export_patient_form(
+    form_id: UUID,
+    request: Request,
+    session: TenantSession,
+    tenant_id: TenantId,
+    caller: VerifiedIdentity = require("forms:export"),
+) -> Response:
+    """Stream the COMPLETED form as XLSX — a PHI disclosure. Writes one
+    export_artifact ledger row + a FORM_EXPORTED audit (field names only).
+    The one binary endpoint: errors still ride the standard envelope."""
+    form = (
+        await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+    if form.status != FormStatus.COMPLETED:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="only completed forms can be exported",
+            data={"status": form.status},
+        )
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    values = await current_values_by_path(session, form_id)
+    sources = {p: s.source or "" for p, s in (await load_field_status(session, form_id)).items()}
+    attempts = await load_call_attempts(session, form_id)
+    prov = await load_field_provenance(
+        session, form_id, {a.id: (a.attempt, a.mode) for a in attempts}
+    )
+    data = build_workbook(version.schema_json, values, sources, prov, attempts)
+
+    artifact = ExportArtifact(
+        tenant_id=tenant_id,
+        form_id=form_id,
+        format="xlsx",
+        sha256=hashlib.sha256(data).hexdigest(),
+        exported_by=caller.user_id,
+    )
+    session.add(artifact)
+    await session.flush()
+    await get_audit(request).emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.FORM_EXPORTED.value,
+            resource_type="patient_form",
+            resource_id=str(form_id),
+            detail={"artifact_id": str(artifact.id), "format": "xlsx", "fields": sorted(values)},
+        )
+    )
+    return Response(
+        content=data,
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="ibv-{form_id}.xlsx"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1063,6 +1272,8 @@ async def update_patient_form_status(
             message=str(exc),
             data={"from": current.value, "to": target.value},
         ) from exc
+
+    # review_reason is stamped/cleared inside FormStateMachine.transition.
 
     # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
     if target == FormStatus.IN_QUEUE:

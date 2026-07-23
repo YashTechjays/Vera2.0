@@ -127,9 +127,27 @@ class ProviderStage(enum.StrEnum):
     TTS = "tts"
 
 
-class ExportFormat(enum.StrEnum):
-    XLSX = "xlsx"
-    PDF = "pdf"
+class ReviewReason(enum.StrEnum):
+    """Why the post-call pipeline routed a form to EXCEPTION_REVIEW. NULL on the
+    form outside review and for manual transitions (a pipeline artifact)."""
+
+    # Every required field is satisfied — nothing is wrong, the form just needs a
+    # human to sign it off. The pipeline never auto-COMPLETEs; COMPLETED is a
+    # human-only transition out of review (once any disputes are resolved).
+    READY_FOR_REVIEW = "ready_for_review"
+    TOKEN_VALUE = "token_value"
+    RETRIES_EXHAUSTED = "retries_exhausted"
+    LLM_ERROR = "llm_error"
+    NO_TRANSCRIPT = "no_transcript"
+    # Required fields are unsatisfied but none are askable — a retry call could
+    # not fix them, so the form needs human review.
+    UNSATISFIED_UNASKABLE = "unsatisfied_unaskable"
+    # The form's pinned schema document failed to parse (e.g. legacy v1) — the
+    # eval cannot run against it.
+    UNSUPPORTED_SCHEMA = "unsupported_schema"
+    # A supervisor ended the call by hand — it is never auto-redialed even with
+    # unsatisfied retryable fields; a human takes it from here.
+    USER_ENDED = "user_ended"
 
 
 class VersionStatus(enum.StrEnum):

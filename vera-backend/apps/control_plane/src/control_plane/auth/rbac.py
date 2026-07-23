@@ -105,9 +105,12 @@ async def emit_authz_audit(
     permission: str,
     allowed: bool,
     scope: ResourceScope = ResourceScope.TENANT,
+    detail: dict[str, object] | None = None,
 ) -> None:
     """Standard endpoint authz allow/deny audit — the shape require() writes, so an
-    endpoint that checks a permission itself doesn't drop reason / elevation_session_id."""
+    endpoint that checks a permission itself doesn't drop reason / elevation_session_id.
+    `detail` merges extra caller-supplied context (e.g. which rule granted access)
+    alongside the standard `scope` field."""
     await audit.emit(
         AuditRecord(
             tenant_id=tenant_id,
@@ -121,7 +124,7 @@ async def emit_authz_audit(
             decision="allow" if allowed else "deny",
             reason="" if allowed else ("unknown user" if user_id is None else "not granted"),
             request_id=current_request_id(request),
-            detail={"scope": scope.value},
+            detail={"scope": scope.value, **(detail or {})},
             elevation_session_id=current_elevation(request),
         )
     )

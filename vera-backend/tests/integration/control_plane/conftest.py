@@ -28,6 +28,7 @@ from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
+from vera_core.events import PostCallJob
 from vera_core.integrations.credentials import seal_credentials
 from vera_core.models import (
     AppUser,
@@ -53,6 +54,19 @@ class MintedToken(NamedTuple):
     name: str | None
     attributes: dict[str, str] | None
     ttl: timedelta
+
+
+class FakePostCallBus:
+    """Records emitted PostCallJobs for test assertions; no Redis required."""
+
+    def __init__(self) -> None:
+        self.emitted: list[PostCallJob] = []
+
+    async def emit(self, job: PostCallJob) -> None:
+        self.emitted.append(job)
+
+    async def ensure_group(self) -> None:
+        pass
 
 
 class FakeLiveKit(LiveKitGateway):
@@ -122,6 +136,18 @@ def fake_livekit() -> FakeLiveKit:
     return FakeLiveKit()
 
 
+@pytest.fixture(scope="session")
+def fake_post_call_bus() -> FakePostCallBus:
+    return FakePostCallBus()
+
+
+@pytest.fixture(autouse=True)
+def reset_fake_bus(fake_post_call_bus: FakePostCallBus) -> Iterator[None]:
+    """Clear the bus before each test so emissions don't bleed across tests."""
+    fake_post_call_bus.emitted.clear()
+    yield
+
+
 @pytest.fixture(autouse=True)
 def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     """The fake is session-scoped; reset its per-test validation/dial knobs before each
@@ -170,7 +196,11 @@ class _MemCallStreamStore:
         return room_name in self._entries
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         # This fake replays a fixed snapshot and never blocks; the deadline is only
         # recorded so endpoint tests can assert what was passed.
@@ -200,6 +230,7 @@ class RBACWorld:
         self.admin_id: UUID = UUID(int=0)
         self.supervisor_id: UUID = UUID(int=0)
         self.virtual_assistant_id: UUID = UUID(int=0)
+        self.listener_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
@@ -373,6 +404,7 @@ async def rbac_world(
         tenant_id=tenant_id,
         email="virtual_assistant@test.example",
     )
+    world.listener_id = listener_id
     world.listener_token = await _mint(
         session_store, user_id=listener_id, tenant_id=tenant_id, email="listener@test.example"
     )
@@ -426,6 +458,7 @@ async def authz_app(
     email_sender: InMemoryEmailSender,
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
+    fake_post_call_bus: FakePostCallBus,
     call_stream_service: CallStreamService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
@@ -446,6 +479,7 @@ async def authz_app(
         call_stream_service=call_stream_service,
     )
     async with app.router.lifespan_context(app):
+        app.state.post_call_bus = fake_post_call_bus
         yield app
 
 

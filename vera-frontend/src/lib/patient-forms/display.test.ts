@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { allowedStatusTransitions, statusActionLabel } from "./display"
+import { allowedStatusTransitions, statusActionLabel, ageLabel } from "./display"
 
 describe("allowedStatusTransitions", () => {
   it("offers (re)queue + complete from exception_review", () => {
@@ -23,5 +23,18 @@ describe("statusActionLabel", () => {
   it("labels the complete and queue actions", () => {
     expect(statusActionLabel("completed")).toBe("Mark complete")
     expect(statusActionLabel("in_queue")).toBe("Send to queue")
+  })
+})
+
+describe("ageLabel", () => {
+  it("renders day/hour/minute buckets", () => {
+    const now = Date.now()
+    expect(ageLabel(new Date(now - 3 * 864e5).toISOString())).toBe("3d")
+    expect(ageLabel(new Date(now - 5 * 36e5).toISOString())).toBe("5h")
+    expect(ageLabel(new Date(now - 12 * 6e4).toISOString())).toBe("12m")
+  })
+  it("dashes on null/invalid", () => {
+    expect(ageLabel(null)).toBe("—")
+    expect(ageLabel("not-a-date")).toBe("—")
   })
 })

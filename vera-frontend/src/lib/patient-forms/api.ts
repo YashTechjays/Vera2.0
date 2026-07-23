@@ -2,8 +2,9 @@
 // contract. Each call rides `apiRequest`, which injects the bearer token,
 // unwraps the response envelope, and throws `ApiError` on failure.
 
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, apiRequestBlob } from "@/lib/api/client"
 import type {
+  CallAttempt,
   ListPatientFormsParams,
   PaginatedPatientForms,
   PatientFormDetail,
@@ -87,4 +88,18 @@ export function updatePatientFormStatus(
       },
     },
   )
+}
+
+/** GET /patient-forms/{id}/calls — the attempt timeline. */
+export function getPatientFormCalls(formId: string): Promise<CallAttempt[]> {
+  return apiRequest<CallAttempt[]>(
+    `/patient-forms/${encodeURIComponent(formId)}/calls`,
+  )
+}
+
+/** POST /patient-forms/{id}/export — streamed XLSX (forms:export). */
+export function exportPatientForm(formId: string): Promise<Blob> {
+  return apiRequestBlob(`/patient-forms/${encodeURIComponent(formId)}/export`, {
+    method: "POST",
+  })
 }
