@@ -67,7 +67,7 @@ export function LlmConfig() {
     setError(null)
     setBusy(true)
     try {
-      await saveLlmConfig(input)
+      await saveLlmConfig(input.trim())
       await load()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save the model override.")
