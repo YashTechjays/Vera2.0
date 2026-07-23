@@ -8,9 +8,11 @@ queryable row rather than an absence of rows. Only `stage == VoiceModelStage.LLM
 written today; STT/TTS are schema-ready for a future iteration (see agent_worker/cascade.py).
 """
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, ForeignKey, Index, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,6 +35,7 @@ class VoiceModelConfig(Base, UUIDv7PKMixin, CreatedAtMixin):
     stage: Mapped[str] = mapped_column(String(16), nullable=False)
     provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    extra_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id"), nullable=True
     )

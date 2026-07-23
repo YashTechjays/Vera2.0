@@ -65,3 +65,40 @@ async def test_newest_row_per_stage_is_the_current_value(
             )
         ).scalar_one()
     assert current.model == "gemini-3.5-flash"
+
+
+async def test_extra_config_column_stores_arbitrary_json(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as s, s.begin():
+        row = VoiceModelConfig(
+            stage="llm",
+            provider="google",
+            model="gemini-3.5-flash",
+            extra_config={"thinking_level": "low"},
+        )
+        s.add(row)
+        await s.flush()
+        row_id = row.id
+
+    async with admin_sessionmaker() as s:
+        fetched = (
+            await s.execute(select(VoiceModelConfig).where(VoiceModelConfig.id == row_id))
+        ).scalar_one()
+        assert fetched.extra_config == {"thinking_level": "low"}
+
+
+async def test_extra_config_defaults_to_null(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as s, s.begin():
+        row = VoiceModelConfig(stage="llm", provider="google", model="gemini-2.5-flash")
+        s.add(row)
+        await s.flush()
+        row_id = row.id
+
+    async with admin_sessionmaker() as s:
+        fetched = (
+            await s.execute(select(VoiceModelConfig).where(VoiceModelConfig.id == row_id))
+        ).scalar_one()
+        assert fetched.extra_config is None
