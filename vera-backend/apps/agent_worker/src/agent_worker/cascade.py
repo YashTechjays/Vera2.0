@@ -25,10 +25,16 @@ from livekit.plugins.turn_detector.english import EnglishModel
 from agent_worker.intervention import TakeoverState
 
 _VAD_SILENCE_DURATION = 0.4
+_DEFAULT_LLM_MODEL = "gemini-2.5-flash"
 
 
 def _build_vad() -> Any:
     return silero.VAD.load(min_silence_duration=_VAD_SILENCE_DURATION)
+
+
+def resolve_llm_model(llm_model: str | None) -> str:
+    """The runtime override if set (non-empty), else the hardcoded cascade default."""
+    return llm_model or _DEFAULT_LLM_MODEL
 
 
 def cascade_session_kwargs(turn_detector: Any) -> dict[str, Any]:
@@ -57,7 +63,10 @@ def stt_kwargs(key_terms: list[str] | None) -> dict[str, Any]:
 
 
 def build_session(
-    vad: Any | None = None, *, key_terms: list[str] | None = None
+    vad: Any | None = None,
+    *,
+    key_terms: list[str] | None = None,
+    llm_model: str | None = None,
 ) -> AgentSession[TakeoverState]:
     # The latch must exist from construction: agents read it before speaking or hanging up.
     return AgentSession(
@@ -66,7 +75,7 @@ def build_session(
             model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms)
         ),
         llm=google.LLM(
-            model="gemini-2.5-flash",
+            model=resolve_llm_model(llm_model),
             vertexai=True,
             location="global",
             thinking_config=ThinkingConfig(thinking_budget=0),

@@ -180,6 +180,15 @@ class PlaybookStatus(enum.StrEnum):
     INACTIVE = "inactive"
 
 
+class VoiceModelStage(enum.StrEnum):
+    """Which voice-cascade stage a `voice_model_config` row overrides. Only LLM is
+    read by the cascade today; STT/TTS are schema-ready for a future iteration."""
+
+    STT = "stt"
+    LLM = "llm"
+    TTS = "tts"
+
+
 class EvalScope(enum.StrEnum):
     COMPONENT = "component"
     E2E = "e2e"

@@ -8,6 +8,7 @@ from control_plane.api.v1.form_schemas import router as form_schemas_router
 from control_plane.api.v1.insurance_providers import router as insurance_providers_router
 from control_plane.api.v1.integrations import router as integrations_router
 from control_plane.api.v1.ivr_playbooks import router as ivr_playbooks_router
+from control_plane.api.v1.llm_config import router as llm_config_router
 from control_plane.api.v1.notifications import router as notifications_router
 from control_plane.api.v1.patient_forms import router as patient_forms_router
 from control_plane.api.v1.platform import router as platform_router
@@ -30,6 +31,7 @@ router.include_router(prompts_router)
 router.include_router(insurance_providers_router)
 router.include_router(form_schemas_router)
 router.include_router(ivr_playbooks_router)
+router.include_router(llm_config_router)
 router.include_router(platform_auth_router)
 router.include_router(users_router)
 router.include_router(roles_router)

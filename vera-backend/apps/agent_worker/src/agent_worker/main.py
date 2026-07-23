@@ -418,6 +418,7 @@ async def entrypoint(ctx: JobContext) -> None:
         session = build_session(
             vad=ctx.proc.userdata.get("vad"),
             key_terms=controller.plan.stt_key_terms if controller is not None else None,
+            llm_model=meta.get("llm_model_override"),
         )
 
         # THE call event stream: transcript turns + call_status frames, feeding the

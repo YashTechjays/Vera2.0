@@ -62,6 +62,7 @@ from vera_core.services.ivr_selection import (
     add_active_playbook_metadata,
     add_agent_context_metadata,
 )
+from vera_core.services.model_config import add_llm_model_override_metadata
 from vera_core.services.recordings import start_recording_for_call
 from vera_core.telephony import LiveKitUnavailable, OutboundDialError
 
@@ -442,6 +443,7 @@ async def try_dispatch(
                     await add_active_playbook_metadata(session, provider.id, metadata)
                 if form.ivr_navigation_enabled:
                     await add_agent_context_metadata(session, form, metadata)
+                await add_llm_model_override_metadata(session, metadata)
                 try:
                     await livekit.create_call_room(room_name, metadata=metadata)
                 except Exception as exc:

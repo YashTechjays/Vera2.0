@@ -1,4 +1,4 @@
-from agent_worker.cascade import cascade_session_kwargs
+from agent_worker.cascade import cascade_session_kwargs, resolve_llm_model
 
 
 def test_cascade_uses_turn_handling_only() -> None:
@@ -46,3 +46,15 @@ def test_stt_kwargs_empty_without_key_terms() -> None:
 
     assert stt_kwargs(None) == {}
     assert stt_kwargs([]) == {}
+
+
+def test_resolve_llm_model_uses_override_when_set() -> None:
+    assert resolve_llm_model("gemini-3.5-flash") == "gemini-3.5-flash"
+
+
+def test_resolve_llm_model_falls_back_to_default_when_unset() -> None:
+    assert resolve_llm_model(None) == "gemini-2.5-flash"
+
+
+def test_resolve_llm_model_falls_back_on_empty_string() -> None:
+    assert resolve_llm_model("") == "gemini-2.5-flash"
