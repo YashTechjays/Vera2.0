@@ -162,26 +162,33 @@ dict back through `ThinkingOverride.model_validate(...)` when present.
 
 ### 4. agent_worker — `cascade.py` + `main.py`
 
-`cascade.py` gains two small pure functions and a new `build_session` parameter:
+`cascade.py` gains a small set of pure functions and a new `build_session`
+parameter. `resolve_thinking_attrs` is the single source of truth for the
+budget-vs-level decision, in plain `int`/`str` form — both the actual
+`ThinkingConfig` the LLM call needs and the trace attributes derive from it, rather
+than reading back off the constructed `ThinkingConfig` object (whose
+`thinking_level` is a google-genai enum with no guaranteed `str()` format — safer
+to never round-trip through it for anything but the actual API call):
 
 ```python
 from vera_core.services.model_config import is_gemini_3_model
 
-def resolve_thinking_config(model: str, thinking_override: dict[str, Any] | None) -> ThinkingConfig:
+def resolve_thinking_attrs(model: str, thinking_override: dict[str, Any] | None) -> dict[str, int | str]:
+    """The resolved (budget-or-level) values in plain-value form — exactly one key,
+    matching the same pairing ThinkingOverride/validate_extra_config enforce at save time."""
     if thinking_override:
-        return ThinkingConfig(**thinking_override)
+        return dict(thinking_override)
     if is_gemini_3_model(model):
-        return ThinkingConfig(thinking_level="low")
-    return ThinkingConfig(thinking_budget=0)
+        return {"thinking_level": "low"}
+    return {"thinking_budget": 0}
 
 
-def llm_trace_attributes(model: str, thinking_config: ThinkingConfig) -> dict[str, str | int]:
-    attrs: dict[str, str | int] = {"vera.llm.model": model}
-    if thinking_config.thinking_budget is not None:
-        attrs["vera.llm.thinking_budget"] = thinking_config.thinking_budget
-    if thinking_config.thinking_level is not None:
-        attrs["vera.llm.thinking_level"] = str(thinking_config.thinking_level)
-    return attrs
+def resolve_thinking_config(model: str, thinking_override: dict[str, Any] | None) -> ThinkingConfig:
+    return ThinkingConfig(**resolve_thinking_attrs(model, thinking_override))
+
+
+def llm_trace_attributes(model: str, thinking_attrs: dict[str, int | str]) -> dict[str, str | int]:
+    return {"vera.llm.model": model, **{f"vera.llm.{k}": v for k, v in thinking_attrs.items()}}
 ```
 
 `build_session(..., thinking_override: dict[str, Any] | None = None)` calls
@@ -196,8 +203,8 @@ between there and `build_session` opens a narrower span):
 
 ```python
 resolved_model = resolve_llm_model(meta.get("llm_model_override"))
-thinking_cfg = resolve_thinking_config(resolved_model, meta.get("llm_thinking_override"))
-trace.get_current_span().set_attributes(llm_trace_attributes(resolved_model, thinking_cfg))
+thinking_attrs = resolve_thinking_attrs(resolved_model, meta.get("llm_thinking_override"))
+trace.get_current_span().set_attributes(llm_trace_attributes(resolved_model, thinking_attrs))
 
 session = build_session(
     vad=ctx.proc.userdata.get("vad"),
@@ -207,7 +214,7 @@ session = build_session(
 )
 ```
 
-Calling `resolve_llm_model`/`resolve_thinking_config` here duplicates the same
+Calling `resolve_llm_model`/`resolve_thinking_attrs` here duplicates the same
 (cheap, pure, side-effect-free) computation `build_session` does internally —
 accepted, since it avoids widening `build_session`'s return contract just to hand
 back values used only for tracing.
