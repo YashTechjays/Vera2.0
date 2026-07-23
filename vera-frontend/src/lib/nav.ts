@@ -33,6 +33,7 @@ export const navItems: NavItem[] = [
   { title: "Call History", to: "/call-history", icon: PhoneCall, permission: "calls:read" },
   { title: "Analytics", to: "/analytics", icon: BarChart3, permission: "calls:read" },
   { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, permission: "platform:elevations:read" },
+  { title: "Platform Operators", to: "/platform-operators", icon: Users, permission: "platform:users:read" },
   { title: "Agent Prompt", to: "/agent-prompt", icon: Bot, permission: "platform:prompts:read" },
   { title: "Insurance Providers", to: "/insurance-providers", icon: Building2, permission: "platform:insurance_providers:read" },
   { title: "IVR Playbooks", to: "/ivr-playbooks", icon: ListTree, permission: "platform:ivr_playbooks:read" },

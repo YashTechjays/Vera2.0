@@ -12,6 +12,8 @@ import { PlatformLogin } from "@/pages/PlatformLogin"
 import { MfaVerify } from "@/pages/MfaVerify"
 import { MfaEnroll } from "@/pages/MfaEnroll"
 import { AcceptInvite } from "@/pages/AcceptInvite"
+import { PlatformAcceptInvite } from "@/pages/PlatformAcceptInvite"
+import { PlatformOperators } from "@/pages/PlatformOperators"
 import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
@@ -47,6 +49,7 @@ function App() {
         <Route path="/mfa-enroll" element={<MfaEnroll />} />
         {/* Invite links are tenant-scoped (generated in the backend email). */}
         <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
+        <Route path="/platform/accept-invite" element={<PlatformAcceptInvite />} />
         <Route element={<RequireAuth />}>
           {/* AppShell owns the Suspense boundary around its <Outlet>, so a lazy
               page (e.g. Voice Lab) shows a spinner in the content area while the
@@ -83,6 +86,8 @@ function App() {
               element={<RequireNavRoute to="/analytics"><Placeholder title="Analytics" /></RequireNavRoute>}
             />
             <Route path="tenant-access" element={<TenantAccess />} />
+            {/* Super-admin-only platform-operator roster. */}
+            <Route path="platform-operators" element={<PlatformOperators />} />
             {/* Super-admin-only prompt editor. */}
             <Route path="agent-prompt" element={<AgentPrompt />} />
             {/* Super-admin-only insurance-provider catalog CRUD. */}

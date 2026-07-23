@@ -7,10 +7,12 @@ account it provisions — so a Redis dump cannot be replayed into account access
 TTL and credential-setup power). Expiry auto-revokes; accept deletes the entry
 (single use). Invitees are workforce members, so this carries no PHI.
 
-Two namespaces share one store:
-  * "invite"     — the onboarding token that lets an invitee set their password;
-  * "invite_mfa" — a short-lived token bridging password-set → MFA activation when
-                   the tenant enforces MFA, so onboarding completes without a session.
+Four namespaces share one store:
+  * "invite"           — the onboarding token that lets an invitee set their password;
+  * "invite_mfa"       — a short-lived token bridging password-set → MFA activation when
+                         the tenant enforces MFA, so onboarding completes without a session;
+  * "platform_invite"  — the onboarding token for a platform-operator (tenant_id is None);
+  * "platform_invite_mfa" — the short-lived MFA token for a platform-operator.
 """
 
 import hashlib
@@ -25,20 +27,25 @@ from redis.asyncio import Redis
 
 INVITE_NS = "invite"
 INVITE_MFA_NS = "invite_mfa"
+PLATFORM_INVITE_NS = "platform_invite"
+PLATFORM_INVITE_MFA_NS = "platform_invite_mfa"
 
 
 @dataclass(frozen=True)
 class InviteData:
-    """What an invite token resolves to — only identifiers, never a secret."""
+    """What an invite token resolves to — only identifiers, never a secret.
+    `tenant_id` is None for a platform-operator invite (no tenant); the caller's
+    namespace (tenant vs. platform) is the actual security boundary, this field is
+    just the data payload."""
 
-    tenant_id: UUID
+    tenant_id: UUID | None
     app_user_id: UUID
     email: str
 
     def to_json(self) -> str:
         return json.dumps(
             {
-                "tenant_id": str(self.tenant_id),
+                "tenant_id": str(self.tenant_id) if self.tenant_id is not None else None,
                 "app_user_id": str(self.app_user_id),
                 "email": self.email,
             }
@@ -48,7 +55,7 @@ class InviteData:
     def from_json(cls, raw: str) -> "InviteData":
         d = json.loads(raw)
         return cls(
-            tenant_id=UUID(d["tenant_id"]),
+            tenant_id=UUID(d["tenant_id"]) if d["tenant_id"] is not None else None,
             app_user_id=UUID(d["app_user_id"]),
             email=d["email"],
         )

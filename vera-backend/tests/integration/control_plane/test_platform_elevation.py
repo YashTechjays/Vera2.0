@@ -369,3 +369,27 @@ async def test_elevated_operator_manages_roles_like_a_tenant_admin(
     assert ended.status_code == 200
     after = await client.get("/api/v1/roles", headers=_auth(w.super_token))
     assert after.status_code == 403  # elevation over → access gone again
+
+
+async def test_elevated_super_admin_still_reaches_platform_tier_endpoints(
+    world: tuple[httpx.AsyncClient, World],
+) -> None:
+    """An active elevation grant changes the DB session's tenant GUC for /api/v1/*
+    tenant routes (`tenant_context` / `tenant_scoped_session`), but it does NOT
+    change the caller's `account_type` — the identity resolved from the bearer
+    token is still `'platform'`. `platform_require` (and the `platform_scoped_session`
+    it depends on) never consults `tenant_context` or the elevation grant at all —
+    it resolves permissions straight from `current_identity` over a platform
+    session. So a SUPER_ADMIN who is mid-elevation into a tenant is still, and
+    correctly, allowed to reach platform-tier endpoints like GET /platform/users;
+    elevation only ADDS tenant access, it never subtracts platform access."""
+    client, w = world
+    grant_id = (await _create(client, w, tenant=w.tenant_id)).json()["data"]["id"]
+
+    resp = await client.get("/api/v1/platform/users", headers=_auth(w.super_token))
+    assert resp.status_code == 200, resp.text
+    emails = {row["email"] for row in resp.json()["data"]}
+    assert "root@vera.example" in emails  # the elevated super admin sees itself listed
+
+    ended = await client.post(f"{_BASE}/{grant_id}/end", headers=_auth(w.super_token))
+    assert ended.status_code == 200
