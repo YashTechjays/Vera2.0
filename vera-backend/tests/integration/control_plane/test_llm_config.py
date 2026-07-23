@@ -237,3 +237,57 @@ async def test_write_requires_idempotency_key(
         json={"model": "gemini-3.5-flash"},
     )
     assert resp.status_code == 400, resp.text
+
+
+async def test_save_with_matching_thinking_override_succeeds(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = llm_config_world
+    resp = await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.super_token),
+        json={"model": "gemini-3.5-flash", "extra_config": {"thinking_level": "high"}},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["extra_config"] == {"thinking_level": "high"}
+
+
+async def test_save_rejects_mismatched_thinking_override(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = llm_config_world
+    resp = await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.super_token),
+        json={"model": "gemini-3.5-flash", "extra_config": {"thinking_budget": 0}},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_save_rejects_both_fields_set(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = llm_config_world
+    resp = await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.super_token),
+        json={
+            "model": "gemini-2.5-flash",
+            "extra_config": {"thinking_budget": 0, "thinking_level": "low"},
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_history_carries_extra_config(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = llm_config_world
+    await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.super_token),
+        json={"model": "gemini-2.5-flash", "extra_config": {"thinking_budget": 500}},
+    )
+    history = await client.get("/api/v1/platform/llm-config/history", headers=_auth(w.super_token))
+    assert history.status_code == 200, history.text
+    assert history.json()["data"][0]["extra_config"] == {"thinking_budget": 500}

@@ -29,6 +29,8 @@ from control_plane.responses import ResponseModel, ok
 from vera_core.models import VoiceModelConfig
 from vera_core.services.model_config import (
     InvalidModelName,
+    InvalidThinkingOverride,
+    ThinkingOverride,
     get_active_llm_config,
     list_llm_config_history,
     reset_llm_model,
@@ -44,11 +46,13 @@ _WRITE = platform_require("platform:llm_config:write")
 
 class SaveLlmConfigRequest(BaseModel):
     model: str
+    extra_config: ThinkingOverride | None = None
 
 
 class LlmConfigState(BaseModel):
     provider: str | None
     model: str | None
+    extra_config: dict[str, int | str] | None
     is_default: bool
     created_at: datetime | None
     created_by_user_id: UUID | None
@@ -57,11 +61,17 @@ class LlmConfigState(BaseModel):
 def _state(row: VoiceModelConfig | None) -> LlmConfigState:
     if row is None:
         return LlmConfigState(
-            provider=None, model=None, is_default=True, created_at=None, created_by_user_id=None
+            provider=None,
+            model=None,
+            extra_config=None,
+            is_default=True,
+            created_at=None,
+            created_by_user_id=None,
         )
     return LlmConfigState(
         provider=row.provider,
         model=row.model,
+        extra_config=row.extra_config,
         is_default=row.model is None,
         created_at=row.created_at,
         created_by_user_id=row.created_by_user_id,
@@ -124,9 +134,9 @@ async def save_llm_config(
     )
     try:
         row = await save_llm_model(
-            session, body.model, extra_config=None, created_by_user_id=caller.user_id
+            session, body.model, extra_config=body.extra_config, created_by_user_id=caller.user_id
         )
-    except InvalidModelName as exc:
+    except (InvalidModelName, InvalidThinkingOverride) as exc:
         raise CustomAPIException(DefaultExceptionCode.VALIDATION_ERROR, message=str(exc)) from exc
     return ok(_state(row))
 
