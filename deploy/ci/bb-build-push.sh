@@ -25,6 +25,17 @@ build_args="${4:-}"
 : "${BITBUCKET_COMMIT:?BITBUCKET_COMMIT not set}"
 TRIVY_EXIT_CODE="${TRIVY_EXIT_CODE:-0}"   # warn by default; flip to 1 once the CVE backlog is triaged
 
+# google/cloud-sdk:slim ships neither jq nor docker. verify-config.sh needs jq; install it up
+# front (no-op if present). Ports the GitHub verify-* pre-build jobs, run here as a fail-closed
+# gate BEFORE the build so a missing/unmapped env var stops us before we build anything.
+command -v jq >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq jq >/dev/null; }
+case "$component" in
+  control-plane) bash deploy/verify-config.sh control-plane ;;
+  agent-worker)  bash deploy/verify-config.sh worker ;;
+  frontend)      bash deploy/verify-frontend-build-env.sh ;;
+  *) echo "unknown component '$component'" >&2; exit 1 ;;
+esac
+
 registry_host="${GCP_REGION}-docker.pkg.dev"
 image="${registry_host}/${GCP_PROJECT_ID}/${AR_REPO}/${component}"
 

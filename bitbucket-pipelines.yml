@@ -184,7 +184,6 @@ definitions:
               - "vera-backend/uv.lock"
               - "deploy/**"
         script:
-          - bash deploy/verify-config.sh control-plane
           - bash deploy/ci/bb-gcp-auth.sh
           - bash deploy/ci/bb-build-push.sh control-plane vera-backend vera-backend/docker/control_plane.Dockerfile
 
@@ -204,7 +203,6 @@ definitions:
               - "vera-backend/uv.lock"
               - "deploy/**"
         script:
-          - bash deploy/verify-config.sh worker
           - bash deploy/ci/bb-gcp-auth.sh
           - bash deploy/ci/bb-build-push.sh agent-worker vera-backend vera-backend/docker/agent_worker.Dockerfile
 
@@ -220,7 +218,6 @@ definitions:
               - "vera-frontend/**"
               - "deploy/**"
         script:
-          - bash deploy/verify-frontend-build-env.sh
           - bash deploy/ci/bb-gcp-auth.sh
           - bash deploy/ci/bb-build-push.sh frontend vera-frontend vera-frontend/Dockerfile "VITE_API_BASE_URL=$VITE_API_BASE_URL"
 
@@ -288,7 +285,6 @@ pipelines:
               services: [docker]
               caches: [docker]
               script:
-                - bash deploy/verify-config.sh control-plane
                 - bash deploy/ci/bb-gcp-auth.sh
                 - bash deploy/ci/bb-build-push.sh control-plane vera-backend vera-backend/docker/control_plane.Dockerfile
           - step:
@@ -298,7 +294,6 @@ pipelines:
               services: [docker]
               caches: [docker]
               script:
-                - bash deploy/verify-config.sh worker
                 - bash deploy/ci/bb-gcp-auth.sh
                 - bash deploy/ci/bb-build-push.sh agent-worker vera-backend vera-backend/docker/agent_worker.Dockerfile
           - step:
@@ -308,7 +303,6 @@ pipelines:
               services: [docker]
               caches: [docker]
               script:
-                - bash deploy/verify-frontend-build-env.sh
                 - bash deploy/ci/bb-gcp-auth.sh
                 - bash deploy/ci/bb-build-push.sh frontend vera-frontend vera-frontend/Dockerfile "VITE_API_BASE_URL=$VITE_API_BASE_URL"
       - step: *deploy-test
