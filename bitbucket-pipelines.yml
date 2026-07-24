@@ -1,0 +1,82 @@
+# Bitbucket Pipelines — vera2 (application repo)
+# CI only for now: branch-promotion gate + security scanning (gitleaks, trivy).
+# Deploy/CD is intentionally NOT wired yet — added later once the GCP target is settled.
+# Checkov (IaC) is NOT here — it belongs on the Vera2_Infra repo; this repo is app-only.
+#
+# Scanners run in WARN mode (--exit-code 0) during rollout. Flip to hard-fail (--exit-code 1)
+# and enable "Require successful builds" once the backlog is triaged (hardening steps 7,8,13).
+
+image: atlassian/default-image:4
+
+definitions:
+  steps:
+    - step: &promotion
+        name: Enforce branch promotion
+        script:
+          - |
+            SRC="$BITBUCKET_BRANCH"
+            DEST="$BITBUCKET_PR_DESTINATION_BRANCH"
+            echo "PR: $SRC -> $DEST"
+            case "$DEST" in
+              main)
+                # CURRENT (dev + main only): allow dev and hotfix/*.
+                # TODO when qa/stg exist: tighten to  stg|hotfix/*
+                case "$SRC" in
+                  dev|hotfix/*) echo "OK" ;;
+                  *) echo "BLOCKED: main accepts only dev or hotfix/* (until stg exists)"; exit 1 ;;
+                esac ;;
+              dev)
+                case "$SRC" in
+                  feature/*|bugfix/*) echo "OK" ;;
+                  *) echo "BLOCKED: dev accepts only feature/* or bugfix/*"; exit 1 ;;
+                esac ;;
+              # TODO when qa/stg branches are created, add:
+              #   qa)  src must be dev
+              #   stg) src must be qa
+              #   main) src must be stg|hotfix/*
+              *)
+                echo "No promotion rule for destination '$DEST' — allowed" ;;
+            esac
+
+    - step: &gitleaks
+        name: Secrets (gitleaks)
+        image: zricethezav/gitleaks:latest
+        script:
+          - gitleaks detect --source . --redact --exit-code 0   # WARN — flip to 1 in step 7
+
+    - step: &trivy
+        name: Vulnerabilities (trivy)
+        image: aquasec/trivy:latest
+        script:
+          - trivy fs . --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0   # WARN — flip to 1 in step 8
+
+pipelines:
+  # ---- Merge gate: every PR. Pair with "Require successful builds" (step 13) to enforce. ----
+  pull-requests:
+    '**':
+      - step: *promotion
+      - parallel:
+          - step: *gitleaks
+          - step: *trivy
+
+  # ---- Fast secret detection on pushes to the env branches (scoped, not '**', to save minutes) ----
+  branches:
+    dev:
+      - step: *gitleaks
+    main:
+      - step: *gitleaks
+
+  # ---- Nightly deep scan. Schedule it: Repo settings -> Pipelines -> Schedules -> nightly-scan ----
+  custom:
+    nightly-scan:
+      - parallel:
+          - step:
+              name: Trivy critical (full)
+              image: aquasec/trivy:latest
+              script:
+                - trivy fs . --severity CRITICAL --exit-code 1
+          - step:
+              name: Gitleaks full history
+              image: zricethezav/gitleaks:latest
+              script:
+                - gitleaks detect --source . --redact --log-opts="--all"
