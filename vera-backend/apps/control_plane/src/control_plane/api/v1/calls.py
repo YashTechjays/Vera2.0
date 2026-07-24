@@ -17,7 +17,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import (
@@ -33,6 +33,7 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_authz import authorize_or_403 as _authorize_or_403
 from control_plane.call_authz import call_hidden_from as _call_hidden_from
+from control_plane.call_authz import visible_to as _visible_to
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.call_summary import (
     CallSummaryResponse,
@@ -188,17 +189,6 @@ def _summary(
         health_flag=call.health_flag,
         health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
-    )
-
-
-def _visible_to(caller_id: UUID) -> ColumnElement[bool]:
-    """Calls the caller may see: their own, published ones, and ownerless
-    (pre-ownership dispatcher) calls — hidden, those would have no monitoring
-    and no owner to ever publish them."""
-    return or_(
-        Call.initiated_by_id == caller_id,
-        Call.published.is_(True),
-        Call.initiated_by_id.is_(None),
     )
 
 

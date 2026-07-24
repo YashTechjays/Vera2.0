@@ -461,6 +461,43 @@ async def test_ownerless_call_is_tenant_visible_and_joinable(
 
 
 @pytest.mark.asyncio
+async def test_ownerless_terminal_call_hidden_from_non_owners(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Ownerless visibility is a live-queue affordance only (VR2-62): a terminal
+    ownerless call (owner deleted — SET NULL) is nobody's to claim, so it stays
+    out of the history list and the stats — unless it was published."""
+    done_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        status=CallStatus.COMPLETED.value,
+    )
+    published_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        status=CallStatus.COMPLETED.value,
+        published=True,
+    )
+
+    history = await client.get(
+        "/api/v1/calls",
+        params={"scope": "history"},
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    ids = [c["id"] for c in history.json()["data"]]
+    assert str(done_id) not in ids
+    assert str(published_id) in ids
+
+    stats = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.supervisor_token))
+    assert stats.json()["data"] == {"total_today": 1, "live": 0, "critical": 0}
+
+
+@pytest.mark.asyncio
 async def test_publish_is_owner_only_idempotent_and_audited(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -917,9 +954,7 @@ async def test_end_call_visibility_matches_join_token(
     assert "owner" in denied.json()["message"]
 
     # The owner may still end their own published call; the audit row carries the owner id.
-    ended = await client.post(
-        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token)
-    )
+    ended = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
     assert ended.status_code == 200, ended.text
     audit = (
         (
