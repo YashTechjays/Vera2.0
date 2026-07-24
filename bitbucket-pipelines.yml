@@ -130,9 +130,130 @@ definitions:
           - uv run python scripts/seed.py
           - uv run pytest tests/integration
 
+    # ============================ CD: dev -> test ============================
+    # Runs ONLY on the dev branch (see pipelines.branches.dev): full DB-backed gate, then
+    # build + deploy the 3 components to the test VM. Mirrors GitHub .github/workflows/dev.yml.
+    # Auth is keyless (Bitbucket OIDC -> Workload Identity Federation); see deploy/ci/README.md.
+
+    # Full merge gate on the ACTUAL dev commit: static checks + migrate/seed + BOTH unit and
+    # integration tests. Runs on dev (not the fast '**' lane) because dev auto-deploys — this is
+    # the one place base-drift / logical conflicts from a squash-merge are caught before shipping.
+    - step: &dev-ci-backend
+        name: Backend gate (full, with DB)
+        image: ghcr.io/astral-sh/uv:python3.12-bookworm
+        size: 2x
+        caches: [uv]
+        services: [postgres, redis]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/**"
+              - "deploy/**"
+        script:
+          - cd vera-backend
+          - export UV_CACHE_DIR=/tmp/uv-cache
+          - export VERA_DATABASE_URL="postgresql+asyncpg://vera:vera@localhost:5432/vera"
+          - export VERA_REDIS_URL="redis://localhost:6379/0"
+          - uv sync --all-packages --locked
+          - uv run ruff format --check .
+          - uv run ruff check .
+          - uv run mypy
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/5432) 2>/dev/null && break; echo "waiting for postgres ($i)"; sleep 1; done
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/6379) 2>/dev/null && break; echo "waiting for redis ($i)"; sleep 1; done
+          - uv run alembic upgrade head
+          - uv run python scripts/seed.py
+          - uv run pytest tests/unit tests/integration apps/agent_worker/tests
+
+    # Build one component image -> Artifact Registry (:sha + :dev) + Trivy scan. Keyless: the
+    # step needs `oidc: true`; `services: [docker]` gives the build daemon. Path-filtered so a
+    # component only rebuilds when it (or shared code / deploy assets) changed — the built image
+    # set is exactly what the deploy step will pick up.
+    - step: &build-control-plane
+        name: Build control-plane
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/apps/control_plane/**"
+              - "vera-backend/packages/**"
+              - "vera-backend/docker/control_plane.Dockerfile"
+              - "vera-backend/pyproject.toml"
+              - "vera-backend/uv.lock"
+              - "deploy/**"
+        script:
+          - bash deploy/verify-config.sh control-plane
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh control-plane vera-backend vera-backend/docker/control_plane.Dockerfile
+
+    - step: &build-worker
+        name: Build agent-worker
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/apps/agent_worker/**"
+              - "vera-backend/packages/**"
+              - "vera-backend/docker/agent_worker.Dockerfile"
+              - "vera-backend/pyproject.toml"
+              - "vera-backend/uv.lock"
+              - "deploy/**"
+        script:
+          - bash deploy/verify-config.sh worker
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh agent-worker vera-backend vera-backend/docker/agent_worker.Dockerfile
+
+    - step: &build-frontend
+        name: Build frontend
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-frontend/**"
+              - "deploy/**"
+        script:
+          - bash deploy/verify-frontend-build-env.sh
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh frontend vera-frontend vera-frontend/Dockerfile "VITE_API_BASE_URL=$VITE_API_BASE_URL"
+
+    # Single deployment step (Bitbucket allows one `deployment:` per pipeline). Deploys every
+    # component whose :sha image exists — i.e. exactly what the builds above produced — in order
+    # control-plane -> agent-worker -> frontend(last). `deployment: test` gives the Deployments
+    # dashboard + per-environment serialization. Reused by the auto and manual pipelines.
+    - step: &deploy-test
+        name: Deploy to test VM
+        image: google/cloud-sdk:slim
+        oidc: true
+        deployment: test
+        script:
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-deploy-changed.sh
+
 pipelines:
-  # ---- EVERY push, EVERY branch: fast feedback (static + unit + frontend + secret scan). No DB. ----
   branches:
+    # ---- dev (auto CD): full DB-backed gate -> build changed components -> deploy to test. ----
+    #      Bitbucket runs only the MOST SPECIFIC branch match, so dev does NOT also run '**';
+    #      the full gate below replaces the fast lane for dev (which auto-deploys).
+    dev:
+      - parallel:
+          - step: *dev-ci-backend
+          - step: *ci-frontend
+          - step: *gitleaks
+      - parallel:
+          - step: *build-control-plane
+          - step: *build-worker
+          - step: *build-frontend
+      - step: *deploy-test
+
+    # ---- EVERY OTHER branch: fast feedback (static + unit + frontend + secret scan). No DB. ----
     '**':
       - parallel:
           - step: *checks-backend
@@ -153,6 +274,45 @@ pipelines:
   #      are NOT re-run here. Schedule: Repo settings -> Pipelines -> Schedules -> branch main ->
   #      pipeline nightly-scan -> daily.
   custom:
+    # ---- Manual "deploy everything at current dev HEAD" (the workflow_dispatch equivalent). ----
+    #      Use for the first deploy or a forced redeploy: builds all 3 UNCONDITIONALLY (no
+    #      changeset filter — a manually-run pipeline has no reliable changeset base), so every
+    #      :sha image exists and deploy-test ships all 3. Run from Pipelines -> Run pipeline ->
+    #      Custom: deploy-dev-all, on the dev branch.
+    deploy-dev-all:
+      - parallel:
+          - step:
+              name: Build control-plane (all)
+              image: google/cloud-sdk:slim
+              oidc: true
+              services: [docker]
+              caches: [docker]
+              script:
+                - bash deploy/verify-config.sh control-plane
+                - bash deploy/ci/bb-gcp-auth.sh
+                - bash deploy/ci/bb-build-push.sh control-plane vera-backend vera-backend/docker/control_plane.Dockerfile
+          - step:
+              name: Build agent-worker (all)
+              image: google/cloud-sdk:slim
+              oidc: true
+              services: [docker]
+              caches: [docker]
+              script:
+                - bash deploy/verify-config.sh worker
+                - bash deploy/ci/bb-gcp-auth.sh
+                - bash deploy/ci/bb-build-push.sh agent-worker vera-backend vera-backend/docker/agent_worker.Dockerfile
+          - step:
+              name: Build frontend (all)
+              image: google/cloud-sdk:slim
+              oidc: true
+              services: [docker]
+              caches: [docker]
+              script:
+                - bash deploy/verify-frontend-build-env.sh
+                - bash deploy/ci/bb-gcp-auth.sh
+                - bash deploy/ci/bb-build-push.sh frontend vera-frontend vera-frontend/Dockerfile "VITE_API_BASE_URL=$VITE_API_BASE_URL"
+      - step: *deploy-test
+
     nightly-scan:
       - parallel:
           - step:
