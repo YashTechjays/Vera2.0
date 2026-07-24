@@ -904,13 +904,21 @@ async def test_end_call_visibility_matches_join_token(
     )
     assert unknown.status_code == 404, unknown.text
 
-    # Published → non-owner supervisor may end it; the audit row carries the owner id.
+    # Published → visible to the non-owner supervisor now (no longer 404), but
+    # VR2-59: before anyone has intervened, only the owner may end it.
     published = await client.post(
         f"/api/v1/calls/{call_id}/publish", headers=_auth(rbac_world.admin_token)
     )
     assert published.status_code == 200, published.text
-    ended = await client.post(
+    denied = await client.post(
         f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert denied.status_code == 409, denied.text
+    assert "owner" in denied.json()["message"]
+
+    # The owner may still end their own published call; the audit row carries the owner id.
+    ended = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token)
     )
     assert ended.status_code == 200, ended.text
     audit = (

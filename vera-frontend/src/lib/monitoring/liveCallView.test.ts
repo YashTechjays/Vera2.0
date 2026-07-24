@@ -6,6 +6,7 @@ import {
   agentJoined,
   coachingPanelVisible,
   connectionPhase,
+  endCallButtonState,
   interveneButtonState,
   isWaitingForCall,
   intervenerLabel,
@@ -191,6 +192,31 @@ describe("interveneButtonState", () => {
     const state = interveneButtonState(true, { ...live, otherIntervener: true })
     expect(state.disabled).toBe(true)
     expect(state.title).toBe("Another supervisor is intervening")
+  })
+})
+
+describe("endCallButtonState", () => {
+  const live: RoomStatus = { phase: "live", otherIntervener: false, intervenerLabel: null }
+
+  it("enables for the owner before anyone has intervened", () => {
+    expect(endCallButtonState(true, false, live)).toEqual({ disabled: false })
+    expect(endCallButtonState(true, false, null)).toEqual({ disabled: false })
+  })
+
+  it("disables for a non-owner, non-intervener viewer with a reason (VR2-59)", () => {
+    const state = endCallButtonState(false, false, live)
+    expect(state.disabled).toBe(true)
+    expect(state.title).toBe("Only the call owner can end this call before intervention")
+  })
+
+  it("enables for the viewer currently intervening, even if not the owner", () => {
+    expect(endCallButtonState(false, true, live)).toEqual({ disabled: false })
+  })
+
+  it("disables with a reason while another supervisor is intervening, regardless of ownership", () => {
+    const state = endCallButtonState(true, false, { ...live, otherIntervener: true })
+    expect(state.disabled).toBe(true)
+    expect(state.title).toBe("Only the intervening supervisor can end this call")
   })
 })
 

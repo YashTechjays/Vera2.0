@@ -26,6 +26,7 @@ import { endCall } from "@/lib/api/calls"
 import type { CallHealth } from "@/lib/api/callEvents"
 import {
   coachingPanelVisible,
+  endCallButtonState,
   interveneButtonState,
   shouldAllowClose,
   type LiveCallMode,
@@ -104,6 +105,7 @@ export function LiveCallModal({
   const callEnded = sseEnded
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
+  const endCallState = endCallButtonState(call?.isOwner ?? false, mode === "intervene", roomStatus)
   const canCoach = coachingPanelVisible(canIntervene, call?.isOwner ?? false, callEnded)
 
   // Tab close / refresh while intervening abandons the call with a silenced agent — warn.
@@ -393,7 +395,7 @@ export function LiveCallModal({
             {!callEnded && (
               <Button
                 onClick={() => void handleEndCall()}
-                disabled={ending || roomStatus?.otherIntervener}
+                disabled={ending || endCallState.disabled}
                 className="bg-red-500 text-white hover:bg-red-600"
               >
                 {ending ? "Ending…" : "End Call"}
@@ -406,10 +408,8 @@ export function LiveCallModal({
             )}
             {actionError && <span className="text-sm text-destructive">{actionError}</span>}
             {/* Helper text, not a title: the disabled button swallows hover events. */}
-            {!actionError && !callEnded && roomStatus?.otherIntervener && (
-              <span className="text-sm text-muted-foreground">
-                Only the intervening supervisor can end this call
-              </span>
+            {!actionError && !callEnded && endCallState.title && (
+              <span className="text-sm text-muted-foreground">{endCallState.title}</span>
             )}
           </div>
           {intervene.visible && mode === "listen" && !callEnded && (
