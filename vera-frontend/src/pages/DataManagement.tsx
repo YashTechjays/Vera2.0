@@ -64,9 +64,9 @@ export function DataManagement() {
   const [tab, setTab] = useState<TabKey>("all")
   const [status, setStatus] = useState<"" | PatientFormStatus>("")
   const [query, setQuery] = useState("")
-  // Most recent appointment first by default; the server sorts the full set.
-  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
-    key: "appointment_date",
+  // Newest records first by default; the server sorts the full set.
+  const [sort, setSort] = useState<{ key: PatientFormSortKey; dir: "asc" | "desc" }>({
+    key: "created_at",
     dir: "desc",
   })
   const [error, setError] = useState<string | null>(null)
