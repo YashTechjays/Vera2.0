@@ -23,6 +23,7 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import InvalidIntakeValue, promote_columns
 from vera_core.forms.review import completion_pct, completion_pct_v2, unwrap_value
 from vera_core.models import FieldAnswer, PatientForm
+from vera_core.models.enums import AnswerSource
 
 logger = logging.getLogger("vera_core.field_answers")
 
@@ -39,6 +40,26 @@ async def current_values_by_path(session: AsyncSession, form_id: UUID) -> dict[s
             )
         ).all()
     }
+
+
+async def baseline_value(session: AsyncSession, form_id: UUID, field_path: str) -> Any | None:
+    """The dispute baseline for one field: the most-recent intake/human stored value
+    (`{"value": ...}`), or None if the field has no human/intake answer. Filters on
+    `source` only (NOT `is_current`), so it still resolves after an `ai_call` answer
+    supersedes it — mirroring the detail view's baseline query so a live dispute matches
+    the REST one."""
+    return (
+        await session.execute(
+            select(FieldAnswer.value)
+            .where(
+                FieldAnswer.form_id == form_id,
+                FieldAnswer.field_path == field_path,
+                FieldAnswer.source.in_([AnswerSource.INTAKE.value, AnswerSource.HUMAN.value]),
+            )
+            .order_by(FieldAnswer.created_at.desc(), FieldAnswer.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def record_answer(

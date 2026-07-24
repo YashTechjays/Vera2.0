@@ -33,6 +33,7 @@ import {
 } from "@/lib/monitoring/liveCallView"
 import { healthTone, healthToneClass } from "@/lib/monitoring/health"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
+import { useIbv } from "@/components/ibv/IbvProvider"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
 import { CoachingPanel } from "./CoachingPanel"
@@ -63,6 +64,7 @@ export function LiveCallModal({
   onExpand: () => void
 }) {
   const canIntervene = usePermission("calls:intervene")
+  const { applyLiveAnswer, loadFormById } = useIbv()
   const [mode, setMode] = useState<LiveCallMode>("listen")
   const [roomStatus, setRoomStatus] = useState<RoomStatus | null>(null)
   const [ending, setEnding] = useState(false)
@@ -78,15 +80,26 @@ export function LiveCallModal({
   useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const [liveHealth, setLiveHealth] = useState<CallHealth | null>(null)
-  // Reset liveHealth during render when the call changes (React's previous-render
+  // Live form completion from the SSE field_answer frames (0-100); null until the
+  // first answer, then it drives the progress bar in place of the polled value.
+  const [liveCompletion, setLiveCompletion] = useState<number | null>(null)
+  // Reset live state during render when the call changes (React's previous-render
   // pattern, mirroring useCallStatus.ts) — an effect-based reset trips react-hooks
   // v6's set-state-in-effect rule. Close still resets it too, below.
   const [healthForCallId, setHealthForCallId] = useState(call?.id)
   if (call?.id !== healthForCallId) {
     setHealthForCallId(call?.id)
     setLiveHealth(null)
+    setLiveCompletion(null)
   }
-  const progress = call?.formProgress ?? 0
+  // Prefer the live SSE completion; fall back to the polled list value until the first frame.
+  const progress = Math.round(liveCompletion ?? call?.formProgress ?? 0)
+
+  // Load the call's form into the inline form (data only — not the full-screen modal)
+  // so its fields render and live AI answers land on an already-seeded form.
+  useEffect(() => {
+    if (open && call?.formId) loadFormById(call.formId)
+  }, [open, call?.formId, loadFormById])
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
@@ -127,6 +140,7 @@ export function LiveCallModal({
       setTranscriptCopied(false)
       setRightTab("transcript")
       setLiveHealth(null)
+      setLiveCompletion(null)
     }
     onOpenChange(next)
   }
@@ -373,6 +387,10 @@ export function LiveCallModal({
                     onCallStatus={onCallStatus}
                     onTextChange={setTranscript}
                     onHealth={setLiveHealth}
+                    onFieldAnswer={(a) => {
+                      applyLiveAnswer(a.fieldPath, a.value, a.dispute)
+                      if (a.completionPct !== null) setLiveCompletion(a.completionPct)
+                    }}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                   />
                   {canCoach && <CoachingPanel callId={call.id} />}

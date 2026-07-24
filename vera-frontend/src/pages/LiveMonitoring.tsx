@@ -95,6 +95,7 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     insurance: c.insurance_provider || "—",
     confidence: 0,
     formProgress: 0,
+    formId: c.form_id,
     callTime: elapsed(c.started_at, now),
     startedAt: c.started_at,
     healthScore: c.health_score,

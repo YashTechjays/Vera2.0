@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react"
@@ -21,6 +22,7 @@ import {
   type DisputeMap,
 } from "@/lib/ibv/disputes"
 import type { FormSchema, FormValues } from "@/lib/ibv/types"
+import type { LiveDispute } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
 import {
   getPatientForm,
@@ -48,6 +50,17 @@ type IbvContextValue = {
   schema: FormSchema | null
   values: FormValues
   setValue: (path: string, value: string) => void
+  /** Apply an AI-extracted answer pushed live over SSE (Live Monitoring). Updates
+   *  the value WITHOUT marking the form dirty, and skips any field the supervisor
+   *  has edited this session so an agent fill never clobbers a manual correction.
+   *  `dispute` is tri-state: `undefined` leaves the disputes map untouched, `null`
+   *  clears any dispute for the field, an object sets it (rendered like a REST one).
+   *  No-op when no form is open. */
+  applyLiveAnswer: (
+    path: string,
+    value: string | number | boolean | null,
+    dispute?: LiveDispute | null,
+  ) => void
   errors: ValidationErrors
   /** Required fields the reviewer emptied this session — saving is blocked on these. */
   clearedRequired: string[]
@@ -93,8 +106,11 @@ type IbvContextValue = {
   formId: string | null
   /** Returns the provenance record for a field path, or null if absent. */
   provenanceFor: (path: string) => FieldProvenance | null
-  /** Open a real patient form by id, loaded from the API. */
+  /** Open a real patient form by id, loaded from the API (opens the full-screen modal). */
   openFormById: (formId: string) => void
+  /** Load a form's data by id WITHOUT opening the full-screen modal — for surfaces
+   *  (Live Monitoring) that render the form inline and apply live answers. */
+  loadFormById: (formId: string) => void
   closeForm: () => void
 }
 
@@ -112,6 +128,24 @@ async function loadSchema(versionId: string): Promise<FormSchema> {
   return schema
 }
 
+/** Date leaves store ISO but render in the schema's declared date_format. Map each
+ *  date leaf's path to that format — built on form load (adaptDetail) and memoized for
+ *  the live-answer path, whose values arrive as ISO too. */
+function dateFormatsOf(schema: FormSchema): Map<string, string> {
+  const formats = new Map<string, string>()
+  for (const leaf of allLeaves(schema)) {
+    const format = leaf.field.validation?.date_format
+    if (leaf.field.type === "date" && format) formats.set(leaf.path, format)
+  }
+  return formats
+}
+
+/** Stored value → display string, applying the date leaf's format when one is set. */
+function toDisplayValue(raw: unknown, format: string | undefined): string {
+  const text = valueToInput(raw)
+  return format ? isoToDateFormat(text, format) : text
+}
+
 /** Map an API form detail into the form's value, dispute, and provenance maps
  * (keyed by path). Date leaves are converted from stored ISO to the schema's
  * declared date_format on the way in — see isoToDateFormat. */
@@ -123,16 +157,9 @@ function adaptDetail(
   disputes: DisputeMap
   provenance: Record<string, FieldProvenance>
 } {
-  const dateFormats = new Map<string, string>()
-  for (const leaf of allLeaves(schema)) {
-    const format = leaf.field.validation?.date_format
-    if (leaf.field.type === "date" && format) dateFormats.set(leaf.path, format)
-  }
-  const toInput = (raw: unknown, path: string): string => {
-    const text = valueToInput(raw)
-    const format = dateFormats.get(path)
-    return format ? isoToDateFormat(text, format) : text
-  }
+  const dateFormats = dateFormatsOf(schema)
+  const toInput = (raw: unknown, path: string): string =>
+    toDisplayValue(raw, dateFormats.get(path))
   const values: FormValues = {}
   const disputes: DisputeMap = {}
   const provenance: Record<string, FieldProvenance> = {}
@@ -172,6 +199,11 @@ export function IbvProvider({
   const [flags, setFlagsState] = useState<DisputeFlagMap>({})
   const [provenance, setProvenance] = useState<Record<string, FieldProvenance>>({})
 
+  // Field paths the supervisor edited this session — live AI answers skip these so
+  // a push never clobbers a manual correction. A ref (not state): reading it must
+  // not re-run the live-answer callback, and it's cleared whenever the form reseeds.
+  const editedPathsRef = useRef<Set<string>>(new Set())
+
   const [dirty, setDirty] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>("idle")
   const [loading, setLoading] = useState(false)
@@ -188,6 +220,12 @@ export function IbvProvider({
   const errors = useMemo(
     () => (schema ? validateAll(schema, values) : {}),
     [schema, values],
+  )
+
+  // The date-format map for live answers (which arrive as ISO) — same source as adaptDetail.
+  const dateFormats = useMemo(
+    () => (schema ? dateFormatsOf(schema) : new Map<string, string>()),
+    [schema],
   )
 
   // Required/applicable fields the reviewer emptied in THIS session (had a value on
@@ -218,23 +256,27 @@ export function IbvProvider({
       setDirty(false)
       setSaveState("idle")
       setPatientName(name)
+      editedPathsRef.current = new Set() // fresh form/save — no manual edits yet
     },
     [],
   )
 
-  // Real path: load a patient form by id from the API. setState happens in the
-  // event handler + async callbacks, never synchronously inside an effect.
-  const openFormById = useCallback(
+  // Real path: load a patient form by id from the API into the form state (schema +
+  // values + provenance) WITHOUT opening the full-screen form modal. The Live
+  // Monitoring modal uses this to render its inline form and receive live answers;
+  // openFormById layers the full-screen modal on top. setState happens in the event
+  // handler + async callbacks, never synchronously inside an effect.
+  const loadFormById = useCallback(
     (id: string) => {
       setMode("api")
       setFormId(id)
-      setModalOpen(true)
       setLoading(true)
       setError(null)
       setValues({})
       setOriginalValues({})
       setDisputes({})
       setFlagsState({})
+      editedPathsRef.current = new Set()
       setDirty(false)
       setSaveState("idle")
       setStatus(null)
@@ -274,16 +316,68 @@ export function IbvProvider({
     [seed],
   )
 
+  // Load the form AND open the full-screen form modal (the "expand" action).
+  const openFormById = useCallback(
+    (id: string) => {
+      setModalOpen(true)
+      loadFormById(id)
+    },
+    [loadFormById],
+  )
+
   const closeForm = useCallback(() => {
     setModalOpen(false)
     setProvenance({})
   }, [])
 
   const setValue = useCallback((path: string, value: string) => {
+    editedPathsRef.current.add(path) // a manual edit — live AI answers must not overwrite it
     setValues((prev) => ({ ...prev, [path]: value }))
     setDirty(true)
     setSaveState("idle")
   }, [])
+
+  const applyLiveAnswer = useCallback(
+    (path: string, raw: string | number | boolean | null, dispute?: LiveDispute | null) => {
+      // Only into an open form, and never over a field the supervisor is editing.
+      if (!formId || editedPathsRef.current.has(path)) return
+      const format = dateFormats.get(path)
+      const display = toDisplayValue(raw, format)
+      // Not a supervisor edit: update the value only, never touch dirty/saveState.
+      setValues((prev) => (prev[path] === display ? prev : { ...prev, [path]: display }))
+
+      if (dispute === undefined) return // frame carried no dispute info — leave disputes as-is
+      if (dispute === null) {
+        // Backend computed "not disputed" — drop any dispute (and its flag) for the field.
+        setDisputes((prev) => {
+          if (!(path in prev)) return prev
+          const next = { ...prev }
+          delete next[path]
+          return next
+        })
+        setFlagsState((prev) => {
+          if (!(path in prev)) return prev
+          const next = { ...prev }
+          delete next[path]
+          return next
+        })
+        return
+      }
+      // Set the dispute in the same shape adaptDetail builds, so FieldRow renders it
+      // identically to a REST-loaded one. Flags stay unset (starts unresolved); no dirty.
+      setDisputes((prev) => ({
+        ...prev,
+        [path]: {
+          previousValue: toDisplayValue(dispute.previousValue, format),
+          currentValue: toDisplayValue(dispute.currentValue, format),
+          confidence: dispute.confidence ?? undefined,
+          evidence: dispute.evidence ?? undefined,
+          reasoning: dispute.reasoning ?? undefined,
+        },
+      }))
+    },
+    [formId, dateFormats],
+  )
 
   const flagsFor = useCallback(
     (path: string) => flags[path] ?? defaultFlags(),
@@ -421,6 +515,7 @@ export function IbvProvider({
     schema,
     values,
     setValue,
+    applyLiveAnswer,
     errors,
     clearedRequired,
     disputes,
@@ -451,6 +546,7 @@ export function IbvProvider({
     formId,
     provenanceFor,
     openFormById,
+    loadFormById,
     closeForm,
   }
 

@@ -7,6 +7,7 @@ monkeypatched per-test via `_consumer()`, which routes queries through a
 `tests/unit/services/test_queue_dispatcher.py`.
 """
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
@@ -64,12 +66,23 @@ class _FakeRedis:
         self.xreadgroup_response: object = None
         self.xautoclaim_response: object = ("0-0", [], [])
         # When set, xreadgroup raises it — used to mimic redis-py turning a BLOCK
-        # window with no new entries into a raised TimeoutError.
-        self.xreadgroup_error: Exception | None = None
+        # window with no new entries into a raised TimeoutError, or a CancelledError
+        # (a BaseException) to break out of the run loop in a test.
+        self.xreadgroup_error: BaseException | None = None
+        # Group-bootstrap bookkeeping: count ensure_group() calls, and let a test
+        # queue per-call xautoclaim errors (e.g. a one-shot NOGROUP) to exercise recovery.
+        self.xgroup_create_calls = 0
+        self.xautoclaim_errors: list[Exception] = []
 
     async def xack(self, stream: str, group: str, entry_id: str) -> int:
         self.acked.append(entry_id)
         return 1
+
+    async def xgroup_create(
+        self, name: str, groupname: str, id: str = "0", mkstream: bool = False
+    ) -> bool:
+        self.xgroup_create_calls += 1
+        return True
 
     async def xreadgroup(
         self,
@@ -92,6 +105,8 @@ class _FakeRedis:
         start_id: str = "0-0",
         count: int | None = None,
     ) -> object:
+        if self.xautoclaim_errors:
+            raise self.xautoclaim_errors.pop(0)
         return self.xautoclaim_response
 
 
@@ -165,6 +180,7 @@ class _FakeCallStream:
         self.cleared: list[str] = []
         self.published: list[tuple[str, str]] = []
         self.ended: list[str] = []
+        self.field_answers: list[dict[str, Any]] = []
 
     async def read_all(self, room_name: str) -> list[CallStreamEvent]:
         return self._events
@@ -175,6 +191,9 @@ class _FakeCallStream:
 
     async def publish_status(self, room_name: str, status: str, *, ts: int) -> None:
         self.published.append((room_name, status))
+
+    async def publish_field_answer(self, room_name: str, **kwargs: Any) -> None:
+        self.field_answers.append({"room_name": room_name, **kwargs})
 
     async def end(self, room_name: str) -> None:
         self.ended.append(room_name)
@@ -442,6 +461,30 @@ async def test_read_once_treats_block_timeout_as_idle(monkeypatch: pytest.Monkey
     await wired.consumer._read_once()
     assert livekit.calls == []
     assert redis.acked == []
+
+
+@pytest.mark.asyncio
+async def test_run_reensures_group_after_nogroup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NOGROUP mid-loop (group dropped by a Redis flush, or the stream recreated by a
+    producer's XADD before the group existed) must re-bootstrap the group, not spin on the
+    error forever. The run loop resets group_ready so ensure_group re-runs next pass."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    # First reclaim raises NOGROUP; the second pass must call ensure_group again and
+    # then break out of the loop via a cancel on the following read.
+    redis.xautoclaim_errors = [ResponseError("NOGROUP No such key or consumer group")]
+    redis.xreadgroup_error = asyncio.CancelledError()
+    wired = _consumer(monkeypatch, redis, livekit)
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await wired.consumer.run()
+
+    # Once at startup, once after the NOGROUP reset — proving recovery.
+    assert redis.xgroup_create_calls == 2
 
 
 # ---------------------------------------------------------------------------
@@ -918,8 +961,12 @@ async def test_answer_recorded_writes_recomputes_and_audits(
     async def _fake_recompute(sess: Any, f: Any, schema_json: Any) -> None:
         recomputed.append(f)
 
+    async def _fake_baseline(sess: Any, fid: Any, path: str) -> Any:
+        return {"value": "No"}  # intake/human baseline the AI value diverges from
+
     monkeypatch.setattr(worker_events, "record_answer", _fake_record_answer)
     monkeypatch.setattr(worker_events, "recompute_form_projection", _fake_recompute)
+    monkeypatch.setattr(worker_events, "baseline_value", _fake_baseline)
 
     event = CallAnswerRecordedEvent(
         room_name=room, field_path="sections.a.x", value="Yes", confidence=90, evidence_seq=3, ts=1
@@ -935,6 +982,61 @@ async def test_answer_recorded_writes_recomputes_and_audits(
     assert ai_audits[0].detail == {"field_path": "sections.a.x", "call_id": str(call_id)}
     assert "Yes" not in str(ai_audits[0].detail)  # never the value
     assert redis.acked == ["1-0"]
+    # Relayed onto the per-call SSE stream so Live Monitoring updates without a poll,
+    # carrying the dispute (AI "Yes" diverges from the "No" baseline).
+    assert wired.call_stream.field_answers == [
+        {
+            "room_name": room,
+            "field_path": "sections.a.x",
+            "value": "Yes",
+            "confidence": 90,
+            "evidence_seq": 3,
+            "completion_pct": form.completion_pct,
+            "dispute": {
+                "previous_value": "No",
+                "current_value": "Yes",
+                "confidence": 90,
+                "evidence": None,
+                "reasoning": None,
+            },
+            "ts": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_publishes_null_dispute_when_matching_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An AI answer that matches the intake/human baseline is not disputed — the SSE frame
+    carries dispute=None so a live surface clears any earlier dispute for the field."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    form = _form_row(tenant_id, form_id)
+    version = SchemaVersion(id=form.schema_version_id, schema_json={"dsl_version": "2.1"})
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id), form=form, schema_version=version
+    )
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session)
+
+    async def _wrote(sess: Any, **kwargs: Any) -> bool:
+        return True
+
+    async def _recompute(sess: Any, f: Any, schema_json: Any) -> None:
+        return None
+
+    async def _same_baseline(sess: Any, fid: Any, path: str) -> Any:
+        return {"value": "Yes"}  # equals the AI value → not disputed
+
+    monkeypatch.setattr(worker_events, "record_answer", _wrote)
+    monkeypatch.setattr(worker_events, "recompute_form_projection", _recompute)
+    monkeypatch.setattr(worker_events, "baseline_value", _same_baseline)
+
+    event = CallAnswerRecordedEvent(room_name=room, field_path="sections.a.x", value="Yes", ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert wired.call_stream.field_answers[0]["dispute"] is None
 
 
 @pytest.mark.asyncio
@@ -965,6 +1067,7 @@ async def test_answer_recorded_noop_skips_recompute_and_audit(
 
     assert recomputed == []
     assert wired.audit.records == []
+    assert wired.call_stream.field_answers == []  # no SSE relay on an idempotent no-op
     assert redis.acked == ["1-0"]  # acked (successfully processed as a no-op)
 
 

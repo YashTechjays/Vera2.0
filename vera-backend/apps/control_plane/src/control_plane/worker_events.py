@@ -45,6 +45,7 @@ from vera_core.events import (
     WorkerEventBus,
     parse_worker_event,
 )
+from vera_core.forms.review import dispute_view
 from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AnswerSource, CallEventType, CallHealthFlag, CallStatus
@@ -58,6 +59,7 @@ from vera_core.notifications import (
 from vera_core.observability.correlation import parse_room_name
 from vera_core.plan_store import CallPlanService
 from vera_core.services.field_answers import (
+    baseline_value,
     current_values_by_path,
     recompute_form_projection,
     record_answer,
@@ -186,6 +188,7 @@ class WorkerEventConsumer:
                 raise
             except RedisError:
                 logger.exception("worker-event consumer Redis error; backing off")
+                group_ready = False
                 await asyncio.sleep(1.0)
 
     async def _read_once(self) -> None:
@@ -418,6 +421,25 @@ class WorkerEventConsumer:
                     # Field path + call id only — never the extracted value.
                     detail={"field_path": event.field_path, "call_id": str(call.id)},
                 )
+            )
+            # Relay the just-persisted answer onto the per-call SSE stream
+            baseline = await baseline_value(session, form.id, event.field_path)
+            dispute = dispute_view(
+                source=AnswerSource.AI_CALL.value,
+                value=event.value,
+                confidence=event.confidence,
+                evidence=None,
+                baseline_value=baseline,
+            )
+            await self._call_stream.publish_field_answer(
+                event.room_name,
+                field_path=event.field_path,
+                value=event.value,
+                confidence=event.confidence,
+                evidence_seq=event.evidence_seq,
+                completion_pct=float(form.completion_pct),
+                dispute=dispute,
+                ts=event.ts,
             )
 
     async def _handle_call_health(self, event: WorkerEvent) -> None:
