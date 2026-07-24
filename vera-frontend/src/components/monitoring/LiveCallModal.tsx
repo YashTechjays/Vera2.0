@@ -278,7 +278,10 @@ export function LiveCallModal({
 
             {formExpanded && (
               <div className="overflow-auto rounded-lg border border-border bg-white p-4">
-                <SchemaForm />
+                {/* Render at IbvFormModal's natural width instead of compressing to this half-width panel; the box scrolls both ways. */}
+                <div className="min-w-[1100px]">
+                  <SchemaForm />
+                </div>
               </div>
             )}
 
