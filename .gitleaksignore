@@ -1,0 +1,4 @@
+# gitleaks suppressions — one finding fingerprint per line.
+# Add fingerprints from `gitleaks detect` output ONLY after confirming the value is a
+# false positive OR the credential has been rotated. Every entry here is a documented,
+# reviewed decision. Do not add live secrets.
