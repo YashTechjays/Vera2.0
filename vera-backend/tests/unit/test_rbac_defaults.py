@@ -15,12 +15,11 @@ def test_calls_publish_permission_is_catalogued_and_granted() -> None:
 
 def test_calls_intervene_permission_is_catalogued_and_granted() -> None:
     assert "calls:intervene" in DEFAULT_PERMISSIONS
-    # All three roles the seed migration grants it to (SUPER_ADMIN holds every permission).
     assert "calls:intervene" in SYSTEM_ROLES["SUPER_ADMIN"]
     assert "calls:intervene" in SYSTEM_ROLES["SUPERVISOR"]
     assert "calls:intervene" in SYSTEM_ROLES["TENANT_ADMIN"]
-    # A VA never intervenes — sandbox only.
-    assert "calls:intervene" not in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
+    # VR2-77: VAs intervene on published ("Visible to All") calls.
+    assert "calls:intervene" in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
 
 
 def test_insurance_provider_permissions_are_catalogued_and_super_admin_only() -> None:
