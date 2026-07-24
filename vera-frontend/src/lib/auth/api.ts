@@ -183,6 +183,8 @@ export type UserSummary = {
   /** "invited" | "active" | "deactivated" */
   status: string
   last_login_at: string | null
+  /** Assigned role names, e.g. ["TENANT_ADMIN"]; empty when none. */
+  roles: string[]
 }
 
 /** List all users in the caller's tenant (RLS-scoped). Requires `users:read`. */

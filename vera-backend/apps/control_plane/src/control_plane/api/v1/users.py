@@ -44,7 +44,7 @@ from control_plane.exceptions import (
 from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import emit_auth_event
-from vera_core.models import AppUser, Role
+from vera_core.models import AppUser, Role, UserRole
 from vera_core.models.enums import AccountType, AuthEvent
 
 logger = logging.getLogger(__name__)
@@ -72,15 +72,17 @@ class UserResponse(BaseModel):
     name: str
     status: str
     last_login_at: datetime | None
+    roles: list[str]
 
 
-def _to_response(row: AppUser) -> UserResponse:
+def _to_response(row: AppUser, roles: list[str]) -> UserResponse:
     return UserResponse(
         id=row.id,
         email=row.email,
         name=row.name,
         status=row.status,
         last_login_at=row.last_login_at,
+        roles=roles,
     )
 
 
@@ -226,7 +228,17 @@ async def list_users(
     _caller: VerifiedIdentity = require("users:read"),
 ) -> ResponseModel[list[UserResponse]]:
     rows = (await session.execute(select(AppUser).order_by(AppUser.email))).scalars().all()
-    return ok([_to_response(r) for r in rows])
+    role_rows = (
+        await session.execute(
+            select(UserRole.app_user_id, Role.name)
+            .join(Role, Role.id == UserRole.role_id)
+            .order_by(Role.name)
+        )
+    ).all()
+    roles_by_user: dict[UUID, list[str]] = {}
+    for user_id, role_name in role_rows:
+        roles_by_user.setdefault(user_id, []).append(role_name)
+    return ok([_to_response(r, roles_by_user.get(r.id, [])) for r in rows])
 
 
 @router.post(

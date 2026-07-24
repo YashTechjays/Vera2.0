@@ -18,6 +18,13 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "outline"> = {
   deactivated: "outline",
 }
 
+function roleLabel(name: string): string {
+  return name
+    .split("_")
+    .map((w) => w.charAt(0) + w.slice(1).toLowerCase())
+    .join(" ")
+}
+
 function formatDate(iso: string | null): string {
   if (!iso) return "—"
   const d = new Date(iso)
@@ -116,7 +123,7 @@ export function Users() {
     invited: users?.filter((u) => u.status === "invited").length ?? 0,
     deactivated: users?.filter((u) => u.status === "deactivated").length ?? 0,
   }
-  const colSpan = canManage ? 5 : 4
+  const colSpan = canManage ? 6 : 5
 
   return (
     <div className="space-y-6 p-6">
@@ -153,6 +160,7 @@ export function Users() {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Email</TableHead>
+              <TableHead>Role</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Last login</TableHead>
               {canManage && <TableHead>Actions</TableHead>}
@@ -177,6 +185,9 @@ export function Users() {
               <TableRow key={u.id}>
                 <TableCell className="font-medium">{u.name || "—"}</TableCell>
                 <TableCell>{u.email}</TableCell>
+                <TableCell>
+                  {u.roles.length > 0 ? u.roles.map(roleLabel).join(", ") : "—"}
+                </TableCell>
                 <TableCell>
                   <Badge variant={STATUS_VARIANT[u.status] ?? "outline"} className="capitalize">
                     {u.status}

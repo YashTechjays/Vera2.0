@@ -340,6 +340,32 @@ async def test_admin_endpoint_denied_without_permission(
     assert resp.status_code == 403
 
 
+async def test_list_users_includes_role_names(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """VR2-78: each user row carries its assigned role names; a role-less user gets []."""
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "rolecolumn@test.example", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+    assign = await client.post(
+        f"/api/v1/users/{user_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": supervisor_id},
+    )
+    assert assign.status_code == 200, assign.text
+
+    listing = await client.get("/api/v1/users", headers=_auth(rbac_world.admin_token))
+    assert listing.status_code == 200, listing.text
+    by_id = {u["id"]: u for u in listing.json()["data"]}
+    assert by_id[user_id]["roles"] == ["SUPERVISOR"]
+    assert "TENANT_ADMIN" in by_id[str(rbac_world.admin_id)]["roles"]
+
+
 # --- roles -------------------------------------------------------------------
 
 
