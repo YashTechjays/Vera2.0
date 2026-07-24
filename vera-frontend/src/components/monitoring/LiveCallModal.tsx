@@ -33,6 +33,7 @@ import {
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 import { healthTone, healthToneClass } from "@/lib/monitoring/health"
+import { IbvProvider, useIbv } from "@/components/ibv/IbvProvider"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
@@ -42,6 +43,81 @@ import { LiveCallRoom } from "./LiveCallRoom"
 import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
+
+/** Collapsible form panel; loads the call's own form on expand (VR2-64). */
+function FormPanel({
+  formId,
+  progress,
+  onExpand,
+}: {
+  formId: string | undefined
+  progress: number
+  onExpand: () => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const { openFormById, loading, error, schema } = useIbv()
+
+  function toggleExpanded() {
+    // Re-fetch on each expand so a live call's preview is fresh.
+    if (!expanded && formId) openFormById(formId)
+    setExpanded((v) => !v)
+  }
+
+  return (
+    <>
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-white px-4 py-3">
+        <button type="button" onClick={toggleExpanded} className="flex items-center gap-3">
+          <span className="font-semibold text-foreground">Patient Information Form</span>
+          <span className="text-sm font-semibold text-foreground">{progress}%</span>
+        </button>
+        <div className="flex items-center gap-2">
+          <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-all"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={onExpand}
+            title="Open full form"
+            className="flex size-7 items-center justify-center rounded-md text-foreground hover:bg-muted"
+          >
+            <Maximize2 className="size-4" />
+          </button>
+          <button
+            type="button"
+            onClick={toggleExpanded}
+            title={expanded ? "Collapse" : "Expand"}
+            className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
+          >
+            {expanded ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
+          </button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="overflow-auto rounded-lg border border-border bg-white p-4">
+          {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          )}
+          {!formId && (
+            <p className="text-sm text-muted-foreground">No form linked to this call.</p>
+          )}
+          {/* IbvFormModal's natural width; the box scrolls both ways. */}
+          {schema && !loading && !error && (
+            <div className="min-w-[1100px]">
+              <SchemaForm />
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
 
 /**
  * The live-call modal: auto-connects listen-only, and upgrades in place to publish via
@@ -69,7 +145,6 @@ export function LiveCallModal({
   const [ending, setEnding] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
-  const [formExpanded, setFormExpanded] = useState(false)
   // Full-width/height presentation of this modal (the header ⛶), not the IBV form.
   const [maximized, setMaximized] = useState(false)
   // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
@@ -233,57 +308,10 @@ export function LiveCallModal({
 
         <div className="flex min-h-[360px] flex-1 gap-4 overflow-hidden bg-[#f8f9fa] p-4">
           <div className="flex flex-1 flex-col gap-3 overflow-auto">
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-white px-4 py-3">
-              <button
-                type="button"
-                onClick={() => setFormExpanded((v) => !v)}
-                className="flex items-center gap-3"
-              >
-                <span className="font-semibold text-foreground">
-                  Patient Information Form
-                </span>
-                <span className="text-sm font-semibold text-foreground">
-                  {progress}%
-                </span>
-              </button>
-              <div className="flex items-center gap-2">
-                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-primary transition-all"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={onExpand}
-                  title="Open full form"
-                  className="flex size-7 items-center justify-center rounded-md text-foreground hover:bg-muted"
-                >
-                  <Maximize2 className="size-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFormExpanded((v) => !v)}
-                  title={formExpanded ? "Collapse" : "Expand"}
-                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
-                >
-                  {formExpanded ? (
-                    <ChevronUp className="size-4" />
-                  ) : (
-                    <ChevronDown className="size-4" />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {formExpanded && (
-              <div className="overflow-auto rounded-lg border border-border bg-white p-4">
-                {/* Render at IbvFormModal's natural width instead of compressing to this half-width panel; the box scrolls both ways. */}
-                <div className="min-w-[1100px]">
-                  <SchemaForm />
-                </div>
-              </div>
-            )}
+            {/* Scoped provider: the app-level one belongs to IbvFormModal. */}
+            <IbvProvider key={call?.id ?? "none"}>
+              <FormPanel formId={call?.formId} progress={progress} onExpand={onExpand} />
+            </IbvProvider>
 
             {/* Timer starts on the SSE "active" event (callee answered) and freezes on a terminal status. */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
