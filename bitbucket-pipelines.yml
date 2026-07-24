@@ -1,17 +1,37 @@
 # Bitbucket Pipelines — vera2 (application repo)
-# CI only for now: branch-promotion gate + security scanning (gitleaks, trivy).
-# Deploy/CD is intentionally NOT wired yet — added later once the GCP target is settled.
-# Checkov (IaC) is NOT here — it belongs on the Vera2_Infra repo; this repo is app-only.
 #
-# Scanners run in WARN mode (--exit-code 0) during rollout. Flip to hard-fail (--exit-code 1)
-# and enable "Require successful builds" once the backlog is triaged (hardening steps 7,8,13).
+# CI strategy (fast lane / slow lane):
+#   EVERY PUSH  -> static checks + UNIT tests + frontend + gitleaks   (no DB, fast feedback)
+#   PULL REQUEST-> branch-promotion gate + INTEGRATION tests + trivy  (Postgres/Redis, the merge gate)
+#   NIGHTLY     -> deep security scans ONLY (trivy + gitleaks)         (catches new CVEs; tests not re-run)
+#
+# Why: unit tests are DB-free and fast, so they gate every feature-branch push. The 38 integration
+# tests need Postgres+Redis (slow) and only matter before a merge, so they run on PRs (into dev AND
+# main — Bitbucket PR patterns match the SOURCE branch, so '**' covers every destination). Deploy/CD
+# is intentionally NOT wired yet. Checkov (IaC) lives on Vera2_Infra, not here (app-only repo).
+#
+# Scanners run WARN mode (--exit-code 0); flip to hard-fail (--exit-code 1) + enable
+# "Require successful builds" once the backlog is triaged (hardening steps 7,8,13).
 
 image: atlassian/default-image:4
 
 definitions:
+  caches:
+    uv: /tmp/uv-cache
+    npm: /root/.npm            # actual npm download cache (speeds `npm ci`); node image runs as root
+  services:
+    postgres:
+      image: pgvector/pgvector:pg17            # same image as GH Actions → `vector` extension present
+      variables:
+        POSTGRES_USER: vera
+        POSTGRES_PASSWORD: vera
+        POSTGRES_DB: vera
+    redis:
+      image: redis:7-alpine
   steps:
     - step: &promotion
         name: Enforce branch promotion
+        image: alpine:3.20                     # tiny image — this is just a POSIX-sh branch check
         script:
           - |
             SRC="$BITBUCKET_BRANCH"
@@ -30,10 +50,7 @@ definitions:
                   feature/*|bugfix/*) echo "OK" ;;
                   *) echo "BLOCKED: dev accepts only feature/* or bugfix/*"; exit 1 ;;
                 esac ;;
-              # TODO when qa/stg branches are created, add:
-              #   qa)  src must be dev
-              #   stg) src must be qa
-              #   main) src must be stg|hotfix/*
+              # TODO when qa/stg branches exist, add: qa<-dev, stg<-qa, main<-stg|hotfix/*
               *)
                 echo "No promotion rule for destination '$DEST' — allowed" ;;
             esac
@@ -50,23 +67,91 @@ definitions:
         script:
           - trivy fs . --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0   # WARN — flip to 1 in step 8
 
+    # ---- FAST lane (every push): static checks + UNIT tests. No DB, 1x. ----
+    - step: &checks-backend
+        name: Backend checks (ruff, mypy, unit tests)
+        image: ghcr.io/astral-sh/uv:python3.12-bookworm
+        caches:
+          - uv
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/**"
+        script:
+          - cd vera-backend
+          - export UV_CACHE_DIR=/tmp/uv-cache
+          - uv sync --all-packages --locked
+          - uv run ruff format --check .
+          - uv run ruff check .
+          - uv run mypy
+          - uv run pytest tests/unit apps/agent_worker/tests    # unit only — DB-free
+
+    - step: &ci-frontend
+        name: Frontend CI (lint, build, test)
+        image: node:22
+        caches:
+          - npm
+        condition:
+          changesets:
+            includePaths:
+              - "vera-frontend/**"
+        script:
+          - cd vera-frontend
+          - corepack enable
+          - npm ci
+          - npm run lint
+          - npm run build
+          - npm test -- --passWithNoTests
+
+    # ---- SLOW lane (PRs + nightly): INTEGRATION tests need Postgres+Redis. size:2x for headroom. ----
+    - step: &integration-backend
+        name: Backend integration (migrate + seed + integration tests)
+        image: ghcr.io/astral-sh/uv:python3.12-bookworm
+        size: 2x
+        caches:
+          - uv
+        services:
+          - postgres
+          - redis
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/**"
+        script:
+          - cd vera-backend
+          - export UV_CACHE_DIR=/tmp/uv-cache
+          - export VERA_DATABASE_URL="postgresql+asyncpg://vera:vera@localhost:5432/vera"
+          - export VERA_REDIS_URL="redis://localhost:6379/0"
+          - uv sync --all-packages --locked
+          # Bitbucket does NOT health-check services (GH Actions did) — wait before DB work.
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/5432) 2>/dev/null && break; echo "waiting for postgres ($i)"; sleep 1; done
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/6379) 2>/dev/null && break; echo "waiting for redis ($i)"; sleep 1; done
+          - uv run alembic upgrade head
+          - uv run python scripts/seed.py
+          - uv run pytest tests/integration
+
 pipelines:
-  # ---- Merge gate: every PR. Pair with "Require successful builds" (step 13) to enforce. ----
+  # ---- EVERY push, EVERY branch: fast feedback (static + unit + frontend + secret scan). No DB. ----
+  branches:
+    '**':
+      - parallel:
+          - step: *checks-backend
+          - step: *ci-frontend
+          - step: *gitleaks
+
+  # ---- PRs (any source → dev or main): promotion gate + the slow integration suite + vuln scan. ----
+  #      Pair with "Require successful builds" (step 13) to make it binding.
   pull-requests:
     '**':
       - step: *promotion
       - parallel:
-          - step: *gitleaks
+          - step: *integration-backend
           - step: *trivy
 
-  # ---- Fast secret detection on pushes to the env branches (scoped, not '**', to save minutes) ----
-  branches:
-    dev:
-      - step: *gitleaks
-    main:
-      - step: *gitleaks
-
-  # ---- Nightly deep scan. Schedule it: Repo settings -> Pipelines -> Schedules -> nightly-scan ----
+  # ---- Nightly deep SECURITY scan only. Catches newly-disclosed CVEs / secrets — things that ----
+  #      change without a code change. Tests are deterministic and already gated on PRs, so they
+  #      are NOT re-run here. Schedule: Repo settings -> Pipelines -> Schedules -> branch main ->
+  #      pipeline nightly-scan -> daily.
   custom:
     nightly-scan:
       - parallel:
