@@ -259,6 +259,7 @@ def _tenant(**overrides: Any) -> Tenant:
         "max_retries": 5,
         "queue_expiry_hours": 48,
         "persona_tweak": {},
+        "observer_enabled": True,
     }
     defaults.update(overrides)
     return Tenant(**defaults)
@@ -338,6 +339,7 @@ async def test_dispatch_dials_the_forms_payer_number(
     assert metadata["publish_events"] is True
     assert metadata["enable_ivr_navigation"] is True
     assert metadata["persona_tweak"] == {"greeting": "Custom greeting"}
+    assert metadata["enable_observer"] is True  # tenant default: AI form filling on
 
 
 async def test_create_call_room_failure_scrubs_phi_from_logs(
@@ -376,6 +378,24 @@ async def test_ivr_navigation_key_absent_when_form_opts_out(
     assert metadata is not None
     assert "enable_ivr_navigation" not in metadata
     assert "persona_tweak" not in metadata  # tenant.persona_tweak is empty
+
+
+async def test_observer_flag_reflects_tenant_setting_when_disabled(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    tenant = _tenant(observer_enabled=False)
+    form = _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    metadata = livekit.dispatch_metadata[0]
+    assert metadata is not None
+    # A tenant with AI form filling off dispatches with the flag OFF, so the worker
+    # never starts the observer.
+    assert metadata["enable_observer"] is False
 
 
 async def test_dispatch_without_trunk_leaves_forms_queued(

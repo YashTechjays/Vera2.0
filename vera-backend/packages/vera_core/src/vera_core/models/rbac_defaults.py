@@ -50,6 +50,7 @@ PLATFORM_PERMISSIONS: Final[dict[str, str]] = {
     "platform:form_schemas:read": "View form schemas and their versions",
     "platform:users:invite": "Invite, resend invitations to, and deactivate platform operators",
     "platform:users:read": "View platform operators",
+    "platform:tenants:manage": "View tenants and toggle their AI form-filling (observer) feature",
 }
 
 # The full catalog seeded into `permission` (tenant + platform).
