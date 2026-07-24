@@ -2,7 +2,17 @@
 
 This repository holds the backend (`vera-backend/`) and frontend (`vera-frontend/`),
 each with its own `CLAUDE.md` of domain/security rules that load when you touch that
-code. The rule below is **repo-wide** and applies to every change in Vera 2.0.
+code. The rules below are **repo-wide** and apply to every change in Vera 2.0.
+
+## MANDATORY: code comments — few, short, only when truly needed
+
+Write a comment ONLY for a non-obvious constraint the code cannot express (a real
+race, a lock order, a compliance rule, a deliberate trade-off) — and keep it to ONE
+line. Never narrate what the next line does, never write multi-line comment blocks
+in new code, and keep docstrings to a sentence. If the code is readable without the
+comment, don't write it. This is a standing instruction from Azad, repeated many
+times — treat every comment you're about to write as unnecessary until proven
+otherwise.
 
 ## MANDATORY: simplify code after every implementation
 
