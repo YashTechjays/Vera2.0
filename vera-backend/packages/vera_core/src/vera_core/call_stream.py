@@ -30,6 +30,7 @@ _ENDED_VALUE = "ended"
 TYPE_TRANSCRIPT = "transcript"
 TYPE_CALL_STATUS = "call_status"
 TYPE_HEALTH = "health"
+TYPE_FIELD_ANSWER = "field_answer"
 
 
 def call_stream_key(room_name: str) -> str:
@@ -39,7 +40,7 @@ def call_stream_key(room_name: str) -> str:
 class CallStreamEvent(BaseModel):
     """One live event. `data` is type-specific and de-identified by construction."""
 
-    type: str  # "transcript" | "call_status" | "health" | future types
+    type: str  # "transcript" | "call_status" | "health" | "field_answer" | future types
     data: dict[str, Any]
     ts: int  # epoch milliseconds
 
@@ -228,6 +229,39 @@ class CallStreamService:
             room_name,
             CallStreamEvent(
                 type=TYPE_HEALTH, data={"score": score, "flag": flag, "reason": reason}, ts=ts
+            ),
+        )
+
+    async def publish_field_answer(
+        self,
+        room_name: str,
+        *,
+        field_path: str,
+        value: str,
+        confidence: int | None,
+        evidence_seq: int | None,
+        completion_pct: float | None,
+        dispute: dict[str, Any] | None,
+        ts: int,
+    ) -> None:
+        """Publish one Observer-extracted field answer (spec: rides the same
+        /calls/{id}/events SSE — no new pipe per event type). `value` is PHI: it lives
+        only in-boundary on this CMEK-protected stream and reaches the browser inside the
+        already-authorized SSE session — never log it. """
+        await self._store.publish(
+            room_name,
+            CallStreamEvent(
+                type=TYPE_FIELD_ANSWER,
+                data={
+                    "field_path": field_path,
+                    "value": value,
+                    "source": "ai_call",
+                    "confidence": confidence,
+                    "evidence_seq": evidence_seq,
+                    "completion_pct": completion_pct,
+                    "dispute": dispute,
+                },
+                ts=ts,
             ),
         )
 

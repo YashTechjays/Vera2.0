@@ -17,6 +17,9 @@ export type LiveCall = {
   insurance: string
   confidence: number
   formProgress: number
+  /** The call's patient-form id — lets the modal load the form and apply live AI
+   *  answers pushed over SSE. Absent on mock rows. */
+  formId?: string | null
   callTime: string
   /** ISO start time from the API (null until the callee answers) — the modals'
    *  live-timer seed. Absent on mock rows. */
