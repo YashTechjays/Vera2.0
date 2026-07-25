@@ -59,13 +59,13 @@ definitions:
         name: Secrets (gitleaks)
         image: zricethezav/gitleaks:latest
         script:
-          - gitleaks detect --source . --redact --exit-code 0   # WARN — flip to 1 in step 7
+          - gitleaks detect --source . --redact --exit-code 1   # HARD-FAIL: a secret finding blocks the build/merge
 
     - step: &trivy
         name: Vulnerabilities (trivy)
         image: aquasec/trivy:latest
         script:
-          - trivy fs . --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0   # WARN — flip to 1 in step 8
+          - trivy fs . --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1   # HARD-FAIL: a fixable HIGH/CRITICAL CVE blocks the build/merge
 
     # ---- FAST lane (every push): static checks + UNIT tests. No DB, 1x. ----
     - step: &checks-backend
