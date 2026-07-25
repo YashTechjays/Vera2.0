@@ -281,6 +281,13 @@ def resolve_session(room_name: str, *, is_local: bool) -> str | None:
     return None
 
 
+def observer_enabled_from_meta(meta: dict[str, object]) -> bool:
+    """Whether the AI form-filling observer should run for this call, per the dispatch
+    metadata flag the control plane resolves from the tenant's `observer_enabled`.
+    Defaults to True: a dispatch that predates the flag keeps today's behaviour."""
+    return bool(meta.get("enable_observer", True))
+
+
 def _fan_out_sink(sinks: list[TurnPublisher]) -> TurnPublisher | None:
     """Collapse the enabled stream sinks (the call stream today) behind one
     TurnPublisher, so at most one ReorderingEmitter is ever attached per job: None with
@@ -441,7 +448,13 @@ async def entrypoint(ctx: JobContext) -> None:
         # live call. It routes turns per active task and does nothing during IVR/wrap-up, so
         # it is inert until the conversation path begins. Started for a plan-backed canonical
         # room; the controller gets the session so a rule fire can interrupt/redirect the bot.
-        if controller is not None and run_state is not None and bus is not None:
+        # `enable_observer` is the per-tenant AI form-filling switch (super-admin managed,
+        if (
+            controller is not None
+            and run_state is not None
+            and bus is not None
+            and observer_enabled_from_meta(meta)
+        ):
             controller.attach_session(session)
             observer_redis = create_redis(settings.redis_url)
             # Out-of-pipeline extraction chain (Gemini primary → OpenAI fallback), the

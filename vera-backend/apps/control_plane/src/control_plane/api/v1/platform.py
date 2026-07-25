@@ -17,16 +17,28 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from control_plane.api.v1.common import AppSettings
 from control_plane.auth import elevation
 from control_plane.auth.identity import VerifiedIdentity
+from control_plane.auth.platform_tenant_config import set_tenant_observer_enabled
 from control_plane.auth.rbac import platform_require
-from control_plane.deps import client_ip, get_auth_audit, platform_scoped_session
+from control_plane.deps import (
+    client_ip,
+    get_auth_audit,
+    get_idempotency_store,
+    platform_scoped_session,
+)
 from control_plane.exceptions import (
     BadRequestError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
     NotFoundError,
+)
+from control_plane.idempotency import (
+    PLATFORM_IDEM_SCOPE,
+    claim_or_conflict,
+    require_idempotency_key,
 )
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuthAuditSink, emit_auth_event
@@ -165,6 +177,7 @@ class TenantSummary(BaseModel):
     id: UUID
     name: str
     slug: str
+    observer_enabled: bool
 
 
 @router.get(
@@ -179,17 +192,77 @@ async def list_tenants(
     session: PlatformSession,
     _caller: Annotated[VerifiedIdentity, platform_require("platform:elevations:read")],
 ) -> ResponseModel[list[TenantSummary]]:
-    """Active tenants (id / name / slug — org metadata, not PHI) for the elevation
-    tenant picker. Readable here via the tenant_platform_read RLS policy (migration
-    0020); gated on platform:elevations:read since it serves the elevation workflow."""
+    """Active tenants (id / name / slug + the AI form-filling switch — org metadata, not
+    PHI) for the elevation tenant picker and the platform-settings screen. Readable here
+    via the tenant_platform_read RLS policy (migration 0022); gated on
+    platform:elevations:read since it serves the elevation workflow (a SUPER_ADMIN also
+    holds platform:tenants:manage)."""
     rows = (
         await session.execute(
-            select(Tenant.id, Tenant.name, Tenant.slug)
+            select(Tenant.id, Tenant.name, Tenant.slug, Tenant.observer_enabled)
             .where(Tenant.status == "active")
             .order_by(Tenant.name)
         )
     ).all()
-    return ok([TenantSummary(id=r.id, name=r.name, slug=r.slug) for r in rows])
+    return ok(
+        [
+            TenantSummary(id=r.id, name=r.name, slug=r.slug, observer_enabled=r.observer_enabled)
+            for r in rows
+        ]
+    )
+
+
+class SetTenantObserverRequest(BaseModel):
+    enabled: bool
+
+
+class TenantObserverResponse(BaseModel):
+    tenant_id: UUID
+    observer_enabled: bool
+
+
+@router.post(
+    "/tenants/{tenant_id}/observer",
+    response_model=ResponseModel[TenantObserverResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def set_tenant_observer(
+    tenant_id: UUID,
+    body: SetTenantObserverRequest,
+    request: Request,
+    session: PlatformSession,
+    audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    caller: Annotated[VerifiedIdentity, platform_require("platform:tenants:manage")],
+) -> ResponseModel[TenantObserverResponse]:
+    """Toggle a tenant's AI form-filling (observer) feature. Writes through the
+    platform_set_tenant_observer_enabled SECURITY DEFINER fn (the tenant table's platform
+    RLS policy is SELECT-only), audited null-tenant like every other /platform authz."""
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        PLATFORM_IDEM_SCOPE,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
+    flipped = await set_tenant_observer_enabled(session, tenant_id=tenant_id, enabled=body.enabled)
+    if not flipped:
+        raise NotFoundError(message="no such tenant")
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_OBSERVER_UPDATED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"target_tenant": str(tenant_id), "observer_enabled": body.enabled},
+    )
+    return ok(TenantObserverResponse(tenant_id=tenant_id, observer_enabled=body.enabled))
 
 
 def _map_create_error(exc: IntegrityError) -> CustomAPIException:

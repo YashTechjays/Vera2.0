@@ -248,6 +248,8 @@ class AuthEvent(enum.StrEnum):
     PLATFORM_USER_ACTIVATED = "platform_user_activated"
     PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
     PLATFORM_INVITE_RESENT = "platform_invite_resent"
+    # Super-admin flipped a tenant's AI form-filling (observer) master switch. Recorded
+    TENANT_OBSERVER_UPDATED = "tenant_observer_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

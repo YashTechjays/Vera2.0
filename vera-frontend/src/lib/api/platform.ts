@@ -29,11 +29,32 @@ export type TenantSummary = {
   id: string
   name: string
   slug: string
+  /** AI form-filling (observer) master switch for this tenant. */
+  observer_enabled: boolean
 }
 
-/** Active tenants the operator can elevate into (the tenant picker source). */
+/** Active tenants the operator can elevate into (the tenant picker source) and manage
+ *  on the Platform Settings screen. */
 export function listTenants() {
   return apiRequest<TenantSummary[]>("/platform/tenants")
+}
+
+export type TenantObserver = {
+  tenant_id: string
+  observer_enabled: boolean
+}
+
+/** Toggle a tenant's AI form-filling (observer) feature. Requires
+ *  `platform:tenants:manage`. */
+export function setTenantObserverEnabled(tenantId: string, enabled: boolean) {
+  return apiRequest<TenantObserver>(
+    `/platform/tenants/${encodeURIComponent(tenantId)}/observer`,
+    {
+      method: "POST",
+      body: { enabled },
+      headers: { "Idempotency-Key": randomId() },
+    },
+  )
 }
 
 /** All active (un-ended, un-expired) grants. */
