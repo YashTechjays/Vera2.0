@@ -114,6 +114,13 @@ class TestConstruction:
         # <spell> guidance, so plan-only must add it here)
         assert "<spell>" in instructions
 
+    def test_scope_discipline_appended_to_every_agent(self) -> None:
+        # The off-script guardrail must reach every plan agent (and wrap-up), so the
+        # LLM never invents questions outside the compiled task list.
+        controller, _ = _controller()
+        for agent in [*controller.agents, controller.wrap_up_agent]:
+            assert "only the questions listed" in agent.instructions.lower()
+
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")
         for agent in [*controller.agents, controller.wrap_up_agent]:
@@ -162,6 +169,16 @@ class TestHandoff:
         mock_session.say.assert_called_once_with("Moving on.")
 
     @pytest.mark.asyncio
+    async def test_no_outro_no_exit_speech(self) -> None:
+        # Outro absent → nothing spoken on exit (symmetric to the no-intro entry case).
+        controller, _ = _controller()
+        agent = controller.agents[2]  # last_task has no outro
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await _tool(agent, "task_complete")()
+        mock_session.say.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_inapplicable_task_is_skipped(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[0]
@@ -203,6 +220,9 @@ class TestOnEnter:
             await agent.on_enter()
             await controller.drain_cursor_writes()
         mock_session.say.assert_called_once_with("Hello rep.")
+        # Intro present → the bot also leads into the first question, never just the
+        # static intro then silence.
+        mock_session.generate_reply.assert_called_once()
         assert state.cursor_writes == [(ROOM, "intro_task")]
 
     @pytest.mark.asyncio
@@ -214,6 +234,8 @@ class TestOnEnter:
             await agent.on_enter()
             await controller.drain_cursor_writes()
         mock_session.say.assert_called_once_with("Custom greeting.")
+        # The opener is treated like every other task: greeting + a proactive lead.
+        mock_session.generate_reply.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_no_intro_no_speech(self) -> None:
@@ -223,7 +245,10 @@ class TestOnEnter:
         with _session_patch(agent, mock_session):
             await agent.on_enter()
             await controller.drain_cursor_writes()
+        # No intro → the bot yields the opening turn to the rep: no intro speech AND
+        # no proactive reply.
         mock_session.say.assert_not_called()
+        mock_session.generate_reply.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cursor_write_failure_never_blocks_speech(self) -> None:
