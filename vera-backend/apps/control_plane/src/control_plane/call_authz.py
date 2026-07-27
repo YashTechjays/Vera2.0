@@ -8,10 +8,12 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import Request
+from sqlalchemy import ColumnElement, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, emit_authz_audit
+from control_plane.call_closeout import TERMINAL_VALUES
 from control_plane.exceptions import CustomAPIException, DefaultExceptionCode
 from vera_core.audit import AuditSink
 from vera_core.models import Call
@@ -21,13 +23,31 @@ def call_hidden_from(call: Call, user_id: UUID | None) -> bool:
     """Whether *user_id* must NOT see this call (→ the same 404 as a missing row,
     so a private call is never revealed by enumeration).
 
-    A non-owner sees it only when it is published or ownerless. Shared by
-    join-token, the event stream, end, and coaching so the visibility gates
-    never diverge.
+    A non-owner sees it only when it is published, or when it is ownerless and
+    still in flight — ownerless visibility exists so an unclaimed dispatcher call
+    can be monitored; once terminal (owner deleted — SET NULL) there is nothing
+    to claim and it stays private. Shared by join-token, the event stream, end,
+    and coaching so the visibility gates never diverge.
     """
     if call.initiated_by_id == user_id:
         return False
-    return call.initiated_by_id is not None and not call.published
+    if call.published:
+        return False
+    return call.initiated_by_id is not None or call.current_status in TERMINAL_VALUES
+
+
+def visible_to(caller_id: UUID) -> ColumnElement[bool]:
+    """SQL twin of `call_hidden_from`, for the list/stats queries: visible =
+    own OR published OR (ownerless AND still in flight). Kept adjacent so the
+    two predicates can't drift."""
+    return or_(
+        Call.initiated_by_id == caller_id,
+        Call.published.is_(True),
+        and_(
+            Call.initiated_by_id.is_(None),
+            Call.current_status.not_in(TERMINAL_VALUES),
+        ),
+    )
 
 
 async def authorize_publish(

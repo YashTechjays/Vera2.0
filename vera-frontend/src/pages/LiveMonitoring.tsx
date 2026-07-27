@@ -97,6 +97,7 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     formProgress: 0,
     callTime: elapsed(c.started_at, now),
     startedAt: c.started_at,
+    formId: c.form_id,
     healthScore: c.health_score,
     isOwner: c.is_owner,
   }

@@ -34,6 +34,7 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_authz import authorize_or_403 as _authorize_or_403
 from control_plane.call_authz import call_hidden_from as _call_hidden_from
+from control_plane.call_authz import visible_to as _visible_to
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.call_summary import (
     CallSummaryResponse,
@@ -190,17 +191,6 @@ def _summary(
         health_flag=call.health_flag,
         health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
-    )
-
-
-def _visible_to(caller_id: UUID) -> ColumnElement[bool]:
-    """Calls the caller may see: their own, published ones, and ownerless
-    (pre-ownership dispatcher) calls — hidden, those would have no monitoring
-    and no owner to ever publish them."""
-    return or_(
-        Call.initiated_by_id == caller_id,
-        Call.published.is_(True),
-        Call.initiated_by_id.is_(None),
     )
 
 
@@ -612,8 +602,17 @@ async def end_call(
     already terminal and no-op).
 
     Visibility matches join-token (`_call_hidden_from`): anyone who may watch
-    the call may end it; a hidden call 404s so it is never revealed. While a
+    the call may end it if it is published (VR2-59 tightens this to just the
+    owner — see below); a hidden call 404s so it is never revealed. While a
     takeover is live, only the intervening supervisor may end the call.
+
+    VR2-59: before anyone has EVER intervened (`intervener_user_id` still
+    null), only the call's owner may end it — a published/"visible to all"
+    call let every watching VA end a call they never joined. A stale/abandoned
+    takeover (crashed supervisor) keeps the existing crash-recovery openness:
+    any viewer may still end it, same as before this change. Ownerless calls
+    (dispatcher-created, no `initiated_by_id`) are unaffected: there is no
+    owner to restrict to.
     """
     call = (
         await session.execute(select(Call).where(Call.id == call_id))
@@ -632,6 +631,15 @@ async def end_call(
         and await _intervener_lock_live(session, livekit, room_name, call, holder)
     ):
         raise ConflictError(message="only the intervening supervisor can end this call")
+    # Only gates the never-intervened case: a stale/abandoned holder (crashed
+    # supervisor) already falls through the check above, and must stay endable
+    # by any viewer — that's the crash-recovery path, distinct from VR2-59.
+    if (
+        holder is None
+        and call.initiated_by_id is not None
+        and call.initiated_by_id != caller.user_id
+    ):
+        raise ConflictError(message="only the call's owner can end this call before intervention")
     pre_answer = call.started_at is None
     actor_label = caller.email or caller.subject
     await audit.emit(
