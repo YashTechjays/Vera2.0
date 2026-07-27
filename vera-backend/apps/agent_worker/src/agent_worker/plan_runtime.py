@@ -27,6 +27,7 @@ import logging
 from typing import Any
 
 from livekit.agents import Agent, AgentSession, llm
+from opentelemetry import trace
 
 from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
@@ -218,11 +219,27 @@ class PlanRunController:
 
     def note_task_entered(self, index: int) -> None:
         self.active_task_index = index
-        self._write_cursor(self.plan.tasks[index].task_key)
+        task_key = self.plan.tasks[index].task_key
+        self._tag_task_entry(task_key, index)
+        self._write_cursor(task_key)
 
     def note_wrap_up_entered(self) -> None:
         self.active_task_index = None
+        self._tag_task_entry(WRAP_UP_TASK_KEY, None)
         self._write_cursor(WRAP_UP_TASK_KEY)
+
+    def _tag_task_entry(self, task_key: str, index: int | None) -> None:
+        try:
+            attrs: dict[str, str | int] = {"vera.task.key": task_key}
+            if index is not None:
+                attrs["vera.task.index"] = index
+            trace.get_current_span().set_attributes(attrs)
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-entry span tagging failed (%s)",
+                self.room_name,
+                type(exc).__name__,
+            )
 
     # -- Phase-2 seams ----------------------------------------------------------
 

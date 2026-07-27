@@ -203,6 +203,34 @@ class TestHandoff:
 
 class TestOnEnter:
     @pytest.mark.asyncio
+    async def test_on_enter_tags_the_current_span_with_task_identity(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[1]  # gated_task, index 1
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.task.key"] == "gated_task"
+        assert span.attributes["vera.task.index"] == 1
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_on_enter_tags_the_sentinel(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.wrap_up_agent
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.task.key"] == WRAP_UP_TASK_KEY
+        assert "vera.task.index" not in span.attributes
+
+    @pytest.mark.asyncio
     async def test_says_intro_and_writes_cursor(self) -> None:
         controller, state = _controller()
         agent = controller.agents[0]
