@@ -24,11 +24,15 @@ from dataclasses import replace
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
-from sqlalchemy import text
+from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.auth import (
+    AcceptInviteRequest,
+    AcceptInviteResponse,
+    ActivateInviteMfaRequest,
+    InviteValidateResponse,
     LoginRequest,
     LoginResponse,
     MfaEnrollActivateRequest,
@@ -39,17 +43,25 @@ from control_plane.api.v1.auth import (
     _unauthorized,
     raise_for_inactive,
 )
-from control_plane.api.v1.common import AppSettings, AuthAudit
+from control_plane.api.v1.common import AppSettings, AuthAudit, Invites
 from control_plane.auth import mfa
-from control_plane.auth.password import MAX_PASSWORD_BYTES, verify_password_or_dummy
+from control_plane.auth.invitations import PLATFORM_INVITE_MFA_NS, PLATFORM_INVITE_NS
+from control_plane.auth.password import MAX_PASSWORD_BYTES, hash_password, verify_password_or_dummy
+from control_plane.auth.platform_provisioning import create_password_identity, set_operator_status
 from control_plane.auth.providers import resolve_platform_login_provider
 from control_plane.auth.session import MFA_ENROLL_NS, MFA_NS, SessionData, SessionStore
 from control_plane.deps import client_ip, get_kms, get_session_store, get_sessionmaker
-from control_plane.exceptions import CustomAPIResponse, DefaultExceptionCode
+from control_plane.exceptions import (
+    BadRequestError,
+    CustomAPIException,
+    CustomAPIResponse,
+    DefaultExceptionCode,
+)
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import emit_auth_event
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import platform_session
+from vera_core.models import AppUser
 from vera_core.models.enums import AccountType, AuthEvent, ProviderKind
 
 router = APIRouter(prefix="/platform/auth", tags=["platform-auth"])
@@ -87,6 +99,158 @@ def _require_platform_challenge(data: SessionData | None) -> SessionData:
     ):
         raise _unauthorized()
     return data
+
+
+@router.get(
+    "/invitations/validate",
+    response_model=ResponseModel[InviteValidateResponse],
+)
+async def validate_platform_invitation(
+    token: str,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    invites: Invites,
+) -> ResponseModel[InviteValidateResponse]:
+    """Token-scoped invite pre-flight for a platform operator — no tenant slug, the
+    invitee belongs to no tenant. Mirrors validate_invitation (auth.py)."""
+    response.headers["Cache-Control"] = "no-store"
+    invite = await invites.get(PLATFORM_INVITE_NS, token)
+    if invite is None or invite.tenant_id is not None:
+        return ok(InviteValidateResponse(state="invalid"))
+
+    async with platform_session(sessionmaker) as session:
+        row = (
+            await session.execute(select(AppUser.status).where(AppUser.id == invite.app_user_id))
+        ).one_or_none()
+
+    if row is None:
+        return ok(InviteValidateResponse(state="invalid"))
+    if row.status == "invited":
+        return ok(InviteValidateResponse(state="valid"))
+    if row.status == "deactivated":
+        return ok(InviteValidateResponse(state="deactivated"))
+    return ok(InviteValidateResponse(state="invalid"))
+
+
+@router.post(
+    "/invitations/accept",
+    response_model=ResponseModel[AcceptInviteResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.BAD_REQUEST,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.VALIDATION_ERROR,
+    ),
+)
+async def accept_platform_invitation(
+    body: AcceptInviteRequest,
+    request: Request,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    kms: KMS,
+    audit: AuthAudit,
+    invites: Invites,
+    settings: AppSettings,
+) -> ResponseModel[AcceptInviteResponse]:
+    """Unauthenticated, token-gated: a platform invitee sets their password. MFA is
+    ALWAYS required for platform operators — no enforce_mfa branch, unlike the
+    tenant flow — this always returns a provisioning URI + bridge mfa_token and
+    leaves status "invited" until activate-mfa. Single-use (token consumed here)."""
+    response.headers["Cache-Control"] = "no-store"
+    invite = await invites.get(PLATFORM_INVITE_NS, body.token)
+    if invite is None or invite.tenant_id is not None:
+        raise _unauthorized()
+    if len(body.password.encode()) > MAX_PASSWORD_BYTES:
+        raise BadRequestError(message="password too long")
+
+    async with platform_session(sessionmaker) as session:
+        user = (
+            await session.execute(select(AppUser).where(AppUser.id == invite.app_user_id))
+        ).scalar_one_or_none()
+        if user is None or user.status != "invited":
+            raise _unauthorized()
+        if await _password_identity_row(session, user.id) is not None:
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT, message="invitation already accepted"
+            )
+        await create_password_identity(
+            session,
+            app_user_id=user.id,
+            email=invite.email,
+            hashed_password=hash_password(body.password),
+        )
+        identity = await _password_identity_row(session, user.id)
+        assert identity is not None  # just created above, in the same transaction
+        provisioning_uri = await mfa.enroll_platform(
+            kms, session, identity=identity, account_email=invite.email
+        )
+
+    await invites.delete(PLATFORM_INVITE_NS, body.token)
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.PLATFORM_INVITE_ACCEPTED,
+        ip=client_ip(request),
+        user_id=invite.app_user_id,
+    )
+    mfa_token = await invites.put(PLATFORM_INVITE_MFA_NS, invite, settings.invite_ttl_seconds)
+    return ok(
+        AcceptInviteResponse(
+            mfa_required=True, provisioning_uri=provisioning_uri, mfa_token=mfa_token
+        )
+    )
+
+
+@router.post(
+    "/invitations/activate-mfa",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.BAD_REQUEST,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.VALIDATION_ERROR,
+    ),
+)
+async def activate_platform_invitation_mfa(
+    body: ActivateInviteMfaRequest,
+    request: Request,
+    sessionmaker: Sessionmaker,
+    kms: KMS,
+    audit: AuthAudit,
+    invites: Invites,
+) -> ResponseModel[None]:
+    """Completes MFA enrollment for a platform invitee, flipping status to active.
+    No recovery codes are returned — platform MFA is TOTP-only everywhere in this
+    codebase (see mfa.py module docstring); consuming a recovery code would need
+    yet another definer write on an already-enrolled row."""
+    invite = await invites.get(PLATFORM_INVITE_MFA_NS, body.mfa_token)
+    if invite is None or invite.tenant_id is not None:
+        raise _unauthorized()
+
+    async with platform_session(sessionmaker) as session:
+        ident = await _password_identity_row(session, invite.app_user_id)
+        if ident is None:
+            raise BadRequestError(message="no password identity for user")
+        activated = await mfa.activate_platform(kms, session, identity=ident, code=body.code)
+        if not activated:
+            raise BadRequestError(message="invalid code")
+        flipped = await set_operator_status(
+            session, app_user_id=invite.app_user_id, status="active"
+        )
+        if not flipped:
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT, message="could not activate operator"
+            )
+
+    await invites.delete(PLATFORM_INVITE_MFA_NS, body.mfa_token)
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.PLATFORM_USER_ACTIVATED,
+        ip=client_ip(request),
+        user_id=invite.app_user_id,
+    )
+    return ok(None, message="Platform operator activated.")
 
 
 @router.post(

@@ -199,6 +199,42 @@ export function deactivateUser(userId: string) {
   })
 }
 
+/** Reissue a fresh invite link for a user stuck in status="invited" (their
+ *  original link or MFA bridge token expired). Requires `users:manage`. */
+export function resendInvitation(userId: string) {
+  return apiRequest<InviteUserResult>(`/users/${encodeURIComponent(userId)}/resend-invitation`, {
+    method: "POST",
+    headers: { "Idempotency-Key": randomId() },
+  })
+}
+
+// --- Platform-operator invite acceptance: no tenant slug (the invitee belongs to
+// no tenant). MFA is always required (see PlatformAcceptInvite). ---
+
+export function platformValidateInvite(token: string) {
+  return apiRequest<InviteValidateResult>(
+    `/platform/auth/invitations/validate?token=${encodeURIComponent(token)}`,
+    { method: "GET", auth: false },
+  )
+}
+
+export function platformAcceptInvite(token: string, password: string) {
+  return apiRequest<AcceptInviteResult>(`/platform/auth/invitations/accept`, {
+    method: "POST",
+    body: { token, password },
+    auth: false,
+  })
+}
+
+/** No recovery codes on this path — platform MFA is TOTP-only everywhere. */
+export function platformActivateInviteMfa(mfaToken: string, code: string) {
+  return apiRequest<null>(`/platform/auth/invitations/activate-mfa`, {
+    method: "POST",
+    body: { mfa_token: mfaToken, code },
+    auth: false,
+  })
+}
+
 export type RoleSummary = {
   id: string
   name: string

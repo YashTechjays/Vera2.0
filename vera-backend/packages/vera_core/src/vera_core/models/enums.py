@@ -148,6 +148,11 @@ class ReviewReason(enum.StrEnum):
     # A supervisor ended the call by hand — it is never auto-redialed even with
     # unsatisfied retryable fields; a human takes it from here.
     USER_ENDED = "user_ended"
+    # The automated post-call eval did not run for this form — either the eval
+    # consumer isn't configured (no Vertex/Gemini), so the close path resolved
+    # the form synchronously, or the pipeline sweeper reclaimed a form stranded
+    # in AI_PROCESSING. A human reviews it without AI-extracted values.
+    NOT_EVALUATED = "not_evaluated"
 
 
 class VersionStatus(enum.StrEnum):
@@ -232,6 +237,17 @@ class AuthEvent(enum.StrEnum):
     LOGOUT = "logout"
     # Tenant-level recording retention policy updated (old/new day counts, no PHI).
     RETENTION_POLICY_UPDATED = "retention_policy_updated"
+    # Tenant-tier invite resend (fixes a gap: neither the invite link nor the MFA
+    # bridge token had any recovery path before this feature).
+    INVITE_RESENT = "invite_resent"
+    # Platform-operator lifecycle — kept distinct from the tenant USER_INVITED /
+    # INVITE_ACCEPTED / USER_DEACTIVATED events so privilege-granting activity is
+    # separately auditable.
+    PLATFORM_USER_INVITED = "platform_user_invited"
+    PLATFORM_INVITE_ACCEPTED = "platform_invite_accepted"
+    PLATFORM_USER_ACTIVATED = "platform_user_activated"
+    PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
+    PLATFORM_INVITE_RESENT = "platform_invite_resent"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

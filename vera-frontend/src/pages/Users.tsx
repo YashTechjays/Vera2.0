@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/table"
 import { InviteUserDialog } from "@/components/users/InviteUserDialog"
 import { ApiError } from "@/lib/api/client"
-import { deactivateUser, listUsers, type UserSummary } from "@/lib/auth/api"
+import { deactivateUser, listUsers, resendInvitation, type UserSummary } from "@/lib/auth/api"
 import { usePermission } from "@/lib/auth/permissions"
 
 const STATUS_VARIANT: Record<string, "default" | "secondary" | "outline"> = {
@@ -44,6 +44,7 @@ export function Users() {
   const [pending, setPending] = useState<UserSummary | null>(null)
   const [busy, setBusy] = useState(false)
   const [dialogError, setDialogError] = useState<string | null>(null)
+  const [resendingId, setResendingId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -104,6 +105,19 @@ export function Users() {
       setDialogError(err instanceof ApiError ? err.message : "Could not deactivate user.")
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function onResend(user: UserSummary) {
+    setResendingId(user.id)
+    setError(null)
+    try {
+      await resendInvitation(user.id)
+      setNotice(`A fresh invite link was sent to ${user.name || user.email}.`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not resend the invitation.")
+    } finally {
+      setResendingId(null)
     }
   }
 
@@ -196,15 +210,22 @@ export function Users() {
                 <TableCell className="text-muted-foreground">{formatDate(u.last_login_at)}</TableCell>
                 {canManage && (
                   <TableCell>
+                    {u.status === "invited" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="-ml-2 mr-1"
+                        onClick={() => onResend(u)}
+                        disabled={resendingId === u.id}
+                      >
+                        {resendingId === u.id ? "Resending…" : "Resend invitation"}
+                      </Button>
+                    )}
                     {u.status !== "deactivated" && (
                       <Button
                         variant="ghost"
                         size="sm"
-                        // The ghost button has px-2.5 (10px) inner padding and the
-                        // TableCell has p-2 (8px). -ml-2 offsets the cell padding so
-                        // the button label aligns with the "Actions" TableHead text
-                        // (which also has px-2). Previously -ml-2.5 over-shot by 2px.
-                        className="-ml-2 text-destructive hover:text-destructive"
+                        className="text-destructive hover:text-destructive"
                         onClick={() => askDeactivate(u)}
                       >
                         Deactivate
