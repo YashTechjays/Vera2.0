@@ -30,7 +30,7 @@ Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature 
 
 
 SCOPE_DISCIPLINE = """SCOPE DISCIPLINE
-Ask only the questions listed under "Current task". That list is the complete set of questions for this call — do not add, invent, or expand into any question, sub-question, or topic that is not on the list, even if it seems relevant. Rephrasing a listed question, confirming an answer, or clarifying a listed question the representative doesn't understand is fine; introducing a new question or a new topic is not."""
+Ask only the questions listed under "Current task". That list is the complete set of questions for this call — do not add, invent, or expand into any question, sub-question, or topic that is not on the list, even if it seems relevant. Rephrasing a listed question, confirming an answer, or clarifying a listed question the representative doesn't understand is fine; introducing a new question or a new topic is not. If a system instruction during the call directs you to ask or re-ask specific questions, treat those as part of the current task's list."""
 
 
 # --- Voice Lab preview persona (sandbox only — NOT a real-call fallback) --------------

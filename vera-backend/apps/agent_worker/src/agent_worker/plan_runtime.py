@@ -50,7 +50,11 @@ _WRAP_UP_DIRECTIVE = (
 )
 
 # Spoken after a task's intro to make the bot proactively lead into the task
-_OPENING_DIRECTIVE = "Continue the call now by asking your next unanswered question."
+_OPENING_DIRECTIVE = (
+    "Continue the call now by asking the first question of the current task that the "
+    "representative has not already answered. Do not re-ask anything already on file — "
+    "confirm those instead."
+)
 
 
 def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
@@ -100,9 +104,18 @@ class PlanTaskAgent(Agent):
 
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
+        if takeover_engaged(self.session):
+            logger.info("task entered under supervisor takeover; staying silent")
+            return
+        # Read before opening_line — that call flips `opened` as a side effect.
+        is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
         if opening:
-            self.session.say(opening)
+            # Awaited, so the lead below can never be queued on top of in-flight TTS.
+            await self.session.say(opening).wait_for_playout()
+        if not is_opening_turn:
+            # The call's opening turn belongs to the rep — they answer the greeting
+            # first. Every later swap leads proactively so it never lands in silence.
             self.session.generate_reply(instructions=_OPENING_DIRECTIVE)
 
     @llm.function_tool(
@@ -210,6 +223,11 @@ class PlanRunController:
         async with self.lock:
             self.generation += 1
             return self._agent_at(self._next_applicable(index + 1))
+
+    @property
+    def opened(self) -> bool:
+        """Whether the call's opening line has been spoken yet."""
+        return self._opened
 
     def opening_line(self, intro: str | None) -> str | None:
         """What the entering task agent speaks. An explicit tenant greeting
