@@ -267,12 +267,7 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
     first_val_col = cpt_col + 1
     extra_col0 = first_val_col + len(table.columns)
 
-    band_cols = [
-        1,
-        *((icd_col,) if icd_col is not None else ()),
-        cpt_col,
-        *range(extra_col0, extra_col0 + len(table.extra_columns)),
-    ]
+    band_cols = [1, *((icd_col,) if icd_col is not None else ()), cpt_col]
     for group in table.groups:
         n = len(group.rows)
         top = r
@@ -284,9 +279,12 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
         for j, (key, _title) in enumerate(table.extra_columns):
             cell = group.extras.get(key)
             col = extra_col0 + j
-            if cell is not None and ctx.applicable(cell.path):
+            applicable = cell is not None and ctx.applicable(cell.path)
+            if cell is not None and applicable:
                 ws.cell(row=top, column=col, value=_str(ctx.values.get(cell.path)))
             _vmerge(ws, top, col, n)
+            for rr in range(top, top + n):
+                _style(ws, rr, col, fill=None if applicable else _FILL_INAPPLICABLE)
         for row_model in group.rows:
             ws.cell(row=r, column=cpt_col, value=row_model.label)
             for j, (key, _title) in enumerate(table.columns):
@@ -297,7 +295,8 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
                     ws.cell(row=r, column=col, value=_str(ctx.values.get(cell.path)))
                 _style(ws, r, col, fill=None if applicable else _FILL_INAPPLICABLE)
             r += 1
-        # Border/style pass over the band's static + extra cells.
+        # Border/style pass over the band's static cells (extras were styled —
+        # fill included — in the extras loop above; don't clobber them here).
         for rr in range(top, top + n):
             for col in band_cols:
                 _style(ws, rr, col, bold=col == 1)

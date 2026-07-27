@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, cast
 
 from openpyxl import Workbook
@@ -338,6 +339,45 @@ def test_grid_full_width_and_two_up_flow_below_band() -> None:
         r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=1).value == "Alpha"
     )
     assert ws.cell(row=alpha_row, column=4).value == "Beta"
+
+
+def test_inapplicable_grid_extras_cell_grayed_with_empty_value() -> None:
+    from vera_core.forms.dsl import PromotedFields
+
+    # Gate the ivf group's cycle_limit extras leaf on a value that's absent, so
+    # its rowspan extras cell is gated off; oi's cycle_limit stays applicable.
+    raw = copy.deepcopy(_PLACED_DOC)
+    cycle_limit = raw["sections"]["treatment"]["fields"]["ivf"]["fields"]["cycle_limit"]
+    cycle_limit["applicable_when"] = {
+        "field": "sections.patient_information.patient_name",
+        "op": "eq",
+        "value": "gate-open",
+    }
+    raw["promoted_fields"] = dict.fromkeys(
+        PromotedFields.model_fields, "sections.patient_information.patient_name"
+    )
+    doc = FormSchemaDoc.model_validate(raw)
+    wb = Workbook()
+    ws = cast(Worksheet, wb.active)
+    render_form_sheet(
+        ws,
+        doc,
+        {
+            "sections.treatment.ivf.cycle_limit": "should-not-show",
+            "sections.treatment.oi.cycle_limit": "4",
+        },
+    )
+    titles = {ws.cell(row=r, column=1).value: r for r in range(1, ws.max_row + 1)}
+    header = titles["Treatment"] + 2  # +1 section-leaf row (tx_covered)
+    assert ws.cell(row=header, column=6).value == "Cycle Limit"
+    ivf_first = header + 1  # ivf band: rows ivf_first..ivf_first+1
+    oi_row = ivf_first + 2  # oi band: single row below the ivf band
+    # Gated ivf extras cell: empty AND grayed, like every other gated leaf.
+    assert ws.cell(row=ivf_first, column=6).value in (None, "")
+    assert str(ws.cell(row=ivf_first, column=6).fill.start_color.rgb).endswith("F5F5F5")
+    # Applicable oi extras cell: value lands, no gray fill.
+    assert ws.cell(row=oi_row, column=6).value == "4"
+    assert not str(ws.cell(row=oi_row, column=6).fill.start_color.rgb).endswith("F5F5F5")
 
 
 def test_placement_constants_reference_fe() -> None:
