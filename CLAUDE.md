@@ -4,15 +4,13 @@ This repository holds the backend (`vera-backend/`) and frontend (`vera-frontend
 each with its own `CLAUDE.md` of domain/security rules that load when you touch that
 code. The rules below are **repo-wide** and apply to every change in Vera 2.0.
 
-## MANDATORY: code comments — few, short, only when truly needed
+## MANDATORY: code comments — only when truly needed
 
-Write a comment ONLY for a non-obvious constraint the code cannot express (a real
-race, a lock order, a compliance rule, a deliberate trade-off) — and keep it to ONE
-line. Never narrate what the next line does, never write multi-line comment blocks
-in new code, and keep docstrings to a sentence. If the code is readable without the
-comment, don't write it. This is a standing instruction from Azad, repeated many
-times — treat every comment you're about to write as unnecessary until proven
-otherwise.
+Default to no comments: well-named, readable code is the documentation. Add a
+comment only when it explains something the code cannot — a non-obvious constraint,
+a real race or lock order, a compliance rule, or a deliberate trade-off — and keep
+it to one line. Never narrate what the code already says, and keep docstrings to a
+single sentence.
 
 ## MANDATORY: simplify code after every implementation
 
