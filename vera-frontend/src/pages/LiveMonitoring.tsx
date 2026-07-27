@@ -95,9 +95,9 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     insurance: c.insurance_provider || "—",
     confidence: 0,
     formProgress: 0,
+    formId: c.form_id,
     callTime: elapsed(c.started_at, now),
     startedAt: c.started_at,
-    formId: c.form_id,
     healthScore: c.health_score,
     isOwner: c.is_owner,
   }
@@ -148,7 +148,7 @@ function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
 }
 
 export function LiveMonitoring() {
-  const { openFormById } = useIbv()
+  const { openFormById, openLoadedForm, formId: loadedFormId } = useIbv()
   const canPublish = usePermission("calls:publish")
   const location = useLocation()
   const navigate = useNavigate()
@@ -445,7 +445,10 @@ export function LiveMonitoring() {
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
         onExpand={() => {
-          if (selected) openFormById(selected.form_id)
+          if (!selected) return
+          // Refetching a form the inline panel already has would drop its live answers and edits.
+          if (selected.form_id === loadedFormId) openLoadedForm()
+          else openFormById(selected.form_id)
         }}
       />
     </div>

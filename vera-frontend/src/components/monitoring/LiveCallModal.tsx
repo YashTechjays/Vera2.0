@@ -33,7 +33,7 @@ import {
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 import { healthTone, healthToneClass } from "@/lib/monitoring/health"
-import { IbvProvider, useIbv } from "@/components/ibv/IbvProvider"
+import { useIbv } from "@/components/ibv/IbvProvider"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
@@ -55,11 +55,11 @@ function FormPanel({
   onExpand: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const { openFormById, loading, error, schema } = useIbv()
+  const { loadFormById, formId: loadedFormId, loading, error, schema } = useIbv()
 
   function toggleExpanded() {
-    // Re-fetch on each expand so a live call's preview is fresh.
-    if (!expanded && formId) openFormById(formId)
+    // Skip when already loaded: a refetch would wipe live answers applied so far and any edit.
+    if (!expanded && formId && formId !== loadedFormId) loadFormById(formId)
     setExpanded((v) => !v)
   }
 
@@ -140,6 +140,9 @@ export function LiveCallModal({
   onExpand: () => void
 }) {
   const canIntervene = usePermission("calls:intervene")
+  // The app-level provider IbvFormModal also renders from — one form, so live answers show
+  // up inline and full-screen alike.
+  const { applyLiveAnswer } = useIbv()
   const [mode, setMode] = useState<LiveCallMode>("listen")
   const [roomStatus, setRoomStatus] = useState<RoomStatus | null>(null)
   const [ending, setEnding] = useState(false)
@@ -154,15 +157,21 @@ export function LiveCallModal({
   useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const [liveHealth, setLiveHealth] = useState<CallHealth | null>(null)
-  // Reset liveHealth during render when the call changes (React's previous-render
+  // Live form completion from the SSE field_answer frames (0-100); null until the
+  // first answer, then it drives the progress bar in place of the polled value.
+  const [liveCompletion, setLiveCompletion] = useState<number | null>(null)
+  // Reset live state during render when the call changes (React's previous-render
   // pattern, mirroring useCallStatus.ts) — an effect-based reset trips react-hooks
   // v6's set-state-in-effect rule. Close still resets it too, below.
   const [healthForCallId, setHealthForCallId] = useState(call?.id)
   if (call?.id !== healthForCallId) {
     setHealthForCallId(call?.id)
     setLiveHealth(null)
+    setLiveCompletion(null)
   }
-  const progress = call?.formProgress ?? 0
+  // Prefer the live SSE completion; fall back to the polled list value until the first frame.
+  const progress = Math.round(liveCompletion ?? call?.formProgress ?? 0)
+
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
@@ -204,6 +213,7 @@ export function LiveCallModal({
       setTranscriptCopied(false)
       setRightTab("transcript")
       setLiveHealth(null)
+      setLiveCompletion(null)
     }
     onOpenChange(next)
   }
@@ -308,10 +318,13 @@ export function LiveCallModal({
 
         <div className="flex min-h-[360px] flex-1 gap-4 overflow-hidden bg-[#f8f9fa] p-4">
           <div className="flex flex-1 flex-col gap-3 overflow-auto">
-            {/* Scoped provider: the app-level one belongs to IbvFormModal. */}
-            <IbvProvider key={call?.id ?? "none"}>
-              <FormPanel formId={call?.formId} progress={progress} onExpand={onExpand} />
-            </IbvProvider>
+            {/* Keyed per call: expand state must not carry from one call to the next. */}
+            <FormPanel
+              key={call?.id ?? "none"}
+              formId={call?.formId}
+              progress={progress}
+              onExpand={onExpand}
+            />
 
             {/* Timer starts on the SSE "active" event (callee answered) and freezes on a terminal status. */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
@@ -406,6 +419,10 @@ export function LiveCallModal({
                     onCallStatus={onCallStatus}
                     onTextChange={setTranscript}
                     onHealth={setLiveHealth}
+                    onFieldAnswer={(a) => {
+                      if (call.formId) applyLiveAnswer(call.formId, a.fieldPath, a.value, a.dispute)
+                      if (a.completionPct !== null) setLiveCompletion(a.completionPct)
+                    }}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                   />
                   {canCoach && <CoachingPanel callId={call.id} />}
