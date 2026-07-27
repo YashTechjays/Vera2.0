@@ -15,12 +15,13 @@ from agent_worker.directives import ReAsk, SkipToTask, Terminate
 from agent_worker.intervention import TakeoverState
 from agent_worker.plan_runtime import (
     WRAP_UP_TASK_KEY,
+    GapTaskAgent,
     PlanRunController,
     PlanTaskAgent,
     WrapUpAgent,
 )
-from vera_core.forms.call_plan import CallPlan, PlanSession, PlanTask
-from vera_core.forms.dsl import Comparison
+from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
+from vera_core.forms.dsl import Comparison, RequiredWhen
 
 ROOM = "call--t--c"
 
@@ -59,7 +60,7 @@ def _plan() -> CallPlan:
                 prompt="Only when in network.",
                 applicable_when=Comparison(field="sections.a.in_network", op="eq", value="Yes"),
             ),
-            PlanTask(task_key="last_task", title="Last", prompt="Finish up."),
+            PlanTask(task_key="last_task", title="Last", intro="Next up.", prompt="Finish up."),
         ],
     )
 
@@ -70,6 +71,7 @@ def _controller(
     *,
     greeting: str | None = None,
     extra_instructions: str | None = None,
+    gap_pass_enabled: bool = True,
 ) -> tuple[PlanRunController, FakeRunState]:
     state = run_state or FakeRunState()
     controller = PlanRunController(
@@ -78,6 +80,7 @@ def _controller(
         run_state=cast(Any, state),
         greeting=greeting,
         extra_instructions=extra_instructions,
+        gap_pass_enabled=gap_pass_enabled,
     )
     return controller, state
 
@@ -89,6 +92,8 @@ def _tool(agent: Agent, name: str) -> FunctionTool:
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
     # A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards.
     mock_session.userdata = TakeoverState()
+    # on_enter awaits the intro's playout before leading into the task.
+    mock_session.say.return_value.wait_for_playout = AsyncMock()
     return patch.object(type(agent), "session", new=property(lambda self: mock_session))
 
 
@@ -113,6 +118,13 @@ class TestConstruction:
         # the Cartesia TTS markup guide is appended (compiled prompts carry no
         # <spell> guidance, so plan-only must add it here)
         assert "<spell>" in instructions
+
+    def test_scope_discipline_appended_to_every_agent(self) -> None:
+        # The off-script guardrail must reach every plan agent (and wrap-up), so the
+        # LLM never invents questions outside the compiled task list.
+        controller, _ = _controller()
+        for agent in [*controller.agents, controller.wrap_up_agent]:
+            assert "only the questions listed" in agent.instructions.lower()
 
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")
@@ -162,6 +174,16 @@ class TestHandoff:
         mock_session.say.assert_called_once_with("Moving on.")
 
     @pytest.mark.asyncio
+    async def test_no_outro_no_exit_speech(self) -> None:
+        # Outro absent → nothing spoken on exit (symmetric to the no-intro entry case).
+        controller, _ = _controller()
+        agent = controller.agents[2]  # last_task has no outro
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await _tool(agent, "task_complete")()
+        mock_session.say.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_inapplicable_task_is_skipped(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[0]
@@ -203,6 +225,9 @@ class TestOnEnter:
             await agent.on_enter()
             await controller.drain_cursor_writes()
         mock_session.say.assert_called_once_with("Hello rep.")
+        # The call's opening turn belongs to the rep: greet, then wait for them to
+        # answer — never greet and fire a question in the same breath.
+        mock_session.generate_reply.assert_not_called()
         assert state.cursor_writes == [(ROOM, "intro_task")]
 
     @pytest.mark.asyncio
@@ -214,16 +239,82 @@ class TestOnEnter:
             await agent.on_enter()
             await controller.drain_cursor_writes()
         mock_session.say.assert_called_once_with("Custom greeting.")
+        # Same as any opener: greeting only, then the rep's turn.
+        mock_session.generate_reply.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_intro_no_speech(self) -> None:
+    async def test_opening_turn_without_intro_is_silent(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[1]  # gated_task has no intro
         mock_session = MagicMock()
         with _session_patch(agent, mock_session):
             await agent.on_enter()
             await controller.drain_cursor_writes()
+        # No intro on the opening turn → nothing at all; the rep speaks first.
         mock_session.say.assert_not_called()
+        mock_session.generate_reply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transition_with_intro_leads_into_the_task(self) -> None:
+        controller, _ = _controller()
+        opener, agent = controller.agents[0], controller.agents[2]
+        with _session_patch(opener, MagicMock()):
+            await opener.on_enter()  # consumes the call's opening turn
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        mock_session.say.assert_called_once_with("Next up.")
+        # Mid-call swap: the intro alone would leave the rep waiting.
+        mock_session.generate_reply.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_transition_without_intro_still_leads(self) -> None:
+        # A task with no intro is exactly where dead air is most likely, so the lead
+        # is gated on the transition — not on the intro being present.
+        controller, _ = _controller()
+        opener, agent = controller.agents[0], controller.agents[1]
+        with _session_patch(opener, MagicMock()):
+            await opener.on_enter()
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        mock_session.say.assert_not_called()
+        mock_session.generate_reply.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_intro_is_spoken_before_the_lead(self) -> None:
+        # The lead must never be queued on top of in-flight TTS, or the intro gets
+        # cut off — assert the playout was awaited first.
+        controller, _ = _controller()
+        opener, agent = controller.agents[0], controller.agents[2]
+        with _session_patch(opener, MagicMock()):
+            await opener.on_enter()
+        order: list[str] = []
+        mock_session = MagicMock()
+        mock_session.generate_reply.side_effect = lambda **_: order.append("generate_reply")
+        with _session_patch(agent, mock_session):
+            mock_session.say.return_value.wait_for_playout = AsyncMock(
+                side_effect=lambda: order.append("playout")
+            )
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        assert order == ["playout", "generate_reply"]
+
+    @pytest.mark.asyncio
+    async def test_on_enter_under_takeover_is_silent(self) -> None:
+        # A task swap landing mid-takeover must not speak — the intro is disruptive
+        # enough, an LLM-generated question more so.
+        controller, _ = _controller()
+        agent = controller.agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            mock_session.userdata.engaged = True
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        mock_session.say.assert_not_called()
+        mock_session.generate_reply.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cursor_write_failure_never_blocks_speech(self) -> None:
@@ -398,3 +489,370 @@ class TestPrefill:
     def test_no_known_information_means_no_block(self) -> None:
         controller, _ = _controller()
         assert "# Known information" not in controller.agents[0].instructions
+
+
+def _field(
+    path: str,
+    title: str,
+    *,
+    required: bool | RequiredWhen = True,
+    gates: tuple[Comparison, ...] = (),
+    values: list[str] | None = None,
+) -> PlanFieldDescriptor:
+    return PlanFieldDescriptor(
+        path=path,
+        title=title,
+        type="text",
+        role="ask",
+        required=required,
+        gates=gates,
+        values=values,
+    )
+
+
+def _gap_plan() -> CallPlan:
+    """Four tasks; the LAST (`closing_task`) is the closer — like the DSL's `wrap_up` task
+    that collects the reference number and says goodbye. The gap pass sweeps the three
+    substantive tasks BEFORE it. `gated_task` is only applicable when in_network == "Yes";
+    `coverage_task.oon_note` gates the opposite way."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="intro_task",
+                title="Introduction",
+                intro="Hello rep.",
+                prompt="Intro.",
+                fields=[
+                    _field("sections.intro.rep_name", "Representative name"),
+                    _field("sections.intro.notes", "Notes", required=False),
+                ],
+            ),
+            PlanTask(
+                task_key="gated_task",
+                title="Gated",
+                prompt="In network only.",
+                applicable_when=Comparison(field="sections.a.in_network", op="eq", value="Yes"),
+                fields=[_field("sections.gated.copay", "Copay")],
+            ),
+            PlanTask(
+                task_key="coverage_task",
+                title="Coverage",
+                prompt="Coverage details.",
+                fields=[
+                    _field("sections.cov.deductible", "Deductible", values=["Met", "Not met"]),
+                    _field(
+                        "sections.cov.oon_note",
+                        "OON note",
+                        gates=(Comparison(field="sections.a.in_network", op="eq", value="No"),),
+                    ),
+                ],
+            ),
+            PlanTask(
+                task_key="closing_task",
+                title="Wrap Up",
+                prompt="Collect the reference number, then end the call.",
+                outro="have a wonderful day!",
+                fields=[_field("sections.close.ref_number", "Reference number")],
+            ),
+        ],
+    )
+
+
+_CLOSER = 3  # index of closing_task in _gap_plan()
+
+
+class TestGapDetection:
+    def test_gap_fields_is_required_applicable_and_unanswered(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        # intro: rep_name required+unanswered → gap; notes optional → excluded
+        assert [f.path for f in controller.gap_fields(0)] == ["sections.intro.rep_name"]
+
+    def test_answered_field_is_not_a_gap(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        assert controller.gap_fields(0) == []
+
+    def test_blank_answer_is_still_a_gap(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "   "})
+        assert [f.path for f in controller.gap_fields(0)] == ["sections.intro.rep_name"]
+
+    def test_inapplicable_field_is_not_a_gap(self) -> None:
+        # coverage_task.oon_note gates on in_network == "No"; with "Yes" it is inapplicable.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        assert [f.path for f in controller.gap_fields(2)] == ["sections.cov.deductible"]
+
+    def test_conditional_required_resolves_against_live_answers(self) -> None:
+        plan = _gap_plan()
+        plan.tasks[0].fields[1] = _field(
+            "sections.intro.notes",
+            "Notes",
+            required=RequiredWhen(when=Comparison(field="sections.a.vip", op="eq", value="Yes")),
+        )
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.intro.rep_name": "Pat", "sections.a.vip": "Yes"})
+        assert [f.path for f in controller.gap_fields(0)] == ["sections.intro.notes"]
+        controller.update_answers({"sections.intro.rep_name": "Pat", "sections.a.vip": "No"})
+        assert controller.gap_fields(0) == []
+
+
+class TestGapRouting:
+    """The gap pass runs when advancing INTO the closing task — so any re-ask lands before
+    the closer collects the reference number and says goodbye, never after."""
+
+    async def _advance_into_closer(self, controller: PlanRunController) -> Agent:
+        # Walk the three substantive tasks, then complete the last substantive one — its
+        # successor (_next_applicable) is the closer, which is the gap-pass trigger point.
+        for i in (0, 1, 2):
+            controller.note_task_entered(i)
+        return await controller.advance_from(2)
+
+    @pytest.mark.asyncio
+    async def test_diverts_to_gap_agent_before_the_closer(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name still missing
+        successor = await self._advance_into_closer(controller)
+        assert successor is controller.gap_agents[0]  # gap pass, NOT the closer yet
+
+    @pytest.mark.asyncio
+    async def test_goes_straight_to_the_closer_when_no_gaps(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers(
+            {
+                "sections.a.in_network": "Yes",
+                "sections.intro.rep_name": "Pat",
+                "sections.gated.copay": "$20",
+                "sections.cov.deductible": "Met",
+            }
+        )
+        successor = await self._advance_into_closer(controller)
+        assert successor is controller.agents[_CLOSER]  # closing task, no gap agent
+        assert controller._gap_pass_done is True
+
+    @pytest.mark.asyncio
+    async def test_flag_off_goes_straight_to_the_closer_despite_gaps(self) -> None:
+        controller, _ = _controller(_gap_plan(), gap_pass_enabled=False)
+        successor = await self._advance_into_closer(controller)
+        assert successor is controller.agents[_CLOSER]
+
+    @pytest.mark.asyncio
+    async def test_closer_turning_inapplicable_mid_pass_falls_through_to_wrap_up(self) -> None:
+        # The pass exists BECAUSE the Observer keeps writing answers while it runs, so the
+        # closer's applicable_when can flip between entering the pass and leaving it.
+        plan = _gap_plan()
+        plan.tasks[_CLOSER].applicable_when = Comparison(
+            field="sections.a.in_network", op="eq", value="Yes"
+        )
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        controller.note_task_entered(0)  # intro has a gap
+        gap_agent = await controller.advance_from(2)
+        assert gap_agent is controller.gap_agents[0]
+        # mid-sweep the rep corrects in_network → the closer no longer applies
+        controller.update_answers({"sections.a.in_network": "No", "sections.intro.rep_name": "Pat"})
+        with _session_patch(gap_agent, MagicMock()):
+            successor = await _tool(gap_agent, "gap_complete")()
+        assert successor is controller.wrap_up_agent
+
+    @pytest.mark.asyncio
+    async def test_single_task_plan_never_sweeps(self) -> None:
+        # Its closer IS index 0, and advance_from only ever asks for _next_applicable(>= 1).
+        plan = _gap_plan()
+        plan.tasks = [plan.tasks[0]]
+        controller, _ = _controller(plan)
+        assert controller.gap_agents == []
+        controller.note_task_entered(0)
+        successor = await controller.advance_from(0)
+        assert successor is controller.wrap_up_agent
+
+    @pytest.mark.asyncio
+    async def test_closer_completion_goes_to_wrap_up_without_re_running(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller._gap_pass_done = True
+        controller.note_task_entered(_CLOSER)
+        successor = await controller.advance_from(_CLOSER)
+        assert successor is controller.wrap_up_agent
+
+
+class TestGapFlowRules:
+    @pytest.mark.asyncio
+    async def test_skip_to_task_bypassed_task_is_not_swept(self) -> None:
+        # gated_task (index 1) is applicable (in_network == "Yes") and has an unanswered
+        # required field, but a skip_to_task flow rule bypassed it — it was never entered,
+        # so the gap pass must not resurrect it.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers(
+            {"sections.a.in_network": "Yes", "sections.cov.deductible": "Met"}
+        )
+        controller.note_task_entered(0)  # intro (has a gap: rep_name)
+        controller.note_task_entered(2)  # coverage (gated_task skipped by a flow rule)
+        successor = await controller.advance_from(2)
+        assert successor is controller.gap_agents[0]  # land on intro, never gated_task
+        assert controller._next_gap_task(1) is None  # gated_task (1) is not swept
+
+    @pytest.mark.asyncio
+    async def test_skip_to_a_completed_task_during_the_gap_pass_is_a_no_op(self) -> None:
+        # The pass re-enters an EARLY task, so active_task_index moves BACKWARDS. Measuring
+        # "forward" against progress (not that cursor) keeps a skip from redirecting into a
+        # task the call already completed and re-speaking its intro to the rep.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        for i in (0, 1, 2):
+            controller.note_task_entered(i)
+        gap_agent = await controller.advance_from(2)
+        assert gap_agent is controller.gap_agents[0]
+        controller.note_task_entered(0)  # what GapTaskAgent.on_enter does: index goes back
+        session, order = _attach_ordered_session(controller)
+        # coverage_task (2) is ahead of the gap cursor (0) but already finished
+        await controller.apply_directive_now(SkipToTask(rule_key="r", task_key="coverage_task"))
+        session.update_agent.assert_not_called()
+        session.interrupt.assert_not_awaited()
+        assert order == []
+
+    @pytest.mark.asyncio
+    async def test_terminate_still_ends_the_call_during_the_gap_pass(self) -> None:
+        # A terminate is a legitimate redirect mid-sweep: the call really is over.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        for i in (0, 1, 2):
+            controller.note_task_entered(i)
+        await controller.advance_from(2)  # into the gap pass
+        controller.note_task_entered(0)
+        session, _order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        session.update_agent.assert_called_once_with(controller.wrap_up_agent)
+        assert controller._terminated is True
+
+    @pytest.mark.asyncio
+    async def test_terminated_call_skips_the_gap_pass(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.note_task_entered(0)  # intro has a gap
+        _session, _order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        assert controller._terminated is True
+        controller.note_task_entered(2)
+        successor = await controller.advance_from(2)  # advancing into the closer
+        assert successor is controller.agents[_CLOSER]  # no gap pass — call was ended
+
+
+class TestGapAgent:
+    @pytest.mark.asyncio
+    async def test_on_enter_rearms_cursor_and_reasks_missing_fields(self) -> None:
+        controller, state = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = controller.gap_agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        # cursor points at the OWNING task index so the Observer captures the answer
+        assert controller.active_task_index == 0
+        assert state.cursor_writes == [(ROOM, "intro_task")]
+        instructions = mock_session.generate_reply.call_args.kwargs["instructions"]
+        assert "Representative name" in instructions
+        # neutral follow-up framing — must not imply the call is ending
+        assert "follow-up" in instructions
+        assert "wrapping up" not in instructions
+
+    @pytest.mark.asyncio
+    async def test_gap_complete_advances_forward_then_to_the_closer(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        for i in (0, 1, 2):  # intro, gated, coverage all visited with gaps
+            controller.note_task_entered(i)
+        first = controller.gap_agents[0]
+        with _session_patch(first, MagicMock()):
+            second = await _tool(first, "gap_complete")()
+        assert second is controller.gap_agents[1]
+        with _session_patch(second, MagicMock()):
+            third = await _tool(second, "gap_complete")()
+        assert third is controller.gap_agents[2]
+        with _session_patch(third, MagicMock()):
+            after = await _tool(third, "gap_complete")()
+        assert after is controller.agents[_CLOSER]  # closer, not wrap-up
+
+    @pytest.mark.asyncio
+    async def test_answering_during_the_pass_drops_the_next_gap(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.note_task_entered(0)
+        controller.note_task_entered(2)
+        first = controller.gap_agents[0]
+        # rep answers the coverage gap while the intro gap is being handled
+        controller.update_answers({"sections.cov.deductible": "Met"})
+        with _session_patch(first, MagicMock()):
+            successor = await _tool(first, "gap_complete")()
+        assert successor is controller.agents[_CLOSER]
+
+    @pytest.mark.asyncio
+    async def test_on_enter_with_no_gaps_moves_on_without_speaking(self) -> None:
+        # Race: the Observer filled the gap between routing and entry.
+        controller, _ = _controller(_gap_plan())
+        controller.note_task_entered(2)
+        controller.update_answers(
+            {"sections.intro.rep_name": "Pat", "sections.cov.deductible": "Met"}
+        )
+        agent = controller.gap_agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+        mock_session.generate_reply.assert_not_called()
+        mock_session.update_agent.assert_called_once_with(controller.agents[_CLOSER])
+
+    @pytest.mark.asyncio
+    async def test_gap_agent_is_dialogue_only(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        names = [t.info.name for t in controller.gap_agents[0].tools if isinstance(t, FunctionTool)]
+        assert names == ["gap_complete"]
+
+    @pytest.mark.asyncio
+    async def test_on_enter_no_op_under_takeover(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = controller.gap_agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            mock_session.userdata.engaged = True
+            await agent.on_enter()
+        mock_session.generate_reply.assert_not_called()
+        mock_session.update_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gap_complete_no_op_under_takeover(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = controller.gap_agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            mock_session.userdata.engaged = True
+            result = await _tool(agent, "gap_complete")()
+        assert isinstance(result, str)
+        assert "supervisor" in result.lower()
+
+
+class TestGapAgentConstruction:
+    def test_one_gap_agent_per_sweepable_task_built_up_front(self) -> None:
+        # Four tasks, but the closer is never swept — so no gap agent is built for it.
+        plan = _gap_plan()
+        controller, _ = _controller(plan)
+        assert len(controller.gap_agents) == len(plan.tasks) - 1
+        assert all(isinstance(a, GapTaskAgent) for a in controller.gap_agents)
+
+    def test_gap_agent_instructions_fuse_session_and_title(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        instructions = controller.gap_agents[0].instructions
+        assert "P." in instructions and "Introduction" in instructions
+        assert "gap_complete" in instructions
+
+    def test_gap_agent_instructions_forbid_finality_language(self) -> None:
+        # A gap agent is a mid-call follow-up, not the finale — it must not be told to
+        # wrap up (regression: it announced "I have all the information I need" mid-pass).
+        controller, _ = _controller(_gap_plan())
+        instructions = controller.gap_agents[0].instructions
+        assert "Final gap check" not in instructions
+        assert "do NOT say goodbye" in instructions
+        assert "more questions may still follow" in instructions

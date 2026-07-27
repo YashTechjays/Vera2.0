@@ -49,6 +49,12 @@ class _FakeAudio:
     def set_audio_enabled(self, enable: bool) -> None: ...
 
 
+class _FakeSpeechHandle:
+    """`say()` returns a handle; on_enter awaits its playout before leading on."""
+
+    async def wait_for_playout(self) -> None: ...
+
+
 class _FakeSession:
     """Records every way the agent could speak or hang up."""
 
@@ -65,7 +71,7 @@ class _FakeSession:
 
     def say(self, text: str) -> object:
         self.said.append(text)
-        return None
+        return _FakeSpeechHandle()
 
     def generate_reply(self, *, instructions: str | None = None) -> object:
         self.generate_reply_calls.append(instructions)

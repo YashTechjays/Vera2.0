@@ -1,0 +1,323 @@
+# Bitbucket Pipelines — vera2 (application repo)
+#
+# CI strategy (fast lane / slow lane):
+#   EVERY PUSH  -> static checks + UNIT tests + frontend + gitleaks   (no DB, fast feedback)
+#   PULL REQUEST-> branch-promotion gate + INTEGRATION tests + trivy  (Postgres/Redis, the merge gate)
+#   NIGHTLY     -> deep security scans ONLY (trivy + gitleaks)         (catches new CVEs; tests not re-run)
+#
+# Why: unit tests are DB-free and fast, so they gate every feature-branch push. The 38 integration
+# tests need Postgres+Redis (slow) and only matter before a merge, so they run on PRs (into dev AND
+# main — Bitbucket PR patterns match the SOURCE branch, so '**' covers every destination). Deploy/CD
+# is intentionally NOT wired yet. Checkov (IaC) lives on Vera2_Infra, not here (app-only repo).
+#
+# Scanners run WARN mode (--exit-code 0); flip to hard-fail (--exit-code 1) + enable
+# "Require successful builds" once the backlog is triaged (hardening steps 7,8,13).
+
+image: atlassian/default-image:4
+
+definitions:
+  caches:
+    uv: /tmp/uv-cache
+    npm: /root/.npm            # actual npm download cache (speeds `npm ci`); node image runs as root
+  services:
+    postgres:
+      image: pgvector/pgvector:pg17            # same image as GH Actions → `vector` extension present
+      variables:
+        POSTGRES_USER: vera
+        POSTGRES_PASSWORD: vera
+        POSTGRES_DB: vera
+    redis:
+      image: redis:7-alpine
+  steps:
+    - step: &promotion
+        name: Enforce branch promotion
+        image: alpine:3.20                     # tiny image — this is just a POSIX-sh branch check
+        script:
+          - |
+            SRC="$BITBUCKET_BRANCH"
+            DEST="$BITBUCKET_PR_DESTINATION_BRANCH"
+            echo "PR: $SRC -> $DEST"
+            case "$DEST" in
+              main)
+                # CURRENT (dev + main only): allow dev and hotfix/*.
+                # TODO when qa/stg exist: tighten to  stg|hotfix/*
+                case "$SRC" in
+                  dev|hotfix/*) echo "OK" ;;
+                  *) echo "BLOCKED: main accepts only dev or hotfix/* (until stg exists)"; exit 1 ;;
+                esac ;;
+              dev)
+                # Allow the conventional-commit branch prefixes (feat/fix/chore, `/` or
+                # `-` separator) plus the legacy feature/*|bugfix/* names.
+                case "$SRC" in
+                  feature/*|bugfix/*|feat/*|feat-*|fix/*|fix-*|chore/*|chore-*) echo "OK" ;;
+                  *) echo "BLOCKED: dev accepts only feature/*, bugfix/*, feat/*, feat-*, fix/*, fix-*, chore/*, chore-*"; exit 1 ;;
+                esac ;;
+              # TODO when qa/stg branches exist, add: qa<-dev, stg<-qa, main<-stg|hotfix/*
+              *)
+                echo "No promotion rule for destination '$DEST' — allowed" ;;
+            esac
+
+    - step: &gitleaks
+        name: Secrets (gitleaks)
+        image: zricethezav/gitleaks:latest
+        script:
+          - gitleaks detect --source . --redact --exit-code 1   # HARD-FAIL: a secret finding blocks the build/merge
+
+    - step: &trivy
+        name: Vulnerabilities (trivy)
+        image: aquasec/trivy:latest
+        script:
+          - trivy fs . --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1   # HARD-FAIL: a fixable HIGH/CRITICAL CVE blocks the build/merge
+
+    # ---- FAST lane (every push): static checks + UNIT tests. No DB, 1x. ----
+    - step: &checks-backend
+        name: Backend checks (ruff, mypy, unit tests)
+        image: ghcr.io/astral-sh/uv:python3.12-bookworm
+        caches:
+          - uv
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/**"
+        script:
+          - cd vera-backend
+          - export UV_CACHE_DIR=/tmp/uv-cache
+          - uv sync --all-packages --locked
+          - uv run ruff format --check .
+          - uv run ruff check .
+          - uv run mypy
+          - uv run pytest tests/unit apps/agent_worker/tests    # unit only — DB-free
+
+    - step: &ci-frontend
+        name: Frontend CI (lint, build, test)
+        image: node:22
+        caches:
+          - npm
+        condition:
+          changesets:
+            includePaths:
+              - "vera-frontend/**"
+        script:
+          - cd vera-frontend
+          - corepack enable
+          - npm ci
+          - npm run lint
+          - npm run build
+          - npm test -- --passWithNoTests
+
+    # ---- SLOW lane (PRs + nightly): INTEGRATION tests need Postgres+Redis. size:2x for headroom. ----
+    - step: &integration-backend
+        name: Backend integration (migrate + seed + integration tests)
+        image: ghcr.io/astral-sh/uv:python3.12-bookworm
+        size: 2x
+        caches:
+          - uv
+        services:
+          - postgres
+          - redis
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/**"
+        script:
+          - cd vera-backend
+          - export UV_CACHE_DIR=/tmp/uv-cache
+          - export VERA_DATABASE_URL="postgresql+asyncpg://vera:vera@localhost:5432/vera"
+          - export VERA_REDIS_URL="redis://localhost:6379/0"
+          - uv sync --all-packages --locked
+          # Bitbucket does NOT health-check services (GH Actions did) — wait before DB work.
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/5432) 2>/dev/null && break; echo "waiting for postgres ($i)"; sleep 1; done
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/6379) 2>/dev/null && break; echo "waiting for redis ($i)"; sleep 1; done
+          - uv run alembic upgrade head
+          - uv run python scripts/seed.py
+          - uv run pytest tests/integration
+
+    # ============================ CD: dev -> test ============================
+    # Runs ONLY on the dev branch (see pipelines.branches.dev): full DB-backed gate, then
+    # build + deploy the 3 components to the test VM. Mirrors GitHub .github/workflows/dev.yml.
+    # Auth is keyless (Bitbucket OIDC -> Workload Identity Federation); see deploy/ci/README.md.
+
+    # Full merge gate on the ACTUAL dev commit: static checks + migrate/seed + BOTH unit and
+    # integration tests. Runs on dev (not the fast '**' lane) because dev auto-deploys — this is
+    # the one place base-drift / logical conflicts from a squash-merge are caught before shipping.
+    - step: &dev-ci-backend
+        name: Backend gate (full, with DB)
+        image: ghcr.io/astral-sh/uv:python3.12-bookworm
+        size: 2x
+        caches: [uv]
+        services: [postgres, redis]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/**"
+              - "deploy/**"
+        script:
+          - cd vera-backend
+          - export UV_CACHE_DIR=/tmp/uv-cache
+          - export VERA_DATABASE_URL="postgresql+asyncpg://vera:vera@localhost:5432/vera"
+          - export VERA_REDIS_URL="redis://localhost:6379/0"
+          - uv sync --all-packages --locked
+          - uv run ruff format --check .
+          - uv run ruff check .
+          - uv run mypy
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/5432) 2>/dev/null && break; echo "waiting for postgres ($i)"; sleep 1; done
+          - for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/6379) 2>/dev/null && break; echo "waiting for redis ($i)"; sleep 1; done
+          - uv run alembic upgrade head
+          - uv run python scripts/seed.py
+          - uv run pytest tests/unit tests/integration apps/agent_worker/tests
+
+    # Build one component image -> Artifact Registry (:sha + :dev) + Trivy scan. Keyless: the
+    # step needs `oidc: true`; `services: [docker]` gives the build daemon. Path-filtered so a
+    # component only rebuilds when it (or shared code / deploy assets) changed — the built image
+    # set is exactly what the deploy step will pick up.
+    - step: &build-control-plane
+        name: Build control-plane
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/apps/control_plane/**"
+              - "vera-backend/packages/**"
+              - "vera-backend/docker/control_plane.Dockerfile"
+              - "vera-backend/pyproject.toml"
+              - "vera-backend/uv.lock"
+              - "deploy/**"
+        script:
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh control-plane vera-backend vera-backend/docker/control_plane.Dockerfile
+
+    - step: &build-worker
+        name: Build agent-worker
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-backend/apps/agent_worker/**"
+              - "vera-backend/packages/**"
+              - "vera-backend/docker/agent_worker.Dockerfile"
+              - "vera-backend/pyproject.toml"
+              - "vera-backend/uv.lock"
+              - "deploy/**"
+        script:
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh agent-worker vera-backend vera-backend/docker/agent_worker.Dockerfile
+
+    - step: &build-frontend
+        name: Build frontend
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        condition:
+          changesets:
+            includePaths:
+              - "vera-frontend/**"
+              - "deploy/**"
+        script:
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh frontend vera-frontend vera-frontend/Dockerfile "VITE_API_BASE_URL=$VITE_API_BASE_URL"
+
+    # Single deployment step (Bitbucket allows one `deployment:` per pipeline). Deploys every
+    # component whose :sha image exists — i.e. exactly what the builds above produced — in order
+    # control-plane -> agent-worker -> frontend(last). `deployment: test` gives the Deployments
+    # dashboard + per-environment serialization. Reused by the auto and manual pipelines.
+    - step: &deploy-test
+        name: Deploy to test VM
+        image: google/cloud-sdk:slim
+        oidc: true
+        deployment: test
+        script:
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-deploy-changed.sh
+
+pipelines:
+  branches:
+    # ---- dev (auto CD): full DB-backed gate -> build changed components -> deploy to test. ----
+    #      Bitbucket runs only the MOST SPECIFIC branch match, so dev does NOT also run '**';
+    #      the full gate below replaces the fast lane for dev (which auto-deploys).
+    dev:
+      - parallel:
+          - step: *dev-ci-backend
+          - step: *ci-frontend
+          - step: *gitleaks
+      - parallel:
+          - step: *build-control-plane
+          - step: *build-worker
+          - step: *build-frontend
+      - step: *deploy-test
+
+    # ---- EVERY OTHER branch: fast feedback (static + unit + frontend + secret scan). No DB. ----
+    '**':
+      - parallel:
+          - step: *checks-backend
+          - step: *ci-frontend
+          - step: *gitleaks
+
+  # ---- PRs (any source → dev or main): promotion gate + the slow integration suite + vuln scan. ----
+  #      Pair with "Require successful builds" (step 13) to make it binding.
+  pull-requests:
+    '**':
+      - step: *promotion
+      - parallel:
+          - step: *integration-backend
+          - step: *trivy
+
+  # ---- Nightly deep SECURITY scan only. Catches newly-disclosed CVEs / secrets — things that ----
+  #      change without a code change. Tests are deterministic and already gated on PRs, so they
+  #      are NOT re-run here. Schedule: Repo settings -> Pipelines -> Schedules -> branch main ->
+  #      pipeline nightly-scan -> daily.
+  custom:
+    # ---- Manual "deploy everything at current dev HEAD" (the workflow_dispatch equivalent). ----
+    #      Use for the first deploy or a forced redeploy: builds all 3 UNCONDITIONALLY (no
+    #      changeset filter — a manually-run pipeline has no reliable changeset base), so every
+    #      :sha image exists and deploy-test ships all 3. Run from Pipelines -> Run pipeline ->
+    #      Custom: deploy-dev-all, on the dev branch.
+    deploy-dev-all:
+      - parallel:
+          - step:
+              name: Build control-plane (all)
+              image: google/cloud-sdk:slim
+              oidc: true
+              services: [docker]
+              caches: [docker]
+              script:
+                - bash deploy/ci/bb-gcp-auth.sh
+                - bash deploy/ci/bb-build-push.sh control-plane vera-backend vera-backend/docker/control_plane.Dockerfile
+          - step:
+              name: Build agent-worker (all)
+              image: google/cloud-sdk:slim
+              oidc: true
+              services: [docker]
+              caches: [docker]
+              script:
+                - bash deploy/ci/bb-gcp-auth.sh
+                - bash deploy/ci/bb-build-push.sh agent-worker vera-backend vera-backend/docker/agent_worker.Dockerfile
+          - step:
+              name: Build frontend (all)
+              image: google/cloud-sdk:slim
+              oidc: true
+              services: [docker]
+              caches: [docker]
+              script:
+                - bash deploy/ci/bb-gcp-auth.sh
+                - bash deploy/ci/bb-build-push.sh frontend vera-frontend vera-frontend/Dockerfile "VITE_API_BASE_URL=$VITE_API_BASE_URL"
+      - step: *deploy-test
+
+    nightly-scan:
+      - parallel:
+          - step:
+              name: Trivy critical (full)
+              image: aquasec/trivy:latest
+              script:
+                - trivy fs . --severity CRITICAL --exit-code 1
+          - step:
+              name: Gitleaks full history
+              image: zricethezav/gitleaks:latest
+              script:
+                - gitleaks detect --source . --redact --log-opts="--all"
