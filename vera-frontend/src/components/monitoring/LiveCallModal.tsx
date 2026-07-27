@@ -33,9 +33,8 @@ import {
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 import { healthTone, healthToneClass } from "@/lib/monitoring/health"
-import { IbvProvider, useIbv } from "@/components/ibv/IbvProvider"
-import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { useIbv } from "@/components/ibv/IbvProvider"
+import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
 import { CoachingPanel } from "./CoachingPanel"
@@ -56,11 +55,11 @@ function FormPanel({
   onExpand: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const { openFormById, loading, error, schema } = useIbv()
+  const { loadFormById, formId: loadedFormId, loading, error, schema } = useIbv()
 
   function toggleExpanded() {
-    // Re-fetch on each expand so a live call's preview is fresh.
-    if (!expanded && formId) openFormById(formId)
+    // Skip when already loaded: a refetch would wipe live answers applied so far and any edit.
+    if (!expanded && formId && formId !== loadedFormId) loadFormById(formId)
     setExpanded((v) => !v)
   }
 
@@ -141,7 +140,9 @@ export function LiveCallModal({
   onExpand: () => void
 }) {
   const canIntervene = usePermission("calls:intervene")
-  const { applyLiveAnswer, loadFormById, formId: loadedFormId, dirty } = useIbv()
+  // The app-level provider IbvFormModal also renders from — one form, so live answers show
+  // up inline and full-screen alike.
+  const { applyLiveAnswer } = useIbv()
   const [mode, setMode] = useState<LiveCallMode>("listen")
   const [roomStatus, setRoomStatus] = useState<RoomStatus | null>(null)
   const [ending, setEnding] = useState(false)
@@ -171,18 +172,6 @@ export function LiveCallModal({
   // Prefer the live SSE completion; fall back to the polled list value until the first frame.
   const progress = Math.round(liveCompletion ?? call?.formProgress ?? 0)
 
-  // Load the call's form into the inline form (data only — not the full-screen modal)
-  // so its fields render and live AI answers land on an already-seeded form.
-  //
-  // loadFormById resets the app-wide IBV state, and this is an EFFECT — no user click
-  // behind it. So it must not fire when the form is already loaded (reopening this modal
-  // would refetch and drop every live answer applied so far) or when the supervisor has
-  // unsaved edits (reopening would silently discard them).
-  useEffect(() => {
-    if (!open || !call?.formId) return
-    if (call.formId === loadedFormId || dirty) return
-    loadFormById(call.formId)
-  }, [open, call?.formId, loadedFormId, dirty, loadFormById])
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
@@ -329,10 +318,13 @@ export function LiveCallModal({
 
         <div className="flex min-h-[360px] flex-1 gap-4 overflow-hidden bg-[#f8f9fa] p-4">
           <div className="flex flex-1 flex-col gap-3 overflow-auto">
-            {/* Scoped provider: the app-level one belongs to IbvFormModal. */}
-            <IbvProvider key={call?.id ?? "none"}>
-              <FormPanel formId={call?.formId} progress={progress} onExpand={onExpand} />
-            </IbvProvider>
+            {/* Keyed per call: expand state must not carry from one call to the next. */}
+            <FormPanel
+              key={call?.id ?? "none"}
+              formId={call?.formId}
+              progress={progress}
+              onExpand={onExpand}
+            />
 
             {/* Timer starts on the SSE "active" event (callee answered) and freezes on a terminal status. */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">

@@ -98,7 +98,6 @@ function toLiveCall(c: CallSummary, now: number): LiveCall {
     formId: c.form_id,
     callTime: elapsed(c.started_at, now),
     startedAt: c.started_at,
-    formId: c.form_id,
     healthScore: c.health_score,
     isOwner: c.is_owner,
   }
@@ -447,8 +446,7 @@ export function LiveMonitoring() {
         onOpenChange={setOverviewOpen}
         onExpand={() => {
           if (!selected) return
-          // The live modal already loaded this form inline — expanding it must not
-          // refetch, or every live answer applied so far is reset.
+          // Refetching a form the inline panel already has would drop its live answers and edits.
           if (selected.form_id === loadedFormId) openLoadedForm()
           else openFormById(selected.form_id)
         }}

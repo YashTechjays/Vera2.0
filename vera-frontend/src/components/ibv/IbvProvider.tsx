@@ -21,6 +21,7 @@ import {
   type DisputeFlags,
   type DisputeMap,
 } from "@/lib/ibv/disputes"
+import { canApplyLiveAnswer } from "@/lib/ibv/liveAnswers"
 import type { FormSchema, FormValues } from "@/lib/ibv/types"
 import type { LiveDispute } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
@@ -112,7 +113,7 @@ type IbvContextValue = {
   /** Open a real patient form by id, loaded (always refetched) from the API. */
   openFormById: (formId: string) => void
   /** Open the modal over the form already loaded — no refetch, no state reset. For a
-   *  surface rendering the form inline that wants to expand what it's showing. */
+   *  surface that already rendered this form inline and is expanding it. */
   openLoadedForm: () => void
   /** Load a form's data by id WITHOUT opening the full-screen modal — for surfaces
    *  (Live Monitoring) that render the form inline and apply live answers. */
@@ -330,10 +331,7 @@ export function IbvProvider({
     [seed],
   )
 
-  // Load the form AND open the full-screen form modal. Always refetches: this is an
-  // explicit user action, and reopening a form someone else has since edited must show
-  // their changes. A surface that already has the form loaded inline wants
-  // `openLoadedForm` instead.
+  // Always refetches: reopening a form someone else has since edited must show their changes.
   const openFormById = useCallback(
     (id: string) => {
       setModalOpen(true)
@@ -342,9 +340,6 @@ export function IbvProvider({
     [loadFormById],
   )
 
-  // Expand a form this surface already has loaded inline (Live Monitoring) — opens the
-  // modal over the current state without refetching, so live answers already applied
-  // survive the expand.
   const openLoadedForm = useCallback(() => setModalOpen(true), [])
 
   const closeForm = useCallback(() => {
@@ -366,10 +361,13 @@ export function IbvProvider({
       raw: string | number | boolean | null,
       dispute?: LiveDispute | null,
     ) => {
-      // Only into the form this stream belongs to, and never over a field the
-      // supervisor is editing. formId outlives closeForm(), so the id check is what
-      // keeps a stale stream from writing into whatever form is loaded now.
-      if (!formId || formId !== expectedFormId || editedPathsRef.current.has(path)) return
+      const applicable = canApplyLiveAnswer({
+        loadedFormId: formId,
+        expectedFormId,
+        path,
+        editedPaths: editedPathsRef.current,
+      })
+      if (!applicable) return
       const format = dateFormats.get(path)
       const display = toDisplayValue(raw, format)
       // Not a supervisor edit: update the value only, never touch dirty/saveState.
