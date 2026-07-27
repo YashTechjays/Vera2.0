@@ -32,9 +32,9 @@ from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState, takeover_engaged
-from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
-from vera_core.forms.call_plan import CallPlan
-from vera_core.forms.conditions import evaluate
+from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SCOPE_DISCIPLINE
+from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
+from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -49,13 +49,53 @@ _WRAP_UP_DIRECTIVE = (
     "time, say a brief goodbye, then call end_call."
 )
 
+# Spoken after a task's intro to make the bot proactively lead into the task
+_OPENING_DIRECTIVE = (
+    "Continue the call now by asking the first question of the current task that the "
+    "representative has not already answered. Do not re-ask anything already on file — "
+    "confirm those instead."
+)
+
+
+def _gap_block(title: str) -> str:
+    """Static instruction block for a gap agent (built up front, so only the task
+    title is known). The specific still-missing fields are injected live in
+    `on_enter` — the answer snapshot is only known once the call is running."""
+    return (
+        f"# Current task: Follow-up questions ({title})\n"
+        "A few required questions from earlier in the call are still unanswered. "
+        "When prompted, re-ask ONLY those specific questions — concisely, politely, "
+        "one at a time. If the representative cannot answer, accept it and move on; "
+        "never press or repeat. This is a mid-call follow-up, NOT the end of the call: "
+        "do NOT say goodbye, do NOT thank the representative as if finishing, and do NOT "
+        "claim you have everything you need — more questions may still follow. Once you "
+        "have re-asked the listed questions, simply call gap_complete."
+    )
+
+
+def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
+    """Live re-ask directive listing the still-missing required fields."""
+    lines: list[str] = []
+    for field in fields:
+        line = f"- {field.title}"
+        if field.values:
+            line += f" (expected one of: {', '.join(field.values)})"
+        lines.append(line)
+    listed = "\n".join(lines)
+    return (
+        "I have a couple of quick follow-up questions. Re-ask the representative for these "
+        "still-missing required details, briefly and naturally — do not imply the call is "
+        f"ending:\n{listed}"
+    )
+
 
 def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
-    the Cartesia TTS markup guide — fused once, at build time. The markup guide
-    keeps CPT codes `<spell>`-wrapped (the compiled prompts carry no TTS
-    guidance)."""
+    the scope-discipline guardrail + the Cartesia TTS markup guide — fused once, at
+    build time. The scope guardrail keeps the LLM on the compiled question list (no
+    invented off-script questions); the markup guide keeps CPT codes `<spell>`-wrapped
+    (the compiled prompts carry no TTS guidance)."""
     parts = [
         f"# Persona\n{plan.session.persona}",
         f"# Goal\n{plan.session.goal}",
@@ -73,6 +113,7 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
     if extra_instructions:
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
+    parts.append(SCOPE_DISCIPLINE)
     parts.append(CARTESIA_MARKUP_GUIDE)
     return "\n\n".join(parts)
 
@@ -95,9 +136,19 @@ class PlanTaskAgent(Agent):
 
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
+        if takeover_engaged(self.session):
+            logger.info("task entered under supervisor takeover; staying silent")
+            return
+        # Read before opening_line — that call flips `opened` as a side effect.
+        is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
         if opening:
-            self.session.say(opening)
+            # Awaited, so the lead below can never be queued on top of in-flight TTS.
+            await self.session.say(opening).wait_for_playout()
+        if not is_opening_turn:
+            # The call's opening turn belongs to the rep — they answer the greeting
+            # first. Every later swap leads proactively so it never lands in silence.
+            self.session.generate_reply(instructions=_OPENING_DIRECTIVE)
 
     @llm.function_tool(
         name="task_complete",
@@ -148,6 +199,49 @@ class WrapUpAgent(VeraAgent):
         self.session.generate_reply(instructions=_WRAP_UP_DIRECTIVE)
 
 
+class GapTaskAgent(Agent):
+    """End-of-call gap pass for ONE task: re-asks that task's still-missing
+    required fields before wrap-up, then hands off to the next gapped task (or
+    wrap-up). Dialogue-only like PlanTaskAgent; its sole tool is `gap_complete`."""
+
+    def __init__(self, controller: "PlanRunController", task_index: int) -> None:
+        self._controller = controller
+        self._task_index = task_index
+        self._task = controller.plan.tasks[task_index]
+        super().__init__(
+            instructions=_instructions(
+                controller.plan,
+                _gap_block(self._task.title),
+                extra_instructions=controller.extra_instructions,
+            ),
+        )
+
+    async def on_enter(self) -> None:
+        self._controller.note_task_entered(self._task_index)
+        if takeover_engaged(self.session):
+            return
+        fields = self._controller.gap_fields(self._task_index)
+        if not fields:
+            self.session.update_agent(await self._controller.advance_gap_from(self._task_index))
+            return
+        self.session.generate_reply(instructions=_gap_reask_instruction(fields))
+
+    @llm.function_tool(
+        name="gap_complete",
+        description=(
+            "Finish re-asking the outstanding questions and move on. Call this once "
+            "you have re-asked every question you were given — whether or not the "
+            "representative could answer them."
+        ),
+    )
+    async def _gap_complete(self) -> Agent | str:
+        if takeover_engaged(self.session):
+            return "A human supervisor has taken over this call. Stay silent."
+        successor = await self._controller.advance_gap_from(self._task_index)
+        await carry_chat_ctx(self, successor)
+        return successor
+
+
 class PlanRunController:
     """Owns the pre-built agent chain and the run's shared-state seam.
 
@@ -164,6 +258,7 @@ class PlanRunController:
         run_state: PlanRunStateService,
         greeting: str | None = None,
         extra_instructions: str | None = None,
+        gap_pass_enabled: bool = True,
     ) -> None:
         if not plan.tasks:
             raise ValueError("call plan has no tasks")
@@ -172,6 +267,7 @@ class PlanRunController:
         self.greeting = greeting
         # Tenant persona-tweak overlay, appended to every plan agent's instructions.
         self.extra_instructions = extra_instructions
+        self.gap_pass_enabled = gap_pass_enabled
         self._opened = False  # has any task agent spoken the call's opening line yet
         self._run_state = run_state
         # In-process answers snapshot for applicability/skip decisions, seeded
@@ -179,6 +275,17 @@ class PlanRunController:
         # Phase-2 Observer keeps it current. Redis stays the cross-process truth.
         self._answers: dict[str, Any] = dict(plan.prefilled)
         self.active_task_index: int | None = None
+        # Tasks the call actually entered (main pass or gap pass).
+        self._visited_tasks: set[int] = set()
+        self._terminated = False
+        # How far the call has PROGRESSED, distinct from `active_task_index` (which is the
+        # Observer's extraction cursor and moves backwards during the gap pass). Monotonic,
+        # so the forward-only skip guard can never redirect into a completed task.
+        self._max_task_index = -1
+        # The gap pass runs ONCE, immediately before the closing task, so any re-ask
+        # happens before that task collects the reference number and says goodbye.
+        self._closing_task_index = len(plan.tasks) - 1
+        self._gap_pass_done = False
         # Serializes handoffs against rule-engine directives so a directive and an
         # in-flight `task_complete` handoff can never double-swap the active agent.
         self.lock = asyncio.Lock()
@@ -193,6 +300,10 @@ class PlanRunController:
         self._cursor_writes: set[asyncio.Task[None]] = set()
 
         self.agents = [PlanTaskAgent(self, i) for i in range(len(plan.tasks))]
+        # One gap agent per SWEEPABLE task, built up front like the task agents so a malformed
+        # plan fails here at construction rather than mid-call. The closing task is never
+        # swept (its reference-number/goodbye stays last), so it gets no gap agent.
+        self.gap_agents = [GapTaskAgent(self, i) for i in range(self._closing_task_index)]
         self.wrap_up_agent = WrapUpAgent(self)
 
     # -- conversation-path API ------------------------------------------------
@@ -203,7 +314,27 @@ class PlanRunController:
     async def advance_from(self, index: int) -> Agent:
         async with self.lock:
             self.generation += 1
-            return self._agent_at(self._next_applicable(index + 1))
+            next_index = self._next_applicable(index + 1)
+            # Right before the closing task, sweep gaps in the visited substantive tasks
+            # so any re-ask lands BEFORE the closer's reference-number/goodbye.
+            gap_agent = self._maybe_enter_gap_pass(next_index)
+            return gap_agent if gap_agent is not None else self._agent_at(next_index)
+
+    async def advance_gap_from(self, index: int) -> Agent:
+        async with self.lock:
+            self.generation += 1
+            gap_index = self._next_gap_task(index + 1)
+            if gap_index is not None:
+                return self.gap_agents[gap_index]
+            self._gap_pass_done = True
+            # Re-check applicability like every other transition: the Observer keeps writing
+            # answers during the pass, so the closer's gate can have flipped since entry.
+            return self._agent_at(self._next_applicable(self._closing_task_index))
+
+    @property
+    def opened(self) -> bool:
+        """Whether the call's opening line has been spoken yet."""
+        return self._opened
 
     def opening_line(self, intro: str | None) -> str | None:
         """What the entering task agent speaks. An explicit tenant greeting
@@ -216,6 +347,8 @@ class PlanRunController:
 
     def note_task_entered(self, index: int) -> None:
         self.active_task_index = index
+        self._max_task_index = max(self._max_task_index, index)
+        self._visited_tasks.add(index)
         self._write_cursor(self.plan.tasks[index].task_key)
 
     def note_wrap_up_entered(self) -> None:
@@ -257,6 +390,9 @@ class PlanRunController:
                 target = self._directive_target(directive)
                 if target is None:  # skip whose target is already at/behind us → no-op
                     return
+                if isinstance(directive, Terminate):
+                    # A terminate_call flow rule ends the call: no end-of-call gap pass.
+                    self._terminated = True
                 await self._session.interrupt()
                 self._session.update_agent(target)
         except Exception as exc:
@@ -269,8 +405,8 @@ class PlanRunController:
             return self.wrap_up_agent
         for i, task in enumerate(self.plan.tasks):
             if task.task_key == directive.task_key:
-                # Only skip forward: a target at or behind the active task is a no-op.
-                if self.active_task_index is not None and i <= self.active_task_index:
+                # Only skip forward, measured against PROGRESS not the active cursor:
+                if i <= self._max_task_index:
                     return None
                 return self.agents[i]
         return None  # unknown task_key (should not happen: validated at compile)
@@ -279,6 +415,58 @@ class PlanRunController:
     def _reask_instruction(directive: ReAsk) -> str:
         clarify = f" {directive.clarify}" if directive.clarify else ""
         return f"CONSISTENCY CHECK: {directive.reason} Re-ask to clarify, do not move on.{clarify}"
+
+    # -- gap-pass API -------------------------------------------------------------
+
+    def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,
+        against the live answer snapshot — the same required/applicable set the form's
+        completion percentage counts."""
+        shared = self.plan.shared_conditions
+        return [
+            field
+            for field in self.plan.tasks[task_index].fields
+            if is_applicable(field.gates, self._answers, shared)
+            and is_required(field, self._answers, shared)
+            and not self._is_answered(field.path)
+        ]
+
+    def _is_answered(self, path: str) -> bool:
+        value = self._answers.get(path)
+        return value is not None and str(value).strip() != ""
+
+    def _maybe_enter_gap_pass(self, next_index: int | None) -> Agent | None:
+        """When the next task is the closing task, divert into the gap pass (once) over
+        the earlier visited tasks. Returns the first gap agent, or None to proceed
+        normally — no gaps, disabled, already run, terminated, or the closer isn't next.
+        A single-task plan therefore never sweeps: `next_index` can never be 0."""
+        if (
+            not self.gap_pass_enabled
+            or self._terminated
+            or self._gap_pass_done
+            or next_index != self._closing_task_index
+        ):
+            return None
+        gap_index = self._next_gap_task(0)
+        if gap_index is None:
+            self._gap_pass_done = True
+            return None
+        return self.gap_agents[gap_index]
+
+    def _next_gap_task(self, start: int) -> int | None:
+        """Next VISITED, applicable task in `[start, closing_task)` that still has gap
+        fields. Restricting to visited tasks respects flow-rule redirects (a task skipped
+        by applicability or a `skip_to_task` was never entered, so it is never swept);
+        stopping before the closing task keeps its reference-number/goodbye last."""
+        for i in range(start, self._closing_task_index):
+            if i not in self._visited_tasks:
+                continue
+            cond = self.plan.tasks[i].applicable_when
+            if cond is not None and not evaluate(cond, self._answers, self.plan.shared_conditions):
+                continue
+            if self.gap_fields(i):
+                return i
+        return None
 
     # -- internals ----------------------------------------------------------------
 

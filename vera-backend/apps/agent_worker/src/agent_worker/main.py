@@ -406,6 +406,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         # An explicit tenant greeting overrides the plan's first-task
                         # intro; extra_instructions overlay every plan agent.
                         greeting=tweak.greeting,
+                        gap_pass_enabled=settings.gap_pass_enabled,
                         extra_instructions=tweak.extra_instructions or None,
                     )
                 except Exception:

@@ -26,6 +26,11 @@ chmod 600 "$tmp"
   # (the Settings Literal has no `test`), so the GCP `test` env runs as `dev`.
   echo "VERA_ENV=dev"
   echo "VERA_LOG_LEVEL=INFO"
+  # GCP project for the control-plane's Vertex AI (Gemini) post-call eval. Not a
+  # secret (it's the same PROJECT the secrets are fetched from, already in plaintext
+  # in the pipeline vars / AR image path). Setting it starts the post-call eval
+  # consumer; unset leaves the feature dormant.
+  echo "VERA_GCP_PROJECT=$PROJECT"
 } >> "$tmp"
 
 while IFS= read -r line; do
