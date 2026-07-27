@@ -150,6 +150,33 @@ class TestConstruction:
 
 class TestHandoff:
     @pytest.mark.asyncio
+    async def test_task_complete_tags_the_handoff_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[0]
+        tracer = trace.get_tracer("test")
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.from_task"] == "intro_task"
+        assert span.attributes["vera.handoff.to_task"] == "gated_task"
+        assert span.attributes["vera.handoff.reason"] == "task_complete"
+
+    @pytest.mark.asyncio
+    async def test_task_complete_to_wrap_up_tags_the_sentinel(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[2]  # last_task
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.to_task"] == WRAP_UP_TASK_KEY
+
+    @pytest.mark.asyncio
     async def test_task_complete_returns_the_next_agent(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[0]

@@ -122,7 +122,25 @@ class PlanTaskAgent(Agent):
         # Carry the call so far into the successor — LiveKit doesn't for a
         # tool-returned agent, so without this it re-greets and re-asks.
         await carry_chat_ctx(self, successor)
+        self._tag_task_complete_handoff(successor)
         return successor
+
+    def _tag_task_complete_handoff(self, successor: Agent) -> None:
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": self._task.task_key,
+                    "vera.handoff.to_task": successor.id,
+                    "vera.handoff.reason": "task_complete",
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-complete handoff span tagging failed (%s)",
+                self._controller.room_name,
+                type(exc).__name__,
+            )
+        logger.info("handoff: %s -> %s (reason=task_complete)", self._task.task_key, successor.id)
 
 
 class WrapUpAgent(VeraAgent):
