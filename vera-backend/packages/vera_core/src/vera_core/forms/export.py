@@ -15,15 +15,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
-from vera_core.forms.export_form_sheet import render_form_sheet
+from vera_core.forms.export_form_sheet import _str, render_form_sheet
 from vera_core.services.call_provenance import CallAttempt, FieldProvenance
 
 _BOLD = Font(bold=True)
-
-
-def _str(v: Any) -> str:
-    """Coerce a field value to a spreadsheet-safe string; None → empty string."""
-    return "" if v is None else str(v)
 
 
 def _bold_header(ws: Worksheet, title: str) -> None:
@@ -48,10 +43,9 @@ def build_workbook(
 
     if is_v2(schema_json):
         doc = FormSchemaDoc.model_validate(schema_json)
-        render_form_sheet(form_ws, doc, values)
-        # titles must keep feeding the Provenance sheet exactly as before — only
-        # the Form-sheet writing moved to export_form_sheet.render_form_sheet.
-        titles: dict[str, str] = {path: leaf.title for path, leaf in doc.leaf_items()}
+        # The renderer's single schema walk also yields the {path: title} map
+        # that feeds the Provenance sheet — same content as before.
+        titles: dict[str, str] = render_form_sheet(form_ws, doc, values)
     else:
         titles = {p: p for p in sorted_paths}
         for path in sorted_paths:

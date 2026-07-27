@@ -17,10 +17,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from vera_core.forms.conditions import is_applicable, is_required, leaf_gates
-from vera_core.forms.dsl import FormSchemaDoc, Group, Leaf, Section
+from vera_core.forms.dsl import Condition, FormSchemaDoc, Group, Leaf, Section
 
 
 @dataclass(frozen=True)
@@ -148,7 +149,10 @@ _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _BOLD = Font(bold=True)
 _CENTER = Alignment(horizontal="center", vertical="center")
 _TOP_LEFT = Alignment(vertical="top", wrap_text=True)
-_FILL_CONTEXT = PatternFill("solid", start_color="C6EFCE")  # UI's green header
+# Fills approximate the UI's section/grid styling (Section.tsx header bars,
+# SectionMatrix.tsx header strip, the grayed inapplicable rows) — the UI uses
+# Tailwind tokens with no exact hex counterpart; keep these visually close.
+_FILL_CONTEXT = PatternFill("solid", start_color="C6EFCE")  # UI's green context header
 _FILL_PLAIN = PatternFill("solid", start_color="E7E6E6")
 _FILL_GRID_HEADER = PatternFill("solid", start_color="F2F2F2")
 _FILL_INAPPLICABLE = PatternFill("solid", start_color="F5F5F5")
@@ -160,12 +164,18 @@ def _str(v: Any) -> str:
 
 
 class _Ctx:
-    """Render context: values + applicability machinery, computed once."""
+    """Render context: values + applicability machinery, computed once. The
+    title map rides the same single leaf_gates walk (it feeds the Provenance
+    sheet — see build_workbook)."""
 
     def __init__(self, doc: FormSchemaDoc, values: Mapping[str, Any]) -> None:
         self.values = values
         self.shared = doc.shared_conditions or {}
-        self.gates = {path: gates for path, _leaf, gates in leaf_gates(doc)}
+        self.gates: dict[str, tuple[Condition, ...]] = {}
+        self.titles: dict[str, str] = {}
+        for path, leaf, gates in leaf_gates(doc):
+            self.gates[path] = gates
+            self.titles[path] = leaf.title
 
     def applicable(self, path: str) -> bool:
         return is_applicable(self.gates.get(path, ()), self.values, self.shared)
@@ -193,6 +203,15 @@ def _vmerge(ws: Worksheet, top: int, col: int, n: int) -> None:
     """Merge a single column down *n* rows starting at *top* (no-op for n <= 1)."""
     if n > 1:
         ws.merge_cells(start_row=top, start_column=col, end_row=top + n - 1, end_column=col)
+
+
+def _grid_value(ws: Worksheet, row: int, col: int, cell: TableCell | None, ctx: _Ctx) -> bool:
+    """Write a grid cell's value when applicable; the returned applicability
+    drives the caller's gray-fill decision (a missing cell counts as gated)."""
+    applicable = cell is not None and ctx.applicable(cell.path)
+    if cell is not None and applicable:
+        ws.cell(row=row, column=col, value=_str(ctx.values.get(cell.path)))
+    return applicable
 
 
 def _title_bar(ws: Worksheet, row: int, col: int, span: int, text: str, *, context: bool) -> None:
@@ -277,22 +296,16 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
             ws.cell(row=top, column=icd_col, value=group.icd10)
             _vmerge(ws, top, icd_col, n)
         for j, (key, _title) in enumerate(table.extra_columns):
-            cell = group.extras.get(key)
             col = extra_col0 + j
-            applicable = cell is not None and ctx.applicable(cell.path)
-            if cell is not None and applicable:
-                ws.cell(row=top, column=col, value=_str(ctx.values.get(cell.path)))
+            applicable = _grid_value(ws, top, col, group.extras.get(key), ctx)
             _vmerge(ws, top, col, n)
             for rr in range(top, top + n):
                 _style(ws, rr, col, fill=None if applicable else _FILL_INAPPLICABLE)
         for row_model in group.rows:
             ws.cell(row=r, column=cpt_col, value=row_model.label)
             for j, (key, _title) in enumerate(table.columns):
-                cell = row_model.cells.get(key)
                 col = first_val_col + j
-                applicable = cell is not None and ctx.applicable(cell.path)
-                if cell is not None and applicable:
-                    ws.cell(row=r, column=col, value=_str(ctx.values.get(cell.path)))
+                applicable = _grid_value(ws, r, col, row_model.cells.get(key), ctx)
                 _style(ws, r, col, fill=None if applicable else _FILL_INAPPLICABLE)
             r += 1
         # Border/style pass over the band's static cells (extras were styled —
@@ -303,8 +316,12 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
     return r - row
 
 
-def render_form_sheet(ws: Worksheet, doc: FormSchemaDoc, values: Mapping[str, Any]) -> None:
-    """Write the UI-replica form into *ws* (title, widths, sections)."""
+def render_form_sheet(
+    ws: Worksheet, doc: FormSchemaDoc, values: Mapping[str, Any]
+) -> dict[str, str]:
+    """Write the UI-replica form into *ws*; returns the {path: title} map from
+    the same single schema walk (build_workbook feeds it to the Provenance
+    sheet instead of re-walking the document)."""
     ws.title = "Form"
     ctx = _Ctx(doc, values)
     sections = doc.sections
@@ -350,4 +367,5 @@ def render_form_sheet(ws: Worksheet, doc: FormSchemaDoc, values: Mapping[str, An
 
     widths = {1: 30, 2: 22, 3: 14, 4: 30, 5: 22, 6: 3, 7: 30, 8: 22}
     for idx, w in widths.items():
-        ws.column_dimensions[chr(ord("A") + idx - 1)].width = w
+        ws.column_dimensions[get_column_letter(idx)].width = w
+    return ctx.titles
