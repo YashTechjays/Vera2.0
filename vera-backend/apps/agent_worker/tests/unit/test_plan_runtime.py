@@ -59,7 +59,7 @@ def _plan() -> CallPlan:
                 prompt="Only when in network.",
                 applicable_when=Comparison(field="sections.a.in_network", op="eq", value="Yes"),
             ),
-            PlanTask(task_key="last_task", title="Last", prompt="Finish up."),
+            PlanTask(task_key="last_task", title="Last", intro="Next up.", prompt="Finish up."),
         ],
     )
 
@@ -89,6 +89,8 @@ def _tool(agent: Agent, name: str) -> FunctionTool:
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
     # A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards.
     mock_session.userdata = TakeoverState()
+    # on_enter awaits the intro's playout before leading into the task.
+    mock_session.say.return_value.wait_for_playout = AsyncMock()
     return patch.object(type(agent), "session", new=property(lambda self: mock_session))
 
 
@@ -113,6 +115,13 @@ class TestConstruction:
         # the Cartesia TTS markup guide is appended (compiled prompts carry no
         # <spell> guidance, so plan-only must add it here)
         assert "<spell>" in instructions
+
+    def test_scope_discipline_appended_to_every_agent(self) -> None:
+        # The off-script guardrail must reach every plan agent (and wrap-up), so the
+        # LLM never invents questions outside the compiled task list.
+        controller, _ = _controller()
+        for agent in [*controller.agents, controller.wrap_up_agent]:
+            assert "only the questions listed" in agent.instructions.lower()
 
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")
@@ -162,6 +171,16 @@ class TestHandoff:
         mock_session.say.assert_called_once_with("Moving on.")
 
     @pytest.mark.asyncio
+    async def test_no_outro_no_exit_speech(self) -> None:
+        # Outro absent → nothing spoken on exit (symmetric to the no-intro entry case).
+        controller, _ = _controller()
+        agent = controller.agents[2]  # last_task has no outro
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await _tool(agent, "task_complete")()
+        mock_session.say.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_inapplicable_task_is_skipped(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[0]
@@ -203,6 +222,9 @@ class TestOnEnter:
             await agent.on_enter()
             await controller.drain_cursor_writes()
         mock_session.say.assert_called_once_with("Hello rep.")
+        # The call's opening turn belongs to the rep: greet, then wait for them to
+        # answer — never greet and fire a question in the same breath.
+        mock_session.generate_reply.assert_not_called()
         assert state.cursor_writes == [(ROOM, "intro_task")]
 
     @pytest.mark.asyncio
@@ -214,16 +236,82 @@ class TestOnEnter:
             await agent.on_enter()
             await controller.drain_cursor_writes()
         mock_session.say.assert_called_once_with("Custom greeting.")
+        # Same as any opener: greeting only, then the rep's turn.
+        mock_session.generate_reply.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_intro_no_speech(self) -> None:
+    async def test_opening_turn_without_intro_is_silent(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[1]  # gated_task has no intro
         mock_session = MagicMock()
         with _session_patch(agent, mock_session):
             await agent.on_enter()
             await controller.drain_cursor_writes()
+        # No intro on the opening turn → nothing at all; the rep speaks first.
         mock_session.say.assert_not_called()
+        mock_session.generate_reply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transition_with_intro_leads_into_the_task(self) -> None:
+        controller, _ = _controller()
+        opener, agent = controller.agents[0], controller.agents[2]
+        with _session_patch(opener, MagicMock()):
+            await opener.on_enter()  # consumes the call's opening turn
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        mock_session.say.assert_called_once_with("Next up.")
+        # Mid-call swap: the intro alone would leave the rep waiting.
+        mock_session.generate_reply.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_transition_without_intro_still_leads(self) -> None:
+        # A task with no intro is exactly where dead air is most likely, so the lead
+        # is gated on the transition — not on the intro being present.
+        controller, _ = _controller()
+        opener, agent = controller.agents[0], controller.agents[1]
+        with _session_patch(opener, MagicMock()):
+            await opener.on_enter()
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        mock_session.say.assert_not_called()
+        mock_session.generate_reply.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_intro_is_spoken_before_the_lead(self) -> None:
+        # The lead must never be queued on top of in-flight TTS, or the intro gets
+        # cut off — assert the playout was awaited first.
+        controller, _ = _controller()
+        opener, agent = controller.agents[0], controller.agents[2]
+        with _session_patch(opener, MagicMock()):
+            await opener.on_enter()
+        order: list[str] = []
+        mock_session = MagicMock()
+        mock_session.generate_reply.side_effect = lambda **_: order.append("generate_reply")
+        with _session_patch(agent, mock_session):
+            mock_session.say.return_value.wait_for_playout = AsyncMock(
+                side_effect=lambda: order.append("playout")
+            )
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        assert order == ["playout", "generate_reply"]
+
+    @pytest.mark.asyncio
+    async def test_on_enter_under_takeover_is_silent(self) -> None:
+        # A task swap landing mid-takeover must not speak — the intro is disruptive
+        # enough, an LLM-generated question more so.
+        controller, _ = _controller()
+        agent = controller.agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            mock_session.userdata.engaged = True
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        mock_session.say.assert_not_called()
+        mock_session.generate_reply.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cursor_write_failure_never_blocks_speech(self) -> None:
