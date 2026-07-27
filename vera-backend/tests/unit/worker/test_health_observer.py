@@ -174,3 +174,17 @@ async def test_aclose_cancels_inflight_analysis() -> None:
             break
     await obs.aclose()  # must return promptly, not hang on the in-flight call
     assert stream.health == [] and bus.events == []
+
+
+@pytest.mark.asyncio
+async def test_analysis_tags_the_llm_call_span(otel_spans: Any) -> None:
+    llm, stream, bus = _FakeLLM(_OK_REPLY), _FakeCallStream(), _FakeBus()
+    obs, _ = _observer(llm, stream, bus)
+    await _feed(obs, ("agent", "Question?"), ("user", "Yes."))
+    await _settle()
+    await _feed(obs, ("agent", "Another?"), ("user", "Yes it's covered."))
+    await _settle()
+    span = next(
+        s for s in otel_spans.get_finished_spans() if s.name == "vera.health_observer.llm_call"
+    )
+    assert span.attributes["vera.llm.purpose"] == "health_observer"

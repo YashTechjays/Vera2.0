@@ -462,6 +462,19 @@ class TestResilientExtractor:
                 _plan().tasks[0], "anything"
             )
 
+    @pytest.mark.asyncio
+    async def test_extract_tags_the_llm_call_span(self, otel_spans: Any) -> None:
+        reply = '[{"field_path": "sections.a.x", "value": "Yes", "confidence": 90}]'
+        llm = FakeCompletionLLM(reply)
+        await ResilientAnswerExtractor(llm).extract(_plan().tasks[0], "Representative: yes")
+        span = next(
+            s
+            for s in otel_spans.get_finished_spans()
+            if s.name == "vera.observer.extraction_llm_call"
+        )
+        assert span.attributes["vera.llm.purpose"] == "observer_extraction"
+        assert span.attributes["vera.task.key"] == "t1"
+
 
 class TestParsing:
     def test_parses_plain_json_array(self) -> None:

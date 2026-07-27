@@ -21,6 +21,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from opentelemetry import trace
+
 from agent_worker.intervention import takeover_engaged
 from vera_core.call_health import HEALTH_SYSTEM_PROMPT, HealthTranscript, parse_assessment
 from vera_core.call_stream import CallStreamService
@@ -30,6 +32,7 @@ from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.transcript import ROLE_AGENT, ROLE_USER, TurnRole, TurnSource, source_for_role
 
 logger = logging.getLogger("agent_worker")
+tracer = trace.get_tracer(__name__)
 
 
 class _HealthLLM(Protocol):
@@ -130,7 +133,11 @@ class CallHealthObserver:
         user_message = self._transcript.render_user_message()
         turn_count = self._transcript.turn_count
         try:
-            reply = await self._llm.complete(system=HEALTH_SYSTEM_PROMPT, user=user_message)
+            with tracer.start_as_current_span(
+                "vera.health_observer.llm_call",
+                attributes={"vera.llm.purpose": "health_observer"},
+            ):
+                reply = await self._llm.complete(system=HEALTH_SYSTEM_PROMPT, user=user_message)
         except Exception as exc:  # prompt/reply are PHI — type name only
             logger.warning("health analysis for %s skipped (%s)", self._room, type(exc).__name__)
             return
