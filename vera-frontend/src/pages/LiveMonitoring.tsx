@@ -148,7 +148,7 @@ function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
 }
 
 export function LiveMonitoring() {
-  const { openFormById } = useIbv()
+  const { openFormById, openLoadedForm, formId: loadedFormId } = useIbv()
   const canPublish = usePermission("calls:publish")
   const location = useLocation()
   const navigate = useNavigate()
@@ -445,7 +445,11 @@ export function LiveMonitoring() {
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
         onExpand={() => {
-          if (selected) openFormById(selected.form_id)
+          if (!selected) return
+          // The live modal already loaded this form inline — expanding it must not
+          // refetch, or every live answer applied so far is reset.
+          if (selected.form_id === loadedFormId) openLoadedForm()
+          else openFormById(selected.form_id)
         }}
       />
     </div>

@@ -247,7 +247,7 @@ class CallStreamService:
         """Publish one Observer-extracted field answer (spec: rides the same
         /calls/{id}/events SSE — no new pipe per event type). `value` is PHI: it lives
         only in-boundary on this CMEK-protected stream and reaches the browser inside the
-        already-authorized SSE session — never log it. """
+        already-authorized SSE session — never log it."""
         await self._store.publish(
             room_name,
             CallStreamEvent(

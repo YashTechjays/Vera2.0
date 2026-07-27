@@ -451,6 +451,10 @@ async def stream_call_events(
             for row in rows
         ]
         snapshot_ts = _epoch_ms(call.ended_at) or int(time.time() * 1000)
+        # One snapshot, so every frame carries the SAME completion_pct — the form's value
+        # as of this read, not a per-answer running total (these rows have no ordering to
+        # reconstruct one from). `dispute` is deliberately absent, not null: a replay must
+        # leave the disputes the REST form load already populated alone.
         db_events.extend(
             (
                 f"db-answer-{seq}",

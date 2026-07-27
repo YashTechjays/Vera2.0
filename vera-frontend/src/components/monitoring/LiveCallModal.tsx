@@ -64,7 +64,7 @@ export function LiveCallModal({
   onExpand: () => void
 }) {
   const canIntervene = usePermission("calls:intervene")
-  const { applyLiveAnswer, loadFormById } = useIbv()
+  const { applyLiveAnswer, loadFormById, formId: loadedFormId, dirty } = useIbv()
   const [mode, setMode] = useState<LiveCallMode>("listen")
   const [roomStatus, setRoomStatus] = useState<RoomStatus | null>(null)
   const [ending, setEnding] = useState(false)
@@ -97,9 +97,16 @@ export function LiveCallModal({
 
   // Load the call's form into the inline form (data only — not the full-screen modal)
   // so its fields render and live AI answers land on an already-seeded form.
+  //
+  // loadFormById resets the app-wide IBV state, and this is an EFFECT — no user click
+  // behind it. So it must not fire when the form is already loaded (reopening this modal
+  // would refetch and drop every live answer applied so far) or when the supervisor has
+  // unsaved edits (reopening would silently discard them).
   useEffect(() => {
-    if (open && call?.formId) loadFormById(call.formId)
-  }, [open, call?.formId, loadFormById])
+    if (!open || !call?.formId) return
+    if (call.formId === loadedFormId || dirty) return
+    loadFormById(call.formId)
+  }, [open, call?.formId, loadedFormId, dirty, loadFormById])
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
@@ -388,7 +395,7 @@ export function LiveCallModal({
                     onTextChange={setTranscript}
                     onHealth={setLiveHealth}
                     onFieldAnswer={(a) => {
-                      applyLiveAnswer(a.fieldPath, a.value, a.dispute)
+                      if (call.formId) applyLiveAnswer(call.formId, a.fieldPath, a.value, a.dispute)
                       if (a.completionPct !== null) setLiveCompletion(a.completionPct)
                     }}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}

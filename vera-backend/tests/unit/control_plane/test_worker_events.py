@@ -1004,21 +1004,24 @@ async def test_answer_recorded_writes_recomputes_and_audits(
     ]
 
 
-@pytest.mark.asyncio
-async def test_answer_recorded_publishes_null_dispute_when_matching_baseline(
+def _wire_answer_relay(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An AI answer that matches the intake/human baseline is not disputed — the SSE frame
-    carries dispute=None so a live surface clears any earlier dispute for the field."""
+    *,
+    baseline: Any = None,
+    call_status: str = CallStatus.ACTIVE.value,
+) -> tuple[_Wired, str, _FakeRedis, _FakeSession]:
+    """A consumer wired for the answer-relay tests: a live Call + PatientForm + schema
+    version, with the write/recompute/baseline collaborators stubbed so only the relay
+    behavior is under test. `baseline` is what `baseline_value` resolves to."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
-    room = room_name_for_call(tenant_id, call_id)
     form = _form_row(tenant_id, form_id)
-    version = SchemaVersion(id=form.schema_version_id, schema_json={"dsl_version": "2.1"})
     session = _FakeSession(
-        call=_call_row(tenant_id, call_id, form_id), form=form, schema_version=version
+        call=_call_row(tenant_id, call_id, form_id, current_status=call_status),
+        form=form,
+        schema_version=SchemaVersion(id=form.schema_version_id, schema_json={"dsl_version": "2.1"}),
     )
-    redis, livekit = _FakeRedis(), _FakeLiveKit()
-    wired = _consumer(monkeypatch, redis, livekit, session=session)
+    redis = _FakeRedis()
+    wired = _consumer(monkeypatch, redis, _FakeLiveKit(), session=session)
 
     async def _wrote(sess: Any, **kwargs: Any) -> bool:
         return True
@@ -1026,17 +1029,67 @@ async def test_answer_recorded_publishes_null_dispute_when_matching_baseline(
     async def _recompute(sess: Any, f: Any, schema_json: Any) -> None:
         return None
 
-    async def _same_baseline(sess: Any, fid: Any, path: str) -> Any:
-        return {"value": "Yes"}  # equals the AI value → not disputed
+    async def _baseline(sess: Any, fid: Any, path: str) -> Any:
+        return baseline
 
     monkeypatch.setattr(worker_events, "record_answer", _wrote)
     monkeypatch.setattr(worker_events, "recompute_form_projection", _recompute)
-    monkeypatch.setattr(worker_events, "baseline_value", _same_baseline)
+    monkeypatch.setattr(worker_events, "baseline_value", _baseline)
+    return wired, room_name_for_call(tenant_id, call_id), redis, session
 
+
+async def _process_answer(wired: _Wired, room: str) -> None:
     event = CallAnswerRecordedEvent(room_name=room, field_path="sections.a.x", value="Yes", ts=1)
     await wired.consumer._process("1-0", {"event": event.model_dump_json()})
 
+
+@pytest.mark.asyncio
+async def test_answer_recorded_publishes_null_dispute_when_matching_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An AI answer that matches the intake/human baseline is not disputed — the SSE frame
+    carries dispute=None so a live surface clears any earlier dispute for the field."""
+    wired, room, _, _ = _wire_answer_relay(monkeypatch, baseline={"value": "Yes"})
+
+    await _process_answer(wired, room)
+
     assert wired.call_stream.field_answers[0]["dispute"] is None
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_skips_publish_for_terminal_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redelivery reclaimed after closeout still persists, but must NOT publish: the
+    stream was deleted by finalize_transcript, and an XADD would recreate it — flipping
+    stream_call_events off its DB-replay branch onto an endless tail of a dead call."""
+    wired, room, redis, _ = _wire_answer_relay(monkeypatch, call_status=CallStatus.COMPLETED.value)
+
+    await _process_answer(wired, room)
+
+    assert wired.call_stream.field_answers == []
+    assert wired.audit.records != []  # still persisted + audited — only the relay is dropped
+    assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_does_not_publish_when_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The relay must not run until the transaction commits, or a failed commit leaves the
+    supervisor looking at a value and completion_pct that were never persisted."""
+    wired, room, redis, session = _wire_answer_relay(monkeypatch)
+
+    class _FailingCommitCtx(_FakeSessionCtx):
+        async def __aexit__(self, *exc: object) -> bool:
+            raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(worker_events, "tenant_session", lambda sm, tid: _FailingCommitCtx(session))
+
+    await _process_answer(wired, room)
+
+    assert wired.call_stream.field_answers == []
+    assert redis.acked == []  # _process leaves the failed entry unacked for reclaim
 
 
 @pytest.mark.asyncio

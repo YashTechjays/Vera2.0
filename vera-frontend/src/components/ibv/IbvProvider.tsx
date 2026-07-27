@@ -55,8 +55,11 @@ type IbvContextValue = {
    *  has edited this session so an agent fill never clobbers a manual correction.
    *  `dispute` is tri-state: `undefined` leaves the disputes map untouched, `null`
    *  clears any dispute for the field, an object sets it (rendered like a REST one).
-   *  No-op when no form is open. */
+   *  `expectedFormId` is the form the SSE stream belongs to — a mismatch (or no open
+   *  form) is a no-op, so a stale stream can never write one patient's value into
+   *  another's form. */
   applyLiveAnswer: (
+    expectedFormId: string,
     path: string,
     value: string | number | boolean | null,
     dispute?: LiveDispute | null,
@@ -106,8 +109,11 @@ type IbvContextValue = {
   formId: string | null
   /** Returns the provenance record for a field path, or null if absent. */
   provenanceFor: (path: string) => FieldProvenance | null
-  /** Open a real patient form by id, loaded from the API (opens the full-screen modal). */
+  /** Open a real patient form by id, loaded (always refetched) from the API. */
   openFormById: (formId: string) => void
+  /** Open the modal over the form already loaded — no refetch, no state reset. For a
+   *  surface rendering the form inline that wants to expand what it's showing. */
+  openLoadedForm: () => void
   /** Load a form's data by id WITHOUT opening the full-screen modal — for surfaces
    *  (Live Monitoring) that render the form inline and apply live answers. */
   loadFormById: (formId: string) => void
@@ -151,13 +157,12 @@ function toDisplayValue(raw: unknown, format: string | undefined): string {
  * declared date_format on the way in — see isoToDateFormat. */
 function adaptDetail(
   detail: PatientFormDetail,
-  schema: FormSchema
+  dateFormats: Map<string, string>
 ): {
   values: FormValues
   disputes: DisputeMap
   provenance: Record<string, FieldProvenance>
 } {
-  const dateFormats = dateFormatsOf(schema)
   const toInput = (raw: unknown, path: string): string =>
     toDisplayValue(raw, dateFormats.get(path))
   const values: FormValues = {}
@@ -222,7 +227,9 @@ export function IbvProvider({
     [schema, values],
   )
 
-  // The date-format map for live answers (which arrive as ISO) — same source as adaptDetail.
+  // Date-leaf path → declared date_format. Derived from `schema` (never stored) so it
+  // can't drift from it, and so the `initialSchema` mock path gets one too. Read by the
+  // live-answer path, whose values arrive as ISO just like the loaded ones.
   const dateFormats = useMemo(
     () => (schema ? dateFormatsOf(schema) : new Map<string, string>()),
     [schema],
@@ -296,7 +303,14 @@ export function IbvProvider({
             loadSchema(detail.schema_version_id),
             listInsuranceProviders().catch(() => [] as ProviderOption[]),
           ])
-          const { values: v, disputes: d, provenance: prov } = adaptDetail(detail, loaded)
+          // `loaded`, not the dateFormats memo — that reads `schema`, which is set below.
+          const { values: v, disputes: d, provenance: prov } = adaptDetail(
+            detail,
+            dateFormatsOf(loaded),
+          )
+          // seed() replaces `values` wholesale, so a live answer that landed during this
+          // fetch is dropped. Self-healing — the SSE replays from "0" on connect and the
+          // value is already persisted — so the field is at worst stale until reload.
           seed(v, d, detail.patient_name)
           setSchema(loaded)
           setStatus(detail.status)
@@ -316,7 +330,10 @@ export function IbvProvider({
     [seed],
   )
 
-  // Load the form AND open the full-screen form modal (the "expand" action).
+  // Load the form AND open the full-screen form modal. Always refetches: this is an
+  // explicit user action, and reopening a form someone else has since edited must show
+  // their changes. A surface that already has the form loaded inline wants
+  // `openLoadedForm` instead.
   const openFormById = useCallback(
     (id: string) => {
       setModalOpen(true)
@@ -324,6 +341,11 @@ export function IbvProvider({
     },
     [loadFormById],
   )
+
+  // Expand a form this surface already has loaded inline (Live Monitoring) — opens the
+  // modal over the current state without refetching, so live answers already applied
+  // survive the expand.
+  const openLoadedForm = useCallback(() => setModalOpen(true), [])
 
   const closeForm = useCallback(() => {
     setModalOpen(false)
@@ -338,9 +360,16 @@ export function IbvProvider({
   }, [])
 
   const applyLiveAnswer = useCallback(
-    (path: string, raw: string | number | boolean | null, dispute?: LiveDispute | null) => {
-      // Only into an open form, and never over a field the supervisor is editing.
-      if (!formId || editedPathsRef.current.has(path)) return
+    (
+      expectedFormId: string,
+      path: string,
+      raw: string | number | boolean | null,
+      dispute?: LiveDispute | null,
+    ) => {
+      // Only into the form this stream belongs to, and never over a field the
+      // supervisor is editing. formId outlives closeForm(), so the id check is what
+      // keeps a stale stream from writing into whatever form is loaded now.
+      if (!formId || formId !== expectedFormId || editedPathsRef.current.has(path)) return
       const format = dateFormats.get(path)
       const display = toDisplayValue(raw, format)
       // Not a supervisor edit: update the value only, never touch dirty/saveState.
@@ -493,7 +522,7 @@ export function IbvProvider({
         dispute_fields,
         reasked_fields: [],
       })
-      const { values: v, disputes: d, provenance: prov } = adaptDetail(refreshed, schema)
+      const { values: v, disputes: d, provenance: prov } = adaptDetail(refreshed, dateFormats)
       seed(v, d, refreshed.patient_name)
       setStatus(refreshed.status)
       setStatusError(null) // resolving disputes clears any "resolve first" warning
@@ -504,7 +533,18 @@ export function IbvProvider({
       setError(err instanceof ApiError ? err.message : "Could not save changes.")
       setSaveState("idle")
     }
-  }, [mode, formId, schema, values, originalValues, disputes, flags, seed, clearedRequired])
+  }, [
+    mode,
+    formId,
+    schema,
+    dateFormats,
+    values,
+    originalValues,
+    disputes,
+    flags,
+    seed,
+    clearedRequired,
+  ])
 
   const provenanceFor = useCallback(
     (path: string) => provenance[path] ?? null,
@@ -546,6 +586,7 @@ export function IbvProvider({
     formId,
     provenanceFor,
     openFormById,
+    openLoadedForm,
     loadFormById,
     closeForm,
   }

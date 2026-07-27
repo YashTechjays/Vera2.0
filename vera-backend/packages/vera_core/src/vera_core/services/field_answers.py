@@ -42,21 +42,31 @@ async def current_values_by_path(session: AsyncSession, form_id: UUID) -> dict[s
     }
 
 
+#: What makes up the dispute baseline `B` — what a human put there, as opposed to what the
+#: AI heard on the call. Both baseline queries read these: `baseline_value` below for one
+#: path, and `_baseline_query` (whole form, `DISTINCT ON`) behind the detail view. Two
+#: definitions would let a live dispute and a REST one disagree about the same field.
+BASELINE_SOURCES = (AnswerSource.INTAKE.value, AnswerSource.HUMAN.value)
+
+#: `created_at` is the transaction time, so same-transaction rows tie; `id DESC` (UUIDv7)
+#: breaks it deterministically.
+BASELINE_ORDER = (FieldAnswer.created_at.desc(), FieldAnswer.id.desc())
+
+
 async def baseline_value(session: AsyncSession, form_id: UUID, field_path: str) -> Any | None:
-    """The dispute baseline for one field: the most-recent intake/human stored value
+    """The dispute baseline for ONE field: the most-recent intake/human stored value
     (`{"value": ...}`), or None if the field has no human/intake answer. Filters on
     `source` only (NOT `is_current`), so it still resolves after an `ai_call` answer
-    supersedes it — mirroring the detail view's baseline query so a live dispute matches
-    the REST one."""
+    supersedes it."""
     return (
         await session.execute(
             select(FieldAnswer.value)
             .where(
                 FieldAnswer.form_id == form_id,
                 FieldAnswer.field_path == field_path,
-                FieldAnswer.source.in_([AnswerSource.INTAKE.value, AnswerSource.HUMAN.value]),
+                FieldAnswer.source.in_(BASELINE_SOURCES),
             )
-            .order_by(FieldAnswer.created_at.desc(), FieldAnswer.id.desc())
+            .order_by(*BASELINE_ORDER)
             .limit(1)
         )
     ).scalar_one_or_none()
