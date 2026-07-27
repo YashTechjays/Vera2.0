@@ -6,11 +6,22 @@ including this file's own on a second invocation. This repo's test suite runs
 `apps/agent_worker/tests` and `tests/` in one pytest session (`pyproject.toml` testpaths) whose
 `conftest.py` files don't share fixtures, so both trees call `install_test_tracer_provider()`
 from their own conftest; the module-level guard below makes that safe and gives both the SAME
-exporter regardless of which tree's fixture runs first. Callers MUST invoke this from a
-session-scoped autouse fixture (see conftest.py in both trees) rather than a plain per-test
-fixture — otherwise an unrelated test that calls the real `configure_observability()` (e.g.
-`tests/unit/observability/test_otel_auth.py`) could win the one-shot race first if it happens
-to run before ours, silently discarding every span this exporter would otherwise have captured.
+exporter regardless of which tree calls first.
+
+**Callers MUST invoke this from a `pytest_configure(config)` HOOK, not from a fixture** — see
+the `conftest.py` in both trees. pytest runs `pytest_configure` for every loaded conftest at
+collection-start, before ANY test or fixture executes, so the installer is guaranteed to reach
+`set_tracer_provider()` first and win the one-shot race.
+
+A fixture — *including* a session-scoped autouse one — is NOT sufficient, and this is not
+theoretical: it was the bug fixed in commit `e0fd7a0c`. A session-scoped autouse fixture is
+still lazy; it only sets up when its first consuming test in that tree is about to run. Any
+test that boots the real app before then (an integration test whose app-boot fixture calls
+`configure_observability()`, which installs the REAL Langfuse/OTLP provider when
+`VERA_LANGFUSE_HOST` is set) reaches `set_tracer_provider()` first and permanently wins.
+Our later call is then silently ignored, this exporter captures nothing, and every span
+assertion in both trees fails with an empty span list — a failure mode that depends on
+collection order and on the ambient environment, so it reproduces in CI and not locally.
 """
 
 from opentelemetry import trace
