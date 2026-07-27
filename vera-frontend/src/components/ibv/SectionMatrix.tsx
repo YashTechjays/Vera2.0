@@ -4,10 +4,11 @@ import { FieldRenderer } from "./FieldRenderer"
 import {
   ApplyButton,
   SwapButton,
-  DisputeBadge,
+  DisputeTooltipBody,
 } from "./DisputeControls"
-import { badgeValue, confidenceHighlightClass } from "@/lib/ibv/disputes"
+import { confidenceHighlightClass } from "@/lib/ibv/disputes"
 import { applicabilityReason, isApplicable } from "@/lib/ibv/schema"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { SectionTable, TableCell } from "@/lib/ibv/schema"
 
 const TH = "border border-ibv-input-border bg-ibv-label-bg px-2 py-0.5 font-bold"
@@ -63,19 +64,19 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           borderless
         />
         {showDispute && (
-          <div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5">
-            <SwapButton swapped={flags.swapped} onClick={() => swapDispute(path)} />
-            <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
-          </div>
-        )}
-        {showDispute && (
-          <div className="px-1 pb-0.5">
-            <DisputeBadge
-              value={badgeValue(dispute!, flags)}
-              dispute={dispute!}
-              label={flags.swapped ? "Captured" : "Prior"}
-            />
-          </div>
+          // No inline badge here — matrix cells are too narrow for value + prior
+          // side by side; the tooltip carries prior/captured/evidence instead.
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5">
+                <SwapButton swapped={flags.swapped} onClick={() => swapDispute(path)} />
+                <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>
+              <DisputeTooltipBody dispute={dispute!} />
+            </TooltipContent>
+          </Tooltip>
         )}
       </div>
     </td>
