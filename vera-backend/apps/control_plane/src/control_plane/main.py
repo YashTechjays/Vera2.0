@@ -320,6 +320,7 @@ def create_app(
                 block_ms=settings.post_call_block_ms,
                 reclaim_idle_ms=settings.post_call_reclaim_idle_ms,
                 review_floor=settings.post_call_review_floor,
+                auto_retry_enabled=settings.form_auto_retry_enabled,
             )
             post_call_task = asyncio.create_task(post_call_consumer.run())
             post_call_task.add_done_callback(_log_task_exit("post-call consumer"))

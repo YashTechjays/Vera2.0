@@ -73,6 +73,7 @@ class PostCallConsumer:
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
         review_floor: int = 60,
+        auto_retry_enabled: bool = False,
         consumer_name: str | None = None,
     ) -> None:
         self._redis = redis
@@ -90,6 +91,7 @@ class PostCallConsumer:
             recording=recording,
             plan_service=plan_service,
             floor=review_floor,
+            auto_retry_enabled=auto_retry_enabled,
         )
 
     async def run(self) -> None:
