@@ -5,7 +5,7 @@ Exercises the three key behaviours against a real Docker-Postgres instance
   1. happy path: writes FieldAnswer + FieldEvaluation rows, form → EXCEPTION_REVIEW
      (all-satisfied still parks for human sign-off — the pipeline never auto-COMPLETEs).
   2. token-valued field: skips the write, routes form → EXCEPTION_REVIEW.
-  3. redelivery: second call is a no-op (idempotency guard).
+  3. redelivery: second call is a no-op (status guard: the first eval left AI_PROCESSING).
 
 Seeding pattern mirrors tests/integration/control_plane/test_call_queue.py:
   - superuser engine from `database_url` (bypasses RLS — needed for Tenant insert)
@@ -355,6 +355,63 @@ def _observer_answer(
         evidence_seq=evidence_seq,
         is_current=True,
     )
+
+
+async def test_verdict_path_mismatch_is_logged_not_silent(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A judge verdict whose field_path matches no judged answer must be
+    WARN-logged (paths only — never values), and the matching verdicts must
+    still be written. Silent drops made 'judge never ran' and 'judge output
+    mismatched' indistinguishable (2026-07-27 E2E)."""
+    ctx = seeded_ai_processing_form
+    turns = [TranscriptTurn(0, "user", "yes in network")]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(ctx.collection_path, "in-network", 92, 0)],
+        verdicts=[
+            JudgeVerdict("sections.coverage.bogus_path", True, 90, "??"),
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    with caplog.at_level("WARNING", logger="vera_core.services.post_call_eval"):
+        await evaluate_call(
+            ctx.session,
+            deps,
+            tenant_id=ctx.tenant_id,
+            form_id=ctx.form_id,
+            call_id=ctx.call_id,
+            turns=turns,
+        )
+
+    warnings = [r for r in caplog.records if "judge verdict" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "sections.coverage.bogus_path" in warnings[0].getMessage()
+
+    # The matching verdict was still written.
+    answer = (
+        await ctx.session.execute(
+            select(FieldAnswer).where(
+                FieldAnswer.form_id == ctx.form_id,
+                FieldAnswer.field_path == ctx.collection_path,
+                FieldAnswer.is_current.is_(True),
+            )
+        )
+    ).scalar_one()
+    evals = (
+        (
+            await ctx.session.execute(
+                select(FieldEvaluation).where(FieldEvaluation.answer_id == answer.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(evals) == 1
 
 
 async def test_observer_answers_are_judged_and_missing_paths_topped_up(

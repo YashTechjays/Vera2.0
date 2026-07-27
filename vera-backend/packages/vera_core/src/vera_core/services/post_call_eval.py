@@ -42,7 +42,7 @@ from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
 
-logger = logging.getLogger("vera.post_call_eval")
+logger = logging.getLogger("vera_core.services.post_call_eval")
 
 # Legacy de-identification token shape ("[[SSN_1]]"). The tokenization wall was
 # removed 2026-07-13 (phi_codec deleted; transcripts are plaintext in-boundary),
@@ -341,6 +341,21 @@ async def evaluate_call(
                 reason=ReviewReason.LLM_ERROR,
             )
         verdicts = {v.field_path: v for v in raw_verdicts}
+        judged_paths = {ef.field_path for ef, _ in to_judge}
+        unmatched_verdicts = sorted(set(verdicts) - judged_paths)
+        unjudged_answers = sorted(judged_paths - set(verdicts))
+        if unmatched_verdicts or unjudged_answers:
+            # Paths only — schema constants, never answer values (PHI rule).
+            logger.warning(
+                "post_call_eval: judge verdict/path mismatch for form %s — "
+                "%d verdict(s) match no judged answer (%s); "
+                "%d judged answer(s) got no verdict (%s)",
+                form_id,
+                len(unmatched_verdicts),
+                unmatched_verdicts,
+                len(unjudged_answers),
+                unjudged_answers,
+            )
         for ef, answer in to_judge:
             v = verdicts.get(ef.field_path)
             if v is not None:
