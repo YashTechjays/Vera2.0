@@ -61,7 +61,14 @@ _SCHEMA_JSON: dict[str, object] = {
                     "role": "ask",
                     "required": True,
                     "prompt": {"ask": "Is the patient in-network?"},
-                }
+                },
+                "notes": {
+                    "type": "text",
+                    "title": "Notes",
+                    "role": "ask",
+                    "required": False,
+                    "prompt": {"ask": "Any additional notes?"},
+                },
             },
         }
     },
@@ -76,6 +83,9 @@ _SCHEMA_JSON: dict[str, object] = {
 
 # The single collection path the minimal schema exposes.
 _COLLECTION_PATH = "sections.coverage.in_network"
+
+# Second (optional) collection path — used by the judge+top-up tests.
+_NOTES_PATH = "sections.coverage.notes"
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +337,136 @@ async def seeded_ai_processing_form_maxed(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def _observer_answer(
+    ctx: _SeedCtx, path: str, value: str, *, confidence: int = 90, evidence_seq: int = 1
+) -> FieldAnswer:
+    """A FieldAnswer as worker_events._handle_call_answer_recorded writes it:
+    ai_call source with the live call's id, current."""
+    return FieldAnswer(
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        field_path=path,
+        value={"value": value},
+        source=AnswerSource.AI_CALL.value,
+        confidence=confidence,
+        evidence_seq=evidence_seq,
+        is_current=True,
+    )
+
+
+async def test_observer_answers_are_judged_and_missing_paths_topped_up(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Regression for the Observer/eval conflict (2026-07-27 E2E): live ai_call
+    answers must NOT no-op the eval. The eval judges them, extracts only the
+    still-missing paths, judges those too, and finishes with a real reason."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    await ctx.session.flush()
+
+    turns = [
+        TranscriptTurn(0, "agent", "are they in network"),
+        TranscriptTurn(1, "user", "yes in network, no notes"),
+    ]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(_NOTES_PATH, "no notes", 80, 1)],
+        verdicts=[
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+            JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    # Top-up extraction asked ONLY for the missing path.
+    assert llm.extract_calls == [[_NOTES_PATH]]
+    # One combined judge pass over observer answer + topped-up answer.
+    assert len(llm.judge_calls) == 1
+    assert {ef.field_path for ef in llm.judge_calls[0]} == {ctx.collection_path, _NOTES_PATH}
+
+    # Not a no-op: the form transitioned with a real reason (required field
+    # satisfied by the observer answer → ready_for_review).
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "ready_for_review"
+
+    # FieldEvaluation rows exist for BOTH answers.
+    answers = (
+        (
+            await ctx.session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == ctx.form_id,
+                    FieldAnswer.source == AnswerSource.AI_CALL.value,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {a.field_path for a in answers} == {ctx.collection_path, _NOTES_PATH}
+    for a in answers:
+        evals = (
+            (
+                await ctx.session.execute(
+                    select(FieldEvaluation).where(FieldEvaluation.answer_id == a.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(evals) == 1, f"no FieldEvaluation for {a.field_path}"
+
+
+async def test_nothing_missing_skips_extraction_and_judges_observer_answers(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """When the Observer answered every collection path, the eval must not
+    spend an extract call — judge-only."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    ctx.session.add(_observer_answer(ctx, _NOTES_PATH, "none", evidence_seq=2))
+    await ctx.session.flush()
+
+    turns = [TranscriptTurn(0, "user", "yes in network, no notes")]
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+            JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert llm.extract_calls == []  # no top-up needed
+    assert len(llm.judge_calls) == 1
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "ready_for_review"
 
 
 async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(

@@ -1,6 +1,11 @@
-"""Post-call re-read: extract collected fields from the (de-identified) transcript,
-persist them, judge each, and decide the form's terminal status. Pure helpers here;
-the DB orchestration lives in `evaluate_call` below.
+"""Post-call eval: judge the Observer's live ai_call answers for the finished
+call, extract only the still-missing collection paths from the transcript
+(top-up), judge those too, and decide the form's terminal status. Pure helpers
+here; Redelivery safety comes from the status guard + single-transaction
+atomicity (a committed eval already left AI_PROCESSING; a rolled-back one left
+no partial state) — there is deliberately no answer-existence guard: the
+Observer writes ai_call answers DURING the call, so their presence proves
+nothing about whether the eval ran.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from vera_core.forms.review import (
     form_completion_pct,
     retryable_required_paths,
     unsatisfied_required_paths,
+    unwrap_value,
 )
 from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -141,20 +147,6 @@ async def evaluate_call(
         )
         return EvalOutcome(status=FormStatus(form.status), answers_written=0)
 
-    # (1) Idempotency guard — return early if this call was already processed.
-    already = (
-        await session.execute(
-            select(FieldAnswer.id)
-            .where(
-                FieldAnswer.call_id == call_id,
-                FieldAnswer.source == AnswerSource.AI_CALL.value,
-            )
-            .limit(1)
-        )
-    ).first()
-    if already is not None:
-        return EvalOutcome(status=FormStatus(form.status), answers_written=0)
-
     tenant: Tenant = (
         await session.execute(select(Tenant).where(Tenant.id == tenant_id))
     ).scalar_one()
@@ -245,23 +237,63 @@ async def evaluate_call(
         )
     paths = doc.collection_paths()
 
-    # (4-5) Extract + persist (skip token-valued fields). Keep each written row so
-    # its ID is in hand for the judge pass — the PK is client-minted (uuid7), so
-    # `.id` is populated at construction and needs no re-query after flush.
-    try:
-        extracted = await deps.llm.extract(field_paths=paths, turns=turns)
-    except Exception as exc:
-        logger.error(
-            "post_call_eval: LLM extract failed for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
-            form_id,
-            type(exc).__name__,
-            exc,
+    # (4a) The form's current answers, fetched once — used both to isolate the
+    # Observer's live answers for THIS call (worker_events persists ai_call
+    # answers during the call since 4f0b8a9; they ARE the extraction for
+    # whatever the call covered, so the eval judges them instead of
+    # re-extracting) and to compute what is still missing (4b), avoiding a
+    # second read of the same rows.
+    current_rows = (
+        (
+            await session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == form_id,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
         )
-        return await _finish(
-            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.LLM_ERROR
+        .scalars()
+        .all()
+    )
+    observer_pairs: list[tuple[ExtractedField, FieldAnswer]] = [
+        (
+            ExtractedField(
+                field_path=row.field_path,
+                value=str(unwrap_value(row.value)),
+                confidence=row.confidence or 0,
+                evidence_seq=row.evidence_seq or 0,
+            ),
+            row,
         )
+        for row in current_rows
+        if row.call_id == call_id and row.source == AnswerSource.AI_CALL.value
+    ]
+
+    # (4b) Top-up extraction: only paths with no current answer AT ALL — an
+    # intake / human / prior-attempt answer is not missing, and the LLM must
+    # never supersede one (extracted paths are filtered back to this set).
+    answered = {row.field_path for row in current_rows}
+    missing = [p for p in paths if p not in answered]
+    extracted: list[ExtractedField] = []
+    if missing:
+        try:
+            extracted = await deps.llm.extract(field_paths=missing, turns=turns)
+        except Exception as exc:
+            logger.error(
+                "post_call_eval: LLM extract failed for form %s — routing to "
+                "EXCEPTION_REVIEW (%s: %s)",
+                form_id,
+                type(exc).__name__,
+                exc,
+            )
+            return await _finish(
+                FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.LLM_ERROR
+            )
     token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
-    clean = [ef for ef in extracted if not has_phi_token(ef.value)]
+    # Keep only what was asked for: a hallucinated path must not supersede an
+    # intake/human answer (top-up semantics).
+    requested = set(missing)
+    clean = [ef for ef in extracted if not has_phi_token(ef.value) and ef.field_path in requested]
     # The LLM may emit the same field_path twice; keep the last occurrence. Two
     # inserts for one path would violate the fa_current_uq partial unique index
     # (the batch demote runs before the inserts) and poison-loop the job.
@@ -287,37 +319,41 @@ async def evaluate_call(
         kept.append((ef, answer))
     await session.flush()
 
-    # (6) Judge + write FieldEvaluation. The verdicts feed the satisfaction check
-    # below via load_field_status — nothing is decided per-field here.
-    try:
-        raw_verdicts = await deps.llm.judge(extracted=[ef for ef, _ in kept], turns=turns)
-    except Exception as exc:
-        logger.error(
-            "post_call_eval: LLM judge failed for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
-            form_id,
-            type(exc).__name__,
-            exc,
-        )
-        return await _finish(
-            FormStatus.EXCEPTION_REVIEW,
-            written=len(kept),
-            reviewed=[ef.field_path for ef, _ in kept],
-            reason=ReviewReason.LLM_ERROR,
-        )
-    verdicts = {v.field_path: v for v in raw_verdicts}
-    for ef, answer in kept:
-        v = verdicts.get(ef.field_path)
-        if v is not None:
-            session.add(
-                FieldEvaluation(
-                    tenant_id=tenant_id,
-                    answer_id=answer.id,
-                    confidence=v.confidence,
-                    evidence=v.evidence,
-                    supported=v.supported,
-                )
+    # (6) One judge pass over the Observer's answers + the topped-up ones. The
+    # verdicts feed the satisfaction check below via load_field_status —
+    # nothing is decided per-field here.
+    to_judge: list[tuple[ExtractedField, FieldAnswer]] = observer_pairs + kept
+    if to_judge:
+        try:
+            raw_verdicts = await deps.llm.judge(extracted=[ef for ef, _ in to_judge], turns=turns)
+        except Exception as exc:
+            logger.error(
+                "post_call_eval: LLM judge failed for form %s — routing to "
+                "EXCEPTION_REVIEW (%s: %s)",
+                form_id,
+                type(exc).__name__,
+                exc,
             )
-    await session.flush()
+            return await _finish(
+                FormStatus.EXCEPTION_REVIEW,
+                written=len(kept),
+                reviewed=[ef.field_path for ef, _ in to_judge],
+                reason=ReviewReason.LLM_ERROR,
+            )
+        verdicts = {v.field_path: v for v in raw_verdicts}
+        for ef, answer in to_judge:
+            v = verdicts.get(ef.field_path)
+            if v is not None:
+                session.add(
+                    FieldEvaluation(
+                        tenant_id=tenant_id,
+                        answer_id=answer.id,
+                        confidence=v.confidence,
+                        evidence=v.evidence,
+                        supported=v.supported,
+                    )
+                )
+        await session.flush()
 
     # (7) Recompute completion % from the form's current answers.
     current_values = await current_values_by_path(session, form_id)

@@ -46,7 +46,9 @@ class LLMClient(Protocol):
 
 
 class FakeLLMClient:
-    """Deterministic test double."""
+    """Deterministic test double. Records each call's arguments so tests can
+    assert WHAT was extracted/judged (e.g. top-up extraction only receives the
+    missing paths)."""
 
     def __init__(
         self,
@@ -58,10 +60,13 @@ class FakeLLMClient:
         self._extracted = extracted
         self._verdicts = verdicts
         self._raise_on_extract = raise_on_extract
+        self.extract_calls: list[list[str]] = []
+        self.judge_calls: list[list[ExtractedField]] = []
 
     async def extract(
         self, *, field_paths: list[str], turns: list[TranscriptTurn]
     ) -> list[ExtractedField]:
+        self.extract_calls.append(list(field_paths))
         if self._raise_on_extract is not None:
             raise self._raise_on_extract
         return list(self._extracted)
@@ -69,4 +74,5 @@ class FakeLLMClient:
     async def judge(
         self, *, extracted: list[ExtractedField], turns: list[TranscriptTurn]
     ) -> list[JudgeVerdict]:
+        self.judge_calls.append(list(extracted))
         return list(self._verdicts)
