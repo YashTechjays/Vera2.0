@@ -727,6 +727,54 @@ class TestCallPlanStaging:
         assert any("Jane Doe" in intro for intro in fused_names)
         assert any("John Roe" in intro for intro in fused_names)
 
+    async def test_stage_call_span_carries_correlation_and_counts(
+        self, _stub_credentials: dict[str, dict[str, Any] | None], otel_spans: Any
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        # ivr_navigation_enabled=False (overriding _form()'s default True): this test asserts
+        # vera.dispatch.ivr_enabled is False, so the form must actually opt out.
+        form = _form(tenant.id, schema_version_id=sv.id, ivr_navigation_enabled=False)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        room_name = livekit.created[0]
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.dispatch.stage_call"
+        )
+        assert span.attributes["vera.room"] == room_name
+        assert span.attributes["vera.tenant_id"] == str(tenant.id)
+        assert "vera.dispatch.task_count" in span.attributes
+        assert span.attributes["vera.dispatch.ivr_enabled"] is False
+
+    async def test_compile_and_fuse_spans_are_schema_and_form_scoped(
+        self, _stub_credentials: dict[str, dict[str, Any] | None], otel_spans: Any
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(tenant=tenant, candidates=[form], schema_version=sv)
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        # next() raises StopIteration if the span was never emitted — presence is asserted
+        # by these lookups, so no separate "span name exists" assertion is needed.
+        spans = otel_spans.get_finished_spans()
+        compile_span = next(s for s in spans if s.name == "vera.dispatch.compile_plan")
+        fuse_span = next(s for s in spans if s.name == "vera.dispatch.fuse_plan")
+        assert compile_span.attributes["vera.dispatch.schema_version"] == str(sv.id)
+        assert fuse_span.attributes["vera.dispatch.form_id"] == str(form.id)
+        assert "vera.room" not in compile_span.attributes  # room_name doesn't exist yet here
+        assert "vera.room" not in fuse_span.attributes
+
 
 async def _noop_sleep(seconds: float) -> None:
     return None
