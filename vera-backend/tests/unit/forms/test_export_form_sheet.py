@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any, cast
 
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.catalog import SCHEMAS
+from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.export_form_sheet import (
     LEFT_TOP,
     RAIL,
@@ -16,6 +18,9 @@ from vera_core.forms.export_form_sheet import (
     render_form_sheet,
     section_table,
 )
+
+# Same depth as test_schema_dsl.py's FORM_SCHEMA_DIR: tests/unit/forms/<file> -> vera-backend.
+FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 
 # A minimal v2 doc with one table section exercising BOTH group shapes:
 #  - ivf: subgroup rows (cpt_1, cpt_2) + group-level extras (cycle_limit, notes)
@@ -378,6 +383,20 @@ def test_inapplicable_grid_extras_cell_grayed_with_empty_value() -> None:
     # Applicable oi extras cell: value lands, no gray fill.
     assert ws.cell(row=oi_row, column=6).value == "4"
     assert not str(ws.cell(row=oi_row, column=6).fill.start_color.rgb).endswith("F5F5F5")
+
+
+def test_ibv_standard_renders_and_placement_lists_exist() -> None:
+    """Drift/smoke guard against the real, shipped ibv_standard schema: the
+    placement lists (LEFT_TOP/RIGHT_TOP/RAIL) must still reference sections
+    that exist in the committed artifact, and rendering it end-to-end must
+    not raise."""
+    filename, _build = SCHEMAS["infertility_treatment"]
+    text = (FORM_SCHEMA_DIR / filename).read_text()
+    doc = load_document(text)
+    for key in (*LEFT_TOP, *RIGHT_TOP, *RAIL):
+        assert key in doc.sections, f"placement list references missing section {key}"
+    wb = Workbook()
+    render_form_sheet(cast(Worksheet, wb.active), doc, {})
 
 
 def test_placement_constants_reference_fe() -> None:

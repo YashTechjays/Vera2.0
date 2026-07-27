@@ -13,8 +13,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.worksheet import Worksheet
 
-from vera_core.forms.conditions import is_applicable, is_v2, leaf_gates
+from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.export_form_sheet import render_form_sheet
 from vera_core.services.call_provenance import CallAttempt, FieldProvenance
 
 _BOLD = Font(bold=True)
@@ -47,24 +48,10 @@ def build_workbook(
 
     if is_v2(schema_json):
         doc = FormSchemaDoc.model_validate(schema_json)
-        shared = doc.shared_conditions or {}
-        # One leaf_gates walk feeds both the Form rows and the label map (avoids a
-        # second traversal — and a second model_validate inside field_labels).
-        titles: dict[str, str] = {}
-        current_section: str | None = None
-        for path, leaf, gates in leaf_gates(doc):
-            titles[path] = leaf.title
-            if not is_applicable(gates, values, shared):
-                continue
-            # v2 paths are root-anchored: sections.<key>.<...>
-            section_key = path.split(".")[1]
-            if section_key != current_section:
-                current_section = section_key
-                _bold_header(form_ws, doc.sections[section_key].title)
-            value = values.get(path)
-            if value is None and leaf.default is not None:
-                value = leaf.default  # DSL §4.4: defaults count as filled on export
-            form_ws.append([leaf.title, _str(value)])
+        render_form_sheet(form_ws, doc, values)
+        # titles must keep feeding the Provenance sheet exactly as before — only
+        # the Form-sheet writing moved to export_form_sheet.render_form_sheet.
+        titles: dict[str, str] = {path: leaf.title for path, leaf in doc.leaf_items()}
     else:
         titles = {p: p for p in sorted_paths}
         for path in sorted_paths:
