@@ -21,6 +21,7 @@ from livekit.agents import (
     get_job_context,
     llm,
 )
+from opentelemetry import trace
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.handoff import carry_chat_ctx
@@ -222,11 +223,21 @@ class IvrNavigatorAgent(Agent):
         """Hand the call to the verification agent. Call this ONLY when a live human
         representative has clearly greeted you — a personal name paired with an open request
         for your info (e.g. "Hi, this is Martha, who am I speaking with?")."""
-        logger.info("handoff: IVR navigator -> verification agent")
         verifier = self._make_verification_agent()
         # Carry the IVR conversation (incl. the member ID already spoken) into the
         # plan agent so it doesn't re-ask what the navigator already established.
         await carry_chat_ctx(self, verifier)
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": IVR_NAVIGATOR_ID,
+                    "vera.handoff.to_task": verifier.id,
+                    "vera.handoff.reason": "ivr_live_human",
+                }
+            )
+        except Exception as exc:
+            logger.warning("IVR handoff span tagging failed (%s)", type(exc).__name__)
+        logger.info("handoff: %s -> %s (reason=ivr_live_human)", IVR_NAVIGATOR_ID, verifier.id)
         return verifier
 
     @function_tool
