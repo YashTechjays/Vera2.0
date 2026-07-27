@@ -109,7 +109,9 @@ spans, without introducing a new instrumentation framework or changing runtime b
 | `vera.handoff.rule_key` | schema rule key (e.g. `contradiction_dob_mismatch`) | rule-engine evaluation, whenever a directive fires |
 | `vera.rule_engine.fired` | bool | every rule-engine evaluation, fired or not |
 | `vera.llm.purpose` | `observer_extraction` \| `health_observer` | the 2 background LLM call sites |
-| `vera.dispatch.schema_version`, `vera.dispatch.task_count`, `vera.dispatch.ivr_enabled` | schema version / int / bool | control-plane dispatch spans |
+| `vera.dispatch.schema_version` | schema_version id | `vera.dispatch.compile_plan` |
+| `vera.dispatch.form_id` | form id | `vera.dispatch.fuse_plan` |
+| `vera.dispatch.task_count`, `vera.dispatch.ivr_enabled` | int / bool | `vera.dispatch.stage_call` (alongside `call_trace_attributes(room_name)`) |
 
 `WrapUpAgent` gets `id=WRAP_UP_TASK_KEY` (reusing the `"@wrap_up"` sentinel already defined at
 `plan_runtime.py:45`, so the value is identical whether read from the Redis cursor or from OTel
@@ -175,14 +177,30 @@ its own span — `vera.observer.extraction_llm_call` around `observer.py:105`,
 accordingly. LiveKit's generic `llm_fallback_adapter`/`llm_request` spans continue to nest
 underneath as children (unchanged); the outer Vera span is what Langfuse groups/filters on.
 
-### 5.7 Control-plane dispatch spans (`queue_dispatcher.py:575,632`)
+### 5.7 Control-plane dispatch spans (`queue_dispatcher.py`)
 
-Wrap `compile_call_plan` and `PrefillFuser.fuse` in `vera.dispatch.compile_plan` /
-`vera.dispatch.fuse_plan` spans, and call `call_trace_attributes(room_name)` on the outer dispatch
-span (control plane never calls this today — only the agent worker does). Because both processes
-derive the same `langfuse.session.id` from the identical room name, this lands the dispatch-time
-spans in the *same* Langfuse trace as the call that follows, giving end-to-end visibility from
-schema compile through hangup.
+Corrected during plan prep: `_resolve_call_plan` (compile at `queue_dispatcher.py:632` inside
+`_resolve_plan_template`, fuse at `queue_dispatcher.py:575`) runs at line 333, in the dispatch
+loop, **before** the `Call` row exists — `room_name = room_name_for_call(...)` isn't computed
+until line 428, later in the *same* loop iteration. `call_trace_attributes(room_name)` cannot be
+attached at the compile/fuse call sites; `room_name` doesn't exist yet there. Two separate spans,
+not one:
+
+- `vera.dispatch.compile_plan` around `compile_call_plan` (`queue_dispatcher.py:632`) —
+  schema-scoped and memoized per pass (one compile may serve several forms/calls), so it's tagged
+  with `vera.dispatch.schema_version` (`str(schema_version.id)`) only, never a room/call
+  attribute — attaching one would misattribute a shared, cross-call compile to whichever call
+  happened to trigger it first.
+- `vera.dispatch.fuse_plan` around `fuser.fuse(...)` (`queue_dispatcher.py:575`) — per-form, tagged
+  with `vera.dispatch.form_id` (`str(form.id)`) — also pre-room-name, so also not call-correlated.
+- **New: `vera.dispatch.stage_call`**, wrapping `queue_dispatcher.py:428-450` (from
+  `room_name = room_name_for_call(...)` through the `create_call_room` call) — this is where
+  `room_name`, `tenant_id`, and the plan are all in scope together, so this is the span that
+  calls `call_trace_attributes(room_name)` and carries `vera.dispatch.ivr_enabled`
+  (`bool(metadata.get("enable_ivr_navigation"))`) and `vera.dispatch.task_count`
+  (`len(plan.tasks)`). Because both processes derive the same `langfuse.session.id` from the
+  identical room name, *this* span — not the compile/fuse ones — is what lands in the same
+  Langfuse trace as the call that follows.
 
 ## 6. PHI guardrail for new instrumentation (hard requirement)
 
