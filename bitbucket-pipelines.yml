@@ -46,9 +46,11 @@ definitions:
                   *) echo "BLOCKED: main accepts only dev or hotfix/* (until stg exists)"; exit 1 ;;
                 esac ;;
               dev)
+                # Allow the conventional-commit branch prefixes (feat/fix/chore, `/` or
+                # `-` separator) plus the legacy feature/*|bugfix/* names.
                 case "$SRC" in
-                  feature/*|bugfix/*) echo "OK" ;;
-                  *) echo "BLOCKED: dev accepts only feature/* or bugfix/*"; exit 1 ;;
+                  feature/*|bugfix/*|feat/*|feat-*|fix/*|fix-*|chore/*|chore-*) echo "OK" ;;
+                  *) echo "BLOCKED: dev accepts only feature/*, bugfix/*, feat/*, feat-*, fix/*, fix-*, chore/*, chore-*"; exit 1 ;;
                 esac ;;
               # TODO when qa/stg branches exist, add: qa<-dev, stg<-qa, main<-stg|hotfix/*
               *)
