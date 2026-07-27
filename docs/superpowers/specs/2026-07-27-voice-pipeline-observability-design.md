@@ -24,7 +24,7 @@ spans, without introducing a new instrumentation framework or changing runtime b
 - Distinguish "task finished normally" from "a flow rule forced a jump" as an explicit, queryable
   attribute — including which rule fired.
 - Distinguish which subsystem issued a given LLM call (observer extraction / health observer /
-  coaching / conversation turn) so Langfuse spans stop colliding under one generic name.
+  conversation turn) so Langfuse spans stop colliding under one generic name.
 - Extend the same visibility to control-plane dispatch-time decisions (schema compile, prefill
   fuse, IVR toggle), correlated into the same Langfuse trace as the call that follows.
 
@@ -72,10 +72,16 @@ spans, without introducing a new instrumentation framework or changing runtime b
 - `vera_core/observability/otel.py` has zero span-opening code of its own anywhere in the repo —
   the only two OTel touch-points (`main.py:342,426-428`) mutate whatever span happens to be
   "current" (LiveKit's ambient `job_entrypoint` span), never open one.
-- Three distinct LLM call sites — observer extraction, health-observer analysis, and coaching —
-  all funnel through LiveKit's generic `llm_fallback_adapter`/`llm_request`/`llm_request_run`
-  span names with no distinguishing attribute, so in Langfuse they render identically regardless
-  of which subsystem issued them (confirmed via screenshot during brainstorming).
+- Two distinct background LLM call sites — `ResilientAnswerExtractor.extract()`
+  (`observer.py:102-105`) and `CallHealthObserver._analyze_once()` (`health_observer.py:133`) —
+  both call `vera_core.llm.ResilientLLM.complete()`, which wraps `FallbackAdapter` internally
+  (`llm.py:163`); `FallbackAdapter`'s own span name is the literal string `"llm_fallback_adapter"`
+  (`fallback_adapter.py:120`), so both call sites funnel through the identical generic SDK span
+  name with no distinguishing attribute — in Langfuse they render identically regardless of which
+  subsystem issued them (confirmed via screenshot during brainstorming). `coaching.py`'s
+  `CoachingListener` was initially assumed to be a third such site but is not: it only injects a
+  system-role chat message (`coaching.py:107-117`) for the *next* conversation turn to pick up —
+  it makes no LLM call of its own, so there is nothing to tag there.
 - Control plane has no span/attribute usage beyond installing the OTel exporter
   (`control_plane/main.py:327`); dispatch-time decisions that shape the runtime agent graph
   (schema compile, prefill fuse, IVR toggle) are invisible in Langfuse today, and control plane
@@ -102,7 +108,7 @@ spans, without introducing a new instrumentation framework or changing runtime b
 | `vera.handoff.directive_type` | `Terminate` \| `SkipToTask` \| `ReAsk` | rule-engine evaluation (see §5.5 — `ReAsk` carries no `from_task`/`to_task`, it isn't a handoff) |
 | `vera.handoff.rule_key` | schema rule key (e.g. `contradiction_dob_mismatch`) | rule-engine evaluation, whenever a directive fires |
 | `vera.rule_engine.fired` | bool | every rule-engine evaluation, fired or not |
-| `vera.llm.purpose` | `observer_extraction` \| `health_observer` \| `coaching` | the 3 background LLM call sites |
+| `vera.llm.purpose` | `observer_extraction` \| `health_observer` | the 2 background LLM call sites |
 | `vera.dispatch.schema_version`, `vera.dispatch.task_count`, `vera.dispatch.ivr_enabled` | schema version / int / bool | control-plane dispatch spans |
 
 `WrapUpAgent` gets `id=WRAP_UP_TASK_KEY` (reusing the `"@wrap_up"` sentinel already defined at
@@ -161,13 +167,13 @@ schema-authored free-text (the contradiction's authored explanation, `dsl.py:426
 per-patient data, but prose rather than the IDs/enums/counts this design otherwise sticks to.
 Never attach them to a span or log line; see §6.
 
-### 5.6 LLM-call purpose tagging (observer extraction / health_observer / coaching)
+### 5.6 LLM-call purpose tagging (observer extraction / health_observer)
 
-Each is Vera's own explicit LLM call site (not SDK-internal). Wrap each in its own span —
-`vera.observer.extraction_llm_call`, `vera.health_observer.llm_call`, `vera.coaching.llm_call` —
-with `vera.llm.purpose` set accordingly. LiveKit's generic `llm_fallback_adapter`/`llm_request`
-spans continue to nest underneath as children; the outer Vera span is what Langfuse groups/filters
-on.
+Each is Vera's own explicit call to `ResilientLLM.complete()` (not SDK-internal). Wrap each in
+its own span — `vera.observer.extraction_llm_call` around `observer.py:105`,
+`vera.health_observer.llm_call` around `health_observer.py:133` — with `vera.llm.purpose` set
+accordingly. LiveKit's generic `llm_fallback_adapter`/`llm_request` spans continue to nest
+underneath as children (unchanged); the outer Vera span is what Langfuse groups/filters on.
 
 ### 5.7 Control-plane dispatch spans (`queue_dispatcher.py:575,632`)
 
