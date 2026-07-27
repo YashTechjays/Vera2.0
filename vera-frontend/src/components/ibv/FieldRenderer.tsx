@@ -173,7 +173,9 @@ export function FieldRenderer({
     )
   }
 
-  const suggestions = suggestionsOf(field)
+  // Suggestions only while empty: a datalist puts a dropdown arrow on the input,
+  // making a filled field read as an unselected dropdown (VR2-91).
+  const suggestions = value ? [] : suggestionsOf(field)
   const listId = suggestions.length > 0 ? `${path}--suggestions` : undefined
   const inputMode = inputModeFor(field.type)
 
