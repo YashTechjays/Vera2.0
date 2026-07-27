@@ -22,6 +22,7 @@ from vera_core.events.worker import CallAnswerRecordedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, FlowRule
 from vera_core.llm import LLMUnavailableError
+from vera_core.observability.otel_testing import assert_no_phi_values
 
 ROOM = "call--t--c"
 
@@ -372,8 +373,9 @@ class TestRuleIntervention:
         assert span.attributes["vera.handoff.directive_type"] == "Terminate"
         assert span.attributes["vera.handoff.rule_key"] == "stop"
         # PHI guardrail (design §6/§8): the answer value that fired this rule ("No") must
-        # never appear in any attribute on this span — only the enum/key metadata above.
-        assert "No" not in span.attributes.values()
+        # never reach the span — only the enum/key metadata above. Substring check, so an
+        # attribute that merely EMBEDS the value (e.g. "answer: No") fails too.
+        assert_no_phi_values(span, "No")
 
     @pytest.mark.asyncio
     async def test_non_firing_evaluation_is_still_visible(self, otel_spans: Any) -> None:
@@ -390,6 +392,7 @@ class TestRuleIntervention:
         )
         assert span.attributes["vera.rule_engine.fired"] is False
         assert "vera.handoff.directive_type" not in span.attributes
+        assert_no_phi_values(span, "Yes")
 
 
 class TestCrashIsolation:
@@ -429,15 +432,15 @@ class TestCrashIsolation:
 class FakeCompletionLLM:
     """Stands in for vera_core.llm.ResilientLLM's `complete` surface."""
 
-    def __init__(self, reply: str = "[]", *, raises: bool = False) -> None:
+    def __init__(self, reply: str = "[]", *, error: Exception | None = None) -> None:
         self.reply = reply
-        self.raises = raises
+        self.error = error
         self.calls: list[tuple[str, str]] = []
 
     async def complete(self, *, system: str, user: str) -> str:
         self.calls.append((system, user))
-        if self.raises:
-            raise LLMUnavailableError
+        if self.error is not None:
+            raise self.error
         return self.reply
 
 
@@ -458,7 +461,7 @@ class TestResilientExtractor:
         # which would let the caller retire the window as extracted. The raise is what lets
         # TaskObserver re-arm and retry those turns (see test_failed_pass_is_retried_...).
         with pytest.raises(LLMUnavailableError):
-            await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
+            await ResilientAnswerExtractor(FakeCompletionLLM(error=LLMUnavailableError())).extract(
                 _plan().tasks[0], "anything"
             )
 
@@ -466,7 +469,9 @@ class TestResilientExtractor:
     async def test_extract_tags_the_llm_call_span(self, otel_spans: Any) -> None:
         reply = '[{"field_path": "sections.a.x", "value": "Yes", "confidence": 90}]'
         llm = FakeCompletionLLM(reply)
-        await ResilientAnswerExtractor(llm).extract(_plan().tasks[0], "Representative: yes")
+        await ResilientAnswerExtractor(llm).extract(
+            _plan().tasks[0], "Representative: yes, Jane Doe is covered."
+        )
         span = next(
             s
             for s in otel_spans.get_finished_spans()
@@ -474,23 +479,31 @@ class TestResilientExtractor:
         )
         assert span.attributes["vera.llm.purpose"] == "observer_extraction"
         assert span.attributes["vera.task.key"] == "t1"
+        # PHI guardrail (design §8): the transcript window handed to the chain is raw PHI —
+        # none of it may ride along on the span.
+        assert_no_phi_values(span, "Jane Doe")
 
     @pytest.mark.asyncio
     async def test_extract_llm_call_span_does_not_record_exceptions(self, otel_spans: Any) -> None:
-        # PHI guardrail: exceptions raised by LLM calls must not be recorded in spans.
-        # record_exception=False prevents OTel from capturing chained tracebacks that
-        # could leak provider error messages (PHI).
-        with pytest.raises(LLMUnavailableError):
-            await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
-                _plan().tasks[0], "anything"
-            )
+        # PHI guardrail: a provider error message can embed the prompt/transcript, so NOTHING
+        # derived from the exception may reach the span. OTel has two independent knobs and
+        # both must be off — record_exception=False drops the exception EVENT, and
+        # set_status_on_exception=False drops the status description, which OTel would
+        # otherwise fill with f"{type}: {exc}" (i.e. str(exc)) even with events disabled.
+        # A message-carrying exception is the case that matters: LLMUnavailableError is always
+        # raised bare (str() == ""), so it would pass this test even unguarded. `complete` is a
+        # Protocol, and an unexpected provider/SDK error escaping it can embed the request body.
+        llm = FakeCompletionLLM(error=RuntimeError("provider rejected prompt for Jane Doe"))
+        with pytest.raises(RuntimeError):
+            await ResilientAnswerExtractor(llm).extract(_plan().tasks[0], "anything")
         span = next(
             s
             for s in otel_spans.get_finished_spans()
             if s.name == "vera.observer.extraction_llm_call"
         )
-        # Verify no exception event was recorded on the span
-        assert not span.events
+        assert not span.events  # record_exception=False — no exception event
+        assert span.status.description is None  # set_status_on_exception=False — no str(exc)
+        assert_no_phi_values(span, "Jane Doe")
 
 
 class TestParsing:

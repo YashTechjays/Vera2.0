@@ -105,10 +105,17 @@ class ResilientAnswerExtractor:
     async def extract(self, task: PlanTask, transcript: str) -> list[ExtractedAnswer]:
         # A whole-chain outage PROPAGATES rather than returning [], which is indistinguishable
         # from "the rep answered nothing" and would retire those turns unextracted.
+        #
+        # BOTH kwargs are required to keep a raised exception off the span: OTel's
+        # Span.__exit__ has two independent knobs — record_exception=False drops the exception
+        # EVENT (message + traceback), and set_status_on_exception=False drops the status
+        # description, which is otherwise f"{type}: {exc}" and would still export str(exc).
+        # The transcript passed to the chain is PHI, so neither may carry it.
         with tracer.start_as_current_span(
             "vera.observer.extraction_llm_call",
             attributes={"vera.llm.purpose": "observer_extraction", "vera.task.key": task.task_key},
             record_exception=False,
+            set_status_on_exception=False,
         ):
             reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
         return _parse_extraction(reply)
@@ -424,7 +431,17 @@ class ObserverManager:
         # next pass (the CP consumer is idempotent under the redelivery).
         self._answers[answer.field_path] = answer.value
         self._controller.update_answers(self._answers)
-        with tracer.start_as_current_span("vera.rule_engine.evaluate") as span:
+        # Same two-knob guardrail as the LLM-call spans (record_exception drops the exception
+        # EVENT, set_status_on_exception drops the f"{type}: {exc}" status description): this
+        # span wraps `self._answers`, raw extracted field values. `evaluate` is pure string
+        # comparison and is documented not to raise, so this is defense-in-depth — but a
+        # PHI-carrying object is right there, so both knobs stay off, as on every Vera-owned
+        # span whose body touches PHI.
+        with tracer.start_as_current_span(
+            "vera.rule_engine.evaluate",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span:
             directive = self._rule_engine.evaluate(self._answers)
             try:
                 span.set_attribute("vera.rule_engine.fired", directive is not None)
