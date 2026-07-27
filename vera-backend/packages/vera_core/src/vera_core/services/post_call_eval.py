@@ -37,7 +37,6 @@ from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, ReviewR
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
-from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
@@ -370,8 +369,14 @@ async def evaluate_call(
                 )
         await session.flush()
 
-    # (7) Recompute completion % from the form's current answers.
-    current_values = await current_values_by_path(session, form_id)
+    # (7) Recompute completion % from the form's current answers — derived
+    # in-memory: the only current-row changes since the (4a) fetch are the
+    # top-up inserts in `kept` (their paths come from `missing`, so they are
+    # disjoint from `current_rows` and the batch demote touched no fetched row).
+    current_values: dict[str, object] = {
+        row.field_path: unwrap_value(row.value) for row in current_rows
+    }
+    current_values.update({ef.field_path: ef.value for ef, _ in kept})
     form.completion_pct = form_completion_pct(current_values, version.schema_json)
 
     # (8) Update call_form_snapshot.after_state (the before_state row was written
