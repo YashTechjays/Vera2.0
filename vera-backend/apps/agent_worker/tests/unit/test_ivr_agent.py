@@ -42,9 +42,7 @@ class TestHandoff:
         tracer = trace.get_tracer("test")
         mock_session = MagicMock()
         mock_session.interrupt = AsyncMock()
-        with _session_patch(navigator, mock_session), tracer.start_as_current_span(
-            "probe"
-        ):
+        with _session_patch(navigator, mock_session), tracer.start_as_current_span("probe"):
             handoff = await navigator.transfer_to_verification()
         assert handoff is verifier
         spans = [s for s in otel_spans.get_finished_spans() if s.name == "probe"]
