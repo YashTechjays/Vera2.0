@@ -34,8 +34,8 @@ spans, without introducing a new instrumentation framework or changing runtime b
   `eou_detection`, `user_turn`) that already attach raw transcript/chat-context text to Langfuse.
   This is a real gap (see `otel-spans-unredacted-pre-prod` — tracked separately) but is
   explicitly deferred: the app is pre-production and the team will add a PHI-redacting
-  `SpanProcessor` as its own follow-on piece of work. Nothing in this design widens that gap —
-  every new attribute added here is metadata (keys, enums, booleans, counts), never content.
+  `SpanProcessor` as its own follow-on piece of work. That gap is accepted as-is for now — but
+  this design must not widen it. See §6 for the hard guardrail on everything this design adds.
 - Fixing `transcript_publisher.py`'s silent drop of LiveKit's native `AgentHandoff` conversation
   item. Once every handoff is instrumented at its actual application call site (richer,
   business-meaningful attributes than the SDK's generic `Agent.id`), that event stops being
@@ -99,8 +99,8 @@ spans, without introducing a new instrumentation framework or changing runtime b
 | `vera.task.key`, `vera.task.index` | schema `task_key` / int | task entry |
 | `vera.handoff.from_task`, `vera.handoff.to_task` | task_key or `"@wrap_up"` / `"@ivr_navigator"` sentinel | all handoff sites |
 | `vera.handoff.reason` | `task_complete` \| `flow_rule` \| `ivr_live_human` | all handoff sites |
-| `vera.handoff.directive_type` | `Terminate` \| `SkipToTask` | rule-engine handoff only |
-| `vera.handoff.rule_key` | schema rule key | rule-engine handoff, `SkipToTask` only |
+| `vera.handoff.directive_type` | `Terminate` \| `SkipToTask` \| `ReAsk` | rule-engine evaluation (see §5.5 — `ReAsk` carries no `from_task`/`to_task`, it isn't a handoff) |
+| `vera.handoff.rule_key` | schema rule key (e.g. `contradiction_dob_mismatch`) | rule-engine evaluation, whenever a directive fires |
 | `vera.rule_engine.fired` | bool | every rule-engine evaluation, fired or not |
 | `vera.llm.purpose` | `observer_extraction` \| `health_observer` \| `coaching` | the 3 background LLM call sites |
 | `vera.dispatch.schema_version`, `vera.dispatch.task_count`, `vera.dispatch.ivr_enabled` | schema version / int / bool | control-plane dispatch spans |
@@ -145,10 +145,21 @@ so this handoff is queryable the same way as the other two.
 
 Runs from the Observer's background tail task with no ambient LiveKit span — Vera opens its own
 span here: `vera.rule_engine.evaluate`, wrapping the `self._rule_engine.evaluate(...)` call and
-(when it fires) the `apply_directive_now` call. Always sets `vera.rule_engine.fired`; when true,
-also sets `vera.handoff.from_task`, `to_task` (read off `target.id` after `_directive_target`
-resolves), `reason="flow_rule"`, `directive_type`, and `rule_key` (for a `SkipToTask`). This is
-also what makes a rule that *evaluates but doesn't fire* visible for the first time.
+(when it fires) the `apply_directive_now` call. Always sets `vera.rule_engine.fired` and, when a
+directive fires, `directive_type` (`Terminate`/`SkipToTask`/`ReAsk`) and `rule_key` — both are
+schema-authored structural identifiers (`^[a-z][a-z0-9_]*$`, same pattern as `task_key`), not
+per-patient values. This is also what makes a rule that *evaluates but doesn't fire* visible for
+the first time.
+
+For `Terminate`/`SkipToTask` only, also set `vera.handoff.from_task`/`to_task` (read off
+`target.id` after `_directive_target` resolves) and `reason="flow_rule"` — these are handoffs.
+`ReAsk` does **not** swap the agent (`plan_runtime.py:253-256`), so it gets no `from_task`/
+`to_task`/`reason`, only `directive_type="ReAsk"` + `rule_key`.
+
+**Explicitly excluded:** `Directive.reason`/`Directive.clarify` (`directives.py:26-30`) are
+schema-authored free-text (the contradiction's authored explanation, `dsl.py:426-433`) — not
+per-patient data, but prose rather than the IDs/enums/counts this design otherwise sticks to.
+Never attach them to a span or log line; see §6.
 
 ### 5.6 LLM-call purpose tagging (observer extraction / health_observer / coaching)
 
@@ -167,7 +178,30 @@ derive the same `langfuse.session.id` from the identical room name, this lands t
 spans in the *same* Langfuse trace as the call that follows, giving end-to-end visibility from
 schema compile through hangup.
 
-## 6. Error handling
+## 6. PHI guardrail for new instrumentation (hard requirement)
+
+The repo's existing rule is unconditional: never log, print, trace, or attach to a span
+plaintext PHI (`vera-backend/CLAUDE.md`, enforced by a PreToolUse hook). The pre-existing
+LiveKit SDK spans already violate it today (§ Non-goals) — that's accepted, tracked, and
+deferred, **not** a license to add more. Every attribute or span this design adds is one of:
+
+- a schema-authored structural identifier matching `^[a-z][a-z0-9_]*$` (`task_key`, `rule_key`)
+  — fixed at schema-authoring time, never a per-call/per-patient value
+- a closed enum (`vera.handoff.reason`, `vera.handoff.directive_type`, `vera.llm.purpose`)
+- a boolean or count (`vera.rule_engine.fired`, `vera.dispatch.task_count`)
+- an `Agent.id` (itself just a `task_key` or a fixed sentinel, per §4)
+
+**Never**, anywhere in this design's implementation: transcript text, extracted answer values
+(`ExtractedAnswer.value`, `self._answers`), DTMF digits (`press_keypad`'s `digits`), or
+`Directive.reason`/`clarify` free text (§5.5). The Vera-owned wrapping spans in §5.6 carry only
+`vera.llm.purpose` + task identity — never the chat context, prompt, or model output; that
+content only ever appears (already, unchanged by this design) on the SDK's own nested child
+spans.
+
+Any implementation-plan step that would attach a value not on the allow-list above needs to
+come back to this design for a decision, not be added ad hoc.
+
+## 7. Error handling
 
 Every attribute/span-setting call is wrapped so a tracing failure can never affect the call or
 the dispatch path — the same principle already used for the cursor write
@@ -176,15 +210,18 @@ the dispatch path — the same principle already used for the cursor write
 swallow `asyncio.CancelledError`; never placed before a `session.say`/`update_agent`/dispatch call
 in a way that could delay it.
 
-## 7. Testing
+## 8. Testing
 
 Assert against OTel's `InMemorySpanExporter` (a test-only `TracerProvider`) for span name +
 attribute values at each of the 7 points in §5 — a real regression test for "handoff reason is
 present and correct," not eyeballing Langfuse. These assertions slot into the existing tests that
 already exercise `plan_runtime.py`'s handoff paths (e.g. the takeover interlock test) rather than
-new test files.
+new test files. Include a negative assertion per §6: the recorded attribute set for each new
+span, diffed against a denylist of live per-call values (current `self._answers` values,
+`ExtractedAnswer.value`, transcript text, DTMF digits), must be disjoint — so a future edit that
+accidentally attaches one of them fails a test, not just a review.
 
-## 8. Open follow-ons (not part of this design's implementation plan)
+## 9. Open follow-ons (not part of this design's implementation plan)
 
 - PHI-redacting `SpanProcessor` for the pre-existing SDK spans (tracked in memory as
   `otel-spans-unredacted-pre-prod`) — schedule before any real production cutover.
