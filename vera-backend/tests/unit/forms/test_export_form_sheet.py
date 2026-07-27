@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
+
+from openpyxl import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
 from vera_core.forms.dsl import FormSchemaDoc
-from vera_core.forms.export_form_sheet import section_table
+from vera_core.forms.export_form_sheet import (
+    LEFT_TOP,
+    RAIL,
+    RIGHT_TOP,
+    render_form_sheet,
+    section_table,
+)
 
 # A minimal v2 doc with one table section exercising BOTH group shapes:
 #  - ivf: subgroup rows (cpt_1, cpt_2) + group-level extras (cycle_limit, notes)
@@ -171,3 +180,176 @@ def test_section_table_model_matches_frontend_rules() -> None:
     assert oi.rows[0].label == "58323"
     assert set(oi.rows[0].cells) == {"covered", "copay"}
     assert set(oi.extras) == {"cycle_limit"}
+
+
+# Extends the table fixture with placed sections: two LEFT_TOP, one RIGHT_TOP
+# (context role → green), one RAIL (context), plus a trailing two-up pair.
+#
+# NOTE: two shapes were adapted from a first draft of this fixture:
+#  - `applicable_when` uses the DSL's actual `Comparison` field name (`field`),
+#    not `path` — see dsl.py's `Comparison` model.
+#  - `tasks[].sections` lists only `collect`-role sections (patient_information,
+#    treatment, alpha, beta); the DSL validator rejects a `context` section
+#    (appointment_information, hospital_information) inside a task's section
+#    list ("only collect sections belong to tasks"). The gating INTENT — spouse
+#    row gated on patient_name == "married" — is unchanged.
+_PLACED_DOC: dict[str, Any] = {
+    **_TABLE_DOC,
+    "sections": {
+        "patient_information": {
+            "title": "Patient Information",
+            "role": "collect",
+            "fields": {
+                "patient_name": {
+                    "type": "text",
+                    "title": "Patient Name",
+                    "role": "ask",
+                    "required": True,
+                    "prompt": {"ask": "Name?"},
+                },
+                "spouse_name": {
+                    "type": "text",
+                    "title": "Spouse Name",
+                    "role": "ask",
+                    "applicable_when": {
+                        "field": "sections.patient_information.patient_name",
+                        "op": "eq",
+                        "value": "married",
+                    },
+                    "prompt": {"ask": "Spouse?"},
+                },
+            },
+        },
+        "appointment_information": {
+            "title": "Appointment Information",
+            "role": "context",
+            "fields": {
+                "appointment_date": {
+                    "type": "text",
+                    "title": "Appointment Date",
+                    "role": "context",
+                },
+            },
+        },
+        "hospital_information": {
+            "title": "Hospital Information",
+            "role": "context",
+            "fields": {
+                "hospital_name": {
+                    "type": "text",
+                    "title": "Hospital Name",
+                    "role": "context",
+                },
+            },
+        },
+        "treatment": _TABLE_DOC["sections"]["treatment"],
+        "alpha": {
+            "title": "Alpha",
+            "role": "collect",
+            "fields": {
+                "a1": {"type": "text", "title": "A One", "role": "ask", "prompt": {"ask": "?"}},
+            },
+        },
+        "beta": {
+            "title": "Beta",
+            "role": "collect",
+            "fields": {
+                "b1": {"type": "text", "title": "B One", "role": "ask", "prompt": {"ask": "?"}},
+            },
+        },
+    },
+    "system_fields": {"in_network": "sections.patient_information.patient_name"},
+    "rep_call_reference_number_field": "sections.patient_information.patient_name",
+    "tasks": [
+        {
+            "task_key": "main",
+            "title": "Main",
+            "sections": ["patient_information", "treatment", "alpha", "beta"],
+        }
+    ],
+}
+
+
+def _placed_doc() -> FormSchemaDoc:
+    from vera_core.forms.dsl import PromotedFields
+
+    raw = dict(_PLACED_DOC)
+    raw["promoted_fields"] = dict.fromkeys(
+        PromotedFields.model_fields, "sections.patient_information.patient_name"
+    )
+    return FormSchemaDoc.model_validate(raw)
+
+
+def _render(values: dict[str, Any]) -> Worksheet:
+    wb = Workbook()
+    ws = cast(Worksheet, wb.active)
+    render_form_sheet(ws, _placed_doc(), values)
+    return ws
+
+
+def test_top_band_geometry_and_values() -> None:
+    ws = _render({"sections.patient_information.patient_name": "Jane"})
+    # Left block anchored at A1; right at D1; rail at G1.
+    assert ws.cell(row=1, column=1).value == "Patient Information"
+    assert ws.cell(row=1, column=4).value == "Appointment Information"
+    assert ws.cell(row=1, column=7).value == "Hospital Information"
+    # Label + value adjacency, with the required marker.
+    assert ws.cell(row=2, column=1).value == "Patient Name *"
+    assert ws.cell(row=2, column=2).value == "Jane"
+
+
+def test_context_sections_get_green_title_fill() -> None:
+    ws = _render({})
+    ctx = ws.cell(row=1, column=4).fill.start_color.rgb  # context section
+    plain = ws.cell(row=1, column=1).fill.start_color.rgb  # collect section
+    assert ctx != plain
+    assert str(ctx).endswith("C6EFCE")
+
+
+def test_inapplicable_leaf_grayed_with_empty_value() -> None:
+    ws = _render({"sections.patient_information.spouse_name": "should-not-show"})
+    # patient_name != "married" → spouse row (row 3, left block) is gated off.
+    assert ws.cell(row=3, column=2).value in (None, "")
+    assert str(ws.cell(row=3, column=2).fill.start_color.rgb).endswith("F5F5F5")
+
+
+def test_grid_full_width_and_two_up_flow_below_band() -> None:
+    ws = _render({"sections.treatment.ivf.cpt_58970.copay": "30"})
+    # Find the grid title and header row.
+    titles = {ws.cell(row=r, column=1).value: r for r in range(1, ws.max_row + 1)}
+    grid_row = titles["Treatment"]
+    header = grid_row + 2  # +1 section-leaf row (tx_covered) sits between
+    assert ws.cell(row=header, column=1).value == "Service"
+    assert ws.cell(row=header, column=2).value == "ICD-10"
+    assert ws.cell(row=header, column=3).value == "CPT Code"
+    assert ws.cell(row=header, column=4).value == "Covered"
+    assert ws.cell(row=header, column=5).value == "Copay ($)"
+    assert ws.cell(row=header, column=6).value == "Cycle Limit"
+    assert ws.cell(row=header, column=7).value == "Additional Notes"
+    # IVF band: Service cell merged across its two CPT rows; copay value lands.
+    ivf_first = header + 1
+    merged = {str(rng) for rng in ws.merged_cells.ranges}
+    assert f"A{ivf_first}:A{ivf_first + 1}" in merged
+    assert ws.cell(row=ivf_first, column=1).value == "In Vitro Fertilization (IVF)"
+    assert ws.cell(row=ivf_first, column=3).value == "CPT 58970"
+    assert ws.cell(row=ivf_first, column=5).value == "30"
+    # Two-up run: alpha (left band) and beta (right band) share a row.
+    alpha_row = next(
+        r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=1).value == "Alpha"
+    )
+    assert ws.cell(row=alpha_row, column=4).value == "Beta"
+
+
+def test_placement_constants_reference_fe() -> None:
+    # Guard: the constants stay aligned with SchemaForm.tsx's lists.
+    assert LEFT_TOP == ["patient_information", "insurance_information"]
+    assert RIGHT_TOP == [
+        "appointment_information",
+        "verification_information",
+        "benefit_coverage",
+    ]
+    assert RAIL == [
+        "hospital_information",
+        "provider_reference_information",
+        "insurance_reference_information",
+    ]
