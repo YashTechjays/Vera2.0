@@ -72,6 +72,10 @@ class EvalDeps:
     recording: Any = None
     plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
+    # Mirrors settings.form_auto_retry_enabled — the eval never auto-redials a
+    # payer for a tenant that has auto-retry off (same gate the fallback
+    # resolver applies). Default False: safe when a caller forgets to wire it.
+    auto_retry_enabled: bool = False
 
 
 @dataclass
@@ -373,7 +377,16 @@ async def evaluate_call(
                 reviewed=unsatisfied,
                 reason=ReviewReason.USER_ENDED,
             )
-        return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
+        if deps.auto_retry_enabled:
+            return await _finish(
+                FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry"
+            )
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW,
+            written=len(kept),
+            reviewed=unsatisfied,
+            reason=ReviewReason.AUTO_RETRY_DISABLED,
+        )
     return await _finish(
         FormStatus.EXCEPTION_REVIEW,
         written=len(kept),

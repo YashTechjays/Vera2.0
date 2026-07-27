@@ -655,7 +655,7 @@ async def test_incomplete_with_retries_left_requeues(
     ctx = seeded_ai_processing_form
     turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -709,6 +709,35 @@ async def test_incomplete_retries_exhausted_goes_to_review(
     assert form.review_reason == "retries_exhausted"
 
 
+async def test_incomplete_retryable_with_auto_retry_disabled_goes_to_review(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Retryable required field + retries remaining, but the tenant auto-retry
+    flag is off (EvalDeps default) → no requeue; EXCEPTION_REVIEW with the
+    honest reason auto_retry_disabled."""
+    ctx = seeded_ai_processing_form
+    turns = [TranscriptTurn(0, "agent", "are they in network")]
+    # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)  # flag defaults off
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "auto_retry_disabled"
+    assert form.retry_count == 0  # the IN_QUEUE branch never fired
+
+
 async def test_incomplete_with_retries_left_requeues_clears_review_reason(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
@@ -718,7 +747,7 @@ async def test_incomplete_with_retries_left_requeues_clears_review_reason(
     ctx = seeded_ai_processing_form
     turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -754,7 +783,7 @@ async def test_user_canceled_call_never_requeues(
     # normally-ended call would route to IN_QUEUE here.
     turns = [TranscriptTurn(0, "user", "sorry, we got cut off")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
