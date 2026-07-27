@@ -11,6 +11,7 @@ export type LlmConfigState = {
   model: string | null
   extra_config: ThinkingOverride | null
   is_default: boolean
+  default_model: string
   created_at: string | null
   created_by_user_id: string | null
 }

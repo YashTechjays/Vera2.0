@@ -24,6 +24,7 @@ import {
   formatUpdatedAt,
   hasPendingChange,
   isGemini3Model,
+  isValidThinkingBudgetInput,
 } from "@/pages/llmConfig.helpers"
 import { useAppSelector } from "@/store/hooks"
 import { selectIsSuperAdmin } from "@/store/authSlice"
@@ -38,7 +39,7 @@ export function LlmConfig() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  function populateFrom(cfg: LlmConfigState) {
+  const populateFrom = useCallback((cfg: LlmConfigState) => {
     setCurrent(cfg)
     setInput(cfg.model ?? "")
     setThinkingBudgetInput(
@@ -51,43 +52,70 @@ export function LlmConfig() {
         ? (cfg.extra_config.thinking_level ?? "")
         : "",
     )
-  }
+  }, [])
+
+  // The two fetches are independent: a history-endpoint hiccup must not take down the
+  // model-editing UI (and vice versa), so each is handled on its own rather than via
+  // Promise.all — which rejects the whole load, and `current`, the moment either fails.
+  const applyLoadResults = useCallback(
+    (
+      cfgResult: PromiseSettledResult<LlmConfigState>,
+      histResult: PromiseSettledResult<LlmConfigState[]>,
+    ) => {
+      if (cfgResult.status === "fulfilled") {
+        populateFrom(cfgResult.value)
+      } else {
+        setError(
+          cfgResult.reason instanceof ApiError
+            ? cfgResult.reason.message
+            : "Could not load the LLM model config.",
+        )
+      }
+      if (histResult.status === "fulfilled") {
+        setHistory(histResult.value)
+      } else {
+        setHistory((prev) => prev ?? [])
+        if (cfgResult.status === "fulfilled") {
+          setError(
+            histResult.reason instanceof ApiError
+              ? histResult.reason.message
+              : "Could not load model change history.",
+          )
+        }
+      }
+    },
+    [populateFrom],
+  )
 
   // Refresh after a mutation.
   const load = useCallback(async () => {
     setError(null)
-    try {
-      const [cfg, hist] = await Promise.all([getLlmConfig(), getLlmConfigHistory()])
-      populateFrom(cfg)
-      setHistory(hist)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not load the LLM model config.")
-      setHistory((prev) => prev ?? [])
-    }
-  }, [])
+    const [cfgResult, histResult] = await Promise.allSettled([
+      getLlmConfig(),
+      getLlmConfigHistory(),
+    ])
+    applyLoadResults(cfgResult, histResult)
+  }, [applyLoadResults])
 
   // Initial load — cancelled-flag idiom, matching InsuranceProviders.tsx / IvrPlaybooks.tsx.
   useEffect(() => {
     if (!isSuperAdmin) return
     let cancelled = false
-    Promise.all([getLlmConfig(), getLlmConfigHistory()])
-      .then(([cfg, hist]) => {
+    Promise.allSettled([getLlmConfig(), getLlmConfigHistory()]).then(
+      ([cfgResult, histResult]) => {
         if (cancelled) return
-        populateFrom(cfg)
-        setHistory(hist)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        setError(err instanceof ApiError ? err.message : "Could not load the LLM model config.")
-        setHistory((prev) => prev ?? [])
-      })
+        applyLoadResults(cfgResult, histResult)
+      },
+    )
     return () => {
       cancelled = true
     }
-  }, [isSuperAdmin])
+  }, [isSuperAdmin, applyLoadResults])
 
   const showLevel = isGemini3Model(input)
   const extraConfig = buildThinkingOverride(input, thinkingBudgetInput, thinkingLevelInput)
+  const invalidBudget = !showLevel && !isValidThinkingBudgetInput(thinkingBudgetInput)
+  const hasInvalidInput = input.trim() === "" || invalidBudget
 
   async function onSave() {
     setError(null)
@@ -150,7 +178,7 @@ export function LlmConfig() {
               {current.is_default ? "Default" : "Override"}
             </Badge>
             <span className="font-mono text-sm">
-              {current.model ?? "gemini-2.5-flash (hardcoded default)"}
+              {current.model ?? `${current.default_model} (default)`}
             </span>
           </div>
 
@@ -196,20 +224,26 @@ export function LlmConfig() {
                 ))}
               </Select>
             ) : (
-              <Input
-                id="llm-thinking-input"
-                type="number"
-                value={thinkingBudgetInput}
-                onChange={(e) => setThinkingBudgetInput(e.target.value)}
-                placeholder="e.g. 0 (disabled), -1 (automatic), or a token count"
-              />
+              <>
+                <Input
+                  id="llm-thinking-input"
+                  type="number"
+                  step="1"
+                  value={thinkingBudgetInput}
+                  onChange={(e) => setThinkingBudgetInput(e.target.value)}
+                  placeholder="e.g. 0 (disabled), -1 (automatic), or a token count"
+                />
+                {invalidBudget && (
+                  <p className="text-xs text-destructive">Must be a whole number.</p>
+                )}
+              </>
             )}
           </div>
 
           <div className="flex gap-3">
             <Button
               onClick={onSave}
-              disabled={busy || !hasPendingChange(input, extraConfig, current)}
+              disabled={busy || hasInvalidInput || !hasPendingChange(input, extraConfig, current)}
               className="min-w-[100px]"
             >
               {busy ? "Saving…" : "Save"}

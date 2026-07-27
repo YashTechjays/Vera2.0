@@ -55,15 +55,21 @@ def test_stt_kwargs_empty_without_key_terms() -> None:
 
 
 def test_resolve_llm_model_uses_override_when_set() -> None:
-    assert resolve_llm_model("gemini-3.5-flash") == "gemini-3.5-flash"
+    assert resolve_llm_model("gemini-3.5-flash", "gemini-2.5-flash") == "gemini-3.5-flash"
 
 
 def test_resolve_llm_model_falls_back_to_default_when_unset() -> None:
-    assert resolve_llm_model(None) == "gemini-2.5-flash"
+    assert resolve_llm_model(None, "gemini-2.5-flash") == "gemini-2.5-flash"
 
 
 def test_resolve_llm_model_falls_back_on_empty_string() -> None:
-    assert resolve_llm_model("") == "gemini-2.5-flash"
+    assert resolve_llm_model("", "gemini-2.5-flash") == "gemini-2.5-flash"
+
+
+def test_resolve_llm_model_default_is_the_caller_supplied_value_not_a_constant() -> None:
+    # The fallback comes from Settings.voice_llm_default_model at the call site, not a
+    # module constant — this pins that resolve_llm_model is a pure pass-through.
+    assert resolve_llm_model(None, "some-other-model") == "some-other-model"
 
 
 def test_resolve_thinking_attrs_returns_explicit_override_verbatim() -> None:
@@ -81,6 +87,29 @@ def test_resolve_thinking_attrs_default_for_gemini_3_without_override() -> None:
 
 def test_resolve_thinking_attrs_default_for_pre_3_without_override() -> None:
     assert resolve_thinking_attrs("gemini-2.5-flash", None) == {"thinking_budget": 0}
+
+
+def test_resolve_thinking_attrs_falls_back_when_override_family_mismatches_model() -> None:
+    # A stored override should always be paired with the model it was saved against
+    # (save_llm_model/validate_extra_config enforce that), but this is the one place
+    # that has the resolved model in hand — it must not trust the pairing blindly,
+    # since a mismatch reaches google.LLM.chat() as a mid-call ValueError, not a clean
+    # setup failure.
+    assert resolve_thinking_attrs("gemini-3.5-flash", {"thinking_budget": 500}) == {
+        "thinking_level": "low"
+    }
+    assert resolve_thinking_attrs("gemini-2.5-flash", {"thinking_level": "high"}) == {
+        "thinking_budget": 0
+    }
+
+
+def test_resolve_thinking_config_falls_back_instead_of_raising_on_mismatch() -> None:
+    # google.LLM's own ThinkingConfig validation raises ValueError for a thinking_level
+    # on a pre-3 model — resolve_thinking_config must never reach it with a mismatched
+    # pairing.
+    cfg = resolve_thinking_config("gemini-2.5-flash", {"thinking_level": "high"})
+    assert cfg.thinking_budget == 0
+    assert cfg.thinking_level is None
 
 
 def test_resolve_thinking_config_builds_a_real_thinking_config_object() -> None:

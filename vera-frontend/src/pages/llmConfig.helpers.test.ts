@@ -7,6 +7,7 @@ import {
   formatUpdatedAt,
   hasPendingChange,
   isGemini3Model,
+  isValidThinkingBudgetInput,
 } from "@/pages/llmConfig.helpers"
 import type { LlmConfigState } from "@/lib/api/llmConfig"
 
@@ -15,6 +16,7 @@ const state = (overrides: Partial<LlmConfigState> = {}): LlmConfigState => ({
   model: "gemini-2.5-flash",
   extra_config: null,
   is_default: false,
+  default_model: "gemini-2.5-flash",
   created_at: "2026-07-23T10:00:00Z",
   created_by_user_id: "u1",
   ...overrides,
@@ -99,6 +101,24 @@ describe("buildThinkingOverride", () => {
     expect(buildThinkingOverride("gemini-3.5-flash", "500", "")).toBeNull()
     // Pre-3 reads the budget, not the level field.
     expect(buildThinkingOverride("gemini-2.5-flash", "", "high")).toBeNull()
+  })
+})
+
+describe("isValidThinkingBudgetInput", () => {
+  it("blank is valid (no override)", () => {
+    expect(isValidThinkingBudgetInput("")).toBe(true)
+    expect(isValidThinkingBudgetInput("   ")).toBe(true)
+  })
+  it("accepts plain integers, including negative (e.g. -1 = automatic)", () => {
+    expect(isValidThinkingBudgetInput("0")).toBe(true)
+    expect(isValidThinkingBudgetInput("500")).toBe(true)
+    expect(isValidThinkingBudgetInput("-1")).toBe(true)
+  })
+  it("rejects fractional input", () => {
+    expect(isValidThinkingBudgetInput("1.5")).toBe(false)
+  })
+  it("rejects non-numeric input", () => {
+    expect(isValidThinkingBudgetInput("abc")).toBe(false)
   })
 })
 

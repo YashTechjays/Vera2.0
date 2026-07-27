@@ -31,6 +31,18 @@ export function buildThinkingOverride(
   return budgetInput.trim() !== "" ? { thinking_budget: Number(budgetInput) } : null
 }
 
+const _INTEGER_RE = /^-?\d+$/
+
+/** Whether the thinking-budget input is either blank (no override) or a plain integer
+ *  string. Gates the Save button — the backend's ThinkingOverride.thinking_budget is
+ *  typed int, so a fractional or non-numeric value like "1.5" always 422s server-side;
+ *  reject it before that round trip. Negative values (e.g. -1, Gemini's "automatic"
+ *  budget) are valid — this checks shape only, not sign or range. */
+export function isValidThinkingBudgetInput(input: string): boolean {
+  const trimmed = input.trim()
+  return trimmed === "" || _INTEGER_RE.test(trimmed)
+}
+
 /** One-line summary of a saved thinking override for the history table; "—" when none. */
 export function formatThinkingOverride(extraConfig: ThinkingOverride | null): string {
   if (!extraConfig) return "—"

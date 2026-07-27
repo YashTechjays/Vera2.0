@@ -172,9 +172,18 @@ async def add_llm_model_override_metadata(session: AsyncSession, metadata: dict[
     """Mirrors add_active_playbook_metadata's missing-key convention: a missing
     `llm_model_override` key means "use the hardcoded cascade default". A broken config
     table must never block a call from being placed, so any read failure degrades to the
-    same missing-key default rather than propagating and failing the whole dispatch."""
+    same missing-key default rather than propagating and failing the whole dispatch.
+
+    The read runs in its own SAVEPOINT: callers use this from both a `begin_nested()`
+    block (queue_dispatcher.py) and a plain top-level transaction (voice_lab.py), and a
+    statement-level DB error (timeout, deadlock) leaves the *session* unusable for any
+    later statement until it's rolled back — swallowing the exception without rolling
+    back would poison whichever transaction the caller is in, breaking work that has
+    nothing to do with this lookup."""
+    current: VoiceModelConfig | None = None
     try:
-        current = await get_active_llm_config(session)
+        async with session.begin_nested():
+            current = await get_active_llm_config(session)
     except Exception as exc:
         logger.warning("llm model override lookup failed (%s) — using default", type(exc).__name__)
         return

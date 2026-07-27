@@ -421,7 +421,9 @@ async def entrypoint(ctx: JobContext) -> None:
         else:
             logger.info("no use_call_plan for %s — voice-lab preview (plan-less)", room_name)
 
-        resolved_model = resolve_llm_model(meta.get("llm_model_override"))
+        resolved_model = resolve_llm_model(
+            meta.get("llm_model_override"), settings.voice_llm_default_model
+        )
         thinking_attrs = resolve_thinking_attrs(resolved_model, meta.get("llm_thinking_override"))
         trace.get_current_span().set_attributes(
             llm_trace_attributes(resolved_model, thinking_attrs)
@@ -432,6 +434,7 @@ async def entrypoint(ctx: JobContext) -> None:
             key_terms=controller.plan.stt_key_terms if controller is not None else None,
             llm_model=meta.get("llm_model_override"),
             thinking_override=meta.get("llm_thinking_override"),
+            default_model=settings.voice_llm_default_model,
         )
 
         # THE call event stream: transcript turns + call_status frames, feeding the

@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera_core.models import VoiceModelConfig
@@ -110,6 +110,28 @@ async def test_add_llm_model_override_metadata_degrades_to_default_on_read_failu
         with patch.object(model_config, "get_active_llm_config", side_effect=RuntimeError("boom")):
             await add_llm_model_override_metadata(s, metadata)
         assert metadata == {}
+
+
+async def test_add_llm_model_override_metadata_leaves_transaction_usable_after_db_error(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Unlike the plain-RuntimeError test above (which never touches the DB), this
+    # simulates a genuine statement-level Postgres error — the failure class the
+    # "never block dispatch" guarantee exists for. Both callers (queue_dispatcher.py's
+    # begin_nested() block, voice_lab.py's top-level request transaction) issue further
+    # statements in the *same* transaction right after this call; if the read's DB error
+    # isn't rolled back before we swallow it, Postgres leaves the transaction aborted and
+    # every later statement in it fails too.
+    async def _broken_read(session: AsyncSession) -> VoiceModelConfig | None:
+        await session.execute(text("SELECT 1/0"))
+        return None
+
+    async with admin_sessionmaker() as s, s.begin():
+        with patch.object(model_config, "get_active_llm_config", _broken_read):
+            metadata: dict[str, object] = {}
+            await add_llm_model_override_metadata(s, metadata)
+            assert metadata == {}
+        assert (await s.execute(select(1))).scalar_one() == 1
 
 
 async def test_save_with_matching_thinking_override_succeeds(

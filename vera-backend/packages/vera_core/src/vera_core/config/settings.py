@@ -168,6 +168,16 @@ class Settings(BaseSettings):
     # bounds the worst-case wait before the endpoint gives up and returns 503.
     summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
 
+    # --- voice cascade (agent worker) -----------------------------------------
+    # The live voice cascade's LLM stage — Deepgram(Flux) -> Gemini -> Cartesia
+    # (agent_worker/cascade.py). A platform SUPER_ADMIN can override this per-call at
+    # runtime (voice_model_config table, platform/llm-config endpoints); this is only
+    # the fallback when no override is active. Deliberately its own setting — not
+    # shared with any other model config (summary/observer/health chains above, or the
+    # post-call gemini_flash_model below): those tune unrelated, out-of-pipeline LLM
+    # calls and must be free to change independently of what the live cascade uses.
+    voice_llm_default_model: str = "gemini-2.5-flash"  # VERA_VOICE_LLM_DEFAULT_MODEL
+
     # --- observer answer extraction (agent worker) ---------------------------
     observer_extract_primary_model: str = "google:gemini-3.5-flash"
     observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]

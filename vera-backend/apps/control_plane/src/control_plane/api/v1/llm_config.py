@@ -54,17 +54,19 @@ class LlmConfigState(BaseModel):
     model: str | None
     extra_config: dict[str, int | str] | None
     is_default: bool
+    default_model: str
     created_at: datetime | None
     created_by_user_id: UUID | None
 
 
-def _state(row: VoiceModelConfig | None) -> LlmConfigState:
+def _state(row: VoiceModelConfig | None, *, default_model: str) -> LlmConfigState:
     if row is None:
         return LlmConfigState(
             provider=None,
             model=None,
             extra_config=None,
             is_default=True,
+            default_model=default_model,
             created_at=None,
             created_by_user_id=None,
         )
@@ -73,6 +75,7 @@ def _state(row: VoiceModelConfig | None) -> LlmConfigState:
         model=row.model,
         extra_config=row.extra_config,
         is_default=row.model is None,
+        default_model=default_model,
         created_at=row.created_at,
         created_by_user_id=row.created_by_user_id,
     )
@@ -87,9 +90,11 @@ def _state(row: VoiceModelConfig | None) -> LlmConfigState:
 )
 async def get_llm_config(
     session: PlatformSession,
+    settings: AppSettings,
     _caller: Annotated[VerifiedIdentity, _READ],
 ) -> ResponseModel[LlmConfigState]:
-    return ok(_state(await get_active_llm_config(session)))
+    row = await get_active_llm_config(session)
+    return ok(_state(row, default_model=settings.voice_llm_default_model))
 
 
 @router.get(
@@ -101,10 +106,11 @@ async def get_llm_config(
 )
 async def get_llm_config_history(
     session: PlatformSession,
+    settings: AppSettings,
     _caller: Annotated[VerifiedIdentity, _READ],
 ) -> ResponseModel[list[LlmConfigState]]:
     rows = await list_llm_config_history(session)
-    return ok([_state(row) for row in rows])
+    return ok([_state(row, default_model=settings.voice_llm_default_model) for row in rows])
 
 
 @router.put(
@@ -138,7 +144,7 @@ async def save_llm_config(
         )
     except (InvalidModelName, InvalidThinkingOverride) as exc:
         raise CustomAPIException(DefaultExceptionCode.VALIDATION_ERROR, message=str(exc)) from exc
-    return ok(_state(row))
+    return ok(_state(row, default_model=settings.voice_llm_default_model))
 
 
 @router.post(
@@ -165,4 +171,5 @@ async def reset_llm_config(
         settings.idempotency_lock_ttl_seconds,
     )
     await reset_llm_model(session, created_by_user_id=caller.user_id)
-    return ok(_state(await get_active_llm_config(session)))
+    row = await get_active_llm_config(session)
+    return ok(_state(row, default_model=settings.voice_llm_default_model))

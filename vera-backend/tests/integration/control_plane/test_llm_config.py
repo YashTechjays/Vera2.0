@@ -146,6 +146,23 @@ async def test_get_llm_config_defaults_when_never_set(
     body = resp.json()["data"]
     assert body["is_default"] is True
     assert body["model"] is None
+    assert body["default_model"] == "gemini-2.5-flash"
+
+
+async def test_get_llm_config_reports_default_model_even_with_an_active_override(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    # default_model always reflects the cascade's hardcoded fallback — regardless of
+    # whether an override is active — so the admin page can show what an override
+    # actually replaces, not just what's currently active.
+    client, w = llm_config_world
+    saved = await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.super_token),
+        json={"model": "gemini-3.5-flash"},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["data"]["default_model"] == "gemini-2.5-flash"
 
 
 async def test_save_then_get_reflects_override(
@@ -222,8 +239,28 @@ async def test_history_lists_saves_and_resets_newest_first(
 async def test_routes_forbidden_for_tenant(
     llm_config_world: tuple[httpx.AsyncClient, World],
 ) -> None:
+    # All four routes gate on a platform permission — a tenant caller (even one
+    # carrying a valid Idempotency-Key on the mutating routes) must be denied on
+    # every one of them, not just GET.
     client, w = llm_config_world
     resp = await client.get("/api/v1/platform/llm-config", headers=_auth(w.tenant_admin_token))
+    assert resp.status_code == 403
+
+    resp = await client.get(
+        "/api/v1/platform/llm-config/history", headers=_auth(w.tenant_admin_token)
+    )
+    assert resp.status_code == 403
+
+    resp = await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.tenant_admin_token),
+        json={"model": "gemini-3.5-flash"},
+    )
+    assert resp.status_code == 403
+
+    resp = await client.post(
+        "/api/v1/platform/llm-config/reset", headers=_write_headers(w.tenant_admin_token)
+    )
     assert resp.status_code == 403
 
 
@@ -237,6 +274,38 @@ async def test_write_requires_idempotency_key(
         json={"model": "gemini-3.5-flash"},
     )
     assert resp.status_code == 400, resp.text
+
+
+async def test_reset_requires_idempotency_key(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = llm_config_world
+    resp = await client.post("/api/v1/platform/llm-config/reset", headers=_auth(w.super_token))
+    assert resp.status_code == 400, resp.text
+
+
+async def test_save_rejects_too_long_model(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = llm_config_world
+    resp = await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.super_token),
+        json={"model": "g" * 201},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_save_rejects_disallowed_characters(
+    llm_config_world: tuple[httpx.AsyncClient, World],
+) -> None:
+    client, w = llm_config_world
+    resp = await client.put(
+        "/api/v1/platform/llm-config",
+        headers=_write_headers(w.super_token),
+        json={"model": "gemini 3.5 flash"},
+    )
+    assert resp.status_code == 422, resp.text
 
 
 async def test_save_with_matching_thinking_override_succeeds(
