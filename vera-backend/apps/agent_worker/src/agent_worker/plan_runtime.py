@@ -24,7 +24,7 @@ never double-swap the active agent.
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
 from opentelemetry import trace
@@ -294,11 +294,30 @@ class PlanRunController:
                 target = self._directive_target(directive)
                 if target is None:  # skip whose target is already at/behind us → no-op
                     return
+                self._tag_rule_handoff(target)
                 await self._session.interrupt()
                 self._session.update_agent(target)
         except Exception as exc:
             logger.warning(
                 "plan run %s: directive apply failed (%s)", self.room_name, type(exc).__name__
+            )
+
+    def _tag_rule_handoff(self, target: Agent) -> None:
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": self.plan.tasks[
+                        cast(int, self.active_task_index)
+                    ].task_key,
+                    "vera.handoff.to_task": target.id,
+                    "vera.handoff.reason": "flow_rule",
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: rule-handoff span tagging failed (%s)",
+                self.room_name,
+                type(exc).__name__,
             )
 
     def _directive_target(self, directive: Terminate | SkipToTask) -> Agent | None:

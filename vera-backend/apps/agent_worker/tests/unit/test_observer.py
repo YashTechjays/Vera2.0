@@ -355,6 +355,42 @@ class TestRuleIntervention:
         await _feed(manager, _rep("the answer is no"))
         assert controller.applied == [Terminate(rule_key="stop")]
 
+    @pytest.mark.asyncio
+    async def test_fired_rule_tags_the_evaluate_span(self, otel_spans: Any) -> None:
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "No", 90)])
+        manager, _, _, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is no"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.rule_engine.evaluate"
+        )
+        assert span.attributes["vera.rule_engine.fired"] is True
+        assert span.attributes["vera.handoff.directive_type"] == "Terminate"
+        assert span.attributes["vera.handoff.rule_key"] == "stop"
+        # PHI guardrail (design §6/§8): the answer value that fired this rule ("No") must
+        # never appear in any attribute on this span — only the enum/key metadata above.
+        assert "No" not in span.attributes.values()
+
+    @pytest.mark.asyncio
+    async def test_non_firing_evaluation_is_still_visible(self, otel_spans: Any) -> None:
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is yes"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.rule_engine.evaluate"
+        )
+        assert span.attributes["vera.rule_engine.fired"] is False
+        assert "vera.handoff.directive_type" not in span.attributes
+
 
 class TestCrashIsolation:
     @pytest.mark.asyncio

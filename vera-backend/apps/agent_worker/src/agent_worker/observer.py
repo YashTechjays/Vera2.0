@@ -34,6 +34,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from opentelemetry import trace
+
 from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from agent_worker.plan_runtime import PlanRunController
 
 logger = logging.getLogger("agent_worker")
+tracer = trace.get_tracer(__name__)
 
 # Cap the transcript window fed to the extractor: the last N finalized turns of the
 # current task. Bounds the prompt size and memory; a task rarely spans more.
@@ -416,11 +419,23 @@ class ObserverManager:
         # next pass (the CP consumer is idempotent under the redelivery).
         self._answers[answer.field_path] = answer.value
         self._controller.update_answers(self._answers)
-        directive = self._rule_engine.evaluate(self._answers)
-        if directive is not None:
-            # Redirect the live call NOW: interrupt the bot + swap/re-ask (the controller
-            # serializes it against an in-flight task_complete handoff).
-            await self._controller.apply_directive_now(directive)
+        with tracer.start_as_current_span("vera.rule_engine.evaluate") as span:
+            directive = self._rule_engine.evaluate(self._answers)
+            try:
+                span.set_attribute("vera.rule_engine.fired", directive is not None)
+                if directive is not None:
+                    span.set_attribute("vera.handoff.directive_type", type(directive).__name__)
+                    span.set_attribute("vera.handoff.rule_key", directive.rule_key)
+            except Exception as exc:
+                logger.warning(
+                    "observer manager %s: rule-engine span tagging failed (%s)",
+                    self._room,
+                    type(exc).__name__,
+                )
+            if directive is not None:
+                # Redirect the live call NOW: interrupt the bot + swap/re-ask (the controller
+                # serializes it against an in-flight task_complete handoff).
+                await self._controller.apply_directive_now(directive)
 
     async def aclose(self) -> None:
         """Stop tailing and drain. Call in the entrypoint shutdown AFTER the call-event

@@ -438,6 +438,51 @@ class TestDirectiveIntervention:
         await controller.apply_directive_now(Terminate(rule_key="t"))
         assert order == []  # no interrupt, no swap
 
+    @pytest.mark.asyncio
+    async def test_terminate_tags_the_ambient_span_with_handoff_attrs(
+        self, otel_spans: Any
+    ) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.from_task"] == "intro_task"
+        assert span.attributes["vera.handoff.to_task"] == WRAP_UP_TASK_KEY
+        assert span.attributes["vera.handoff.reason"] == "flow_rule"
+
+    @pytest.mark.asyncio
+    async def test_skip_forward_tags_the_ambient_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(SkipToTask(rule_key="jump", task_key="last_task"))
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.to_task"] == "last_task"
+
+    @pytest.mark.asyncio
+    async def test_reask_does_not_tag_handoff_attrs(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(
+                ReAsk(rule_key="ded", reason="Deductible was stated twice.")
+            )
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert "vera.handoff.from_task" not in span.attributes
+
 
 class TestPrefill:
     @pytest.mark.asyncio
