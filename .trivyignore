@@ -1,3 +1,10 @@
 # Reviewed, accepted vulnerabilities the image scan should skip.
 # One CVE ID per line, each with a justification and a "remove when fixed" note.
 # The scanner still runs and still blocks every OTHER fixable HIGH/CRITICAL.
+
+# react-router RSC-mode CSRF (affects >=7.12.0 <8.3.0, fix only in v8). Exploitable
+# only via the unstable RSC APIs, which this Vite SPA never uses (declarative
+# react-router-dom; no RSC imports in vera-frontend/src). react-router-dom has no
+# v8 release, so the "fix" would mean migrating off react-router-dom entirely.
+# Remove when react-router-dom ships a release depending on react-router >=8.3.0.
+GHSA-qwww-vcr4-c8h2

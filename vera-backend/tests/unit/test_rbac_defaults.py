@@ -1,5 +1,6 @@
 from vera_core.models.audit_log import AuditEvent
 from vera_core.models.rbac_defaults import (
+    ALL_PERMISSIONS,
     DEFAULT_PERMISSIONS,
     PLATFORM_PERMISSIONS,
     SYSTEM_ROLES,
@@ -57,3 +58,23 @@ def test_recordings_permissions_seeded() -> None:
     assert "recordings:manage" not in SYSTEM_ROLES["SUPERVISOR"]
     assert "recordings:read" in SYSTEM_ROLES["TENANT_ADMIN"]
     assert "recordings:manage" in SYSTEM_ROLES["TENANT_ADMIN"]
+
+
+def test_platform_users_permissions_are_seeded() -> None:
+    assert "platform:users:invite" in PLATFORM_PERMISSIONS
+    assert "platform:users:read" in PLATFORM_PERMISSIONS
+    assert "platform:users:invite" in ALL_PERMISSIONS
+    assert "platform:users:read" in ALL_PERMISSIONS
+
+
+def test_super_admin_holds_the_new_platform_permissions() -> None:
+    assert "platform:users:invite" in SYSTEM_ROLES["SUPER_ADMIN"]
+    assert "platform:users:read" in SYSTEM_ROLES["SUPER_ADMIN"]
+
+
+def test_platform_users_permissions_are_catalogued_and_super_admin_only() -> None:
+    for code in ("platform:users:invite", "platform:users:read"):
+        assert code in PLATFORM_PERMISSIONS
+        # Platform perms go only to SUPER_ADMIN (never a tenant role).
+        assert code in SYSTEM_ROLES["SUPER_ADMIN"]
+        assert code not in SYSTEM_ROLES["TENANT_ADMIN"]
