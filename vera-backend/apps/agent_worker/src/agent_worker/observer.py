@@ -108,6 +108,7 @@ class ResilientAnswerExtractor:
         with tracer.start_as_current_span(
             "vera.observer.extraction_llm_call",
             attributes={"vera.llm.purpose": "observer_extraction", "vera.task.key": task.task_key},
+            record_exception=False,
         ):
             reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
         return _parse_extraction(reply)

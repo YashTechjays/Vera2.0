@@ -136,6 +136,7 @@ class CallHealthObserver:
             with tracer.start_as_current_span(
                 "vera.health_observer.llm_call",
                 attributes={"vera.llm.purpose": "health_observer"},
+                record_exception=False,
             ):
                 reply = await self._llm.complete(system=HEALTH_SYSTEM_PROMPT, user=user_message)
         except Exception as exc:  # prompt/reply are PHI — type name only

@@ -188,3 +188,22 @@ async def test_analysis_tags_the_llm_call_span(otel_spans: Any) -> None:
         s for s in otel_spans.get_finished_spans() if s.name == "vera.health_observer.llm_call"
     )
     assert span.attributes["vera.llm.purpose"] == "health_observer"
+
+
+@pytest.mark.asyncio
+async def test_analysis_llm_call_span_does_not_record_exceptions(otel_spans: Any) -> None:
+    # PHI guardrail: exceptions raised by LLM calls must not be recorded in spans.
+    # record_exception=False prevents OTel from capturing chained tracebacks that
+    # could leak provider error messages (PHI).
+    llm, stream, bus = _FakeLLM(_OK_REPLY), _FakeCallStream(), _FakeBus()
+    llm.error = RuntimeError("providers down")
+    obs, _ = _observer(llm, stream, bus)
+    await _feed(obs, ("agent", "Question?"), ("user", "Yes."))
+    await _settle()
+    await _feed(obs, ("agent", "Another?"), ("user", "Yes it's covered."))
+    await _settle()
+    span = next(
+        s for s in otel_spans.get_finished_spans() if s.name == "vera.health_observer.llm_call"
+    )
+    # Verify no exception event was recorded on the span
+    assert not span.events

@@ -475,6 +475,23 @@ class TestResilientExtractor:
         assert span.attributes["vera.llm.purpose"] == "observer_extraction"
         assert span.attributes["vera.task.key"] == "t1"
 
+    @pytest.mark.asyncio
+    async def test_extract_llm_call_span_does_not_record_exceptions(self, otel_spans: Any) -> None:
+        # PHI guardrail: exceptions raised by LLM calls must not be recorded in spans.
+        # record_exception=False prevents OTel from capturing chained tracebacks that
+        # could leak provider error messages (PHI).
+        with pytest.raises(LLMUnavailableError):
+            await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
+                _plan().tasks[0], "anything"
+            )
+        span = next(
+            s
+            for s in otel_spans.get_finished_spans()
+            if s.name == "vera.observer.extraction_llm_call"
+        )
+        # Verify no exception event was recorded on the span
+        assert not span.events
+
 
 class TestParsing:
     def test_parses_plain_json_array(self) -> None:
