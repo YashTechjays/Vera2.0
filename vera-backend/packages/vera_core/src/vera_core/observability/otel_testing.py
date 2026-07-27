@@ -19,25 +19,16 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 _exporter = InMemorySpanExporter()
-_provider: TracerProvider | None = None
+_installed = False
 
 
 def install_test_tracer_provider() -> InMemorySpanExporter:
-    """Install the shared test TracerProvider on first call; if the global provider
-    has been changed (e.g. by a test fixture resetting it), add our exporter to it."""
-    global _provider
-
-    if _provider is None:
-        # First call: create and install our provider
+    """Install the shared test TracerProvider on first call; a no-op (returning the
+    same exporter) on every call after that."""
+    global _installed
+    if not _installed:
         provider = TracerProvider()
         provider.add_span_processor(SimpleSpanProcessor(_exporter))
         trace.set_tracer_provider(provider)
-        _provider = provider
-    else:
-        # Subsequent calls: check if provider was replaced, and if so, add exporter to it
-        current = trace.get_tracer_provider()
-        if isinstance(current, TracerProvider) and current is not _provider:
-            # Provider has been replaced; add our exporter to the new provider
-            current.add_span_processor(SimpleSpanProcessor(_exporter))
-
+        _installed = True
     return _exporter
