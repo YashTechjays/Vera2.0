@@ -133,11 +133,10 @@ class CallHealthObserver:
         user_message = self._transcript.render_user_message()
         turn_count = self._transcript.turn_count
         try:
-            # BOTH kwargs are required to keep a raised exception off the span: OTel's
-            # Span.__exit__ has two independent knobs — record_exception=False drops the
-            # exception EVENT (message + traceback), and set_status_on_exception=False drops
-            # the status description, which is otherwise f"{type}: {exc}" and would still
-            # export str(exc). The prompt/reply here are PHI, so neither may carry it.
+            # The prompt/reply here are PHI and a raised provider error can embed them, so BOTH
+            # OTel exception knobs must be off: record_exception=False drops the exception EVENT
+            # (message + traceback), set_status_on_exception=False drops the status description,
+            # which OTel would otherwise fill with f"{type}: {exc}".
             with tracer.start_as_current_span(
                 "vera.health_observer.llm_call",
                 attributes={"vera.llm.purpose": "health_observer"},

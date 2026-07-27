@@ -485,13 +485,10 @@ class TestResilientExtractor:
 
     @pytest.mark.asyncio
     async def test_extract_llm_call_span_does_not_record_exceptions(self, otel_spans: Any) -> None:
-        # PHI guardrail: a provider error message can embed the prompt/transcript, so NOTHING
-        # derived from the exception may reach the span. OTel has two independent knobs and
-        # both must be off — record_exception=False drops the exception EVENT, and
-        # set_status_on_exception=False drops the status description, which OTel would
-        # otherwise fill with f"{type}: {exc}" (i.e. str(exc)) even with events disabled.
-        # A message-carrying exception is the case that matters: LLMUnavailableError is always
-        # raised bare (str() == ""), so it would pass this test even unguarded. `complete` is a
+        # PHI guardrail: a provider error message can embed the prompt/transcript, so nothing
+        # derived from the exception may reach the span — both OTel knobs asserted below.
+        # The exception must CARRY a message for this to test anything: LLMUnavailableError is
+        # always raised bare (str() == ""), so it would pass even unguarded. `complete` is a
         # Protocol, and an unexpected provider/SDK error escaping it can embed the request body.
         llm = FakeCompletionLLM(error=RuntimeError("provider rejected prompt for Jane Doe"))
         with pytest.raises(RuntimeError):

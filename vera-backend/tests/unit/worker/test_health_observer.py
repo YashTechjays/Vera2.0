@@ -196,12 +196,10 @@ async def test_analysis_tags_the_llm_call_span(otel_spans: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_analysis_llm_call_span_does_not_record_exceptions(otel_spans: Any) -> None:
-    # PHI guardrail: a provider error message can embed the prompt (raw transcript), so
-    # NOTHING derived from the exception may reach the span. OTel has two independent knobs
-    # and both must be off — record_exception=False drops the exception EVENT, and
-    # set_status_on_exception=False drops the status description, which OTel would otherwise
-    # fill with f"{type}: {exc}" (i.e. str(exc)) even with the event disabled. Before the
-    # second kwarg was added, this message sat verbatim on span.status.description.
+    # PHI guardrail: a provider error message can embed the prompt (raw transcript), so nothing
+    # derived from the exception may reach the span — both OTel knobs asserted below. Before
+    # set_status_on_exception=False was added, this message sat verbatim on
+    # span.status.description.
     llm, stream, bus = _FakeLLM(_OK_REPLY), _FakeCallStream(), _FakeBus()
     llm.error = RuntimeError("providers down: rejected prompt for Jane Doe")
     obs, _ = _observer(llm, stream, bus)

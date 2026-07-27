@@ -434,13 +434,12 @@ async def try_dispatch(
                 }
                 if staged_plan is not None:
                     span_attrs["vera.dispatch.task_count"] = len(staged_plan[0].tasks)
-                # This section builds `metadata` (carries agent_context, raw PHI) and stages the
-                # plan (raw intake values) to Redis — a raised SQLAlchemy/redis error can embed
-                # the statement params. BOTH OTel knobs must be off to keep that off the span:
-                # record_exception=False drops the exception EVENT (message + traceback) and
-                # set_status_on_exception=False drops the status description, which is otherwise
-                # f"{type}: {exc}" and would still export str(exc). create_call_room's own
-                # handler already re-raises PHI-free for the same reason (see below).
+                # This section builds `metadata` (agent_context, raw PHI) and stages the plan
+                # (raw intake values) to Redis — a raised SQLAlchemy/redis error can embed the
+                # statement params, so BOTH OTel exception knobs must be off:
+                # record_exception=False drops the exception EVENT (message + traceback),
+                # set_status_on_exception=False drops the f"{type}: {exc}" status description.
+                # create_call_room's own handler re-raises PHI-free for the same reason (below).
                 with tracer.start_as_current_span(
                     "vera.dispatch.stage_call",
                     attributes=span_attrs,
@@ -595,10 +594,10 @@ async def _resolve_call_plan(
     try:
         values = await current_values_by_path(session, form.id)
         # fuser.fuse operates on field_answer values (PHI) and a raised exception can embed
-        # them. BOTH OTel knobs must be off to keep that off the span: record_exception=False
-        # drops the exception EVENT (message + traceback) and set_status_on_exception=False
-        # drops the status description, which is otherwise f"{type}: {exc}" and would still
-        # export str(exc) — the same reason the handler below logs a type name only.
+        # them, so BOTH OTel exception knobs must be off: record_exception=False drops the
+        # exception EVENT (message + traceback), set_status_on_exception=False drops the
+        # f"{type}: {exc}" status description — the same reason the handler below logs a
+        # type name only.
         with tracer.start_as_current_span(
             "vera.dispatch.fuse_plan",
             attributes={"vera.dispatch.form_id": str(form.id)},
@@ -664,9 +663,9 @@ async def _resolve_plan_template(
             prompt_version_id = prompt_version.id if prompt_version is not None else None
             # Unlike the fuse_plan / stage_call spans, this one deliberately keeps OTel's
             # exception defaults (record_exception / set_status_on_exception both True):
-            # compile_call_plan only touches schema + prompt documents, which are config,
-            # not PHI — so a recorded exception is safe and useful here, exactly as the
-            # handler below already logs the full traceback for the same reason.
+            # compile_call_plan only touches schema + prompt documents, which are config, not
+            # PHI — so a recorded exception is safe and useful here, for the same reason the
+            # handler below logs the full traceback.
             with tracer.start_as_current_span(
                 "vera.dispatch.compile_plan",
                 attributes={"vera.dispatch.schema_version": str(schema_version.id)},
