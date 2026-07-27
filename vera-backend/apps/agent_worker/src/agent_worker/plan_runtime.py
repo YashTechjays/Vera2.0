@@ -34,7 +34,7 @@ from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState, takeover_engaged
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
-from vera_core.forms.conditions import evaluate, is_applicable
+from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -256,9 +256,13 @@ class PlanRunController:
         # Phase-2 Observer keeps it current. Redis stays the cross-process truth.
         self._answers: dict[str, Any] = dict(plan.prefilled)
         self.active_task_index: int | None = None
-        # Tasks the call actually entered (main pass or gap pass). 
+        # Tasks the call actually entered (main pass or gap pass).
         self._visited_tasks: set[int] = set()
         self._terminated = False
+        # How far the call has PROGRESSED, distinct from `active_task_index` (which is the
+        # Observer's extraction cursor and moves backwards during the gap pass). Monotonic,
+        # so the forward-only skip guard can never redirect into a completed task.
+        self._max_task_index = -1
         # The gap pass runs ONCE, immediately before the closing task, so any re-ask
         # happens before that task collects the reference number and says goodbye.
         self._closing_task_index = len(plan.tasks) - 1
@@ -277,8 +281,10 @@ class PlanRunController:
         self._cursor_writes: set[asyncio.Task[None]] = set()
 
         self.agents = [PlanTaskAgent(self, i) for i in range(len(plan.tasks))]
-        # One gap agent per task, built up front like the task agents so a malformed
-        self.gap_agents = [GapTaskAgent(self, i) for i in range(len(plan.tasks))]
+        # One gap agent per SWEEPABLE task, built up front like the task agents so a malformed
+        # plan fails here at construction rather than mid-call. The closing task is never
+        # swept (its reference-number/goodbye stays last), so it gets no gap agent.
+        self.gap_agents = [GapTaskAgent(self, i) for i in range(self._closing_task_index)]
         self.wrap_up_agent = WrapUpAgent(self)
 
     # -- conversation-path API ------------------------------------------------
@@ -302,7 +308,9 @@ class PlanRunController:
             if gap_index is not None:
                 return self.gap_agents[gap_index]
             self._gap_pass_done = True
-            return self._agent_at(self._closing_task_index)
+            # Re-check applicability like every other transition: the Observer keeps writing
+            # answers during the pass, so the closer's gate can have flipped since entry.
+            return self._agent_at(self._next_applicable(self._closing_task_index))
 
     def opening_line(self, intro: str | None) -> str | None:
         """What the entering task agent speaks. An explicit tenant greeting
@@ -315,6 +323,7 @@ class PlanRunController:
 
     def note_task_entered(self, index: int) -> None:
         self.active_task_index = index
+        self._max_task_index = max(self._max_task_index, index)
         self._visited_tasks.add(index)
         self._write_cursor(self.plan.tasks[index].task_key)
 
@@ -372,8 +381,8 @@ class PlanRunController:
             return self.wrap_up_agent
         for i, task in enumerate(self.plan.tasks):
             if task.task_key == directive.task_key:
-                # Only skip forward: a target at or behind the active task is a no-op.
-                if self.active_task_index is not None and i <= self.active_task_index:
+                # Only skip forward, measured against PROGRESS not the active cursor:
+                if i <= self._max_task_index:
                     return None
                 return self.agents[i]
         return None  # unknown task_key (should not happen: validated at compile)
@@ -394,16 +403,9 @@ class PlanRunController:
             field
             for field in self.plan.tasks[task_index].fields
             if is_applicable(field.gates, self._answers, shared)
-            and self._field_required(field)
+            and is_required(field, self._answers, shared)
             and not self._is_answered(field.path)
         ]
-
-    def _field_required(self, field: PlanFieldDescriptor) -> bool:
-        """Resolve `PlanFieldDescriptor.required` (`bool | RequiredWhen`) against the
-        live answers — the descriptor's own copy of `conditions.is_required`."""
-        if isinstance(field.required, bool):
-            return field.required
-        return evaluate(field.required.when, self._answers, self.plan.shared_conditions)
 
     def _is_answered(self, path: str) -> bool:
         value = self._answers.get(path)
@@ -412,7 +414,8 @@ class PlanRunController:
     def _maybe_enter_gap_pass(self, next_index: int | None) -> Agent | None:
         """When the next task is the closing task, divert into the gap pass (once) over
         the earlier visited tasks. Returns the first gap agent, or None to proceed
-        normally — no gaps, disabled, already run, terminated, or the closer isn't next."""
+        normally — no gaps, disabled, already run, terminated, or the closer isn't next.
+        A single-task plan therefore never sweeps: `next_index` can never be 0."""
         if (
             not self.gap_pass_enabled
             or self._terminated

@@ -555,6 +555,36 @@ class TestGapRouting:
         assert successor is controller.agents[_CLOSER]
 
     @pytest.mark.asyncio
+    async def test_closer_turning_inapplicable_mid_pass_falls_through_to_wrap_up(self) -> None:
+        # The pass exists BECAUSE the Observer keeps writing answers while it runs, so the
+        # closer's applicable_when can flip between entering the pass and leaving it.
+        plan = _gap_plan()
+        plan.tasks[_CLOSER].applicable_when = Comparison(
+            field="sections.a.in_network", op="eq", value="Yes"
+        )
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        controller.note_task_entered(0)  # intro has a gap
+        gap_agent = await controller.advance_from(2)
+        assert gap_agent is controller.gap_agents[0]
+        # mid-sweep the rep corrects in_network → the closer no longer applies
+        controller.update_answers({"sections.a.in_network": "No", "sections.intro.rep_name": "Pat"})
+        with _session_patch(gap_agent, MagicMock()):
+            successor = await _tool(gap_agent, "gap_complete")()
+        assert successor is controller.wrap_up_agent
+
+    @pytest.mark.asyncio
+    async def test_single_task_plan_never_sweeps(self) -> None:
+        # Its closer IS index 0, and advance_from only ever asks for _next_applicable(>= 1).
+        plan = _gap_plan()
+        plan.tasks = [plan.tasks[0]]
+        controller, _ = _controller(plan)
+        assert controller.gap_agents == []
+        controller.note_task_entered(0)
+        successor = await controller.advance_from(0)
+        assert successor is controller.wrap_up_agent
+
+    @pytest.mark.asyncio
     async def test_closer_completion_goes_to_wrap_up_without_re_running(self) -> None:
         controller, _ = _controller(_gap_plan())
         controller._gap_pass_done = True
@@ -578,6 +608,39 @@ class TestGapFlowRules:
         successor = await controller.advance_from(2)
         assert successor is controller.gap_agents[0]  # land on intro, never gated_task
         assert controller._next_gap_task(1) is None  # gated_task (1) is not swept
+
+    @pytest.mark.asyncio
+    async def test_skip_to_a_completed_task_during_the_gap_pass_is_a_no_op(self) -> None:
+        # The pass re-enters an EARLY task, so active_task_index moves BACKWARDS. Measuring
+        # "forward" against progress (not that cursor) keeps a skip from redirecting into a
+        # task the call already completed and re-speaking its intro to the rep.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        for i in (0, 1, 2):
+            controller.note_task_entered(i)
+        gap_agent = await controller.advance_from(2)
+        assert gap_agent is controller.gap_agents[0]
+        controller.note_task_entered(0)  # what GapTaskAgent.on_enter does: index goes back
+        session, order = _attach_ordered_session(controller)
+        # coverage_task (2) is ahead of the gap cursor (0) but already finished
+        await controller.apply_directive_now(SkipToTask(rule_key="r", task_key="coverage_task"))
+        session.update_agent.assert_not_called()
+        session.interrupt.assert_not_awaited()
+        assert order == []
+
+    @pytest.mark.asyncio
+    async def test_terminate_still_ends_the_call_during_the_gap_pass(self) -> None:
+        # A terminate is a legitimate redirect mid-sweep: the call really is over.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        for i in (0, 1, 2):
+            controller.note_task_entered(i)
+        await controller.advance_from(2)  # into the gap pass
+        controller.note_task_entered(0)
+        session, _order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        session.update_agent.assert_called_once_with(controller.wrap_up_agent)
+        assert controller._terminated is True
 
     @pytest.mark.asyncio
     async def test_terminated_call_skips_the_gap_pass(self) -> None:
@@ -684,9 +747,11 @@ class TestGapAgent:
 
 
 class TestGapAgentConstruction:
-    def test_one_gap_agent_per_task_built_up_front(self) -> None:
-        controller, _ = _controller(_gap_plan())
-        assert len(controller.gap_agents) == 4
+    def test_one_gap_agent_per_sweepable_task_built_up_front(self) -> None:
+        # Four tasks, but the closer is never swept — so no gap agent is built for it.
+        plan = _gap_plan()
+        controller, _ = _controller(plan)
+        assert len(controller.gap_agents) == len(plan.tasks) - 1
         assert all(isinstance(a, GapTaskAgent) for a in controller.gap_agents)
 
     def test_gap_agent_instructions_fuse_session_and_title(self) -> None:

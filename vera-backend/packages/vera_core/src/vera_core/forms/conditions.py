@@ -8,7 +8,7 @@ are PHI). Mirrors the frontend evaluator (`vera-frontend/src/lib/ibv/conditions.
 """
 
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, Protocol
 
 from vera_core.forms.dsl import (
     PATH_PREFIX,
@@ -21,6 +21,7 @@ from vera_core.forms.dsl import (
     Leaf,
     NotCondition,
     RefCondition,
+    RequiredWhen,
 )
 
 Values = Mapping[str, Any]
@@ -88,8 +89,18 @@ def is_applicable(gates: tuple[Condition, ...], values: Values, shared: SharedCo
     return all(evaluate(gate, values, shared) for gate in gates)
 
 
-def is_required(leaf: Leaf, values: Values, shared: SharedConditions) -> bool:
+class HasRequired(Protocol):
+    """Anything carrying the DSL's `required` shape. Structural on purpose: the rule is
+    shared by the schema's `Leaf` and the compiled plan's `PlanFieldDescriptor`, which
+    hold the identical field under unrelated types. One implementation keeps them from
+    drifting — this rule has to agree with the form's completion-percentage maths."""
+
+    @property
+    def required(self) -> bool | RequiredWhen: ...
+
+
+def is_required(field: HasRequired, values: Values, shared: SharedConditions) -> bool:
     """Resolve `required: bool | {when}` against the current values."""
-    if isinstance(leaf.required, bool):
-        return leaf.required
-    return evaluate(leaf.required.when, values, shared)
+    if isinstance(field.required, bool):
+        return field.required
+    return evaluate(field.required.when, values, shared)
