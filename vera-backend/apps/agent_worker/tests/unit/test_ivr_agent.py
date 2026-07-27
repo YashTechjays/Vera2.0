@@ -11,13 +11,21 @@ from agent_worker.ivr_agent import IVR_NAVIGATOR_ID, IvrNavigatorAgent
 
 
 def _verifier(agent_id: str) -> Agent:
-    """Create a test verifier agent with a specific id."""
+    """A stand-in verification agent whose `.id` is actually `agent_id`.
 
-    class TestVerifier(Agent):
+    The subclass is REQUIRED, not stylistic: LiveKit's `Agent.__init__`
+    (`livekit/agents/voice/agent.py`) starts with
+    `if type(self) is Agent: self._id = "default_agent"`, so a bare `Agent(instructions=...,
+    id="intro_task")` silently DISCARDS the `id=` kwarg and reports `"default_agent"`. Only a
+    subclass takes the `else` branch (`self._id = id or camel_to_snake_case(type(self).__name__)`)
+    and honours it — which is what the handoff-span assertions here depend on.
+    """
+
+    class FakeVerifierAgent(Agent):
         def __init__(self, agent_id: str) -> None:
             super().__init__(instructions="verify", id=agent_id)
 
-    return TestVerifier(agent_id)
+    return FakeVerifierAgent(agent_id)
 
 
 def _navigator(verifier: Agent) -> IvrNavigatorAgent:
