@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,9 +77,10 @@ class EvalDeps:
     recording: Any = None
     plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
-    # Mirrors settings.form_auto_retry_enabled — the eval never auto-redials a
-    # payer for a tenant that has auto-retry off (same gate the fallback
-    # resolver applies). Default False: safe when a caller forgets to wire it.
+    # Mirrors settings.form_auto_retry_enabled — a DEPLOYMENT-WIDE flag (there
+    # is no per-tenant knob today): when off, the eval never auto-redials a
+    # payer (same gate the fallback resolver applies). Default False: safe when
+    # a caller forgets to wire it.
     auto_retry_enabled: bool = False
 
 
@@ -170,10 +171,16 @@ async def evaluate_call(
     # attempt's answers and decide the form on the old transcript. The newer
     # attempt's own job owns the resolution; ACK this one as a no-op.
     if call is not None:
+        # created_at is transaction-start time and can tie across attempts, so
+        # break ties on the uuid7 PK — same discipline as the other latest-call
+        # queries (calls.py, call_provenance.py, worker_events.py).
         newer = (
             await session.execute(
                 select(Call.id)
-                .where(Call.form_id == form_id, Call.created_at > call.created_at)
+                .where(
+                    Call.form_id == form_id,
+                    tuple_(Call.created_at, Call.id) > (call.created_at, call.id),
+                )
                 .limit(1)
             )
         ).first()
@@ -367,6 +374,22 @@ async def evaluate_call(
                 reason=ReviewReason.LLM_ERROR,
             )
         verdicts = {v.field_path: v for v in raw_verdicts}
+        if len(verdicts) != len(raw_verdicts):
+            # Same LLM quirk the extract side dedupes: duplicate verdicts for
+            # one path collapse last-wins here — surface it, paths only.
+            dupes = sorted(
+                {
+                    v.field_path
+                    for v in raw_verdicts
+                    if sum(1 for w in raw_verdicts if w.field_path == v.field_path) > 1
+                }
+            )
+            logger.warning(
+                "post_call_eval: judge returned duplicate verdicts for form %s — "
+                "last occurrence wins (%s)",
+                form_id,
+                dupes,
+            )
         judged_paths = {ef.field_path for ef, _ in to_judge}
         unmatched_verdicts = sorted(set(verdicts) - judged_paths)
         unjudged_answers = sorted(judged_paths - set(verdicts))

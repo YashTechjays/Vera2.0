@@ -148,8 +148,8 @@ class ReviewReason(enum.StrEnum):
     # A supervisor ended the call by hand — it is never auto-redialed even with
     # unsatisfied retryable fields; a human takes it from here.
     USER_ENDED = "user_ended"
-    # Required fields are unsatisfied and retryable, but the tenant has
-    # form_auto_retry_enabled off — the eval never auto-redials for them, so
+    # Required fields are unsatisfied and retryable, but the deployment-wide
+    # form_auto_retry_enabled flag is off — the eval never auto-redials, so
     # the form parks for a human instead of re-queueing.
     AUTO_RETRY_DISABLED = "auto_retry_disabled"
     # The automated post-call eval did not run for this form — either the eval
