@@ -57,8 +57,8 @@ def has_phi_token(value: str) -> bool:
     return PHI_TOKEN_RE.search(value) is not None
 
 
-def evidence_text(turns: list[TranscriptTurn], evidence_seq: int) -> str | None:
-    if 0 <= evidence_seq < len(turns):
+def evidence_text(turns: list[TranscriptTurn], evidence_seq: int | None) -> str | None:
+    if evidence_seq is not None and 0 <= evidence_seq < len(turns):
         return turns[evidence_seq].text
     return None
 
@@ -163,6 +163,27 @@ async def evaluate_call(
     user_ended = call is not None and (
         call.current_status == CallStatus.CANCELED.value or call.end_requested_by_id is not None
     )
+    # (0b) Stale-call guard — only the form's LATEST attempt may be evaluated.
+    # A job can be redelivered after its transaction committed (crash between
+    # commit and XACK); if the form has since re-entered AI_PROCESSING for a
+    # newer call, the status guard alone would let the stale job demote the new
+    # attempt's answers and decide the form on the old transcript. The newer
+    # attempt's own job owns the resolution; ACK this one as a no-op.
+    if call is not None:
+        newer = (
+            await session.execute(
+                select(Call.id)
+                .where(Call.form_id == form_id, Call.created_at > call.created_at)
+                .limit(1)
+            )
+        ).first()
+        if newer is not None:
+            logger.warning(
+                "post_call_eval: call %s is not form %s's latest attempt — skipping (stale job)",
+                call_id,
+                form_id,
+            )
+            return EvalOutcome(status=FormStatus(form.status), answers_written=0)
     prev_status = form.status
     sm = FormStateMachine()
 
@@ -260,7 +281,9 @@ async def evaluate_call(
                 field_path=row.field_path,
                 value=str(unwrap_value(row.value)),
                 confidence=row.confidence or 0,
-                evidence_seq=row.evidence_seq or 0,
+                # None stays None — fabricating turn 0 would point the judge at
+                # the call opener as the supposed evidence for this answer.
+                evidence_seq=row.evidence_seq,
             ),
             row,
         )
@@ -274,25 +297,29 @@ async def evaluate_call(
     answered = {row.field_path for row in current_rows}
     missing = [p for p in paths if p not in answered]
     extracted: list[ExtractedField] = []
+    extract_failed = False
     if missing:
         try:
             extracted = await deps.llm.extract(field_paths=missing, turns=turns)
         except Exception as exc:
+            # Do NOT return yet: the Observer's answers below still deserve their
+            # judge pass — forfeiting it would reproduce the "answers but no
+            # verdicts" stranding this module exists to prevent.
             logger.error(
                 "post_call_eval: LLM extract failed for form %s — routing to "
-                "EXCEPTION_REVIEW (%s: %s)",
+                "EXCEPTION_REVIEW after judging observer answers (%s: %s)",
                 form_id,
                 type(exc).__name__,
                 exc,
             )
-            return await _finish(
-                FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.LLM_ERROR
-            )
-    token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
+            extract_failed = True
     # Keep only what was asked for: a hallucinated path must not supersede an
-    # intake/human answer (top-up semantics).
+    # intake/human answer, and must not trip the token quarantine below for a
+    # field that is never written (top-up semantics).
     requested = set(missing)
-    clean = [ef for ef in extracted if not has_phi_token(ef.value) and ef.field_path in requested]
+    extracted = [ef for ef in extracted if ef.field_path in requested]
+    token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
+    clean = [ef for ef in extracted if not has_phi_token(ef.value)]
     # The LLM may emit the same field_path twice; keep the last occurrence. Two
     # inserts for one path would violate the fa_current_uq partial unique index
     # (the batch demote runs before the inserts) and poison-loop the job.
@@ -368,6 +395,16 @@ async def evaluate_call(
                     )
                 )
         await session.flush()
+
+    # (6b) A failed top-up extraction routes to review only AFTER the observer
+    # answers were judged above — their verdicts are persisted either way.
+    if extract_failed:
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW,
+            written=len(kept),
+            reviewed=[ef.field_path for ef, _ in to_judge],
+            reason=ReviewReason.LLM_ERROR,
+        )
 
     # (7) Recompute completion % from the form's current answers — derived
     # in-memory: the only current-row changes since the (4a) fetch are the

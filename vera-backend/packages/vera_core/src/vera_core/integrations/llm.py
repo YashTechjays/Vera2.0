@@ -24,7 +24,9 @@ class ExtractedField:
     field_path: str
     value: str
     confidence: int  # 0-100
-    evidence_seq: int  # index into the turns list
+    # Index into the turns list; None when no evidence turn anchors the answer
+    # (an Observer answer recorded without a rep turn) — never fabricate one.
+    evidence_seq: int | None  # index into the turns list
 
 
 @dataclass(frozen=True)
