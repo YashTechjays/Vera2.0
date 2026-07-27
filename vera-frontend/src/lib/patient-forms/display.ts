@@ -31,8 +31,9 @@ export function statusBadgeClass(status: PatientFormStatus | string): string {
   }
 }
 
-/** Tailwind chip classes for a call attempt's mode ("full" | "retry"). */
-export function modeBadgeClass(mode: "full" | "retry"): string {
+/** Tailwind chip classes for a call attempt's mode. "retry" stands out; any other
+ *  value (incl. "full") is neutral, so a plain `string` is accepted. */
+export function modeBadgeClass(mode: string): string {
   return mode === "retry"
     ? "bg-purple-100 text-purple-700"
     : "bg-slate-100 text-slate-600"
@@ -95,6 +96,21 @@ export function formatDate(iso: string | null): string {
   return Number.isNaN(d.getTime())
     ? "—"
     : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
+}
+
+/** ISO timestamp → short local date + time, or "—" (for time-ordered lists). */
+export function formatDateTime(iso: string | null): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? "—"
+    : d.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
 }
 
 /** Rough relative age for worklist columns: "3d" / "5h" / "12m", or "—". */

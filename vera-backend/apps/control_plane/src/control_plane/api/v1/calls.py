@@ -12,11 +12,12 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -85,6 +86,7 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
+from vera_core.services.call_visibility import recording_playable
 
 logger = logging.getLogger(__name__)
 
@@ -787,6 +789,162 @@ async def call_stats(
     ).one()
     total_today, live, critical = row
     return ok(CallStats(total_today=total_today, live=live, critical=critical))
+
+
+class CallHistoryRow(BaseModel):
+    """One call attempt in the tenant-wide Call History list. Carries the patient
+    identifiers the list displays (PHI) plus call metadata; no field values or
+    transcript. `recording_available` is caller-aware (see `_call_attempt_view`)."""
+
+    id: UUID
+    form_id: UUID
+    mode: str
+    status: str
+    created_at: datetime
+    patient_name: str | None
+    member_id: str | None
+    insurance_provider: str | None
+    recording_available: bool
+
+
+class PaginatedCalls(BaseModel):
+    items: list[CallHistoryRow]
+    page: int
+    page_size: int
+    total: int
+
+
+@router.get(
+    "/call-history",
+    response_model=ResponseModel[PaginatedCalls],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_call_history(
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    audit: Audit,
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status: Annotated[str | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
+    date_from: Annotated[datetime | None, Query()] = None,
+    date_to: Annotated[datetime | None, Query()] = None,
+    caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[PaginatedCalls]:
+    """The tenant's calls as a flat, newest-first list across every form — the
+    cross-form counterpart to `/patient-forms/{id}/calls`. RLS scopes rows to the
+    tenant; patient identifiers are a PHI disclosure (audited, no-store)."""
+    response.headers["Cache-Control"] = "no-store"
+    conds: list[ColumnElement[bool]] = []
+    if status is not None:
+        conds.append(Call.current_status == status)
+    if q:
+        # patient_name is trigram-indexed (contains match); member_id is not, so it
+        # takes a prefix match — the natural way to search a policy number and the
+        # only index-friendly shape.
+        conds.append(
+            or_(PatientForm.patient_name.ilike(f"%{q}%"), PatientForm.member_id.ilike(f"{q}%"))
+        )
+    if date_from is not None:
+        conds.append(Call.created_at >= date_from)
+    if date_to is not None:
+        conds.append(Call.created_at <= date_to)
+
+    has_recording = (
+        select(Recording.id)
+        .where(Recording.call_id == Call.id, Recording.status == RecordingStatus.AVAILABLE.value)
+        .exists()
+    )
+
+    async def _fetch_page() -> tuple[list[Any], int]:
+        """The page rows joined to their form, with the filtered total as a window
+        column. An out-of-range page returns no rows; fall back to a bare count."""
+        rows = (
+            await session.execute(
+                select(
+                    Call.id,
+                    Call.form_id,
+                    Call.mode,
+                    Call.current_status,
+                    Call.created_at,
+                    Call.initiated_by_id,
+                    Call.published,
+                    PatientForm.patient_name,
+                    PatientForm.member_id,
+                    PatientForm.insurance_provider,
+                    has_recording.label("has_recording"),
+                    func.count().over().label("total"),
+                )
+                .join(PatientForm, PatientForm.id == Call.form_id)
+                .where(*conds)
+                # id (UUIDv7) tie-break keeps pages stable across equal timestamps.
+                .order_by(Call.created_at.desc(), Call.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        if rows:
+            return list(rows), int(rows[0].total)
+        total = (
+            await session.execute(
+                select(func.count()).select_from(Call).join(PatientForm).where(*conds)
+            )
+        ).scalar_one()
+        return [], total
+
+    fetch_result, audit_result = await asyncio.gather(
+        _fetch_page(),
+        emit_phi_read_audit(
+            audit,
+            request,
+            tenant_id=tenant_id,
+            caller=caller,
+            resource_type="call",
+            resource_id="list",
+            fields=["patient_name", "member_id", "insurance_provider"],
+        ),
+        return_exceptions=True,
+    )
+    if isinstance(audit_result, BaseException):
+        raise audit_result
+    if isinstance(fetch_result, BaseException):
+        raise fetch_result
+    rows, total = fetch_result
+
+    # recordings:read shapes recording_available only (the timeline needs just
+    # calls:read; the playback endpoint re-enforces it). Skip the resolve when the
+    # page is empty — can_play is consumed only per row.
+    can_play = (
+        bool(rows)
+        and "recordings:read"
+        in (await resolver.effective_permissions(session, tenant_id, caller.user_id))[1]
+    )
+    items = [
+        CallHistoryRow(
+            id=r.id,
+            form_id=r.form_id,
+            mode=r.mode,
+            status=r.current_status,
+            created_at=r.created_at,
+            patient_name=r.patient_name,
+            member_id=r.member_id,
+            insurance_provider=r.insurance_provider,
+            recording_available=recording_playable(
+                has_recording=r.has_recording,
+                initiated_by_id=r.initiated_by_id,
+                published=r.published,
+                user_id=caller.user_id,
+                can_play=can_play,
+            ),
+        )
+        for r in rows
+    ]
+    return ok(PaginatedCalls(items=items, page=page, page_size=page_size, total=total))
 
 
 @router.get(

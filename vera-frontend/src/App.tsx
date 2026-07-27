@@ -24,6 +24,7 @@ import { InsuranceProviders } from "@/pages/InsuranceProviders"
 import { IvrPlaybooks } from "@/pages/IvrPlaybooks"
 import { FormSchemas } from "@/pages/FormSchemas"
 import { LlmConfig } from "@/pages/LlmConfig"
+import { CallHistory } from "@/pages/CallHistory"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -79,7 +80,7 @@ function App() {
             />
             <Route
               path="call-history"
-              element={<RequireNavRoute to="/call-history"><Placeholder title="Call History" /></RequireNavRoute>}
+              element={<RequireNavRoute to="/call-history"><CallHistory /></RequireNavRoute>}
             />
             <Route
               path="analytics"

@@ -38,7 +38,7 @@ from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db.rls import tenant_session
 from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallStatus, FormStatus
+from vera_core.models.enums import CallStatus, FormStatus, ReviewReason
 from vera_core.observability.correlation import RoomRef
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
@@ -99,7 +99,17 @@ async def resolve_ai_processing(
                 form.enqueued_at = func.now()
                 requeued = True
         if not requeued:
-            sm.transition(form, FormStatus.EXCEPTION_REVIEW, tenant_max_retries=tenant.max_retries)
+            # Stamp WHY so the reviewer isn't left with a blank reason: a
+            # supervisor-ended call is USER_ENDED; anything else reaching this
+            # fallback (eval consumer unconfigured, or the sweeper reclaiming a
+            # stranded form) was never AI-evaluated.
+            reason = ReviewReason.USER_ENDED if user_ended else ReviewReason.NOT_EVALUATED
+            sm.transition(
+                form,
+                FormStatus.EXCEPTION_REVIEW,
+                tenant_max_retries=tenant.max_retries,
+                reason=reason,
+            )
 
         await audit.emit(
             AuditRecord(

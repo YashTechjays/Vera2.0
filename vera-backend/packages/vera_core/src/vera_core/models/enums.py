@@ -148,6 +148,11 @@ class ReviewReason(enum.StrEnum):
     # A supervisor ended the call by hand — it is never auto-redialed even with
     # unsatisfied retryable fields; a human takes it from here.
     USER_ENDED = "user_ended"
+    # The automated post-call eval did not run for this form — either the eval
+    # consumer isn't configured (no Vertex/Gemini), so the close path resolved
+    # the form synchronously, or the pipeline sweeper reclaimed a form stranded
+    # in AI_PROCESSING. A human reviews it without AI-extracted values.
+    NOT_EVALUATED = "not_evaluated"
 
 
 class VersionStatus(enum.StrEnum):

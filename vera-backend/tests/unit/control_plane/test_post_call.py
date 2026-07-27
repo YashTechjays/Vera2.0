@@ -24,7 +24,7 @@ from control_plane.post_call import resolve_ai_processing, sweep_stuck_ai_proces
 from vera_core.audit import AuditRecord
 from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.audit_log import AuditEvent
-from vera_core.models.enums import CallStatus, FormStatus
+from vera_core.models.enums import CallStatus, FormStatus, ReviewReason
 from vera_core.observability.correlation import RoomRef
 
 # The tenant_session seam is monkeypatched, so the sessionmaker is never touched.
@@ -160,6 +160,8 @@ async def test_high_completion_moves_form_to_exception_review(
     assert requeued is False
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.retry_count == 0
+    # This synchronous fallback never ran the AI eval — the reviewer must see WHY.
+    assert form.review_reason == ReviewReason.NOT_EVALUATED.value
     assert len(audit.records) == 1
     record = audit.records[0]
     assert record.event_type == AuditEvent.FORM_STATUS_CHANGE.value
@@ -258,6 +260,7 @@ async def test_canceled_call_never_auto_requeues(monkeypatch: pytest.MonkeyPatch
 
     assert requeued is False
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.review_reason == ReviewReason.USER_ENDED.value  # supervisor ended it
     assert form.retry_count == 0  # budget untouched — cancels are operator decisions
     assert audit.records[0].detail["to"] == FormStatus.EXCEPTION_REVIEW.value
 

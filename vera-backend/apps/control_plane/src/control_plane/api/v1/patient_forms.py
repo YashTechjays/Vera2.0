@@ -98,7 +98,7 @@ from vera_core.services.call_provenance import (
     load_call_attempts,
     load_field_provenance,
 )
-from vera_core.services.call_visibility import call_hidden_from
+from vera_core.services.call_visibility import recording_playable
 from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
@@ -439,7 +439,6 @@ class CallAttemptView(BaseModel):
 
 
 def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
-    visible = not call_hidden_from(a.initiated_by_id, a.published, caller_id)
     return CallAttemptView(
         id=a.id,
         attempt=a.attempt,
@@ -448,7 +447,13 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -
         created_at=a.created_at,
         retry_of=a.retry_of,
         changed_paths=a.changed_paths,
-        recording_available=a.recording_available and visible and can_play,
+        recording_available=recording_playable(
+            has_recording=a.recording_available,
+            initiated_by_id=a.initiated_by_id,
+            published=a.published,
+            user_id=caller_id,
+            can_play=can_play,
+        ),
     )
 
 
