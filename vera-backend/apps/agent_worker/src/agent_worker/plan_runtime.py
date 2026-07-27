@@ -91,6 +91,7 @@ class PlanTaskAgent(Agent):
                 f"# Current task: {self._task.title}\n{self._task.prompt}",
                 extra_instructions=controller.extra_instructions,
             ),
+            id=self._task.task_key,
         )
 
     async def on_enter(self) -> None:
@@ -138,6 +139,7 @@ class WrapUpAgent(VeraAgent):
                 "do not open new topics or re-ask anything.",
                 extra_instructions=controller.extra_instructions,
             ),
+            id=WRAP_UP_TASK_KEY,
         )
 
     async def on_enter(self) -> None:

@@ -31,6 +31,11 @@ from vera_core.schemas import IvrPlaybookConfig
 
 logger = logging.getLogger("agent_worker")
 
+# Fixed id: exactly one IvrNavigatorAgent instance exists per call, so a sentinel (not a
+# per-instance value) is enough — matches the "@..." sentinel convention used for the plan
+# runtime's WrapUpAgent (agent_worker.plan_runtime.WRAP_UP_TASK_KEY).
+IVR_NAVIGATOR_ID = "@ivr_navigator"
+
 # Deterministic backstop: if the navigator takes this many IVR turns without reaching a
 # human, it hangs up rather than looping forever (enforced in on_user_turn_completed).
 _IVR_MAX_TURNS = 60
@@ -160,6 +165,7 @@ class IvrNavigatorAgent(Agent):
             instructions=build_ivr_instructions(playbook, context),
             tools=[],
             turn_handling=ivr_turn_handling(),
+            id=IVR_NAVIGATOR_ID,
         )
 
     def tts_node(

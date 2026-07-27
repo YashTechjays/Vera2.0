@@ -139,6 +139,14 @@ class TestConstruction:
         names = [t.info.name for t in controller.agents[0].tools if isinstance(t, FunctionTool)]
         assert names == ["task_complete"]  # no answer-write tools, no end_call
 
+    def test_task_agents_get_their_schema_task_key_as_id(self) -> None:
+        controller, _ = _controller()
+        assert [a.id for a in controller.agents] == ["intro_task", "gated_task", "last_task"]
+
+    def test_wrap_up_agent_id_is_the_sentinel(self) -> None:
+        controller, _ = _controller()
+        assert controller.wrap_up_agent.id == WRAP_UP_TASK_KEY
+
 
 class TestHandoff:
     @pytest.mark.asyncio
