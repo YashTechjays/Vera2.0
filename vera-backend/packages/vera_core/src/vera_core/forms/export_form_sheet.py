@@ -346,6 +346,9 @@ def render_form_sheet(
     run: list[str] = []
 
     def flush_run() -> None:
+        # Deliberate approximation of the FE's two independent column stacks:
+        # pairs advance row-by-row, so 3+-section runs align differently when
+        # block heights differ (column assignment and reading order match).
         nonlocal r, run
         for i in range(0, len(run), 2):
             pair = run[i : i + 2]
