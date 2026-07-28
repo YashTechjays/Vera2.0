@@ -1068,7 +1068,8 @@ async def test_end_call_terminal_still_reaps_the_room(
 ) -> None:
     """A terminal DB row can outlive its room (the agent self-ended but the room
     delete never took) — the only thing that hangs up the phone leg is deleting
-    the room, so the idempotent no-op must still tear it down (VR2-60)."""
+    the room, so the idempotent no-op must still tear it down (VR2-60), and that
+    hangup carries its own audit trail."""
     call_id = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
@@ -1084,13 +1085,19 @@ async def test_end_call_terminal_still_reaps_the_room(
     room = room_name_for_call(rbac_world.tenant_id, call_id)
     assert room in fake_livekit.deleted
     rows = (
-        await admin_session.execute(
-            select(AuditLog).where(
-                AuditLog.event_type == "call.end", AuditLog.resource_id == str(call_id)
+        (
+            await admin_session.execute(
+                select(AuditLog).where(
+                    AuditLog.event_type == "call.end", AuditLog.resource_id == str(call_id)
+                )
             )
         )
-    ).scalars()
-    assert list(rows) == []
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].detail["phase"] == "terminal_reap"
+    assert rows[0].actor_user_id == rbac_world.admin_id
 
 
 @pytest.mark.asyncio
