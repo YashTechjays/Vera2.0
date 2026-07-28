@@ -442,3 +442,11 @@ class TestParsing:
     def test_clamps_confidence_and_coerces_value(self) -> None:
         out = _parse_extraction('[{"field_path": "a.b", "value": 500, "confidence": 250}]')
         assert out == [ExtractedAnswer("a.b", "500", 100)]
+
+    def test_blank_values_are_dropped(self) -> None:  # VR2-93
+        out = _parse_extraction(
+            '[{"field_path": "a.b", "value": ""},'
+            ' {"field_path": "a.c", "value": "   "},'
+            ' {"field_path": "a.d", "value": "No"}]'
+        )
+        assert out == [ExtractedAnswer("a.d", "No", None)]

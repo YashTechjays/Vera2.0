@@ -20,6 +20,7 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
     form_completion_pct,
+    is_blank_answer,
     retryable_required_paths,
     unsatisfied_required_paths,
 )
@@ -257,7 +258,11 @@ async def evaluate_call(
             FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.LLM_ERROR
         )
     token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
-    clean = [ef for ef in extracted if not has_phi_token(ef.value)]
+    # blank answers never demote a baseline (VR2-93) — this writer bypasses
+    # record_answer, so it needs the same guard
+    clean = [
+        ef for ef in extracted if not has_phi_token(ef.value) and not is_blank_answer(ef.value)
+    ]
     # The LLM may emit the same field_path twice; keep the last occurrence. Two
     # inserts for one path would violate the fa_current_uq partial unique index
     # (the batch demote runs before the inserts) and poison-loop the job.

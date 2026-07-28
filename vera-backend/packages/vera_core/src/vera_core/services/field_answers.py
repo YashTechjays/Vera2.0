@@ -21,8 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import InvalidIntakeValue, promote_columns
-from vera_core.forms.review import completion_pct, completion_pct_v2, unwrap_value
+from vera_core.forms.review import (
+    completion_pct,
+    completion_pct_v2,
+    is_blank_answer,
+    unwrap_value,
+)
 from vera_core.models import FieldAnswer, PatientForm
+from vera_core.models.enums import AnswerSource
 
 logger = logging.getLogger("vera_core.field_answers")
 
@@ -58,6 +64,9 @@ async def record_answer(
     identical (source, call_id, value) that is already current is a no-op (returns False)
     Demote-then-flush-then-insert keeps the `fa_current_uq` partial-unique index (one
     current row per field) satisfied through the swap."""
+    # blank AI answers never demote a baseline (VR2-93); humans/intake may still clear
+    if source == AnswerSource.AI_CALL.value and is_blank_answer(raw_value):
+        return False
     current = (
         await session.execute(
             select(FieldAnswer).where(
