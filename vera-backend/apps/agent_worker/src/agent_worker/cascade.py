@@ -26,7 +26,11 @@ from livekit.plugins import cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.english import EnglishModel
 
 from agent_worker.intervention import TakeoverState
-from vera_core.services.model_config import is_gemini_3_model
+from vera_core.services.model_config import (
+    ThinkingOverride,
+    is_gemini_3_model,
+    validate_extra_config,
+)
 
 logger = logging.getLogger("agent_worker")
 
@@ -47,32 +51,39 @@ def resolve_llm_model(llm_model: str | None, default_model: str) -> str:
 def resolve_thinking_attrs(
     model: str, thinking_override: dict[str, Any] | None
 ) -> dict[str, int | str]:
-    """The resolved (budget-or-level) values in plain-value form — exactly one key,
-    matching the same pairing ThinkingOverride/validate_extra_config enforce at save
-    time. No override + Gemini 3 -> an explicit "low" (not an empty ThinkingConfig
-    left for the plugin's own private auto-selection) so this is always accurate.
+    """The resolved (budget-or-level) value in plain-value form — always exactly the one
+    key the model's family accepts, holding a value that family accepts. No override +
+    Gemini 3 -> an explicit "low" (not an empty ThinkingConfig left for the plugin's own
+    private auto-selection) so this is always accurate.
 
-    save_llm_model pairs an override with its model atomically, so a mismatch (a
-    thinking_budget override alongside a Gemini 3 model, or vice versa) shouldn't
-    reach here — but this is the one place with the resolved model in hand, and
-    google.LLM only checks the pairing inside chat(), on the first live turn, not at
-    construction. Trusting a mismatched override through would crash mid-call instead
-    of failing cleanly at session setup, so fall back to the family default instead."""
-    is_gemini_3 = is_gemini_3_model(model)
-    expected_key = "thinking_level" if is_gemini_3 else "thinking_budget"
+    Re-validated here through the SAME ThinkingOverride/validate_extra_config the save path
+    uses, rather than trusting the stored dict: `extra_config` is unconstrained JSONB (no
+    CHECK), so a hand-edited or future writer's row can hold the wrong key for the resolved
+    model, an out-of-enum level, or a non-int budget. Each is worse than it looks —
+    ThinkingConfig is extra="forbid", so a bad key raises here and drops the call at session
+    setup; an out-of-enum thinking_level only warns locally before being sent to the API; and
+    a pre-3 model paired with a thinking_level raises inside google.LLM's chat(), on the first
+    live turn, crashing mid-call. Falling back to the family default keeps a bad row
+    cosmetic, and reusing the save-path validator means the two can't drift apart."""
     default: dict[str, int | str] = (
-        {"thinking_level": "low"} if is_gemini_3 else {"thinking_budget": 0}
+        {"thinking_level": "low"} if is_gemini_3_model(model) else {"thinking_budget": 0}
     )
     if not thinking_override:
         return default
-    if expected_key not in thinking_override:
+    try:
+        override = ThinkingOverride(**thinking_override)
+        validate_extra_config(model, override)
+    except ValueError as exc:
         logger.warning(
-            "thinking override %s does not match model %s's family — using default",
+            "thinking override %s is not usable for model %s (%s) — using default",
             sorted(thinking_override),
             model,
+            type(exc).__name__,
         )
         return default
-    return dict(thinking_override)
+    # _exactly_one guarantees this is the single key the family accepts; the same
+    # model_dump save_llm_model writes the column with.
+    return override.model_dump(exclude_none=True)
 
 
 def resolve_thinking_config(model: str, thinking_override: dict[str, Any] | None) -> ThinkingConfig:

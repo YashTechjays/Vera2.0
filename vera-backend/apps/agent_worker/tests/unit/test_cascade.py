@@ -72,7 +72,7 @@ def test_resolve_llm_model_default_is_the_caller_supplied_value_not_a_constant()
     assert resolve_llm_model(None, "some-other-model") == "some-other-model"
 
 
-def test_resolve_thinking_attrs_returns_explicit_override_verbatim() -> None:
+def test_resolve_thinking_attrs_honors_an_explicit_override() -> None:
     assert resolve_thinking_attrs("gemini-2.5-flash", {"thinking_budget": 500}) == {
         "thinking_budget": 500
     }
@@ -101,6 +101,51 @@ def test_resolve_thinking_attrs_falls_back_when_override_family_mismatches_model
     assert resolve_thinking_attrs("gemini-2.5-flash", {"thinking_level": "high"}) == {
         "thinking_budget": 0
     }
+
+
+def test_resolve_thinking_attrs_drops_a_stray_extra_key() -> None:
+    # extra_config is unconstrained JSONB (validated only on the save path) and
+    # ThinkingConfig is extra="forbid", so a stray key passed through would raise at
+    # session setup and drop the call. Only the family key may reach ThinkingConfig.
+    assert resolve_thinking_attrs("gemini-2.5-flash", {"thinking_budget": 500, "junk": 1}) == {
+        "thinking_budget": 500
+    }
+    assert resolve_thinking_attrs("gemini-3.5-flash", {"thinking_level": "high", "junk": 1}) == {
+        "thinking_level": "high"
+    }
+
+
+def test_resolve_thinking_attrs_falls_back_when_no_family_key_survives() -> None:
+    assert resolve_thinking_attrs("gemini-2.5-flash", {"junk": 1}) == {"thinking_budget": 0}
+
+
+def test_resolve_thinking_attrs_falls_back_on_an_out_of_enum_thinking_level() -> None:
+    # google.genai only WARNS on an unknown ThinkingLevel and ships it to the API, so a
+    # bad stored level has to be caught here or not at all.
+    assert resolve_thinking_attrs("gemini-3.5-flash", {"thinking_level": "sideways"}) == {
+        "thinking_level": "low"
+    }
+
+
+def test_resolve_thinking_attrs_falls_back_on_an_uncoercible_thinking_budget() -> None:
+    # ThinkingOverride is pydantic in lax mode, so "500" coerces to 500 — fine, it still
+    # reaches ThinkingConfig as an int. Only a value no int can be made of falls back.
+    for bad in (1.5, "abc", None, [0]):
+        assert resolve_thinking_attrs("gemini-2.5-flash", {"thinking_budget": bad}) == {
+            "thinking_budget": 0
+        }
+
+
+def test_resolve_thinking_config_never_raises_on_a_malformed_stored_override() -> None:
+    # The point of re-validating: every one of these reaches ThinkingConfig as a valid
+    # config instead of the ValidationError that would kill the call at session setup.
+    for model, override in (
+        ("gemini-2.5-flash", {"thinking_budget": 0, "junk": 1}),
+        ("gemini-3.5-flash", {"thinking_level": "sideways"}),
+        ("gemini-2.5-flash", {"thinking_budget": "abc"}),
+        ("gemini-3.5-flash", {}),
+    ):
+        resolve_thinking_config(model, override)
 
 
 def test_resolve_thinking_config_falls_back_instead_of_raising_on_mismatch() -> None:
