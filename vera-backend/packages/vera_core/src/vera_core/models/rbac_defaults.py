@@ -80,6 +80,13 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "VIRTUAL_ASSISTANT": frozenset(
-        {"voice_lab:sandbox", "calls:read", "calls:publish", "forms:read", "forms:write"}
+        {
+            "voice_lab:sandbox",
+            "calls:read",
+            "calls:publish",
+            "calls:intervene",
+            "forms:read",
+            "forms:write",
+        }
     ),
 }

@@ -45,6 +45,7 @@ from vera_core.events import (
     WorkerEventBus,
     parse_worker_event,
 )
+from vera_core.forms.review import dispute_view
 from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AnswerSource, CallEventType, CallHealthFlag, CallStatus
@@ -58,6 +59,7 @@ from vera_core.notifications import (
 from vera_core.observability.correlation import parse_room_name
 from vera_core.plan_store import CallPlanService
 from vera_core.services.field_answers import (
+    baseline_value,
     current_values_by_path,
     recompute_form_projection,
     record_answer,
@@ -186,6 +188,7 @@ class WorkerEventConsumer:
                 raise
             except RedisError:
                 logger.exception("worker-event consumer Redis error; backing off")
+                group_ready = False
                 await asyncio.sleep(1.0)
 
     async def _read_once(self) -> None:
@@ -365,9 +368,9 @@ class WorkerEventConsumer:
 
     async def _handle_call_answer_recorded(self, event: WorkerEvent) -> None:
         """Persist an Observer-extracted answer as an ai_call field_answer, then re-derive
-        the form's promoted columns + completion_pct. Idempotent under redelivery (the
-        writer no-ops an unchanged value); the form row lock serializes against a
-        concurrent human resolve on the same form."""
+        the form's promoted columns + completion_pct, then relay it onto the per-call SSE
+        stream. Idempotent under redelivery (the writer no-ops an unchanged value); the form
+        row lock serializes against a concurrent human resolve on the same form."""
         if not isinstance(event, CallAnswerRecordedEvent):
             return
         ref = parse_room_name(event.room_name)
@@ -380,6 +383,7 @@ class WorkerEventConsumer:
             if call is None:
                 _retry_young_or_drop(event.room_name, event.ts)
                 return  # voice-lab room (or the Call row hasn't committed yet → retry)
+            call_is_terminal = call.current_status in TERMINAL_VALUES
             form = (
                 await session.execute(
                     select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
@@ -419,6 +423,32 @@ class WorkerEventConsumer:
                     detail={"field_path": event.field_path, "call_id": str(call.id)},
                 )
             )
+            # Closeout already deleted this call's stream; an XADD would recreate it and
+            # pin every client to a dead call. The DB row is written — just skip the relay,
+            # and skip the baseline read it would need. See the test for the full chain.
+            if call_is_terminal:
+                return
+            # Everything the relay needs, read while the row is still live in this session.
+            dispute = dispute_view(
+                source=AnswerSource.AI_CALL.value,
+                value=event.value,
+                confidence=event.confidence,
+                evidence=None,
+                baseline_value=await baseline_value(session, form.id, event.field_path),
+            )
+            completion_pct = float(form.completion_pct)
+
+        # Committed and unlocked — see the docstring.
+        await self._call_stream.publish_field_answer(
+            event.room_name,
+            field_path=event.field_path,
+            value=event.value,
+            confidence=event.confidence,
+            evidence_seq=event.evidence_seq,
+            completion_pct=completion_pct,
+            dispute=dispute,
+            ts=event.ts,
+        )
 
     async def _handle_call_health(self, event: WorkerEvent) -> None:
         """Persist one observer analysis (spec §4.3). Every surviving analysis

@@ -76,16 +76,41 @@ def is_blank_answer(value: Any) -> bool:
     return value is None or not str(value).strip()
 
 
+def dispute_view(
+    *,
+    source: str,
+    value: Any,
+    confidence: int | None,
+    evidence: str | None,
+    baseline_value: Any,
+) -> dict[str, Any] | None:
+    """The `{previous_value, current_value, confidence, evidence, reasoning}` payload for one
+    field, or `None` when it is not disputed."""
+    if source != AnswerSource.AI_CALL.value:
+        return None
+    if normalize_value(unwrap_value(value)) == normalize_value(unwrap_value(baseline_value)):
+        return None
+    return {
+        "previous_value": unwrap_value(baseline_value),
+        "current_value": unwrap_value(value),
+        "confidence": confidence,
+        "evidence": evidence,
+        "reasoning": None,
+    }
+
+
 def is_disputed(current: AnswerRow, baseline_value: Any) -> bool:
     """True when the current value came from the AI call and diverges from the
-    human/intake baseline. `baseline_value` is the stored baseline (`{"value": ...}`) or
-    `None` if absent; `!=` matches `IS DISTINCT FROM` semantics for `None`. Values are
-    normalized first, so case/whitespace-only differences are not disputes."""
-    if current.source != AnswerSource.AI_CALL.value:
-        return False
-    return bool(
-        normalize_value(unwrap_value(current.value))
-        != normalize_value(unwrap_value(baseline_value))
+    human/intake baseline. Thin wrapper over `dispute_view` so there is one rule."""
+    return (
+        dispute_view(
+            source=current.source,
+            value=current.value,
+            confidence=current.confidence,
+            evidence=current.evidence,
+            baseline_value=baseline_value,
+        )
+        is not None
     )
 
 
@@ -163,15 +188,13 @@ def build_field_views(
     views: list[dict[str, Any]] = []
     for answer in sorted(current_answers, key=lambda a: a.field_path):
         baseline = baseline_value_by_path.get(answer.field_path)
-        dispute: dict[str, Any] | None = None
-        if is_disputed(answer, baseline):
-            dispute = {
-                "previous_value": unwrap_value(baseline),
-                "current_value": unwrap_value(answer.value),
-                "confidence": answer.confidence,  # the AI answer's own confidence
-                "evidence": answer.evidence,  # what the AI captured
-                "reasoning": None,  # field_evaluation is not part of disputes
-            }
+        dispute = dispute_view(
+            source=answer.source,
+            value=answer.value,
+            confidence=answer.confidence,
+            evidence=answer.evidence,
+            baseline_value=baseline,
+        )
         views.append(
             {
                 "field_path": answer.field_path,

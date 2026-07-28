@@ -1,6 +1,11 @@
-"""Post-call re-read: extract collected fields from the (de-identified) transcript,
-persist them, judge each, and decide the form's terminal status. Pure helpers here;
-the DB orchestration lives in `evaluate_call` below.
+"""Post-call eval: judge the Observer's live ai_call answers for the finished
+call, extract only the still-missing collection paths from the transcript
+(top-up), judge those too, and decide the form's terminal status. Pure helpers
+here; Redelivery safety comes from the status guard + single-transaction
+atomicity (a committed eval already left AI_PROCESSING; a rolled-back one left
+no partial state) — there is deliberately no answer-existence guard: the
+Observer writes ai_call answers DURING the call, so their presence proves
+nothing about whether the eval ran.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +28,7 @@ from vera_core.forms.review import (
     is_blank_answer,
     retryable_required_paths,
     unsatisfied_required_paths,
+    unwrap_value,
 )
 from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -32,12 +38,11 @@ from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, ReviewR
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
-from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
 
-logger = logging.getLogger("vera.post_call_eval")
+logger = logging.getLogger("vera_core.services.post_call_eval")
 
 # Legacy de-identification token shape ("[[SSN_1]]"). The tokenization wall was
 # removed 2026-07-13 (phi_codec deleted; transcripts are plaintext in-boundary),
@@ -53,8 +58,8 @@ def has_phi_token(value: str) -> bool:
     return PHI_TOKEN_RE.search(value) is not None
 
 
-def evidence_text(turns: list[TranscriptTurn], evidence_seq: int) -> str | None:
-    if 0 <= evidence_seq < len(turns):
+def evidence_text(turns: list[TranscriptTurn], evidence_seq: int | None) -> str | None:
+    if evidence_seq is not None and 0 <= evidence_seq < len(turns):
         return turns[evidence_seq].text
     return None
 
@@ -73,6 +78,11 @@ class EvalDeps:
     recording: Any = None
     plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
+    # Mirrors settings.form_auto_retry_enabled — a DEPLOYMENT-WIDE flag (there
+    # is no per-tenant knob today): when off, the eval never auto-redials a
+    # payer (same gate the fallback resolver applies). Default False: safe when
+    # a caller forgets to wire it.
+    auto_retry_enabled: bool = False
 
 
 @dataclass
@@ -138,20 +148,6 @@ async def evaluate_call(
         )
         return EvalOutcome(status=FormStatus(form.status), answers_written=0)
 
-    # (1) Idempotency guard — return early if this call was already processed.
-    already = (
-        await session.execute(
-            select(FieldAnswer.id)
-            .where(
-                FieldAnswer.call_id == call_id,
-                FieldAnswer.source == AnswerSource.AI_CALL.value,
-            )
-            .limit(1)
-        )
-    ).first()
-    if already is not None:
-        return EvalOutcome(status=FormStatus(form.status), answers_written=0)
-
     tenant: Tenant = (
         await session.execute(select(Tenant).where(Tenant.id == tenant_id))
     ).scalar_one()
@@ -169,6 +165,33 @@ async def evaluate_call(
     user_ended = call is not None and (
         call.current_status == CallStatus.CANCELED.value or call.end_requested_by_id is not None
     )
+    # (0b) Stale-call guard — only the form's LATEST attempt may be evaluated.
+    # A job can be redelivered after its transaction committed (crash between
+    # commit and XACK); if the form has since re-entered AI_PROCESSING for a
+    # newer call, the status guard alone would let the stale job demote the new
+    # attempt's answers and decide the form on the old transcript. The newer
+    # attempt's own job owns the resolution; ACK this one as a no-op.
+    if call is not None:
+        # created_at is transaction-start time and can tie across attempts, so
+        # break ties on the uuid7 PK — same discipline as the other latest-call
+        # queries (calls.py, call_provenance.py, worker_events.py).
+        newer = (
+            await session.execute(
+                select(Call.id)
+                .where(
+                    Call.form_id == form_id,
+                    tuple_(Call.created_at, Call.id) > (call.created_at, call.id),
+                )
+                .limit(1)
+            )
+        ).first()
+        if newer is not None:
+            logger.warning(
+                "post_call_eval: call %s is not form %s's latest attempt — skipping (stale job)",
+                call_id,
+                form_id,
+            )
+            return EvalOutcome(status=FormStatus(form.status), answers_written=0)
     prev_status = form.status
     sm = FormStateMachine()
 
@@ -242,21 +265,67 @@ async def evaluate_call(
         )
     paths = doc.collection_paths()
 
-    # (4-5) Extract + persist (skip token-valued fields). Keep each written row so
-    # its ID is in hand for the judge pass — the PK is client-minted (uuid7), so
-    # `.id` is populated at construction and needs no re-query after flush.
-    try:
-        extracted = await deps.llm.extract(field_paths=paths, turns=turns)
-    except Exception as exc:
-        logger.error(
-            "post_call_eval: LLM extract failed for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
-            form_id,
-            type(exc).__name__,
-            exc,
+    # (4a) The form's current answers, fetched once — used both to isolate the
+    # Observer's live answers for THIS call (worker_events persists ai_call
+    # answers during the call since 4f0b8a9; they ARE the extraction for
+    # whatever the call covered, so the eval judges them instead of
+    # re-extracting) and to compute what is still missing (4b), avoiding a
+    # second read of the same rows.
+    current_rows = (
+        (
+            await session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == form_id,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
         )
-        return await _finish(
-            FormStatus.EXCEPTION_REVIEW, written=0, reviewed=[], reason=ReviewReason.LLM_ERROR
+        .scalars()
+        .all()
+    )
+    observer_pairs: list[tuple[ExtractedField, FieldAnswer]] = [
+        (
+            ExtractedField(
+                field_path=row.field_path,
+                value=str(unwrap_value(row.value)),
+                confidence=row.confidence or 0,
+                # None stays None — fabricating turn 0 would point the judge at
+                # the call opener as the supposed evidence for this answer.
+                evidence_seq=row.evidence_seq,
+            ),
+            row,
         )
+        for row in current_rows
+        if row.call_id == call_id and row.source == AnswerSource.AI_CALL.value
+    ]
+
+    # (4b) Top-up extraction: only paths with no current answer AT ALL — an
+    # intake / human / prior-attempt answer is not missing, and the LLM must
+    # never supersede one (extracted paths are filtered back to this set).
+    answered = {row.field_path for row in current_rows}
+    missing = [p for p in paths if p not in answered]
+    extracted: list[ExtractedField] = []
+    extract_failed = False
+    if missing:
+        try:
+            extracted = await deps.llm.extract(field_paths=missing, turns=turns)
+        except Exception as exc:
+            # Do NOT return yet: the Observer's answers below still deserve their
+            # judge pass — forfeiting it would reproduce the "answers but no
+            # verdicts" stranding this module exists to prevent.
+            logger.error(
+                "post_call_eval: LLM extract failed for form %s — routing to "
+                "EXCEPTION_REVIEW after judging observer answers (%s: %s)",
+                form_id,
+                type(exc).__name__,
+                exc,
+            )
+            extract_failed = True
+    # Keep only what was asked for: a hallucinated path must not supersede an
+    # intake/human answer, and must not trip the token quarantine below for a
+    # field that is never written (top-up semantics).
+    requested = set(missing)
+    extracted = [ef for ef in extracted if ef.field_path in requested]
     token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
     # blank answers never demote a baseline (VR2-93) — this writer bypasses
     # record_answer, so it needs the same guard
@@ -288,40 +357,91 @@ async def evaluate_call(
         kept.append((ef, answer))
     await session.flush()
 
-    # (6) Judge + write FieldEvaluation. The verdicts feed the satisfaction check
-    # below via load_field_status — nothing is decided per-field here.
-    try:
-        raw_verdicts = await deps.llm.judge(extracted=[ef for ef, _ in kept], turns=turns)
-    except Exception as exc:
-        logger.error(
-            "post_call_eval: LLM judge failed for form %s — routing to EXCEPTION_REVIEW (%s: %s)",
-            form_id,
-            type(exc).__name__,
-            exc,
-        )
+    # (6) One judge pass over the Observer's answers + the topped-up ones. The
+    # verdicts feed the satisfaction check below via load_field_status —
+    # nothing is decided per-field here.
+    to_judge: list[tuple[ExtractedField, FieldAnswer]] = observer_pairs + kept
+    if to_judge:
+        try:
+            raw_verdicts = await deps.llm.judge(extracted=[ef for ef, _ in to_judge], turns=turns)
+        except Exception as exc:
+            logger.error(
+                "post_call_eval: LLM judge failed for form %s — routing to "
+                "EXCEPTION_REVIEW (%s: %s)",
+                form_id,
+                type(exc).__name__,
+                exc,
+            )
+            return await _finish(
+                FormStatus.EXCEPTION_REVIEW,
+                written=len(kept),
+                reviewed=[ef.field_path for ef, _ in to_judge],
+                reason=ReviewReason.LLM_ERROR,
+            )
+        verdicts = {v.field_path: v for v in raw_verdicts}
+        if len(verdicts) != len(raw_verdicts):
+            # Same LLM quirk the extract side dedupes: duplicate verdicts for
+            # one path collapse last-wins here — surface it, paths only.
+            dupes = sorted(
+                {
+                    v.field_path
+                    for v in raw_verdicts
+                    if sum(1 for w in raw_verdicts if w.field_path == v.field_path) > 1
+                }
+            )
+            logger.warning(
+                "post_call_eval: judge returned duplicate verdicts for form %s — "
+                "last occurrence wins (%s)",
+                form_id,
+                dupes,
+            )
+        judged_paths = {ef.field_path for ef, _ in to_judge}
+        unmatched_verdicts = sorted(set(verdicts) - judged_paths)
+        unjudged_answers = sorted(judged_paths - set(verdicts))
+        if unmatched_verdicts or unjudged_answers:
+            # Paths only — schema constants, never answer values (PHI rule).
+            logger.warning(
+                "post_call_eval: judge verdict/path mismatch for form %s — "
+                "%d verdict(s) match no judged answer (%s); "
+                "%d judged answer(s) got no verdict (%s)",
+                form_id,
+                len(unmatched_verdicts),
+                unmatched_verdicts,
+                len(unjudged_answers),
+                unjudged_answers,
+            )
+        for ef, answer in to_judge:
+            v = verdicts.get(ef.field_path)
+            if v is not None:
+                session.add(
+                    FieldEvaluation(
+                        tenant_id=tenant_id,
+                        answer_id=answer.id,
+                        confidence=v.confidence,
+                        evidence=v.evidence,
+                        supported=v.supported,
+                    )
+                )
+        await session.flush()
+
+    # (6b) A failed top-up extraction routes to review only AFTER the observer
+    # answers were judged above — their verdicts are persisted either way.
+    if extract_failed:
         return await _finish(
             FormStatus.EXCEPTION_REVIEW,
             written=len(kept),
-            reviewed=[ef.field_path for ef, _ in kept],
+            reviewed=[ef.field_path for ef, _ in to_judge],
             reason=ReviewReason.LLM_ERROR,
         )
-    verdicts = {v.field_path: v for v in raw_verdicts}
-    for ef, answer in kept:
-        v = verdicts.get(ef.field_path)
-        if v is not None:
-            session.add(
-                FieldEvaluation(
-                    tenant_id=tenant_id,
-                    answer_id=answer.id,
-                    confidence=v.confidence,
-                    evidence=v.evidence,
-                    supported=v.supported,
-                )
-            )
-    await session.flush()
 
-    # (7) Recompute completion % from the form's current answers.
-    current_values = await current_values_by_path(session, form_id)
+    # (7) Recompute completion % from the form's current answers — derived
+    # in-memory: the only current-row changes since the (4a) fetch are the
+    # top-up inserts in `kept` (their paths come from `missing`, so they are
+    # disjoint from `current_rows` and the batch demote touched no fetched row).
+    current_values: dict[str, object] = {
+        row.field_path: unwrap_value(row.value) for row in current_rows
+    }
+    current_values.update({ef.field_path: ef.value for ef, _ in kept})
     form.completion_pct = form_completion_pct(current_values, version.schema_json)
 
     # (8) Update call_form_snapshot.after_state (the before_state row was written
@@ -378,7 +498,16 @@ async def evaluate_call(
                 reviewed=unsatisfied,
                 reason=ReviewReason.USER_ENDED,
             )
-        return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
+        if deps.auto_retry_enabled:
+            return await _finish(
+                FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry"
+            )
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW,
+            written=len(kept),
+            reviewed=unsatisfied,
+            reason=ReviewReason.AUTO_RETRY_DISABLED,
+        )
     return await _finish(
         FormStatus.EXCEPTION_REVIEW,
         written=len(kept),

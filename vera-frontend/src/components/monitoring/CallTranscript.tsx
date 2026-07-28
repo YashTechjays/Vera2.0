@@ -5,9 +5,11 @@ import { cn } from "@/lib/utils"
 import {
   asCallHealth,
   asCallStatus,
+  asFieldAnswer,
   asTranscriptTurn,
   streamCallEvents,
   type CallHealth,
+  type FieldAnswerEvent,
   type TranscriptTurn,
   type TranscriptTurnSource,
 } from "@/lib/api/callEvents"
@@ -44,6 +46,7 @@ export function CallTranscript({
   onCallStatus,
   onTextChange,
   onHealth,
+  onFieldAnswer,
   supervisorLabel = "Supervisor",
 }: {
   callId: string
@@ -56,6 +59,8 @@ export function CallTranscript({
   onTextChange?: (text: string) => void
   /** Fires for every health envelope — the modal lifts this into its header badge. */
   onHealth?: (h: CallHealth) => void
+  /** Fires for every field_answer envelope — the modal pushes it into the live form. */
+  onFieldAnswer?: (a: FieldAnswerEvent) => void
   /** Label for supervisor (takeover) turns — the intervener's email when known. */
   supervisorLabel?: string
 }) {
@@ -67,13 +72,15 @@ export function CallTranscript({
   const onCallStatusRef = useRef(onCallStatus)
   const onTextChangeRef = useRef(onTextChange)
   const onHealthRef = useRef(onHealth)
+  const onFieldAnswerRef = useRef(onFieldAnswer)
   const supervisorLabelRef = useRef(supervisorLabel)
   useEffect(() => {
     onCallStatusRef.current = onCallStatus
     onTextChangeRef.current = onTextChange
     onHealthRef.current = onHealth
+    onFieldAnswerRef.current = onFieldAnswer
     supervisorLabelRef.current = supervisorLabel
-  }, [onCallStatus, onTextChange, onHealth, supervisorLabel])
+  }, [onCallStatus, onTextChange, onHealth, onFieldAnswer, supervisorLabel])
 
   useEffect(() => {
     onTextChangeRef.current?.(transcriptText(turns))
@@ -91,6 +98,8 @@ export function CallTranscript({
         if (status) onCallStatusRef.current?.(status, e.ts)
         const health = asCallHealth(e)
         if (health) onHealthRef.current?.(health)
+        const answer = asFieldAnswer(e)
+        if (answer) onFieldAnswerRef.current?.(answer)
       },
       // A dropped connection was re-established and the server replays the
       // stream from the start — discard the stale turns; the replay replaces

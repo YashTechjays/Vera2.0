@@ -10,6 +10,7 @@ from vera_core.forms.review import (
     all_required_paths,
     build_field_views,
     completion_pct,
+    dispute_view,
     expand_to_groups,
     has_call_reference,
     is_disputed,
@@ -125,6 +126,66 @@ class TestIsDisputed:
         # A non-breaking space (U+00A0) is not ASCII whitespace, so it is NOT stripped —
         # this stays a dispute.
         assert is_disputed(self._answer("\u00a0Primary"), {"value": "Primary"}) is True
+
+
+class TestDisputeView:
+    """dispute_view is the shared payload builder \u2014 the live SSE path and the detail view
+    both go through it, so its dict shape is what the UI renders either way."""
+
+    def test_diverging_ai_value_builds_payload(self) -> None:
+        assert dispute_view(
+            source="ai_call",
+            value={"value": "Blue Cross"},
+            confidence=88,
+            evidence="member said Blue Cross",
+            baseline_value={"value": "BCBS TX"},
+        ) == {
+            "previous_value": "BCBS TX",
+            "current_value": "Blue Cross",
+            "confidence": 88,
+            "evidence": "member said Blue Cross",
+            "reasoning": None,
+        }
+
+    def test_matching_baseline_is_none(self) -> None:
+        assert (
+            dispute_view(
+                source="ai_call",
+                value="BCBS TX",
+                confidence=None,
+                evidence=None,
+                baseline_value={"value": "BCBS TX"},
+            )
+            is None
+        )
+
+    def test_absent_baseline_disputes_non_null_value(self) -> None:
+        view = dispute_view(
+            source="ai_call", value="Aetna", confidence=None, evidence=None, baseline_value=None
+        )
+        assert view is not None
+        assert view["previous_value"] is None
+        assert view["current_value"] == "Aetna"
+
+    def test_non_ai_source_is_never_disputed(self) -> None:
+        assert (
+            dispute_view(
+                source="human", value="x", confidence=None, evidence=None, baseline_value=None
+            )
+            is None
+        )
+
+    def test_accepts_raw_unwrapped_values(self) -> None:
+        # The live path passes raw values (not {"value": ...}) \u2014 must behave identically.
+        assert dispute_view(
+            source="ai_call", value="Yes", confidence=90, evidence=None, baseline_value="No"
+        ) == {
+            "previous_value": "No",
+            "current_value": "Yes",
+            "confidence": 90,
+            "evidence": None,
+            "reasoning": None,
+        }
 
 
 class TestRequiredPathsAndCompletion:

@@ -5,7 +5,7 @@ Exercises the three key behaviours against a real Docker-Postgres instance
   1. happy path: writes FieldAnswer + FieldEvaluation rows, form → EXCEPTION_REVIEW
      (all-satisfied still parks for human sign-off — the pipeline never auto-COMPLETEs).
   2. token-valued field: skips the write, routes form → EXCEPTION_REVIEW.
-  3. redelivery: second call is a no-op (idempotency guard).
+  3. redelivery: second call is a no-op (status guard: the first eval left AI_PROCESSING).
 
 Seeding pattern mirrors tests/integration/control_plane/test_call_queue.py:
   - superuser engine from `database_url` (bypasses RLS — needed for Tenant insert)
@@ -61,7 +61,14 @@ _SCHEMA_JSON: dict[str, object] = {
                     "role": "ask",
                     "required": True,
                     "prompt": {"ask": "Is the patient in-network?"},
-                }
+                },
+                "notes": {
+                    "type": "text",
+                    "title": "Notes",
+                    "role": "ask",
+                    "required": False,
+                    "prompt": {"ask": "Any additional notes?"},
+                },
             },
         }
     },
@@ -76,6 +83,9 @@ _SCHEMA_JSON: dict[str, object] = {
 
 # The single collection path the minimal schema exposes.
 _COLLECTION_PATH = "sections.coverage.in_network"
+
+# Second (optional) collection path — used by the judge+top-up tests.
+_NOTES_PATH = "sections.coverage.notes"
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +337,193 @@ async def seeded_ai_processing_form_maxed(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def _observer_answer(
+    ctx: _SeedCtx, path: str, value: str, *, confidence: int = 90, evidence_seq: int | None = 1
+) -> FieldAnswer:
+    """A FieldAnswer as worker_events._handle_call_answer_recorded writes it:
+    ai_call source with the live call's id, current."""
+    return FieldAnswer(
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        field_path=path,
+        value={"value": value},
+        source=AnswerSource.AI_CALL.value,
+        confidence=confidence,
+        evidence_seq=evidence_seq,
+        is_current=True,
+    )
+
+
+async def test_verdict_path_mismatch_is_logged_not_silent(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A judge verdict whose field_path matches no judged answer must be
+    WARN-logged (paths only — never values), and the matching verdicts must
+    still be written. Silent drops made 'judge never ran' and 'judge output
+    mismatched' indistinguishable (2026-07-27 E2E)."""
+    ctx = seeded_ai_processing_form
+    turns = [TranscriptTurn(0, "user", "yes in network")]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(ctx.collection_path, "in-network", 92, 0)],
+        verdicts=[
+            JudgeVerdict("sections.coverage.bogus_path", True, 90, "??"),
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    with caplog.at_level("WARNING", logger="vera_core.services.post_call_eval"):
+        await evaluate_call(
+            ctx.session,
+            deps,
+            tenant_id=ctx.tenant_id,
+            form_id=ctx.form_id,
+            call_id=ctx.call_id,
+            turns=turns,
+        )
+
+    warnings = [r for r in caplog.records if "judge verdict" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "sections.coverage.bogus_path" in warnings[0].getMessage()
+
+    # The matching verdict was still written.
+    answer = (
+        await ctx.session.execute(
+            select(FieldAnswer).where(
+                FieldAnswer.form_id == ctx.form_id,
+                FieldAnswer.field_path == ctx.collection_path,
+                FieldAnswer.is_current.is_(True),
+            )
+        )
+    ).scalar_one()
+    evals = (
+        (
+            await ctx.session.execute(
+                select(FieldEvaluation).where(FieldEvaluation.answer_id == answer.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(evals) == 1
+
+
+async def test_observer_answers_are_judged_and_missing_paths_topped_up(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Regression for the Observer/eval conflict (2026-07-27 E2E): live ai_call
+    answers must NOT no-op the eval. The eval judges them, extracts only the
+    still-missing paths, judges those too, and finishes with a real reason."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    await ctx.session.flush()
+
+    turns = [
+        TranscriptTurn(0, "agent", "are they in network"),
+        TranscriptTurn(1, "user", "yes in network, no notes"),
+    ]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(_NOTES_PATH, "no notes", 80, 1)],
+        verdicts=[
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+            JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    # Top-up extraction asked ONLY for the missing path.
+    assert llm.extract_calls == [[_NOTES_PATH]]
+    # One combined judge pass over observer answer + topped-up answer.
+    assert len(llm.judge_calls) == 1
+    assert {ef.field_path for ef in llm.judge_calls[0]} == {ctx.collection_path, _NOTES_PATH}
+
+    # Not a no-op: the form transitioned with a real reason (required field
+    # satisfied by the observer answer → ready_for_review).
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "ready_for_review"
+
+    # FieldEvaluation rows exist for BOTH answers.
+    answers = (
+        (
+            await ctx.session.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == ctx.form_id,
+                    FieldAnswer.source == AnswerSource.AI_CALL.value,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {a.field_path for a in answers} == {ctx.collection_path, _NOTES_PATH}
+    for a in answers:
+        evals = (
+            (
+                await ctx.session.execute(
+                    select(FieldEvaluation).where(FieldEvaluation.answer_id == a.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(evals) == 1, f"no FieldEvaluation for {a.field_path}"
+
+
+async def test_nothing_missing_skips_extraction_and_judges_observer_answers(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """When the Observer answered every collection path, the eval must not
+    spend an extract call — judge-only."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    ctx.session.add(_observer_answer(ctx, _NOTES_PATH, "none", evidence_seq=2))
+    await ctx.session.flush()
+
+    turns = [TranscriptTurn(0, "user", "yes in network, no notes")]
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+            JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert llm.extract_calls == []  # no top-up needed
+    assert len(llm.judge_calls) == 1
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "ready_for_review"
 
 
 async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(
@@ -692,7 +889,7 @@ async def test_incomplete_with_retries_left_requeues(
     ctx = seeded_ai_processing_form
     turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -746,6 +943,35 @@ async def test_incomplete_retries_exhausted_goes_to_review(
     assert form.review_reason == "retries_exhausted"
 
 
+async def test_incomplete_retryable_with_auto_retry_disabled_goes_to_review(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Retryable required field + retries remaining, but the tenant auto-retry
+    flag is off (EvalDeps default) → no requeue; EXCEPTION_REVIEW with the
+    honest reason auto_retry_disabled."""
+    ctx = seeded_ai_processing_form
+    turns = [TranscriptTurn(0, "agent", "are they in network")]
+    # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)  # flag defaults off
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "auto_retry_disabled"
+    assert form.retry_count == 0  # the IN_QUEUE branch never fired
+
+
 async def test_incomplete_with_retries_left_requeues_clears_review_reason(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
@@ -755,7 +981,7 @@ async def test_incomplete_with_retries_left_requeues_clears_review_reason(
     ctx = seeded_ai_processing_form
     turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -791,7 +1017,7 @@ async def test_user_canceled_call_never_requeues(
     # normally-ended call would route to IN_QUEUE here.
     turns = [TranscriptTurn(0, "user", "sorry, we got cut off")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -808,3 +1034,185 @@ async def test_user_canceled_call_never_requeues(
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.review_reason == "user_ended"
     assert form.enqueued_at is None  # the review path must not queue the form
+
+
+async def test_stale_job_for_older_call_is_skipped(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A redelivered job for a call that is no longer the form's latest attempt
+    must no-op: evaluating the older call's transcript would demote the newer
+    attempt's answers and decide the form on stale data (crash-between-commit-
+    and-XACK redelivery during a later attempt's AI_PROCESSING window)."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(
+        Call(
+            id=uuid7(),
+            tenant_id=ctx.tenant_id,
+            form_id=ctx.form_id,
+            current_status=CallStatus.COMPLETED.value,
+            mode="full",
+        )
+    )
+    await ctx.session.flush()
+
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(ctx.collection_path, "in-network", 92, 1)],
+        verdicts=[JudgeVerdict(ctx.collection_path, True, 88, "yes in network")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=[TranscriptTurn(0, "user", "yes in network")],
+    )
+
+    assert outcome.status == FormStatus.AI_PROCESSING  # untouched — newer job owns it
+    assert outcome.answers_written == 0
+    assert llm.extract_calls == []  # the eval never ran
+    assert llm.judge_calls == []
+
+
+async def test_extract_failure_still_judges_observer_answers(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A top-up extraction blip must not forfeit judge verdicts for the
+    Observer's already-captured answers — the judge pass runs regardless, then
+    the form routes to LLM_ERROR review."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    await ctx.session.flush()
+
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[JudgeVerdict(ctx.collection_path, True, 88, "yes in network")],
+        raise_on_extract=RuntimeError("vertex blip"),
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=[TranscriptTurn(0, "user", "yes in network")],
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "llm_error"
+    assert len(llm.judge_calls) == 1  # observer answer was still judged
+
+    answer = (
+        await ctx.session.execute(
+            select(FieldAnswer).where(
+                FieldAnswer.form_id == ctx.form_id,
+                FieldAnswer.field_path == ctx.collection_path,
+                FieldAnswer.is_current.is_(True),
+            )
+        )
+    ).scalar_one()
+    evals = (
+        (
+            await ctx.session.execute(
+                select(FieldEvaluation).where(FieldEvaluation.answer_id == answer.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(evals) == 1
+
+
+async def test_hallucinated_token_path_outside_request_does_not_quarantine(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A token-shaped value the LLM emits for a path it was NOT asked about is
+    dropped entirely — it must not route the form to TOKEN_VALUE review for a
+    field that was never written."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    await ctx.session.flush()
+
+    llm = FakeLLMClient(
+        extracted=[
+            ExtractedField(ctx.collection_path, "[[MEMBER_ID_1]]", 99, 0),  # not requested
+            ExtractedField(_NOTES_PATH, "no notes", 80, 1),
+        ],
+        verdicts=[
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+            JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=[TranscriptTurn(0, "user", "yes in network, no notes")],
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "ready_for_review"  # NOT token_value
+
+    # The observer's real value survived untouched.
+    answer = (
+        await ctx.session.execute(
+            select(FieldAnswer).where(
+                FieldAnswer.form_id == ctx.form_id,
+                FieldAnswer.field_path == ctx.collection_path,
+                FieldAnswer.is_current.is_(True),
+            )
+        )
+    ).scalar_one()
+    assert answer.value["value"] == "in-network"
+
+
+async def test_observer_answer_without_evidence_anchor_is_judged_with_none(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """An Observer answer recorded without an evidence turn (evidence_seq NULL)
+    must reach the judge with no anchor — not a fabricated turn 0."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network", evidence_seq=None))
+    ctx.session.add(_observer_answer(ctx, _NOTES_PATH, "none", evidence_seq=2))
+    await ctx.session.flush()
+
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[
+            JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
+            JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
+        ],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=[TranscriptTurn(0, "agent", "hello"), TranscriptTurn(1, "user", "yes")],
+    )
+
+    assert len(llm.judge_calls) == 1
+    by_path = {ef.field_path: ef for ef in llm.judge_calls[0]}
+    assert by_path[ctx.collection_path].evidence_seq is None
+    assert by_path[_NOTES_PATH].evidence_seq == 2

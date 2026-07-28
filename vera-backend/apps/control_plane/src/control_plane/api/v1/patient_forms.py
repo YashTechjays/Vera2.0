@@ -99,7 +99,11 @@ from vera_core.services.call_provenance import (
     load_field_provenance,
 )
 from vera_core.services.call_visibility import recording_playable
-from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.field_answers import (
+    BASELINE_ORDER,
+    BASELINE_SOURCES,
+    current_values_by_path,
+)
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
@@ -465,19 +469,16 @@ class ResolveRequest(BaseModel):
 
 def _baseline_query(form_id: UUID) -> Any:
     """`(field_path, value)` of the most recent `intake`/`human` answer per `field_path`
-    for one form — the dispute baseline `B`. `created_at` is the transaction time, so
-    same-transaction rows tie; `id DESC` (UUIDv7) breaks the tie deterministically."""
+    for one form — the dispute baseline `B`. The whole-form counterpart to
+    `baseline_value`, which resolves a single path for the live SSE relay; both read the
+    shared `BASELINE_SOURCES` / `BASELINE_ORDER` so the two can never disagree."""
     return (
         select(FieldAnswer.field_path, FieldAnswer.value)
         .where(
             FieldAnswer.form_id == form_id,
-            FieldAnswer.source.in_([AnswerSource.INTAKE.value, AnswerSource.HUMAN.value]),
+            FieldAnswer.source.in_(BASELINE_SOURCES),
         )
-        .order_by(
-            FieldAnswer.field_path,
-            FieldAnswer.created_at.desc(),
-            FieldAnswer.id.desc(),
-        )
+        .order_by(FieldAnswer.field_path, *BASELINE_ORDER)
         .distinct(FieldAnswer.field_path)
     )
 
