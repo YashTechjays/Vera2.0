@@ -1093,6 +1093,33 @@ async def test_end_call_terminal_still_reaps_the_room(
     assert list(rows) == []
 
 
+@pytest.mark.asyncio
+async def test_end_call_terminal_reap_stays_owner_only(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The room a terminal call outlives is a LIVE phone leg, so reaping it is a
+    real end — VR2-59's owner-only gate must run before it, not after."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="completed",
+        published=True,  # visible to the supervisor, but still not theirs to end
+    )
+
+    denied = await client.post(
+        f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert denied.status_code == 409, denied.text
+    assert "owner" in denied.json()["message"]
+    assert room_name_for_call(rbac_world.tenant_id, call_id) not in fake_livekit.deleted
+
+
 # ---------------------------------------------------------------------------
 # ?intervene=true — calls:intervene gate + the single-intervener lock
 # ---------------------------------------------------------------------------
