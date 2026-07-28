@@ -139,8 +139,9 @@ export function LiveCallModal({
   open: boolean
   onOpenChange: (open: boolean) => void
   onExpand: () => void
-  /** SSE reported the call terminal — lets the list reflect it before its next poll */
-  onCallEnded?: (callId: string) => void
+  /** SSE reported the call terminal — lets the list reflect the REAL ending
+   *  (failed/canceled/no_answer, not a blanket "completed") before its next poll */
+  onCallEnded?: (callId: string, status: string) => void
 }) {
   const canIntervene = usePermission("calls:intervene")
   // The app-level provider IbvFormModal also renders from — one form, so live answers show
@@ -192,11 +193,11 @@ export function LiveCallModal({
   const callEnded = sseEnded
 
   // The list is poll-driven and its DB status lags the worker's shutdown drain by
-  // many seconds (VR2-72) — surface the SSE terminal signal so it updates now.
+  // many seconds (VR2-72) — surface the SSE terminal status so it updates now.
   const endedCallId = callEnded ? call?.id : undefined
   useEffect(() => {
-    if (endedCallId) onCallEnded?.(endedCallId)
-  }, [endedCallId, onCallEnded])
+    if (endedCallId && terminalStatus) onCallEnded?.(endedCallId, terminalStatus)
+  }, [endedCallId, terminalStatus, onCallEnded])
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
   const endCallState = endCallButtonState(call?.isOwner ?? false, mode === "intervene", roomStatus)
