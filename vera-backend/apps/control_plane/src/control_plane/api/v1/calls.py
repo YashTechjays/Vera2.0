@@ -620,9 +620,17 @@ async def end_call(
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None or _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")
-    if call.current_status in TERMINAL_VALUES:
-        return ok(None, message="Call already ended.")  # idempotent no-op
     room_name = room_name_for_call(tenant_id, call.id)
+    if call.current_status in TERMINAL_VALUES:
+        # The row can go terminal while the room survives (the agent self-ended but
+        # the room delete never took) — and deleting the room is the ONLY thing that
+        # hangs up the phone leg, so the idempotent no-op must still reap it (VR2-60).
+        # Best-effort: a teardown hiccup must not turn "already ended" into a 500.
+        try:
+            await livekit.delete_room(room_name)
+        except Exception as exc:
+            logger.warning("end_call: terminal-room reap failed (%s)", type(exc).__name__)
+        return ok(None, message="Call already ended.")
     # Lock-free read by design: holding the row lock across the presence probe is worse
     # than the benign race with a fresh claim (worst case: a moments-ago-legal end).
     holder = call.intervener_user_id

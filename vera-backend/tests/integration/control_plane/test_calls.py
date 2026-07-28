@@ -1015,7 +1015,7 @@ async def test_end_call_live_stamps_intent_and_defers_to_worker(
 
 
 @pytest.mark.asyncio
-async def test_end_call_terminal_is_idempotent_noop(
+async def test_end_call_terminal_still_reaps_the_room(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
@@ -1023,6 +1023,9 @@ async def test_end_call_terminal_is_idempotent_noop(
     admin_session: AsyncSession,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A terminal DB row can outlive its room (the agent self-ended but the room
+    delete never took) — the only thing that hangs up the phone leg is deleting
+    the room, so the idempotent no-op must still tear it down (VR2-60)."""
     call_id = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
@@ -1034,9 +1037,9 @@ async def test_end_call_terminal_is_idempotent_noop(
     resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
     assert resp.status_code == 200, resp.text
 
-    # Already closed out: no room teardown, no audit row.
+    # The stranded room (and its SIP leg) is reaped; the closeout stays a no-op.
     room = room_name_for_call(rbac_world.tenant_id, call_id)
-    assert room not in fake_livekit.deleted
+    assert room in fake_livekit.deleted
     rows = (
         await admin_session.execute(
             select(AuditLog).where(
