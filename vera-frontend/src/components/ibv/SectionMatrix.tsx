@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
 import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
-import { confidenceHighlightClass } from "@/lib/ibv/disputes"
+import { confidenceHighlightClass, type DisputeMap } from "@/lib/ibv/disputes"
 import { applicabilityReason, isApplicable } from "@/lib/ibv/schema"
 import type { SectionTable, TableCell } from "@/lib/ibv/schema"
 import type { LeafField } from "@/lib/ibv/types"
@@ -20,6 +20,38 @@ function disputeGutter(field: LeafField): string {
 /** Yes/No columns need less room than text/money for value + controls + chip. */
 function isEnumColumn(table: SectionTable, key: string): boolean {
   return table.groups.some((g) => g.rows.some((r) => r.cells[key]?.field.type === "enum"))
+}
+
+// Two width flavours. The wide one only exists to fit the inline Prior chip, which
+// renders solely on disputed cells — applying it always would make every form scroll
+// sideways to reserve room for chips it never draws, so it is gated on dispute presence.
+const COMPACT_WIDTHS = {
+  icd: "w-[80px]",
+  icdCell: "w-[80px]",
+  cpt: "w-[120px]",
+  cptCell: "w-[120px] break-words",
+  value: "min-w-[100px]",
+  enumValue: "min-w-[100px]",
+  extra: "",
+} as const
+const WIDE_WIDTHS = {
+  icd: "min-w-[110px]",
+  icdCell: "min-w-[110px] whitespace-nowrap",
+  cpt: "min-w-[150px]",
+  cptCell: "min-w-[150px] whitespace-nowrap",
+  value: "min-w-[210px]",
+  enumValue: "min-w-[120px]",
+  extra: "min-w-[210px]",
+} as const
+
+/** Does any cell in this table carry an unresolved dispute? */
+function hasDispute(table: SectionTable, disputes: DisputeMap): boolean {
+  const disputed = (cell?: TableCell) => cell !== undefined && disputes[cell.path] !== undefined
+  return table.groups.some(
+    (g) =>
+      Object.values(g.extras).some(disputed) ||
+      g.rows.some((r) => Object.values(r.cells).some(disputed))
+  )
 }
 
 /** One editable matrix cell with inline dispute UI and applicability graying. */
@@ -105,26 +137,28 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
  * per-group rowspan cells.
  */
 export function SectionMatrix({ table }: { table: SectionTable }) {
-  const { schema, values } = useIbv()
+  const { schema, values, disputes } = useIbv()
+  // Wide columns keep value + controls + chip on one row (the wrapper scrolls);
+  // an undisputed table keeps its natural width.
+  const w = hasDispute(table, disputes) ? WIDE_WIDTHS : COMPACT_WIDTHS
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse font-ibv text-[13.3px] text-black">
         <thead>
           <tr className="text-center">
-            <th className={cn("w-[170px] min-w-[170px]", TH)}>Service</th>
-            {table.hasIcd && <th className={cn("min-w-[110px]", TH)}>ICD-10</th>}
-            <th className={cn("min-w-[150px]", TH)}>CPT Code</th>
-            {/* min-w keeps value + controls + chip on one row; the wrapper scrolls */}
+            <th className={cn("w-[170px]", TH)}>Service</th>
+            {table.hasIcd && <th className={cn(w.icd, TH)}>ICD-10</th>}
+            <th className={cn(w.cpt, TH)}>CPT Code</th>
             {table.columns.map((c) => (
               <th
                 key={c.key}
-                className={cn(isEnumColumn(table, c.key) ? "min-w-[120px]" : "min-w-[210px]", TH)}
+                className={cn(isEnumColumn(table, c.key) ? w.enumValue : w.value, TH)}
               >
                 {c.title}
               </th>
             ))}
             {table.extraColumns.map((c) => (
-              <th key={c.key} className={cn("min-w-[210px]", TH)}>
+              <th key={c.key} className={cn(w.extra, TH)}>
                 {c.title}
               </th>
             ))}
@@ -154,13 +188,21 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
                 )}
                 {table.hasIcd && rowIdx === 0 && (
                   <td
-                    className="min-w-[110px] border border-ibv-input-border bg-white px-2 py-0.5 align-top whitespace-nowrap text-ibv-label-border"
+                    className={cn(
+                      "border border-ibv-input-border bg-white px-2 py-0.5 align-top text-ibv-label-border",
+                      w.icdCell
+                    )}
                     rowSpan={group.rows.length}
                   >
                     {group.icd10 || "—"}
                   </td>
                 )}
-                <td className="min-w-[150px] border border-ibv-input-border bg-white px-2 py-0.5 text-center whitespace-nowrap text-black">
+                <td
+                  className={cn(
+                    "border border-ibv-input-border bg-white px-2 py-0.5 text-center text-black",
+                    w.cptCell
+                  )}
+                >
                   {row.label}
                 </td>
                 {table.columns.map((c) => (
