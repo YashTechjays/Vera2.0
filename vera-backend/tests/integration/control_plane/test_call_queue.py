@@ -5,6 +5,7 @@ call terminal status reported → auto-retry → dispatcher fires again.
 Runs against live RLS-enforcing Postgres with FakeLiveKit.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from datetime import time as dt_time
 from uuid import UUID
@@ -145,6 +146,47 @@ async def queue_form_id(
             yield form_id
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+async def queue_form_pair(
+    database_url: str,
+    rbac_world: RBACWorld,
+) -> AsyncGenerator[tuple[UUID, UUID]]:
+    """Two dialable queue-test forms for the per-VA capacity tests."""
+    engine = create_async_engine(database_url)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async for form_a in _seed_ready_form(
+            sessionmaker, rbac_world.tenant_id, phone=_DIALABLE_PHONE
+        ):
+            async for form_b in _seed_ready_form(
+                sessionmaker, rbac_world.tenant_id, phone=_DIALABLE_PHONE
+            ):
+                yield (form_a, form_b)
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def va_limit_one(
+    admin_sessionmaker: async_sessionmaker[AsyncSession], rbac_world: RBACWorld
+) -> AsyncGenerator[None]:
+    """Pin the tenant's per-VA limit to 1 for the duration of a test, then restore."""
+    async with admin_sessionmaker() as session, session.begin():
+        old = (
+            await session.execute(
+                select(Tenant.max_agents_per_va).where(Tenant.id == rbac_world.tenant_id)
+            )
+        ).scalar_one()
+        await session.execute(
+            update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_agents_per_va=1)
+        )
+    yield
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(
+            update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_agents_per_va=old)
+        )
 
 
 @pytest.fixture
@@ -322,6 +364,136 @@ async def test_enqueue_rejected_without_payer_phone(
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert "phone" in body["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Per-VA capacity gate — a caller may not have more than `max_agents_per_va`
+# forms in flight at once (Task 3's ensure_va_capacity, wired at enqueue).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enqueue_rejected_when_va_at_limit(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    queue_form_pair: tuple[UUID, UUID],
+    trunk_configured: None,
+    va_limit_one: None,
+) -> None:
+    """Second enqueue by the same VA at limit 1 → 409 with actionable data; the
+    form is left untouched in READY_FOR_PROCESSING."""
+    form_a, form_b = queue_form_pair
+    first = await client.put(
+        f"/api/v1/patient-forms/{form_a}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert first.status_code == 200, first.text
+
+    second = await client.put(
+        f"/api/v1/patient-forms/{form_b}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert second.status_code == 409, second.text
+    envelope = second.json()
+    assert "concurrent-agent limit (1)" in envelope["message"]
+    assert envelope["data"] == {"limit": 1, "in_flight": 1}
+
+    # Untouched: still manually re-queueable later.
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_b}",
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert detail.json()["data"]["status"] == "ready_for_processing"
+
+
+@pytest.mark.asyncio
+async def test_va_limit_does_not_block_other_vas(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    queue_form_pair: tuple[UUID, UUID],
+    trunk_configured: None,
+    va_limit_one: None,
+) -> None:
+    """The limit is per VA: a different user with forms:write enqueues freely while
+    the first VA is at their cap. Uses the supervisor persona (holds forms:write in
+    the RBAC world — see conftest role grants)."""
+    form_a, form_b = queue_form_pair
+    first = await client.put(
+        f"/api/v1/patient-forms/{form_a}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert first.status_code == 200, first.text
+
+    second = await client.put(
+        f"/api/v1/patient-forms/{form_b}/status",
+        headers=_auth(rbac_world.supervisor_token),
+        json={"status": "in_queue"},
+    )
+    assert second.status_code == 200, second.text
+
+
+@pytest.mark.asyncio
+async def test_slot_frees_when_form_leaves_in_flight(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    queue_form_pair: tuple[UUID, UUID],
+    trunk_configured: None,
+    va_limit_one: None,
+) -> None:
+    """A form leaving the in-flight set (here: parked in EXCEPTION_REVIEW) frees the
+    VA's slot and the next enqueue succeeds."""
+    form_a, form_b = queue_form_pair
+    first = await client.put(
+        f"/api/v1/patient-forms/{form_a}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert first.status_code == 200, first.text
+    await drain_pending()  # let the post-commit dispatch task settle before mutating
+
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(
+            text("UPDATE patient_form SET status = 'exception_review' WHERE id = :fid").bindparams(
+                fid=form_a
+            )
+        )
+
+    second = await client.put(
+        f"/api/v1/patient-forms/{form_b}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert second.status_code == 200, second.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_enqueues_at_limit_admit_exactly_one(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    queue_form_pair: tuple[UUID, UUID],
+    trunk_configured: None,
+    va_limit_one: None,
+) -> None:
+    """Two simultaneous enqueues by the same VA with one slot: the advisory lock
+    serializes the count → exactly one 200 and one 409, never two 200s."""
+    form_a, form_b = queue_form_pair
+    responses = await asyncio.gather(
+        client.put(
+            f"/api/v1/patient-forms/{form_a}/status",
+            headers=_auth(rbac_world.admin_token),
+            json={"status": "in_queue"},
+        ),
+        client.put(
+            f"/api/v1/patient-forms/{form_b}/status",
+            headers=_auth(rbac_world.admin_token),
+            json={"status": "in_queue"},
+        ),
+    )
+    assert sorted(r.status_code for r in responses) == [200, 409]
 
 
 # ---------------------------------------------------------------------------
