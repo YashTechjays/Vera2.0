@@ -173,9 +173,7 @@ export function FieldRenderer({
     )
   }
 
-  // Suggestions only while empty: a datalist puts a dropdown arrow on the input,
-  // making a filled field read as an unselected dropdown (VR2-91).
-  const suggestions = value ? [] : suggestionsOf(field)
+  const suggestions = suggestionsOf(field)
   const listId = suggestions.length > 0 ? `${path}--suggestions` : undefined
   const inputMode = inputModeFor(field.type)
 
@@ -190,7 +188,14 @@ export function FieldRenderer({
         placeholder={hint}
         list={listId}
         style={padStyle}
-        className={cn("truncate", CELL_BASE, look)}
+        // Chrome paints a picker arrow on any input carrying a datalist, which made
+        // a filled cell read as an unselected dropdown (VR2-91). Hide the arrow, keep
+        // the suggestions — they still open on typing and on ArrowDown.
+        className={cn(
+          "truncate [&::-webkit-calendar-picker-indicator]:hidden",
+          CELL_BASE,
+          look
+        )}
       />
       {listId && (
         <datalist id={listId}>

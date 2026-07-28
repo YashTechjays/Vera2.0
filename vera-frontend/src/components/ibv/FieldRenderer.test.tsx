@@ -5,8 +5,10 @@ import { FieldRenderer } from "./FieldRenderer"
 import type { LeafField } from "@/lib/ibv/types"
 
 // VR2-91: a text field with special_values (e.g. cycle_limit's "No Limit") gets a
-// <datalist>, and Chrome paints a dropdown arrow on the input — so a filled field
-// reads as an empty dropdown. Suggestions belong only on an EMPTY field.
+// <datalist>, and Chrome paints a picker arrow on such inputs — so a filled field
+// read as an unselected dropdown. Hide the ARROW, never the suggestions: dropping
+// the datalist on filled fields would kill the feature for every special_values
+// field the moment anything is typed.
 describe("FieldRenderer text-field suggestions", () => {
   const cycleLimit: LeafField = {
     type: "text",
@@ -25,17 +27,22 @@ describe("FieldRenderer text-field suggestions", () => {
       />
     )
 
-  it("shows suggestions while the field is empty", () => {
+  it("offers the suggestions while the field is empty", () => {
     const html = render("")
     expect(html).toContain("<datalist")
     expect(html).toContain("No Limit")
     expect(html).toContain("list=")
   })
 
-  it("drops the datalist (and its dropdown arrow) once a value is present", () => {
+  it("keeps the suggestions once a value is present", () => {
     const html = render("No cycle limit")
-    expect(html).not.toContain("<datalist")
-    expect(html).not.toContain("list=")
+    expect(html).toContain("<datalist")
+    expect(html).toContain("No Limit")
+    expect(html).toContain("list=")
     expect(html).toContain("No cycle limit")
+  })
+
+  it("hides the picker arrow so a filled cell never reads as a dropdown", () => {
+    expect(render("No cycle limit")).toContain("[&amp;::-webkit-calendar-picker-indicator]:hidden")
   })
 })
