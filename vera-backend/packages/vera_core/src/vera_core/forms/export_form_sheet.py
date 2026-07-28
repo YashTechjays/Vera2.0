@@ -144,16 +144,26 @@ RAIL = [
 # Column anchors (1-based): left block A-B, right D-E, rail G-H; spacers C, F.
 _LEFT_COL, _RIGHT_COL, _RAIL_COL = 1, 4, 7
 
-_THIN = Side(style="thin", color="B0B0B0")
-_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+# The UI's exact palette — sources: vera-frontend/src/index.css (--color-ibv-*),
+# Section.tsx (header greens), usageMeta.ts (label-cell usage tints).
+_NAVY = "373F6B"  # --color-ibv-label-border: label text + label borders
+_TEAL = "34B2B2"  # --color-ibv-input-border: value/grid borders
+_BORDER_LABEL = Border(*(Side(style="thin", color=_NAVY),) * 4)
+_BORDER_VALUE = Border(*(Side(style="thin", color=_TEAL),) * 4)
+_BORDER_GREEN = Border(*(Side(style="thin", color="1F9D57"),) * 4)
 _BOLD = Font(bold=True)
+_LABEL_FONT = Font(bold=True, color=_NAVY)
 _CENTER = Alignment(horizontal="center", vertical="center")
 _TOP_LEFT = Alignment(vertical="top", wrap_text=True)
-# Fills approximate the UI styling (Section.tsx / SectionMatrix.tsx Tailwind tokens; no exact hex).
-_FILL_CONTEXT = PatternFill("solid", start_color="C6EFCE")  # UI's green context header
-_FILL_PLAIN = PatternFill("solid", start_color="E7E6E6")
-_FILL_GRID_HEADER = PatternFill("solid", start_color="F2F2F2")
-_FILL_INAPPLICABLE = PatternFill("solid", start_color="F5F5F5")
+_FILL_CONTEXT = PatternFill("solid", start_color="22C55E")  # Section.tsx bg-[#22c55e]
+_FILL_PLAIN = PatternFill("solid", start_color="EFEFEF")  # --color-ibv-label-bg
+_FILL_GRID_HEADER = PatternFill("solid", start_color="EFEFEF")  # SectionMatrix TH bg-ibv-label-bg
+_FILL_VALUE = PatternFill("solid", start_color="D0E0E3")  # --color-ibv-input-bg
+_FILL_INAPPLICABLE = PatternFill("solid", start_color="F7F7F7")  # bg-ibv-label-bg/50
+# usageMeta.ts labelCellClass tints (Tailwind violet-100 / green-100; noop hatch).
+_FILL_LABEL_SYSTEM = PatternFill("solid", start_color="EDE9FE")
+_FILL_LABEL_CONTEXT = PatternFill("solid", start_color="DCFCE7")
+_FILL_LABEL_NOOP = PatternFill(patternType="lightUp", fgColor="E4E4E7", bgColor="FAFAFA")
 
 
 def cell_str(v: Any) -> str:
@@ -174,9 +184,24 @@ class _Ctx:
         for path, leaf, gates in leaf_gates(doc):
             self.gates[path] = gates
             self.titles[path] = leaf.title
+        self.system_paths = set((doc.system_fields or {}).values())
+        self.section_roles = {key: sec.role for key, sec in doc.sections.items()}
 
     def applicable(self, path: str) -> bool:
         return is_applicable(self.gates.get(path, ()), self.values, self.shared)
+
+    def label_fill(self, path: str, leaf: Leaf) -> PatternFill | None:
+        """Usage tint for a label cell — mirrors fieldUsageOf in the FE
+        (lib/ibv/schema.ts) + usageMeta.ts's labelCellClass colors."""
+        if path in self.system_paths:
+            return _FILL_LABEL_SYSTEM
+        if self.section_roles.get(path.split(".")[1]) == "ui_only":
+            return _FILL_LABEL_NOOP
+        if leaf.role == "context":
+            return _FILL_LABEL_CONTEXT
+        if leaf.role in ("input", "readonly"):
+            return _FILL_LABEL_NOOP
+        return None  # "asked" — plain white label cell
 
 
 def _style(
@@ -187,12 +212,16 @@ def _style(
     fill: PatternFill | None = None,
     bold: bool = False,
     center: bool = False,
+    border: Border = _BORDER_VALUE,
+    font: Font | None = None,
 ) -> None:
     c = ws.cell(row=row, column=col)
-    c.border = _BORDER
+    c.border = border
     if fill is not None:
         c.fill = fill
-    if bold:
+    if font is not None:
+        c.font = font
+    elif bold:
         c.font = _BOLD
     c.alignment = _CENTER if center else _TOP_LEFT
 
@@ -226,8 +255,9 @@ def _title_bar(ws: Worksheet, row: int, col: int, span: int, text: str, *, conte
         ws.merge_cells(start_row=row, start_column=col, end_row=row, end_column=col + span - 1)
     ws.cell(row=row, column=col, value=text)
     fill = _FILL_CONTEXT if context else _FILL_PLAIN
+    border = _BORDER_GREEN if context else _BORDER_VALUE
     for i in range(span):
-        _style(ws, row, col + i, fill=fill, bold=True, center=True)
+        _style(ws, row, col + i, fill=fill, bold=True, center=True, border=border)
 
 
 def _leaf_row(ws: Worksheet, row: int, col: int, path: str, leaf: Leaf, ctx: _Ctx) -> None:
@@ -235,9 +265,14 @@ def _leaf_row(ws: Worksheet, row: int, col: int, path: str, leaf: Leaf, ctx: _Ct
     star = " *" if applicable and is_required(leaf, ctx.values, ctx.shared) else ""
     ws.cell(row=row, column=col, value=f"{leaf.title}{star}")
     ws.cell(row=row, column=col + 1, value=_leaf_value(path, leaf, ctx) if applicable else "")
-    fill = None if applicable else _FILL_INAPPLICABLE
-    _style(ws, row, col, fill=fill, bold=True)
-    _style(ws, row, col + 1, fill=fill)
+    if applicable:
+        _style(
+            ws, row, col, fill=ctx.label_fill(path, leaf), border=_BORDER_LABEL, font=_LABEL_FONT
+        )
+        _style(ws, row, col + 1, fill=_FILL_VALUE)
+    else:
+        _style(ws, row, col, fill=_FILL_INAPPLICABLE, border=_BORDER_LABEL, font=_LABEL_FONT)
+        _style(ws, row, col + 1, fill=_FILL_INAPPLICABLE)
 
 
 def _field_block(
@@ -259,8 +294,8 @@ def _field_block(
             else:  # nested group: sub-header row, then children
                 ws.cell(row=r, column=col, value=f.title)
                 ws.merge_cells(start_row=r, start_column=col, end_row=r, end_column=col + 1)
-                _style(ws, r, col, bold=True)
-                _style(ws, r, col + 1)
+                _style(ws, r, col, border=_BORDER_LABEL, font=_LABEL_FONT)
+                _style(ws, r, col + 1, border=_BORDER_LABEL)
                 r += 1
                 emit(path, f.fields)
 
@@ -308,19 +343,19 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
             applicable = _grid_value(ws, top, col, group.extras.get(key), ctx)
             _vmerge(ws, top, col, n)
             for rr in range(top, top + n):
-                _style(ws, rr, col, fill=None if applicable else _FILL_INAPPLICABLE)
+                _style(ws, rr, col, fill=_FILL_VALUE if applicable else _FILL_INAPPLICABLE)
         for row_model in group.rows:
             ws.cell(row=r, column=cpt_col, value=row_model.label)
             for j, (key, _title) in enumerate(table.columns):
                 col = first_val_col + j
                 applicable = _grid_value(ws, r, col, row_model.cells.get(key), ctx)
-                _style(ws, r, col, fill=None if applicable else _FILL_INAPPLICABLE)
+                _style(ws, r, col, fill=_FILL_VALUE if applicable else _FILL_INAPPLICABLE)
             r += 1
         # Border/style pass over the band's static cells (extras were styled —
         # fill included — in the extras loop above; don't clobber them here).
         for rr in range(top, top + n):
             for col in band_cols:
-                _style(ws, rr, col, bold=col == 1)
+                _style(ws, rr, col, font=_LABEL_FONT if col == 1 else None)
     return r - row
 
 
