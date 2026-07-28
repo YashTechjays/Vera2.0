@@ -24,6 +24,11 @@ UPGRADE_STATEMENTS: tuple[str, ...] = (
     # Behavior-preserving backfill: the dispatcher's tenant-wide cap used to read
     # max_agents_per_va, so existing tenants keep exactly their current capacity.
     "UPDATE tenant SET max_concurrent_calls = max_agents_per_va WHERE max_concurrent_calls IS NULL",
+    # Rollout no-op (runs AFTER the capacity snapshot above): every pre-PR tenant sits
+    # at the never-admin-settable default (3), which this release turns into an enforced
+    # per-VA enqueue gate — lift those to the schema ceiling (20) so queueing behavior
+    # only tightens once an admin deliberately lowers the knob. Fresh CI DBs have no rows.
+    "UPDATE tenant SET max_agents_per_va = 20 WHERE max_agents_per_va = 3",
     "ALTER TABLE tenant ALTER COLUMN max_concurrent_calls SET NOT NULL",
     "ALTER TABLE tenant ALTER COLUMN max_concurrent_calls SET DEFAULT 25",
     # Serves the per-VA in-flight count (enqueue gate) and the dispatcher's active

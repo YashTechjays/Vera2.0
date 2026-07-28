@@ -41,12 +41,19 @@ describe("ConcurrencySection", () => {
     await userEvent.type(perVa, "5")
     await userEvent.click(screen.getByRole("button", { name: /save/i }))
 
-    await waitFor(() =>
-      expect(mockedPatch).toHaveBeenCalledWith({
-        max_agents_per_va: 5,
-        max_concurrent_calls: 25,
-      }),
-    )
+    // Only the edited knob is sent — unchanged fields from a possibly stale local
+    // copy must not ride along and clobber another admin's concurrent change.
+    await waitFor(() => expect(mockedPatch).toHaveBeenCalledWith({ max_agents_per_va: 5 }))
+  })
+
+  it("does not PATCH when nothing changed", async () => {
+    render(<ConcurrencySection />)
+    await userEvent.click(screen.getByText("Agent capacity"))
+    await waitFor(() => expect(screen.getByLabelText(/agents per va/i)).toHaveValue(3))
+
+    await userEvent.click(screen.getByRole("button", { name: /save/i }))
+
+    expect(mockedPatch).not.toHaveBeenCalled()
   })
 
   it("surfaces the API error message on a failed save", async () => {
@@ -58,6 +65,9 @@ describe("ConcurrencySection", () => {
     await userEvent.click(screen.getByText("Agent capacity"))
     await waitFor(() => expect(screen.getByLabelText(/agents per va/i)).toHaveValue(3))
 
+    const perVa = screen.getByLabelText(/agents per va/i)
+    await userEvent.clear(perVa)
+    await userEvent.type(perVa, "5")
     await userEvent.click(screen.getByRole("button", { name: /save/i }))
 
     await waitFor(() => expect(screen.getByText("Validation failed.")).toBeInTheDocument())

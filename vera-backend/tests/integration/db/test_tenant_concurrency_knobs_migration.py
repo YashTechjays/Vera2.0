@@ -50,6 +50,13 @@ async def _max_concurrent_calls(session: AsyncSession, tenant_id: object) -> int
     return int(result.scalar_one())
 
 
+async def _max_agents_per_va(session: AsyncSession, tenant_id: object) -> int:
+    result = await session.execute(
+        text("SELECT max_agents_per_va FROM tenant WHERE id = :id"), {"id": tenant_id}
+    )
+    return int(result.scalar_one())
+
+
 async def test_backfill_sets_max_concurrent_calls_from_max_agents_per_va_when_null(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -73,6 +80,8 @@ async def test_backfill_sets_max_concurrent_calls_from_max_agents_per_va_when_nu
         await _run_upgrade(session)
 
         assert await _max_concurrent_calls(session, tenant.id) == 5
+        # A non-default per-VA value is not touched by the rollout lift.
+        assert await _max_agents_per_va(session, tenant.id) == 5
         # never committed — nothing here needs to persist, including the DROP NOT NULL
 
 
@@ -94,4 +103,32 @@ async def test_backfill_leaves_an_already_set_value_untouched(
         await _run_upgrade(session)
 
         assert await _max_concurrent_calls(session, tenant.id) == 99
+        # never committed — nothing here needs to persist
+
+
+async def test_default_limit_tenant_is_lifted_after_capacity_snapshot(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Rollout no-op: a pre-PR tenant at the never-admin-set default (3) keeps its
+    old tenant-wide capacity as the ceiling (backfilled BEFORE the lift, proving
+    statement order) while per-VA rises to 20 so the new enqueue gate doesn't
+    409 operators on deploy day."""
+    async with admin_sessionmaker() as session:
+        await session.execute(
+            text("ALTER TABLE tenant ALTER COLUMN max_concurrent_calls DROP NOT NULL")
+        )
+        tenant = Tenant(
+            slug="concurrency-rollout-noop-mig", name="Rollout Noop", max_agents_per_va=3
+        )
+        session.add(tenant)
+        await session.flush()
+        await session.execute(
+            text("UPDATE tenant SET max_concurrent_calls = NULL WHERE id = :id"),
+            {"id": tenant.id},
+        )
+
+        await _run_upgrade(session)
+
+        assert await _max_concurrent_calls(session, tenant.id) == 3
+        assert await _max_agents_per_va(session, tenant.id) == 20
         # never committed — nothing here needs to persist

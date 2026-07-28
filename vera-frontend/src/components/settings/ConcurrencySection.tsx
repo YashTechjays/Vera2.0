@@ -37,23 +37,36 @@ const KNOBS = [
 /** Admin knobs for agent concurrency: per-VA in-flight cap + tenant dial ceiling. */
 export function ConcurrencySection() {
   const [config, setConfig] = useState<ConcurrencyConfig | null>(null)
+  const [saved, setSaved] = useState<ConcurrencyConfig | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     getConcurrencyConfig()
-      .then(setConfig)
+      .then((loaded) => {
+        setConfig(loaded)
+        setSaved(loaded)
+      })
       .catch((err) =>
         setError(err instanceof ApiError ? err.message : "Could not load capacity settings."),
       )
   }, [])
 
   const save = async () => {
-    if (!config) return
+    if (!config || !saved) return
+    // PATCH only the edited knobs — resending unchanged fields from a stale copy
+    // would silently revert another admin's concurrent change (last-write-wins).
+    const patch: Partial<ConcurrencyConfig> = {}
+    for (const { key } of KNOBS) {
+      if (config[key] !== saved[key]) patch[key] = config[key]
+    }
+    if (Object.keys(patch).length === 0) return
     setSaving(true)
     setError(null)
     try {
-      setConfig(await patchConcurrencyConfig(config))
+      const next = await patchConcurrencyConfig(patch)
+      setConfig(next)
+      setSaved(next)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save capacity settings.")
     } finally {
