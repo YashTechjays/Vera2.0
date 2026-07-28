@@ -261,6 +261,8 @@ class AuthEvent(enum.StrEnum):
     PLATFORM_USER_ACTIVATED = "platform_user_activated"
     PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
     PLATFORM_INVITE_RESENT = "platform_invite_resent"
+    # Tenant concurrency knobs updated (old/new integer values, no PHI).
+    CONCURRENCY_CONFIG_UPDATED = "concurrency_config_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:
