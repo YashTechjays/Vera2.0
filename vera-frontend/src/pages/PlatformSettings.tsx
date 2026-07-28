@@ -5,11 +5,13 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { ApiError } from "@/lib/api/client"
 import { listTenants, setTenantObserverEnabled, type TenantSummary } from "@/lib/api/platform"
-import { useAppSelector } from "@/store/hooks"
-import { selectIsSuperAdmin } from "@/store/authSlice"
+import { usePermission } from "@/lib/auth/permissions"
 
 export function PlatformSettings() {
-  const isSuperAdmin = useAppSelector(selectIsSuperAdmin)
+  // Gate on the permission that actually governs this screen, matching the nav entry in
+  // lib/nav.ts — account_type === "platform" would render the table for any platform
+  // operator, whose toggles would then 403 from the backend.
+  const mayManage = usePermission("platform:tenants:manage")
   const [tenants, setTenants] = useState<TenantSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [savingId, setSavingId] = useState<string | null>(null)
@@ -17,7 +19,7 @@ export function PlatformSettings() {
   // Initial load. setState only in the async callbacks, with a cancelled flag to
   // avoid a post-unmount update (mirrors PlatformOperators).
   useEffect(() => {
-    if (!isSuperAdmin) return
+    if (!mayManage) return
     let cancelled = false
     listTenants()
       .then((ts) => {
@@ -31,13 +33,13 @@ export function PlatformSettings() {
     return () => {
       cancelled = true
     }
-  }, [isSuperAdmin])
+  }, [mayManage])
 
-  // Platform-only surface; the backend also enforces this, but hide it cleanly.
-  if (!isSuperAdmin) {
+  // The backend also enforces this, but hide the surface cleanly.
+  if (!mayManage) {
     return (
       <p className="text-sm text-muted-foreground">
-        This page is only available to platform operators.
+        You do not have permission to manage tenant settings.
       </p>
     )
   }
@@ -68,6 +70,8 @@ export function PlatformSettings() {
         <p className="text-sm text-muted-foreground">
           Toggle AI form filling per tenant. When off, the agent still runs the call but
           stops extracting answers to auto-fill forms — completion is left to manual review.
+          Conditional questions then follow the intake prefill rather than the
+          representative&rsquo;s live answers.
         </p>
       </div>
 
@@ -102,8 +106,11 @@ export function PlatformSettings() {
                 <TableCell className="font-medium">{t.name}</TableCell>
                 <TableCell className="font-mono text-sm text-muted-foreground">{t.slug}</TableCell>
                 <TableCell className="text-right">
+                  {/* `?? false` only satisfies the tri-state wire type: the page is gated
+                      on the same permission that controls disclosure, so null never
+                      reaches here. */}
                   <Switch
-                    checked={t.observer_enabled}
+                    checked={t.observer_enabled ?? false}
                     disabled={savingId === t.id}
                     onCheckedChange={(v) => void onToggle(t, v)}
                     aria-label={`AI form filling for ${t.name}`}

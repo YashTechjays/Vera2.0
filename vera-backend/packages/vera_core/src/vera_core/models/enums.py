@@ -244,6 +244,8 @@ class AuthEvent(enum.StrEnum):
     PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
     PLATFORM_INVITE_RESENT = "platform_invite_resent"
     # Super-admin flipped a tenant's AI form-filling (observer) master switch. Recorded
+    # null-tenant in the auth audit log (via emit_auth_event), like every other /platform
+    # action — the tenant-scoped audit_log cannot hold a platform row.
     TENANT_OBSERVER_UPDATED = "tenant_observer_updated"
 
 

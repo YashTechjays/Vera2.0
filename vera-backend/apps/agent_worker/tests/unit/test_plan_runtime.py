@@ -171,6 +171,22 @@ class TestHandoff:
         assert handoff is controller.agents[2]
 
     @pytest.mark.asyncio
+    async def test_applicability_falls_back_to_prefill_without_the_observer(self) -> None:
+        """Regression fence for the per-tenant AI form-filling switch: with the Observer
+        off nothing calls `update_answers`, so `_answers` stays at the intake prefill and
+        `applicable_when` routes off THAT, not off what the rep says. Deliberate — keeping
+        answers current requires extraction, which is exactly what the switch disables —
+        and stated in the platform-settings copy. See agent_worker/main.py's gate."""
+        prefilled = _plan().model_copy(update={"prefilled": {"sections.a.in_network": "Yes"}})
+        controller, _ = _controller(prefilled)
+        agent = controller.agents[0]
+        # No update_answers call anywhere: the prefill alone opens the gated task, where an
+        # unprefilled plan would have skipped it (test_inapplicable_task_is_skipped).
+        with _session_patch(agent, MagicMock()):
+            handoff = await _tool(agent, "task_complete")()
+        assert handoff is controller.agents[1]
+
+    @pytest.mark.asyncio
     async def test_final_task_hands_off_to_wrap_up(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[2]
@@ -293,6 +309,17 @@ class TestDirectiveIntervention:
             await asyncio.sleep(0)
             assert not task.done()
         assert await task is controller.agents[2]
+
+    @pytest.mark.asyncio
+    async def test_directive_without_an_attached_session_is_a_silent_noop(self) -> None:
+        """With the AI form-filling switch off the worker skips `attach_session`, so this
+        path is live in production. It must degrade quietly, not raise — self-consistent
+        today because directives only ever come from the Observer's own rule engine, which
+        is off in the same breath."""
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        assert controller.active_task_index == 0  # no swap happened
 
     @pytest.mark.asyncio
     async def test_terminate_interrupts_then_swaps_to_wrap_up(self) -> None:

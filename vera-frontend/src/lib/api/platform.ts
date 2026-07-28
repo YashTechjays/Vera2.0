@@ -29,8 +29,9 @@ export type TenantSummary = {
   id: string
   name: string
   slug: string
-  /** AI form-filling (observer) master switch for this tenant. */
-  observer_enabled: boolean
+  /** AI form-filling (observer) master switch for this tenant. `null` means the API did
+   *  not disclose it — the caller lacks `platform:tenants:manage` — not that it is off. */
+  observer_enabled: boolean | null
 }
 
 /** Active tenants the operator can elevate into (the tenant picker source) and manage

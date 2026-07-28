@@ -13,6 +13,7 @@ so the strict WITH CHECK on NULL-tenant role_permission rows does not block it.
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "749ffe826565"
@@ -26,19 +27,25 @@ _PERMISSIONS = {
 
 
 def upgrade() -> None:
+    # Bound params, not f-strings: the codes/descriptions are literals today, but an
+    # apostrophe in the next one ("a tenant's ...") would otherwise break the statement.
     for code, description in _PERMISSIONS.items():
         op.execute(
-            "INSERT INTO permission (id, code, description) "
-            f"VALUES (gen_random_uuid(), '{code}', '{description}') "
-            "ON CONFLICT (code) DO NOTHING"
+            sa.text(
+                "INSERT INTO permission (id, code, description) "
+                "VALUES (gen_random_uuid(), :code, :description) "
+                "ON CONFLICT (code) DO NOTHING"
+            ).bindparams(code=code, description=description)
         )
         op.execute(
-            "INSERT INTO role_permission (id, tenant_id, role_id, permission_id) "
-            "SELECT gen_random_uuid(), NULL, r.id, p.id "
-            "FROM role r, permission p "
-            "WHERE r.tenant_id IS NULL AND r.name = 'SUPER_ADMIN' "
-            f"AND p.code = '{code}' "
-            "ON CONFLICT (role_id, permission_id) DO NOTHING"
+            sa.text(
+                "INSERT INTO role_permission (id, tenant_id, role_id, permission_id) "
+                "SELECT gen_random_uuid(), NULL, r.id, p.id "
+                "FROM role r, permission p "
+                "WHERE r.tenant_id IS NULL AND r.name = 'SUPER_ADMIN' "
+                "AND p.code = :code "
+                "ON CONFLICT (role_id, permission_id) DO NOTHING"
+            ).bindparams(code=code)
         )
 
 
