@@ -1,17 +1,26 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import {
-  ApplyButton,
-  SwapButton,
-  DisputeTooltipBody,
-} from "./DisputeControls"
+import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
 import { confidenceHighlightClass } from "@/lib/ibv/disputes"
 import { applicabilityReason, isApplicable } from "@/lib/ibv/schema"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { SectionTable, TableCell } from "@/lib/ibv/schema"
+import type { LeafField } from "@/lib/ibv/types"
 
 const TH = "border border-ibv-input-border bg-ibv-label-bg px-2 py-0.5 font-bold"
+
+/** Room reserved inside the input so the dispute cluster never covers the value. */
+function disputeGutter(field: LeafField): string {
+  // textarea padding applies to EVERY line, so long-text cells reserve buttons only
+  if (field.ui?.widget === "textarea") return "50px"
+  if (field.type === "enum") return "90px"
+  return "150px"
+}
+
+/** Yes/No columns need less room than text/money for value + controls + chip. */
+function isEnumColumn(table: SectionTable, key: string): boolean {
+  return table.groups.some((g) => g.rows.some((r) => r.cells[key]?.field.type === "enum"))
+}
 
 /** One editable matrix cell with inline dispute UI and applicability graying. */
 function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
@@ -43,6 +52,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const highlightClass = showDispute
     ? confidenceHighlightClass(dispute!.confidence)
     : undefined
+  const isTextarea = field.ui?.widget === "textarea"
 
   return (
     // h-px is the table-cell "fill height" trick: the cell collapses to its real
@@ -60,24 +70,29 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           title={disabledReason ?? invalidReason}
           invalid={!!invalidReason}
           highlightClass={highlightClass}
-          inputPaddingRight={showDispute ? "70px" : undefined}
+          inputPaddingRight={showDispute ? disputeGutter(field) : undefined}
           borderless
         />
-        {showDispute && (
-          // No inline badge here — matrix cells are too narrow for value + prior
-          // side by side; the tooltip carries prior/captured/evidence instead.
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5">
-                <SwapButton swapped={flags.swapped} onClick={() => swapDispute(path)} />
-                <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
-              </div>
-            </TooltipTrigger>
-            <TooltipContent>
-              <DisputeTooltipBody dispute={dispute!} />
-            </TooltipContent>
-          </Tooltip>
-        )}
+        {showDispute &&
+          (isTextarea ? (
+            // Buttons pinned to the first line; a 10-char chip of a paragraph is noise.
+            <CompactDisputeControls
+              dispute={dispute!}
+              flags={flags}
+              className="top-1 right-1"
+              onSwap={() => swapDispute(path)}
+              onApply={() => applyDispute(path)}
+            />
+          ) : (
+            <InlineDisputeControls
+              dispute={dispute!}
+              flags={flags}
+              className="right-1"
+              bareBadge={field.type === "enum"}
+              onSwap={() => swapDispute(path)}
+              onApply={() => applyDispute(path)}
+            />
+          ))}
       </div>
     </td>
   )
@@ -96,16 +111,20 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
       <table className="w-full border-collapse font-ibv text-[13.3px] text-black">
         <thead>
           <tr className="text-center">
-            <th className={cn("w-[170px]", TH)}>Service</th>
-            {table.hasIcd && <th className={cn("w-[80px]", TH)}>ICD-10</th>}
-            <th className={cn("w-[120px]", TH)}>CPT Code</th>
+            <th className={cn("w-[170px] min-w-[170px]", TH)}>Service</th>
+            {table.hasIcd && <th className={cn("min-w-[110px]", TH)}>ICD-10</th>}
+            <th className={cn("min-w-[150px]", TH)}>CPT Code</th>
+            {/* min-w keeps value + controls + chip on one row; the wrapper scrolls */}
             {table.columns.map((c) => (
-              <th key={c.key} className={cn("min-w-[100px]", TH)}>
+              <th
+                key={c.key}
+                className={cn(isEnumColumn(table, c.key) ? "min-w-[120px]" : "min-w-[210px]", TH)}
+              >
                 {c.title}
               </th>
             ))}
             {table.extraColumns.map((c) => (
-              <th key={c.key} className={TH}>
+              <th key={c.key} className={cn("min-w-[210px]", TH)}>
                 {c.title}
               </th>
             ))}
@@ -135,13 +154,13 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
                 )}
                 {table.hasIcd && rowIdx === 0 && (
                   <td
-                    className="w-[80px] border border-ibv-input-border bg-white px-2 py-0.5 align-top text-ibv-label-border"
+                    className="min-w-[110px] border border-ibv-input-border bg-white px-2 py-0.5 align-top whitespace-nowrap text-ibv-label-border"
                     rowSpan={group.rows.length}
                   >
                     {group.icd10 || "—"}
                   </td>
                 )}
-                <td className="w-[120px] border border-ibv-input-border bg-white px-2 py-0.5 text-center break-words text-black">
+                <td className="min-w-[150px] border border-ibv-input-border bg-white px-2 py-0.5 text-center whitespace-nowrap text-black">
                   {row.label}
                 </td>
                 {table.columns.map((c) => (
