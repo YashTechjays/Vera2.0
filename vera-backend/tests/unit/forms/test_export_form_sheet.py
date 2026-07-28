@@ -309,14 +309,14 @@ def test_context_sections_get_green_title_fill() -> None:
     ctx = ws.cell(row=1, column=4).fill.start_color.rgb  # context section
     plain = ws.cell(row=1, column=1).fill.start_color.rgb  # collect section
     assert ctx != plain
-    assert str(ctx).endswith("C6EFCE")
+    assert str(ctx).endswith("22C55E")
 
 
 def test_inapplicable_leaf_grayed_with_empty_value() -> None:
     ws = _render({"sections.patient_information.spouse_name": "should-not-show"})
     # patient_name != "married" → spouse row (row 3, left block) is gated off.
     assert ws.cell(row=3, column=2).value in (None, "")
-    assert str(ws.cell(row=3, column=2).fill.start_color.rgb).endswith("F5F5F5")
+    assert str(ws.cell(row=3, column=2).fill.start_color.rgb).endswith("F7F7F7")
 
 
 def test_grid_full_width_and_two_up_flow_below_band() -> None:
@@ -379,10 +379,10 @@ def test_inapplicable_grid_extras_cell_grayed_with_empty_value() -> None:
     oi_row = ivf_first + 2  # oi band: single row below the ivf band
     # Gated ivf extras cell: empty AND grayed, like every other gated leaf.
     assert ws.cell(row=ivf_first, column=6).value in (None, "")
-    assert str(ws.cell(row=ivf_first, column=6).fill.start_color.rgb).endswith("F5F5F5")
+    assert str(ws.cell(row=ivf_first, column=6).fill.start_color.rgb).endswith("F7F7F7")
     # Applicable oi extras cell: value lands, no gray fill.
     assert ws.cell(row=oi_row, column=6).value == "4"
-    assert not str(ws.cell(row=oi_row, column=6).fill.start_color.rgb).endswith("F5F5F5")
+    assert str(ws.cell(row=oi_row, column=6).fill.start_color.rgb).endswith("D0E0E3")
 
 
 def test_ibv_standard_renders_and_placement_lists_exist() -> None:
@@ -447,3 +447,15 @@ def test_declared_default_counts_as_filled_on_export() -> None:
     )
     header = grid_title + 2
     assert ws.cell(row=header + 1, column=5).value == "0"  # grid cell default
+
+
+def test_ui_palette_usage_tints_and_value_fill() -> None:
+    """Label cells carry the UI's usage tints (usageMeta.ts) and value cells
+    the teal input background (--color-ibv-input-bg)."""
+    ws = _render({"sections.patient_information.patient_name": "Jane"})
+    # patient_name is a system_fields target -> violet-100 label tint.
+    assert str(ws.cell(row=2, column=1).fill.start_color.rgb).endswith("EDE9FE")
+    # its value cell uses the teal input background.
+    assert str(ws.cell(row=2, column=2).fill.start_color.rgb).endswith("D0E0E3")
+    # appointment_date is role=context -> green-100 label tint (right band).
+    assert str(ws.cell(row=2, column=4).fill.start_color.rgb).endswith("DCFCE7")
