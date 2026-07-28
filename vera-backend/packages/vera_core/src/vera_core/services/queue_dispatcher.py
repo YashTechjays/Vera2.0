@@ -80,7 +80,7 @@ tracer = trace.get_tracer(__name__)
 
 _EASTERN = ZoneInfo("America/New_York")
 
-# Form statuses that count toward the tenant's concurrency cap.
+# Form statuses that count toward the tenant's max_concurrent_calls ceiling.
 _ACTIVE_FORM_STATUSES = (
     FormStatus.IN_CALL.value,
     FormStatus.AI_PROCESSING.value,
@@ -192,7 +192,7 @@ async def try_dispatch(
         )
     ).scalar_one()
 
-    slots = tenant.max_agents_per_va - active_count
+    slots = tenant.max_concurrent_calls - active_count
     if slots <= 0:
         return 0
 

@@ -16,7 +16,13 @@ from vera_core.audit import emit_auth_event
 from vera_core.config import Settings
 from vera_core.models import Tenant
 from vera_core.models.enums import AuthEvent
-from vera_core.schemas import PersonaTweak, RetentionPolicy, RetentionPolicyUpdate
+from vera_core.schemas import (
+    ConcurrencyConfig,
+    ConcurrencyConfigUpdate,
+    PersonaTweak,
+    RetentionPolicy,
+    RetentionPolicyUpdate,
+)
 
 router = APIRouter(tags=["tenant-config"])
 
@@ -136,3 +142,63 @@ async def patch_retention_policy(
         meta={"old_days": old_days, "new_days": body.retention_days},
     )
     return ok(_retention_policy(body.retention_days, settings))
+
+
+def _concurrency_config(tenant: Tenant) -> ConcurrencyConfig:
+    return ConcurrencyConfig(
+        max_agents_per_va=tenant.max_agents_per_va,
+        max_concurrent_calls=tenant.max_concurrent_calls,
+    )
+
+
+@router.get(
+    "/tenant/config/concurrency",
+    response_model=ResponseModel[ConcurrencyConfig],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def get_concurrency_config(
+    tenant_id: TenantId,
+    session: TenantSession,
+    _caller: VerifiedIdentity = require("tenant:config:manage"),
+) -> ResponseModel[ConcurrencyConfig]:
+    tenant = await _load_tenant(session, tenant_id)
+    return ok(_concurrency_config(tenant))
+
+
+@router.patch(
+    "/tenant/config/concurrency",
+    response_model=ResponseModel[ConcurrencyConfig],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        DefaultExceptionCode.VALIDATION_ERROR,
+    ),
+)
+async def patch_concurrency_config(
+    body: ConcurrencyConfigUpdate,
+    request: Request,
+    tenant_id: TenantId,
+    session: TenantSession,
+    audit: AuthAudit,
+    caller: VerifiedIdentity = require("tenant:config:manage"),
+) -> ResponseModel[ConcurrencyConfig]:
+    tenant = await _load_tenant(session, tenant_id)
+    old = _concurrency_config(tenant)
+    if body.max_agents_per_va is not None:
+        tenant.max_agents_per_va = body.max_agents_per_va
+    if body.max_concurrent_calls is not None:
+        tenant.max_concurrent_calls = body.max_concurrent_calls
+    new = _concurrency_config(tenant)
+    # Policy-change before/after, same precedent as retention. Config ints, not PHI.
+    await emit_auth_event(
+        audit,
+        tenant_id=tenant_id,
+        event=AuthEvent.CONCURRENCY_CONFIG_UPDATED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"old": old.model_dump(), "new": new.model_dump()},
+    )
+    return ok(new)

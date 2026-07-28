@@ -184,8 +184,11 @@ class FakeSession:
             name = _bound_value(stmt, "name")
             return _Result(scalar=self.providers.get(name))
         if entity is PatientForm:
-            rows = self.candidates if stmt._limit_clause is not None else self.expired
-            return _Result(rows=rows)
+            # Honor the LIMIT's bound value so slot math (limit(slots)) is
+            # actually exercised — presence alone can't catch a wrong slot count.
+            if stmt._limit_clause is not None:
+                return _Result(rows=self.candidates[: stmt._limit_clause.value])
+            return _Result(rows=self.expired)
         # Serves BOTH the plan-staging reads and add_agent_context_metadata's schema
         # load: the defaults (schema_version=None, field_answers={}) mean tests that
         # exercise neither path attach no plan and no context.
@@ -263,6 +266,7 @@ def _tenant(**overrides: Any) -> Tenant:
         "slug": f"tenant-{uuid7().hex[:8]}",
         "status": "active",
         "max_agents_per_va": 3,
+        "max_concurrent_calls": 3,
         "max_retries": 5,
         "queue_expiry_hours": 48,
         "persona_tweak": {},
@@ -461,7 +465,7 @@ async def test_dial_failure_marks_call_failed_and_requeues_form(
 async def test_dials_are_paced_one_second_apart(
     _stub_credentials: dict[str, dict[str, Any] | None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tenant = _tenant(max_agents_per_va=5)
+    tenant = _tenant(max_concurrent_calls=5)
     form_a = _form(tenant.id)
     form_b = _form(tenant.id)
     session = FakeSession(tenant=tenant, candidates=[form_a, form_b])
@@ -480,10 +484,31 @@ async def test_dials_are_paced_one_second_apart(
     assert list(sleeps) == [1.0]
 
 
+async def test_slots_come_from_tenant_ceiling_not_per_va_knob(
+    _stub_credentials: dict[str, dict[str, Any] | None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dispatcher's tenant-wide slot math reads max_concurrent_calls; the
+    per-VA knob (max_agents_per_va) is enforced at enqueue time, not here."""
+    tenant = _tenant(max_agents_per_va=1, max_concurrent_calls=2)
+    form_a = _form(tenant.id)
+    form_b = _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form_a, form_b])
+    livekit = FakeLiveKit()
+
+    async def _fake_sleep(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(queue_dispatcher.asyncio, "sleep", _fake_sleep)  # type: ignore[attr-defined]
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 2  # per-VA knob of 1 must NOT cap the tenant-wide pass
+
+
 async def test_pacing_applies_to_failed_dial_attempts(
     _stub_credentials: dict[str, dict[str, Any] | None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tenant = _tenant(max_agents_per_va=5)
+    tenant = _tenant(max_concurrent_calls=5)
     form_a = _form(tenant.id)  # This one will fail to dial
     form_b = _form(tenant.id)  # This one will succeed
     session = FakeSession(tenant=tenant, candidates=[form_a, form_b])
@@ -691,7 +716,7 @@ class TestCallPlanStaging:
     async def test_template_compiles_once_per_schema_but_fuses_per_form(
         self, _stub_credentials: dict[str, dict[str, Any] | None], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        tenant = _tenant(max_agents_per_va=5)
+        tenant = _tenant(max_concurrent_calls=5)
         sv = _schema_version(IBV_SCHEMA_JSON)
         form_a = _form(tenant.id, schema_version_id=sv.id)
         form_b = _form(tenant.id, schema_version_id=sv.id)
