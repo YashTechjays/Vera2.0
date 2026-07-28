@@ -8,12 +8,12 @@ for a FRESH DB — this migration only provisions it on an EXISTING DB (mirrors
 CREATE TABLE / ADD CONSTRAINT, safe to run even where the objects already exist).
 
 Revision ID: 513942e99676
-Revises: 9cec58e69e92
+Revises: 738e38d86bdb
 Create Date: 2026-07-23 15:09:19.086635
 
-Rebased onto origin/dev's tip (9cec58e69e92, "platform operator deactivate lockout
-atomic guard") ahead of merging this branch's PR — both branches had forked new
-migrations off the same prior head (919535223bcc), which would otherwise leave two
+Rebased onto origin/dev's tip (738e38d86bdb, "grant calls:intervene to
+VIRTUAL_ASSISTANT") ahead of merging this branch's PR — both branches had forked new
+migrations off the same prior head (9cec58e69e92), which would otherwise leave two
 heads after merge. Not yet shared, so relinked in place instead of `just merge-heads`.
 
 """
@@ -25,7 +25,7 @@ from alembic import op
 # Keep generated revision/down_revision/branch_labels/depends_on above — do not edit
 
 revision: str = "513942e99676"
-down_revision: str | None = "9cec58e69e92"
+down_revision: str | None = "738e38d86bdb"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
