@@ -151,8 +151,43 @@ class TestConstruction:
         names = [t.info.name for t in controller.agents[0].tools if isinstance(t, FunctionTool)]
         assert names == ["task_complete"]  # no answer-write tools, no end_call
 
+    def test_task_agents_get_their_schema_task_key_as_id(self) -> None:
+        controller, _ = _controller()
+        assert [a.id for a in controller.agents] == ["intro_task", "gated_task", "last_task"]
+
+    def test_wrap_up_agent_id_is_the_sentinel(self) -> None:
+        controller, _ = _controller()
+        assert controller.wrap_up_agent.id == WRAP_UP_TASK_KEY
+
 
 class TestHandoff:
+    @pytest.mark.asyncio
+    async def test_task_complete_tags_the_handoff_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[0]
+        tracer = trace.get_tracer("test")
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.from_task"] == "intro_task"
+        assert span.attributes["vera.handoff.to_task"] == "gated_task"
+        assert span.attributes["vera.handoff.reason"] == "task_complete"
+
+    @pytest.mark.asyncio
+    async def test_task_complete_to_wrap_up_tags_the_sentinel(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[2]  # last_task
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.to_task"] == WRAP_UP_TASK_KEY
+
     @pytest.mark.asyncio
     async def test_task_complete_returns_the_next_agent(self) -> None:
         controller, _ = _controller()
@@ -216,6 +251,34 @@ class TestHandoff:
 
 
 class TestOnEnter:
+    @pytest.mark.asyncio
+    async def test_on_enter_tags_the_current_span_with_task_identity(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[1]  # gated_task, index 1
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.task.key"] == "gated_task"
+        assert span.attributes["vera.task.index"] == 1
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_on_enter_tags_the_sentinel(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.wrap_up_agent
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.task.key"] == WRAP_UP_TASK_KEY
+        assert "vera.task.index" not in span.attributes
+
     @pytest.mark.asyncio
     async def test_says_intro_and_writes_cursor(self) -> None:
         controller, state = _controller()
@@ -465,6 +528,51 @@ class TestDirectiveIntervention:
         session.userdata.engaged = True  # supervisor is driving the call
         await controller.apply_directive_now(Terminate(rule_key="t"))
         assert order == []  # no interrupt, no swap
+
+    @pytest.mark.asyncio
+    async def test_terminate_tags_the_ambient_span_with_handoff_attrs(
+        self, otel_spans: Any
+    ) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.from_task"] == "intro_task"
+        assert span.attributes["vera.handoff.to_task"] == WRAP_UP_TASK_KEY
+        assert span.attributes["vera.handoff.reason"] == "flow_rule"
+
+    @pytest.mark.asyncio
+    async def test_skip_forward_tags_the_ambient_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(SkipToTask(rule_key="jump", task_key="last_task"))
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.to_task"] == "last_task"
+
+    @pytest.mark.asyncio
+    async def test_reask_does_not_tag_handoff_attrs(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(
+                ReAsk(rule_key="ded", reason="Deductible was stated twice.")
+            )
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert "vera.handoff.from_task" not in span.attributes
 
 
 class TestPrefill:

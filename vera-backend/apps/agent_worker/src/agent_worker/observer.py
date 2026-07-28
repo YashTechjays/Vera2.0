@@ -34,6 +34,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from opentelemetry import trace
+
 from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from agent_worker.plan_runtime import PlanRunController
 
 logger = logging.getLogger("agent_worker")
+tracer = trace.get_tracer(__name__)
 
 # Cap the transcript window fed to the extractor: the last N finalized turns of the
 # current task. Bounds the prompt size and memory; a task rarely spans more.
@@ -102,7 +105,18 @@ class ResilientAnswerExtractor:
     async def extract(self, task: PlanTask, transcript: str) -> list[ExtractedAnswer]:
         # A whole-chain outage PROPAGATES rather than returning [], which is indistinguishable
         # from "the rep answered nothing" and would retire those turns unextracted.
-        reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
+        #
+        # The transcript handed to the chain is PHI and a raised provider error can embed it,
+        # so BOTH OTel exception knobs must be off: record_exception=False drops the exception
+        # EVENT (message + traceback), set_status_on_exception=False drops the status
+        # description, which OTel would otherwise fill with f"{type}: {exc}".
+        with tracer.start_as_current_span(
+            "vera.observer.extraction_llm_call",
+            attributes={"vera.llm.purpose": "observer_extraction", "vera.task.key": task.task_key},
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
+            reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
         return _parse_extraction(reply)
 
 
@@ -416,11 +430,32 @@ class ObserverManager:
         # next pass (the CP consumer is idempotent under the redelivery).
         self._answers[answer.field_path] = answer.value
         self._controller.update_answers(self._answers)
-        directive = self._rule_engine.evaluate(self._answers)
-        if directive is not None:
-            # Redirect the live call NOW: interrupt the bot + swap/re-ask (the controller
-            # serializes it against an in-flight task_complete handoff).
-            await self._controller.apply_directive_now(directive)
+        # This span's body reads `self._answers`, raw extracted field values. `evaluate` is
+        # pure string comparison and is documented not to raise, so the two knobs below are
+        # defense-in-depth here — but they stay off, as on every Vera-owned span whose body
+        # touches PHI: record_exception=False drops the exception EVENT,
+        # set_status_on_exception=False drops the f"{type}: {exc}" status description.
+        with tracer.start_as_current_span(
+            "vera.rule_engine.evaluate",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span:
+            directive = self._rule_engine.evaluate(self._answers)
+            try:
+                span.set_attribute("vera.rule_engine.fired", directive is not None)
+                if directive is not None:
+                    span.set_attribute("vera.handoff.directive_type", type(directive).__name__)
+                    span.set_attribute("vera.handoff.rule_key", directive.rule_key)
+            except Exception as exc:
+                logger.warning(
+                    "observer manager %s: rule-engine span tagging failed (%s)",
+                    self._room,
+                    type(exc).__name__,
+                )
+            if directive is not None:
+                # Redirect the live call NOW: interrupt the bot + swap/re-ask (the controller
+                # serializes it against an in-flight task_complete handoff).
+                await self._controller.apply_directive_now(directive)
 
     async def aclose(self) -> None:
         """Stop tailing and drain. Call in the entrypoint shutdown AFTER the call-event

@@ -1,24 +1,11 @@
-"""Shared helpers for the agent_worker unit tests."""
+"""Shared fixtures for tests/unit/ (vera_core + control_plane)."""
 
 from collections.abc import Iterator
 
 import pytest
-from livekit.agents import Agent
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from vera_core.observability.otel_testing import install_test_tracer_provider
-
-
-def chat_ctx_texts(agent: Agent) -> list[str]:
-    """The plain-string message contents of an agent's chat_ctx, in order — the
-    turns a handoff must carry forward (used to assert history is preserved)."""
-    return [
-        content
-        for item in agent.chat_ctx.items
-        if item.type == "message"
-        for content in item.content
-        if isinstance(content, str)
-    ]
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -33,8 +20,6 @@ def pytest_configure(config: pytest.Config) -> None:
 
 @pytest.fixture
 def otel_spans() -> Iterator[InMemorySpanExporter]:
-    """Cleared before and after each test; every test gets a clean span list even
-    though the underlying TracerProvider is process-global and installed once."""
     exporter = install_test_tracer_provider()
     exporter.clear()
     yield exporter

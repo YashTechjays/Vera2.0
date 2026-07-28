@@ -36,8 +36,10 @@ from vera_core.models import (
     PromptVersion,
     SchemaVersion,
     Tenant,
+    VoiceModelConfig,
 )
-from vera_core.models.enums import CallStatus, FormStatus
+from vera_core.models.enums import CallStatus, FormStatus, VoiceModelStage
+from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.plan_store import CallPlanService
 from vera_core.services import queue_dispatcher
 from vera_core.services.queue_dispatcher import is_within_working_hours, try_dispatch
@@ -156,6 +158,7 @@ class FakeSession:
         schema_version: SchemaVersion | None = None,
         prompt_version: PromptVersion | None = None,
         field_answers: dict[Any, list[tuple[str, Any]]] | None = None,
+        voice_model: VoiceModelConfig | None = None,
     ) -> None:
         self.tenant = tenant
         self.active_count = active_count
@@ -166,6 +169,8 @@ class FakeSession:
         self.prompt_version = prompt_version
         # form_id -> [(field_path, stored value)] current field_answer rows
         self.field_answers = field_answers or {}
+        # add_llm_model_override_metadata's read — None means "no override, use default".
+        self.voice_model = voice_model
         self.added: list[Any] = []
 
     async def execute(self, stmt: Any) -> _Result:
@@ -198,6 +203,8 @@ class FakeSession:
         if entity is FieldAnswer:
             form_id = _bound_value(stmt, "form_id")
             return _Result(rows=self.field_answers.get(form_id, []))
+        if entity is VoiceModelConfig:
+            return _Result(scalar=self.voice_model)
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
 
@@ -376,6 +383,41 @@ async def test_ivr_navigation_key_absent_when_form_opts_out(
     assert metadata is not None
     assert "enable_ivr_navigation" not in metadata
     assert "persona_tweak" not in metadata  # tenant.persona_tweak is empty
+
+
+async def test_llm_model_override_carries_into_dispatch_metadata(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    tenant = _tenant()
+    form = _form(tenant.id)
+    voice_model = VoiceModelConfig(
+        stage=VoiceModelStage.LLM, provider="google", model="gemini-3.5-flash"
+    )
+    session = FakeSession(tenant=tenant, candidates=[form], voice_model=voice_model)
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    metadata = livekit.dispatch_metadata[0]
+    assert metadata is not None
+    assert metadata["llm_model_override"] == "gemini-3.5-flash"
+
+
+async def test_llm_model_override_absent_when_never_set(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    tenant = _tenant()
+    form = _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form])  # voice_model defaults to None
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    metadata = livekit.dispatch_metadata[0]
+    assert metadata is not None
+    assert "llm_model_override" not in metadata
 
 
 async def test_dispatch_without_trunk_leaves_forms_queued(
@@ -685,6 +727,72 @@ class TestCallPlanStaging:
         }
         assert any("Jane Doe" in intro for intro in fused_names)
         assert any("John Roe" in intro for intro in fused_names)
+
+    # Both boolean branches are exercised: `vera.dispatch.ivr_enabled` mirrors the form's
+    # opt-in, and _form()'s default is True — so the False case must override it explicitly.
+    @pytest.mark.parametrize("ivr_enabled", [False, True])
+    async def test_stage_call_span_carries_correlation_and_counts(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        otel_spans: Any,
+        ivr_enabled: bool,
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id, ivr_navigation_enabled=ivr_enabled)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        room_name = livekit.created[0]
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.dispatch.stage_call"
+        )
+        assert span.attributes["vera.room"] == room_name
+        assert span.attributes["vera.tenant_id"] == str(tenant.id)
+        assert "vera.dispatch.task_count" in span.attributes
+        assert span.attributes["vera.dispatch.ivr_enabled"] is ivr_enabled
+        # PHI guardrail (design §8): this span wraps the plan staging and the metadata build
+        # (agent_context), both of which handle the patient's name — none of it may ride along.
+        assert_no_phi_values(span, "Jane Doe")  # _form()'s patient_name
+
+    async def test_compile_and_fuse_spans_are_schema_and_form_scoped(
+        self, _stub_credentials: dict[str, dict[str, Any] | None], otel_spans: Any
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        patient_name_path = IBV_SCHEMA_JSON["system_fields"]["patient_name"]
+        session = FakeSession(
+            tenant=tenant,
+            candidates=[form],
+            schema_version=sv,
+            # A real prefill value so the fuse span is asserted against PHI actually in flight.
+            field_answers={form.id: [(patient_name_path, {"value": "Jane Doe"})]},
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        # next() raises StopIteration if the span was never emitted — presence is asserted
+        # by these lookups, so no separate "span name exists" assertion is needed.
+        spans = otel_spans.get_finished_spans()
+        compile_span = next(s for s in spans if s.name == "vera.dispatch.compile_plan")
+        fuse_span = next(s for s in spans if s.name == "vera.dispatch.fuse_plan")
+        assert compile_span.attributes["vera.dispatch.schema_version"] == str(sv.id)
+        assert fuse_span.attributes["vera.dispatch.form_id"] == str(form.id)
+        assert "vera.room" not in compile_span.attributes  # room_name doesn't exist yet here
+        assert "vera.room" not in fuse_span.attributes
+        # PHI guardrail (design §8). compile_plan only ever sees schema/prompt config, so it
+        # keeps OTel's exception defaults — but the denylist assertion still applies to it.
+        assert_no_phi_values(compile_span, "Jane Doe")
+        assert_no_phi_values(fuse_span, "Jane Doe")
 
 
 async def _noop_sleep(seconds: float) -> None:
