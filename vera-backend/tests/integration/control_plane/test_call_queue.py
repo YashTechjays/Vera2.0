@@ -568,11 +568,11 @@ async def test_closed_provider_head_does_not_block_dispatchable_form_behind_it(
         # One slot: if the closed form wins the fetch, nothing dials this pass.
         old_max = (
             await session.execute(
-                select(Tenant.max_agents_per_va).where(Tenant.id == rbac_world.tenant_id)
+                select(Tenant.max_concurrent_calls).where(Tenant.id == rbac_world.tenant_id)
             )
         ).scalar_one()
         await session.execute(
-            update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_agents_per_va=1)
+            update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_concurrent_calls=1)
         )
 
     fake = FakeLiveKit()
@@ -606,7 +606,7 @@ async def test_closed_provider_head_does_not_block_dispatchable_form_behind_it(
             await session.execute(
                 update(Tenant)
                 .where(Tenant.id == rbac_world.tenant_id)
-                .values(max_agents_per_va=old_max)
+                .values(max_concurrent_calls=old_max)
             )
 
 
