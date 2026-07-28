@@ -184,8 +184,11 @@ class FakeSession:
             name = _bound_value(stmt, "name")
             return _Result(scalar=self.providers.get(name))
         if entity is PatientForm:
-            rows = self.candidates if stmt._limit_clause is not None else self.expired
-            return _Result(rows=rows)
+            # Honor the LIMIT's bound value so slot math (limit(slots)) is
+            # actually exercised — presence alone can't catch a wrong slot count.
+            if stmt._limit_clause is not None:
+                return _Result(rows=self.candidates[: stmt._limit_clause.value])
+            return _Result(rows=self.expired)
         # Serves BOTH the plan-staging reads and add_agent_context_metadata's schema
         # load: the defaults (schema_version=None, field_answers={}) mean tests that
         # exercise neither path attach no plan and no context.
