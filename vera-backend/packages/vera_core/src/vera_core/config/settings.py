@@ -227,6 +227,12 @@ class Settings(BaseSettings):
     def _split_health_fallback_models(cls, value: object) -> object:
         return _split_csv(value)
 
+    # --- end-of-call gap pass (agent worker) --------------------------------
+    # Before wrapping up a plan-backed call, re-ask required fields that were left
+    # unanswered in the tasks the call actually visited. False = go straight to the
+    # closing task (the pre-gap-pass behavior).
+    gap_pass_enabled: bool = True  # VERA_GAP_PASS_ENABLED
+
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
     # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:

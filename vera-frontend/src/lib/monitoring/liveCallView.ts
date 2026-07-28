@@ -109,6 +109,29 @@ export function shouldAllowClose(
   return mode !== "intervene" || callEnded
 }
 
+export type EndCallButtonState = {
+  disabled: boolean
+  title?: string
+}
+
+/** VR2-59: before anyone has intervened, only the call's owner may end it — a
+ *  published/"visible to all" call otherwise let any watching VA end a call they
+ *  never joined. Once a takeover is live, only the intervening supervisor may end
+ *  it, same as before. Mirrors the backend's own gate in calls.py::end_call. */
+export function endCallButtonState(
+  isOwner: boolean,
+  selfIntervening: boolean,
+  status: RoomStatus | null,
+): EndCallButtonState {
+  if (status?.otherIntervener) {
+    return { disabled: true, title: "Only the intervening supervisor can end this call" }
+  }
+  if (!isOwner && !selfIntervening) {
+    return { disabled: true, title: "Only the call owner can end this call before intervention" }
+  }
+  return { disabled: false }
+}
+
 export type InterveneButtonState = {
   visible: boolean
   disabled: boolean

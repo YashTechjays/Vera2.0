@@ -34,6 +34,7 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_authz import authorize_or_403 as _authorize_or_403
 from control_plane.call_authz import call_hidden_from as _call_hidden_from
+from control_plane.call_authz import visible_to as _visible_to
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.call_summary import (
     CallSummaryResponse,
@@ -67,14 +68,23 @@ from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
+    TYPE_FIELD_ANSWER,
     TYPE_TRANSCRIPT,
     CallStreamEvent,
     CallStreamService,
 )
 from vera_core.config.kms import KeyManagementService
 from vera_core.db.rls import tenant_session
+from vera_core.forms.review import unwrap_value
 from vera_core.llm import LLMUnavailableError, ResilientLLM
-from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
+from vera_core.models import (
+    Call,
+    FieldAnswer,
+    InterventionEvent,
+    PatientForm,
+    Recording,
+    Transcript,
+)
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
@@ -190,17 +200,6 @@ def _summary(
         health_flag=call.health_flag,
         health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
-    )
-
-
-def _visible_to(caller_id: UUID) -> ColumnElement[bool]:
-    """Calls the caller may see: their own, published ones, and ownerless
-    (pre-ownership dispatcher) calls — hidden, those would have no monitoring
-    and no owner to ever publish them."""
-    return or_(
-        Call.initiated_by_id == caller_id,
-        Call.published.is_(True),
-        Call.initiated_by_id.is_(None),
     )
 
 
@@ -403,6 +402,29 @@ async def stream_call_events(
                 .scalars()
                 .all()
             )
+            # Current answers + completion so a client that only tails the SSE sees the
+            # filled form for a terminal call (the live stream is already gone). Carries
+            # the real source/confidence so it matches the REST form load — no drift.
+            answer_rows = (
+                await session.execute(
+                    select(
+                        FieldAnswer.field_path,
+                        FieldAnswer.value,
+                        FieldAnswer.source,
+                        FieldAnswer.confidence,
+                        FieldAnswer.evidence_seq,
+                    ).where(
+                        FieldAnswer.form_id == call.form_id,
+                        FieldAnswer.is_current.is_(True),
+                    )
+                )
+            ).all()
+            completion_raw = (
+                await session.execute(
+                    select(PatientForm.completion_pct).where(PatientForm.id == call.form_id)
+                )
+            ).scalar_one_or_none()
+            completion_pct = float(completion_raw) if completion_raw is not None else None
         db_events = [
             (
                 f"db-{row.seq}",
@@ -418,13 +440,36 @@ async def stream_call_events(
             )
             for row in rows
         ]
+        snapshot_ts = _epoch_ms(call.ended_at) or int(time.time() * 1000)
+        # One snapshot, so every frame carries the SAME completion_pct — the form's value
+        # as of this read, not a per-answer running total (these rows have no ordering to
+        # reconstruct one from). `dispute` is deliberately absent, not null: a replay must
+        # leave the disputes the REST form load already populated alone.
+        db_events.extend(
+            (
+                f"db-answer-{seq}",
+                CallStreamEvent(
+                    type=TYPE_FIELD_ANSWER,
+                    data={
+                        "field_path": field_path,
+                        "value": unwrap_value(value),
+                        "source": source,
+                        "confidence": confidence,
+                        "evidence_seq": evidence_seq,
+                        "completion_pct": completion_pct,
+                    },
+                    ts=snapshot_ts,
+                ),
+            )
+            for seq, (field_path, value, source, confidence, evidence_seq) in enumerate(answer_rows)
+        )
         db_events.append(
             (
                 "db-status",
                 CallStreamEvent(
                     type=TYPE_CALL_STATUS,
                     data={"status": call.current_status},
-                    ts=_epoch_ms(call.ended_at) or int(time.time() * 1000),
+                    ts=snapshot_ts,
                 ),
             )
         )
@@ -612,8 +657,17 @@ async def end_call(
     already terminal and no-op).
 
     Visibility matches join-token (`_call_hidden_from`): anyone who may watch
-    the call may end it; a hidden call 404s so it is never revealed. While a
+    the call may end it if it is published (VR2-59 tightens this to just the
+    owner — see below); a hidden call 404s so it is never revealed. While a
     takeover is live, only the intervening supervisor may end the call.
+
+    VR2-59: before anyone has EVER intervened (`intervener_user_id` still
+    null), only the call's owner may end it — a published/"visible to all"
+    call let every watching VA end a call they never joined. A stale/abandoned
+    takeover (crashed supervisor) keeps the existing crash-recovery openness:
+    any viewer may still end it, same as before this change. Ownerless calls
+    (dispatcher-created, no `initiated_by_id`) are unaffected: there is no
+    owner to restrict to.
     """
     call = (
         await session.execute(select(Call).where(Call.id == call_id))
@@ -632,6 +686,15 @@ async def end_call(
         and await _intervener_lock_live(session, livekit, room_name, call, holder)
     ):
         raise ConflictError(message="only the intervening supervisor can end this call")
+    # Only gates the never-intervened case: a stale/abandoned holder (crashed
+    # supervisor) already falls through the check above, and must stay endable
+    # by any viewer — that's the crash-recovery path, distinct from VR2-59.
+    if (
+        holder is None
+        and call.initiated_by_id is not None
+        and call.initiated_by_id != caller.user_id
+    ):
+        raise ConflictError(message="only the call's owner can end this call before intervention")
     pre_answer = call.started_at is None
     actor_label = caller.email or caller.subject
     await audit.emit(

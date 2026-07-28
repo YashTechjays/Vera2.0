@@ -95,6 +95,88 @@ export function asCallHealth(e: CallStreamEvent): CallHealth | null {
   return { score, flag, reason: typeof reason === "string" ? reason : null, ts: e.ts }
 }
 
+type FieldValue = string | number | boolean | null
+
+function toFieldValue(v: unknown): FieldValue {
+  return v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean"
+    ? v
+    : null
+}
+
+/** A live dispute: the AI value diverges from the intake/human baseline. Raw values
+ *  (not yet display-formatted) — the provider formats them like the REST detail view. */
+export type LiveDispute = {
+  previousValue: FieldValue
+  currentValue: FieldValue
+  confidence: number | null
+  evidence: string | null
+  reasoning: string | null
+}
+
+/** One Observer-extracted field answer (the "field_answer" envelope) — an AI fill
+ *  of a form field pushed live to Live Monitoring. `value` is PHI: hold it in
+ *  session-scoped state only, never persist or log it. */
+export type FieldAnswerEvent = {
+  /** Root-anchored dotted path — byte-identical to the form field's path. */
+  fieldPath: string
+  value: FieldValue
+  /** Which side produced it ("ai_call" for a live fill), when the envelope carries it. */
+  source: string | null
+  /** 0-100 extractor confidence, or null. */
+  confidence: number | null
+  /** Form completion after this answer (0-100), so a progress bar can advance without a refetch. */
+  completionPct: number | null
+  /** Tri-state dispute: `undefined` when the frame omits it (leave disputes untouched —
+   *  e.g. terminal-call replay); `null` when the backend computed "not disputed" (clear
+   *  any existing dispute); an object when the AI value diverges from the baseline. */
+  dispute?: LiveDispute | null
+  ts: number
+}
+
+/** Narrow an envelope's `dispute` payload to a LiveDispute, or null (not disputed). */
+function asLiveDispute(raw: unknown): LiveDispute | null {
+  if (raw === null || typeof raw !== "object") return null
+  const d = raw as {
+    previous_value?: unknown
+    current_value?: unknown
+    confidence?: unknown
+    evidence?: unknown
+    reasoning?: unknown
+  }
+  return {
+    previousValue: toFieldValue(d.previous_value),
+    currentValue: toFieldValue(d.current_value),
+    confidence: typeof d.confidence === "number" ? d.confidence : null,
+    evidence: typeof d.evidence === "string" ? d.evidence : null,
+    reasoning: typeof d.reasoning === "string" ? d.reasoning : null,
+  }
+}
+
+/** Narrow an envelope to a field answer; null for other/malformed event types. */
+export function asFieldAnswer(e: CallStreamEvent): FieldAnswerEvent | null {
+  if (e.type !== "field_answer") return null
+  const { field_path, value, source, confidence, completion_pct } = e.data as {
+    field_path?: unknown
+    value?: unknown
+    source?: unknown
+    confidence?: unknown
+    completion_pct?: unknown
+  }
+  if (typeof field_path !== "string") return null
+  const answer: FieldAnswerEvent = {
+    fieldPath: field_path,
+    value: toFieldValue(value),
+    source: typeof source === "string" ? source : null,
+    confidence: typeof confidence === "number" ? confidence : null,
+    completionPct: typeof completion_pct === "number" ? completion_pct : null,
+    ts: e.ts,
+  }
+  // Tri-state: only set `dispute` when the frame carries the key at all, so an absent
+  // key (terminal replay) leaves the disputes map untouched downstream.
+  if ("dispute" in e.data) answer.dispute = asLiveDispute(e.data.dispute)
+  return answer
+}
+
 // The worker publishes "ended" on its live stream; the DB replay of an already-terminal
 // call carries the CallStatus enum value instead — treat both vocabularies as terminal.
 const TERMINAL_CALL_STATUSES = new Set([
