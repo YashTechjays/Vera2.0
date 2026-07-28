@@ -31,6 +31,10 @@ chmod 600 "$tmp"
   # in the pipeline vars / AR image path). Setting it starts the post-call eval
   # consumer; unset leaves the feature dormant.
   echo "VERA_GCP_PROJECT=$PROJECT"
+  # Auto-retry: on a low-fill form (completion_pct < tenant.retry_fill_threshold),
+  # the control-plane re-queues the call instead of parking it in EXCEPTION_REVIEW,
+  # bounded by tenant.max_retries. Control-plane-only; the worker ignores it.
+  echo "VERA_FORM_AUTO_RETRY_ENABLED=true"
 } >> "$tmp"
 
 while IFS= read -r line; do
