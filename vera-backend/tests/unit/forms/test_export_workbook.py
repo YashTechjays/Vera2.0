@@ -14,12 +14,18 @@ V2 = {
     "insurance_type": "infertility_treatment",
     # The DSL requires every promoted column mapped to a system_fields target —
     # point them all at one leaf (same shortcut as test_conditions.py).
-    "system_fields": {"network_status": "sections.cov.network_status"},
-    "rep_call_reference_number_field": "sections.cov.network_status",
-    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.cov.network_status"),
+    # "patient_information" is a LEFT_TOP placement key (export_form_sheet.py)
+    # so the replica anchors it at A1.
+    "system_fields": {
+        "network_status": "sections.patient_information.network_status",
+    },
+    "rep_call_reference_number_field": "sections.patient_information.network_status",
+    "promoted_fields": dict.fromkeys(
+        PromotedFields.model_fields, "sections.patient_information.network_status"
+    ),
     "sections": {
-        "cov": {
-            "title": "Coverage",
+        "patient_information": {
+            "title": "Patient Information",
             "role": "collect",
             "fields": {
                 "network_status": {
@@ -32,7 +38,7 @@ V2 = {
             },
         },
     },
-    "tasks": [{"task_key": "t1", "title": "Task 1", "sections": ["cov"]}],
+    "tasks": [{"task_key": "t1", "title": "Task 1", "sections": ["patient_information"]}],
 }
 
 
@@ -48,8 +54,11 @@ def _attempt(n: int, mode: str) -> CallAttempt:
     )
 
 
-def test_workbook_has_form_and_provenance_sheets() -> None:
-    path = "sections.cov.network_status"
+def test_v2_form_sheet_is_ui_replica() -> None:
+    """The v2 "Form" sheet is now export_form_sheet.render_form_sheet's UI
+    replica, not the old flat bold-header/label-value walk — anchor on the
+    replica's known geometry instead."""
+    path = "sections.patient_information.network_status"
     data = build_workbook(
         V2,
         values={path: "in-network"},
@@ -59,9 +68,11 @@ def test_workbook_has_form_and_provenance_sheets() -> None:
     )
     wb = load_workbook(BytesIO(data))
     assert wb.sheetnames == ["Form", "Provenance"]
-    form_cells = [tuple(r) for r in wb["Form"].iter_rows(values_only=True)]
-    assert ("Coverage", None) in form_cells or ("Coverage",) in form_cells
-    assert ("Network status", "in-network") in form_cells
+    ws = wb["Form"]
+    # LEFT_TOP section is anchored at A1 with a label/value pair below it.
+    assert ws.cell(row=1, column=1).value == "Patient Information"
+    assert ws.cell(row=2, column=1).value == "Network status *"
+    assert ws.cell(row=2, column=2).value == "in-network"
     prov_rows = [tuple(r) for r in wb["Provenance"].iter_rows(values_only=True)]
     assert any(r[0] == path and r[2] == "ai_call" and r[3] == 1 for r in prov_rows if r[0])
     assert any(r and r[0] == "Call history" for r in prov_rows)
