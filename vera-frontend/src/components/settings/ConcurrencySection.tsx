@@ -11,6 +11,29 @@ import {
 } from "@/lib/api/tenantConfig"
 import { SettingsCard } from "./SettingsCard"
 
+const KNOBS = [
+  {
+    key: "max_agents_per_va",
+    id: "max-agents-per-va",
+    label: "Agents per VA (1–20)",
+    min: 1,
+    max: 20,
+  },
+  {
+    key: "max_concurrent_calls",
+    id: "max-concurrent-calls",
+    label: "Tenant call ceiling (1–100)",
+    min: 1,
+    max: 100,
+  },
+] as const satisfies ReadonlyArray<{
+  key: keyof ConcurrencyConfig
+  id: string
+  label: string
+  min: number
+  max: number
+}>
+
 /** Admin knobs for agent concurrency: per-VA in-flight cap + tenant dial ceiling. */
 export function ConcurrencySection() {
   const [config, setConfig] = useState<ConcurrencyConfig | null>(null)
@@ -53,30 +76,20 @@ export function ConcurrencySection() {
     >
       {config && (
         <div className="space-y-4">
-          <div className="grid gap-1.5">
-            <Label htmlFor="max-agents-per-va">Agents per VA (1–20)</Label>
-            <Input
-              id="max-agents-per-va"
-              type="number"
-              min={1}
-              max={20}
-              value={config.max_agents_per_va}
-              onChange={(e) => setKnob("max_agents_per_va", e.target.value)}
-              className="max-w-32"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="max-concurrent-calls">Tenant call ceiling (1–100)</Label>
-            <Input
-              id="max-concurrent-calls"
-              type="number"
-              min={1}
-              max={100}
-              value={config.max_concurrent_calls}
-              onChange={(e) => setKnob("max_concurrent_calls", e.target.value)}
-              className="max-w-32"
-            />
-          </div>
+          {KNOBS.map((knob) => (
+            <div className="grid gap-1.5" key={knob.key}>
+              <Label htmlFor={knob.id}>{knob.label}</Label>
+              <Input
+                id={knob.id}
+                type="number"
+                min={knob.min}
+                max={knob.max}
+                value={config[knob.key]}
+                onChange={(e) => setKnob(knob.key, e.target.value)}
+                className="max-w-32"
+              />
+            </div>
+          ))}
           {ceilingBelowPerVa && (
             <p className="text-sm text-muted-foreground">
               The tenant ceiling is below the per-VA limit, so the ceiling will apply first.
