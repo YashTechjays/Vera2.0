@@ -56,11 +56,14 @@ export function LiveCallModal({
   open,
   onOpenChange,
   onExpand,
+  onCallEnded,
 }: {
   call: LiveCall | null
   open: boolean
   onOpenChange: (open: boolean) => void
   onExpand: () => void
+  /** SSE reported the call terminal — lets the list reflect it before its next poll */
+  onCallEnded?: (callId: string) => void
 }) {
   const canIntervene = usePermission("calls:intervene")
   const [mode, setMode] = useState<LiveCallMode>("listen")
@@ -102,6 +105,13 @@ export function LiveCallModal({
   // SSE is the sole source of truth for "call ended"; a room "ended" phase is the
   // supervisor's own connection dropping (LiveCallRoom shows a connection-lost state).
   const callEnded = sseEnded
+
+  // The list is poll-driven and its DB status lags the worker's shutdown drain by
+  // many seconds (VR2-72) — surface the SSE terminal signal so it updates now.
+  const endedCallId = callEnded ? call?.id : undefined
+  useEffect(() => {
+    if (endedCallId) onCallEnded?.(endedCallId)
+  }, [endedCallId, onCallEnded])
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
   const canCoach = coachingPanelVisible(canIntervene, call?.isOwner ?? false, callEnded)
