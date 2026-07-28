@@ -149,16 +149,14 @@ _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _BOLD = Font(bold=True)
 _CENTER = Alignment(horizontal="center", vertical="center")
 _TOP_LEFT = Alignment(vertical="top", wrap_text=True)
-# Fills approximate the UI's section/grid styling (Section.tsx header bars,
-# SectionMatrix.tsx header strip, the grayed inapplicable rows) — the UI uses
-# Tailwind tokens with no exact hex counterpart; keep these visually close.
+# Fills approximate the UI styling (Section.tsx / SectionMatrix.tsx Tailwind tokens; no exact hex).
 _FILL_CONTEXT = PatternFill("solid", start_color="C6EFCE")  # UI's green context header
 _FILL_PLAIN = PatternFill("solid", start_color="E7E6E6")
 _FILL_GRID_HEADER = PatternFill("solid", start_color="F2F2F2")
 _FILL_INAPPLICABLE = PatternFill("solid", start_color="F5F5F5")
 
 
-def _str(v: Any) -> str:
+def cell_str(v: Any) -> str:
     """Coerce a field value to a spreadsheet-safe string; None → empty string."""
     return "" if v is None else str(v)
 
@@ -205,12 +203,21 @@ def _vmerge(ws: Worksheet, top: int, col: int, n: int) -> None:
         ws.merge_cells(start_row=top, start_column=col, end_row=top + n - 1, end_column=col)
 
 
+def _leaf_value(path: str, leaf: Leaf, ctx: _Ctx) -> str:
+    """Stored value with the DSL §4.4 fallback: a declared default counts as
+    filled on export (same rule completion_pct_v2 applies in review.py)."""
+    v = ctx.values.get(path)
+    if v is None and leaf.default is not None:
+        v = leaf.default
+    return cell_str(v)
+
+
 def _grid_value(ws: Worksheet, row: int, col: int, cell: TableCell | None, ctx: _Ctx) -> bool:
     """Write a grid cell's value when applicable; the returned applicability
     drives the caller's gray-fill decision (a missing cell counts as gated)."""
     applicable = cell is not None and ctx.applicable(cell.path)
     if cell is not None and applicable:
-        ws.cell(row=row, column=col, value=_str(ctx.values.get(cell.path)))
+        ws.cell(row=row, column=col, value=_leaf_value(cell.path, cell.leaf, ctx))
     return applicable
 
 
@@ -227,7 +234,7 @@ def _leaf_row(ws: Worksheet, row: int, col: int, path: str, leaf: Leaf, ctx: _Ct
     applicable = ctx.applicable(path)
     star = " *" if applicable and is_required(leaf, ctx.values, ctx.shared) else ""
     ws.cell(row=row, column=col, value=f"{leaf.title}{star}")
-    ws.cell(row=row, column=col + 1, value=_str(ctx.values.get(path)) if applicable else "")
+    ws.cell(row=row, column=col + 1, value=_leaf_value(path, leaf, ctx) if applicable else "")
     fill = None if applicable else _FILL_INAPPLICABLE
     _style(ws, row, col, fill=fill, bold=True)
     _style(ws, row, col + 1, fill=fill)
@@ -265,7 +272,8 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
     """Full-width matrix section; returns rows consumed. Header order mirrors
     SectionMatrix.tsx: Service, [ICD-10], CPT Code, columns…, extras…"""
     table = section_table(section_key, section)
-    assert table is not None  # caller checked ui.layout
+    if table is None:  # caller dispatches on ui.layout — reaching here is a bug
+        raise ValueError(f"_grid_block called for non-table section {section_key!r}")
     static = ["Service"] + (["ICD-10"] if table.has_icd else []) + ["CPT Code"]
     width = len(static) + len(table.columns) + len(table.extra_columns)
 
@@ -342,7 +350,7 @@ def render_form_sheet(
 
     placed = set(LEFT_TOP) | set(RIGHT_TOP) | set(RAIL)
     rest = [k for k in sections if k not in placed]
-    r = next_row + 1
+    r = next_row  # stack() already ends one blank row past its last block
     run: list[str] = []
 
     def flush_run() -> None:

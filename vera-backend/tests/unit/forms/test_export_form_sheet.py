@@ -412,3 +412,38 @@ def test_placement_constants_reference_fe() -> None:
         "provider_reference_information",
         "insurance_reference_information",
     ]
+
+
+def test_every_catalog_schema_renders() -> None:
+    """Smoke over ALL shipped schemas (not just ibv_standard) — a schema
+    without the top-band sections must still render via the below-band flow."""
+    for filename, _build in SCHEMAS.values():
+        doc = load_document((FORM_SCHEMA_DIR / filename).read_text())
+        wb = Workbook()
+        render_form_sheet(cast(Worksheet, wb.active), doc, {})
+
+
+def test_declared_default_counts_as_filled_on_export() -> None:
+    """DSL §4.4: a leaf with a declared default and no stored value exports the
+    default (field blocks AND grid cells), matching completion_pct_v2."""
+    raw = copy.deepcopy(_PLACED_DOC)
+    fields = raw["sections"]["patient_information"]["fields"]
+    fields["patient_name"]["default"] = "N/A"
+    grid = raw["sections"]["treatment"]["fields"]
+    grid["ivf"]["fields"]["cpt_58970"]["fields"]["copay"]["default"] = "0"
+    from vera_core.forms.dsl import PromotedFields
+
+    raw["promoted_fields"] = dict.fromkeys(
+        PromotedFields.model_fields, "sections.patient_information.patient_name"
+    )
+    doc = FormSchemaDoc.model_validate(raw)
+    wb = Workbook()
+    ws = cast(Worksheet, wb.active)
+    render_form_sheet(ws, doc, {})
+
+    assert ws.cell(row=2, column=2).value == "N/A"  # field block default
+    grid_title = next(
+        r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=1).value == "Treatment"
+    )
+    header = grid_title + 2
+    assert ws.cell(row=header + 1, column=5).value == "0"  # grid cell default

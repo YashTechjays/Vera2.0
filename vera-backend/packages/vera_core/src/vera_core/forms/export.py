@@ -15,7 +15,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
-from vera_core.forms.export_form_sheet import _str, render_form_sheet
+from vera_core.forms.export_form_sheet import cell_str, render_form_sheet
 from vera_core.services.call_provenance import CallAttempt, FieldProvenance
 
 _BOLD = Font(bold=True)
@@ -49,7 +49,7 @@ def build_workbook(
     else:
         titles = {p: p for p in sorted_paths}
         for path in sorted_paths:
-            form_ws.append([path, _str(values[path])])
+            form_ws.append([path, cell_str(values[path])])
 
     prov_ws = cast(Worksheet, wb.create_sheet("Provenance"))
     prov_ws.append(
