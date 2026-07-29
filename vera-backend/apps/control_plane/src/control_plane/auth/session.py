@@ -14,6 +14,8 @@ Two keyspaces share one store via a `namespace`:
              second factor. SessionVerifier NEVER accepts an "mfa" token.
   * "sess_abs" — a companion to a "sess" token holding only the absolute-cap TTL,
                  set once at login and never extended; bounds total session lifetime.
+  * "sess_user" — per-user SET of live session tokens, so a password reset can
+                  revoke every session at once.
 """
 
 import json
@@ -36,6 +38,8 @@ MFA_ENROLL_NS = "mfa_enroll"  # first-login MFA bootstrap (enforced tenant, not 
 # caps the sliding `sess` TTL at this key's remaining TTL, so `sess` can never outlive
 # the cap and the verify hot path needs no clock and no extra read.
 SESSION_ABS_NS = "sess_abs"
+# Only mint_session writes this index; stale members are harmless (DEL is a no-op).
+SESSION_USER_NS = "sess_user"
 
 
 @dataclass(frozen=True)
@@ -138,12 +142,17 @@ class SessionStore(Protocol):
         """Delete both the `sess` and `sess_abs` keys (logout)."""
         ...
 
+    async def delete_all_for_user(self, user_id: UUID) -> None:
+        """Revoke every fully-authenticated session of `user_id` (password reset)."""
+        ...
+
 
 class InMemorySessionStore:
     """Dev/tests. Monotonic-clock TTL; values vanish on restart."""
 
     def __init__(self) -> None:
         self._entries: dict[str, tuple[float, SessionData]] = {}
+        self._user_tokens: dict[UUID, set[str]] = {}
 
     async def put(self, namespace: str, data: SessionData, ttl_seconds: int) -> str:
         token = _new_token()
@@ -169,6 +178,7 @@ class InMemorySessionStore:
         self._entries[_key(SESSION_NS, token)] = (now + idle_ttl, data)
         # abs entry: only its expiry timestamp is meaningful — value is a sentinel.
         self._entries[_key(SESSION_ABS_NS, token)] = (now + abs_ttl, _ABS_SENTINEL)
+        self._user_tokens.setdefault(data.user_id, set()).add(token)
         return token
 
     async def extend_session(self, token: str, idle_ttl: int) -> int | None:
@@ -200,8 +210,16 @@ class InMemorySessionStore:
         return int(abs_remaining)
 
     async def delete_session(self, token: str) -> None:
-        self._entries.pop(_key(SESSION_NS, token), None)
+        entry = self._entries.pop(_key(SESSION_NS, token), None)
         self._entries.pop(_key(SESSION_ABS_NS, token), None)
+        if entry is not None:
+            _, data = entry
+            self._user_tokens.get(data.user_id, set()).discard(token)
+
+    async def delete_all_for_user(self, user_id: UUID) -> None:
+        for token in self._user_tokens.pop(user_id, set()):
+            self._entries.pop(_key(SESSION_NS, token), None)
+            self._entries.pop(_key(SESSION_ABS_NS, token), None)
 
 
 class RedisSessionStore:
@@ -227,10 +245,14 @@ class RedisSessionStore:
 
     async def mint_session(self, data: SessionData, idle_ttl: int, abs_ttl: int) -> str:
         token = _new_token()
+        user_key = _key(SESSION_USER_NS, str(data.user_id))
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.set(_key(SESSION_NS, token), data.to_json(), ex=idle_ttl)
             # The companion value is irrelevant — only its TTL matters.
             pipe.set(_key(SESSION_ABS_NS, token), "1", ex=abs_ttl)
+            pipe.sadd(user_key, token)
+            # Refreshed each mint, so the index can never expire before a live session.
+            pipe.expire(user_key, abs_ttl)
             await pipe.execute()
         return token
 
@@ -258,7 +280,23 @@ class RedisSessionStore:
         return abs_remaining
 
     async def delete_session(self, token: str) -> None:
-        await self._redis.delete(_key(SESSION_NS, token), _key(SESSION_ABS_NS, token))
+        # Payload read gives the user for the index SREM; already-expired → skip it.
+        data = await self.get(SESSION_NS, token)
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.delete(_key(SESSION_NS, token), _key(SESSION_ABS_NS, token))
+            if data is not None:
+                pipe.srem(_key(SESSION_USER_NS, str(data.user_id)), token)
+            await pipe.execute()
+
+    async def delete_all_for_user(self, user_id: UUID) -> None:
+        index_key = _key(SESSION_USER_NS, str(user_id))
+        members: set[str | bytes] = await self._redis.smembers(index_key)
+        keys = [index_key]
+        for member in members:
+            token = member.decode() if isinstance(member, bytes) else member
+            keys.append(_key(SESSION_NS, token))
+            keys.append(_key(SESSION_ABS_NS, token))
+        await self._redis.delete(*keys)
 
 
 class SessionVerifier:
