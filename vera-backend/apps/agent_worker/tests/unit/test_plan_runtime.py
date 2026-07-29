@@ -72,6 +72,7 @@ def _controller(
     greeting: str | None = None,
     extra_instructions: str | None = None,
     gap_pass_enabled: bool = True,
+    previous_task_only: bool = True,
 ) -> tuple[PlanRunController, FakeRunState]:
     state = run_state or FakeRunState()
     controller = PlanRunController(
@@ -81,6 +82,7 @@ def _controller(
         greeting=greeting,
         extra_instructions=extra_instructions,
         gap_pass_enabled=gap_pass_enabled,
+        previous_task_only=previous_task_only,
     )
     return controller, state
 
@@ -151,8 +153,43 @@ class TestConstruction:
         names = [t.info.name for t in controller.agents[0].tools if isinstance(t, FunctionTool)]
         assert names == ["task_complete"]  # no answer-write tools, no end_call
 
+    def test_task_agents_get_their_schema_task_key_as_id(self) -> None:
+        controller, _ = _controller()
+        assert [a.id for a in controller.agents] == ["intro_task", "gated_task", "last_task"]
+
+    def test_wrap_up_agent_id_is_the_sentinel(self) -> None:
+        controller, _ = _controller()
+        assert controller.wrap_up_agent.id == WRAP_UP_TASK_KEY
+
 
 class TestHandoff:
+    @pytest.mark.asyncio
+    async def test_task_complete_tags_the_handoff_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[0]
+        tracer = trace.get_tracer("test")
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.from_task"] == "intro_task"
+        assert span.attributes["vera.handoff.to_task"] == "gated_task"
+        assert span.attributes["vera.handoff.reason"] == "task_complete"
+
+    @pytest.mark.asyncio
+    async def test_task_complete_to_wrap_up_tags_the_sentinel(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[2]  # last_task
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.to_task"] == WRAP_UP_TASK_KEY
+
     @pytest.mark.asyncio
     async def test_task_complete_returns_the_next_agent(self) -> None:
         controller, _ = _controller()
@@ -184,6 +221,19 @@ class TestHandoff:
         mock_session.say.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_blank_outro_no_exit_speech(self) -> None:
+        # A prompt-document override may be "" — an operator's explicit "say nothing".
+        plan = _plan()
+        plan.tasks[0] = plan.tasks[0].model_copy(update={"outro": ""})
+        controller, _ = _controller(plan)
+        agent = controller.agents[0]
+        mock_session = MagicMock()
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        with _session_patch(agent, mock_session):
+            await _tool(agent, "task_complete")()
+        mock_session.say.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_inapplicable_task_is_skipped(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[0]
@@ -191,6 +241,22 @@ class TestHandoff:
         with _session_patch(agent, MagicMock()):
             handoff = await _tool(agent, "task_complete")()
         assert handoff is controller.agents[2]
+
+    @pytest.mark.asyncio
+    async def test_applicability_falls_back_to_prefill_without_the_observer(self) -> None:
+        """Regression fence for the per-tenant AI form-filling switch: with the Observer
+        off nothing calls `update_answers`, so `_answers` stays at the intake prefill and
+        `applicable_when` routes off THAT, not off what the rep says. Deliberate — keeping
+        answers current requires extraction, which is exactly what the switch disables —
+        and stated in the platform-settings copy. See agent_worker/main.py's gate."""
+        prefilled = _plan().model_copy(update={"prefilled": {"sections.a.in_network": "Yes"}})
+        controller, _ = _controller(prefilled)
+        agent = controller.agents[0]
+        # No update_answers call anywhere: the prefill alone opens the gated task, where an
+        # unprefilled plan would have skipped it (test_inapplicable_task_is_skipped).
+        with _session_patch(agent, MagicMock()):
+            handoff = await _tool(agent, "task_complete")()
+        assert handoff is controller.agents[1]
 
     @pytest.mark.asyncio
     async def test_final_task_hands_off_to_wrap_up(self) -> None:
@@ -216,6 +282,34 @@ class TestHandoff:
 
 
 class TestOnEnter:
+    @pytest.mark.asyncio
+    async def test_on_enter_tags_the_current_span_with_task_identity(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.agents[1]  # gated_task, index 1
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.task.key"] == "gated_task"
+        assert span.attributes["vera.task.index"] == 1
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_on_enter_tags_the_sentinel(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        agent = controller.wrap_up_agent
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.task.key"] == WRAP_UP_TASK_KEY
+        assert "vera.task.index" not in span.attributes
+
     @pytest.mark.asyncio
     async def test_says_intro_and_writes_cursor(self) -> None:
         controller, state = _controller()
@@ -386,6 +480,17 @@ class TestDirectiveIntervention:
         assert await task is controller.agents[2]
 
     @pytest.mark.asyncio
+    async def test_directive_without_an_attached_session_is_a_silent_noop(self) -> None:
+        """With the AI form-filling switch off the worker skips `attach_session`, so this
+        path is live in production. It must degrade quietly, not raise — self-consistent
+        today because directives only ever come from the Observer's own rule engine, which
+        is off in the same breath."""
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        assert controller.active_task_index == 0  # no swap happened
+
+    @pytest.mark.asyncio
     async def test_terminate_interrupts_then_swaps_to_wrap_up(self) -> None:
         controller, _ = _controller()
         controller.note_task_entered(0)
@@ -465,6 +570,51 @@ class TestDirectiveIntervention:
         session.userdata.engaged = True  # supervisor is driving the call
         await controller.apply_directive_now(Terminate(rule_key="t"))
         assert order == []  # no interrupt, no swap
+
+    @pytest.mark.asyncio
+    async def test_terminate_tags_the_ambient_span_with_handoff_attrs(
+        self, otel_spans: Any
+    ) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(Terminate(rule_key="not_covered"))
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.from_task"] == "intro_task"
+        assert span.attributes["vera.handoff.to_task"] == WRAP_UP_TASK_KEY
+        assert span.attributes["vera.handoff.reason"] == "flow_rule"
+
+    @pytest.mark.asyncio
+    async def test_skip_forward_tags_the_ambient_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(SkipToTask(rule_key="jump", task_key="last_task"))
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.to_task"] == "last_task"
+
+    @pytest.mark.asyncio
+    async def test_reask_does_not_tag_handoff_attrs(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _session, _order = _attach_ordered_session(controller)
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("probe"):
+            await controller.apply_directive_now(
+                ReAsk(rule_key="ded", reason="Deductible was stated twice.")
+            )
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert "vera.handoff.from_task" not in span.attributes
 
 
 class TestPrefill:
@@ -856,3 +1006,140 @@ class TestGapAgentConstruction:
         assert "Final gap check" not in instructions
         assert "do NOT say goodbye" in instructions
         assert "more questions may still follow" in instructions
+
+
+def _linear_plan(count: int) -> CallPlan:
+    """`count` ungated tasks, so a walk visits every one in order."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(task_key=f"task{i}", title=f"Task {i}", prompt=f"Prompt {i}")
+            for i in range(count)
+        ],
+    )
+
+
+async def _walk(controller: PlanRunController, upto: int) -> Agent:
+    """Drive `task_complete` from task 0 through task `upto - 1`, giving each agent one
+    distinctive turn of its own first. Returns the agent the chain lands on."""
+    current: Agent = controller.agents[0]
+    for index in range(upto):
+        agent = controller.agents[index]
+        controller.note_task_entered(index)  # on_enter's job; the walk drives tools directly
+        agent._chat_ctx.add_message(role="user", content=f"turn-from-task{index}")
+        with _session_patch(agent, MagicMock()):
+            current = cast(Agent, await _tool(agent, "task_complete")())
+    return current
+
+
+class TestPreviousTaskWindow:
+    """The handoff carries ONLY the previous task's own turns — the window is one task deep,
+    instead of the whole call so far (which grows linearly to wrap-up)."""
+
+    async def test_carries_only_the_previous_task(self) -> None:
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        landed = await _walk(controller, 4)
+        assert landed is controller.agents[4]
+        # Task 3 is the immediate predecessor; everything before it has aged out.
+        assert chat_ctx_texts(landed) == ["turn-from-task3"]
+
+    async def test_windowed_by_default(self) -> None:
+        # The window is the DEFAULT, so a controller built without the kwarg must be bounded —
+        # the previous assertion only proved the flag works when passed explicitly.
+        controller = PlanRunController(
+            _linear_plan(5), room_name=ROOM, run_state=cast(Any, FakeRunState())
+        )
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == ["turn-from-task3"]
+
+    async def test_cumulative_when_disabled(self) -> None:
+        # The opt-out must still restore the pre-window behavior byte for byte.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=False)
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == [f"turn-from-task{i}" for i in range(4)]
+
+    async def test_wrap_up_gets_only_the_closing_task(self) -> None:
+        controller, _ = _controller(_linear_plan(4), previous_task_only=True)
+        landed = await _walk(controller, 4)
+        assert landed is controller.wrap_up_agent
+        assert chat_ctx_texts(landed) == ["turn-from-task3"]
+
+    async def test_directive_swap_seeds_the_inheritance_boundary(self) -> None:
+        # `update_agent` used to swap with no carry at all, so its target got no boundary
+        # either — and the NEXT handoff would treat the whole inherited context as that
+        # agent's own turns, silently reverting to cumulative. Regression guard.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        await _walk(controller, 2)
+        live = controller.agents[2]
+        live._chat_ctx.add_message(role="user", content="turn-from-task2")
+        session = MagicMock()
+        session.userdata = TakeoverState()
+        session.interrupt = AsyncMock()
+        session.current_agent = live
+        controller.attach_session(session)
+        await controller.apply_directive_now(SkipToTask(rule_key="r", task_key="task4"))
+        session.update_agent.assert_called_once_with(controller.agents[4])
+
+        target = controller.agents[4]
+        assert chat_ctx_texts(target) == ["turn-from-task2"]
+        # The boundary is what matters: task 4's own handoff must not re-carry the above.
+        target._chat_ctx.add_message(role="user", content="turn-from-task4")
+        with _session_patch(target, MagicMock()):
+            successor = cast(Agent, await _tool(target, "task_complete")())
+        assert chat_ctx_texts(successor) == ["turn-from-task4"]
+
+    async def test_the_closer_sees_the_substantive_task_through_a_gap_agent(self) -> None:
+        # The gap pass inserts a hop between the last substantive task and the closer. A gap
+        # agent is not a task, so it must be TRANSPARENT: otherwise "one task deep" would leave
+        # the closer looking at a re-ask exchange and nothing else.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        gap._chat_ctx.add_message(role="assistant", content="re-ask from the gap pass")
+        with _session_patch(gap, MagicMock()):
+            successor = cast(Agent, await _tool(gap, "gap_complete")())
+        texts = chat_ctx_texts(successor)
+        assert "turn-from-task2" in texts  # the substantive task it came from
+        assert "re-ask from the gap pass" in texts  # plus what the gap agent actually said
+
+    async def test_a_silent_gap_agent_does_not_wipe_its_successor(self) -> None:
+        # `GapTaskAgent.on_enter` swaps on WITHOUT SPEAKING when the Observer answered its
+        # fields between selection and entry. Such an agent has no turns of its own, so a
+        # naive "carry the source's own turns" hands the successor an EMPTY context — and the
+        # successor here is the closer, which collects the reference number and says goodbye.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        # The Observer now answers everything, so this gap agent has nothing left to re-ask.
+        controller.update_answers(
+            {
+                "sections.a.in_network": "Yes",
+                "sections.intro.rep_name": "Martha",
+                "sections.gated.copay": "$20",
+                "sections.cov.deductible": "Met",
+            }
+        )
+        mock_session = MagicMock()
+        with _session_patch(gap, mock_session):
+            await gap.on_enter()
+        successor = mock_session.update_agent.call_args.args[0]
+        assert chat_ctx_texts(successor), "a silent gap agent handed over an empty context"
+
+    async def test_gap_agent_gets_its_own_task_turns(self) -> None:
+        # The gap pass walks BACKWARDS, so the chronological predecessor is a late task.
+        # A gap agent re-asks its OWN task's fields, so it needs that task's turns.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name still missing
+        landed = await _walk(controller, 3)  # completing task 2 diverts into the gap pass
+        assert isinstance(landed, GapTaskAgent)
+        assert landed.task_index == 0
+        texts = chat_ctx_texts(landed)
+        assert "turn-from-task0" in texts  # the swept task's own turns
+        assert "turn-from-task2" in texts  # the source it arrived from
+        assert "turn-from-task1" not in texts  # not the whole call

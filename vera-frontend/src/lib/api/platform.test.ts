@@ -15,7 +15,13 @@ vi.mock("@/lib/api/client", () => {
 })
 
 import { apiRequest } from "@/lib/api/client"
-import { deactivateOperator, inviteOperator, listOperators, resendOperatorInvitation } from "./platform"
+import {
+  deactivateOperator,
+  inviteOperator,
+  listOperators,
+  resendOperatorInvitation,
+  setTenantRetryConfig,
+} from "./platform"
 
 describe("platform api client — operators", () => {
   beforeEach(() => vi.resetAllMocks())
@@ -47,6 +53,38 @@ describe("platform api client — operators", () => {
     await resendOperatorInvitation("op-1")
     expect(apiRequest).toHaveBeenCalledWith("/platform/users/op-1/resend-invitation", {
       method: "POST",
+      headers: { "Idempotency-Key": "test-idempotency-key" },
+    })
+  })
+})
+
+describe("platform api client — tenant retry config", () => {
+  beforeEach(() => vi.resetAllMocks())
+
+  it("sets a tenant's auto-retry config with an Idempotency-Key", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({
+      tenant_id: "t1",
+      auto_retry_enabled: true,
+      retry_fill_threshold: 0.4,
+    })
+    await setTenantRetryConfig("t1", { auto_retry_enabled: true })
+    expect(apiRequest).toHaveBeenCalledWith("/platform/tenants/t1/retry-config", {
+      method: "POST",
+      body: { auto_retry_enabled: true },
+      headers: { "Idempotency-Key": "test-idempotency-key" },
+    })
+  })
+
+  it("passes through a partial threshold-only patch", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({
+      tenant_id: "t1",
+      auto_retry_enabled: false,
+      retry_fill_threshold: 0.4,
+    })
+    await setTenantRetryConfig("t1", { retry_fill_threshold: 0.4 })
+    expect(apiRequest).toHaveBeenCalledWith("/platform/tenants/t1/retry-config", {
+      method: "POST",
+      body: { retry_fill_threshold: 0.4 },
       headers: { "Idempotency-Key": "test-idempotency-key" },
     })
   })

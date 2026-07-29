@@ -25,6 +25,16 @@ def test_parse_extract_response_maps_fields() -> None:
     assert out[0].field_path == "p" and out[0].evidence_seq == 1
 
 
+def test_parse_extract_response_drops_blank_values() -> None:  # VR2-93
+    data = [
+        {"field_path": "a", "value": "", "confidence": 90, "evidence_seq": 1},
+        {"field_path": "b", "value": "   ", "confidence": 90, "evidence_seq": 2},
+        {"field_path": "c", "value": "No", "confidence": 90, "evidence_seq": 3},
+    ]
+    out = parse_extract_response(data)
+    assert [e.field_path for e in out] == ["c"]
+
+
 def test_build_judge_prompt_includes_extracted_and_transcript() -> None:
     extracted = [ExtractedField(field_path="a.b", value="yes", confidence=80, evidence_seq=0)]
     turns = [TranscriptTurn(0, "agent", "yes, covered")]

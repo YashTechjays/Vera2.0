@@ -193,6 +193,7 @@ async def _seed_form(database_url: str, *, retry_count: int = 0) -> AsyncGenerat
                 slug=str(tenant_id),
                 name="PostCallEval Test Tenant",
                 status="active",
+                auto_retry_enabled=True,
             )
         )
         # find-or-create form_schema to avoid UNIQUE collision
@@ -683,6 +684,43 @@ async def test_token_valued_field_routes_to_review(
     assert form.enqueued_at is None  # review path must not queue the form
 
 
+async def test_blank_valued_field_is_never_stored(  # VR2-93
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    # This writer bypasses record_answer, so a blank extraction would demote the
+    # baseline and leave an empty field flagged as a dispute.
+    ctx = seeded_ai_processing_form
+    path = ctx.collection_path
+    turns = [TranscriptTurn(0, "user", "I don't have that information")]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(path, "  ", 40, 0)],
+        verdicts=[],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    rows = (
+        (
+            await ctx.session.execute(
+                select(FieldAnswer).where(FieldAnswer.source == AnswerSource.AI_CALL.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == []  # a blank value must never become the current answer
+
+
 async def test_redelivery_is_a_noop(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
@@ -843,7 +881,7 @@ async def test_incomplete_with_retries_left_requeues(
     so the retry branch fires: form → IN_QUEUE, retry_count incremented to 1.
 
     Note: try_dispatch runs inside the same transaction immediately after the
-    IN_QUEUE transition.  Because max_agents_per_va=3 and no forms are active,
+    IN_QUEUE transition.  Because max_concurrent_calls leaves free slots and no forms are active,
     the fake LiveKit dispatches immediately (IN_QUEUE → IN_CALL within the same
     flush).  We therefore assert on the *outcome* (what _finish returned) rather
     than the post-dispatch DB status, and verify that retry_count was incremented
@@ -919,6 +957,40 @@ async def test_incomplete_retryable_with_auto_retry_disabled_goes_to_review(
     # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
     llm = FakeLLMClient(extracted=[], verdicts=[])
     deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)  # flag defaults off
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "auto_retry_disabled"
+    assert form.retry_count == 0  # the IN_QUEUE branch never fired
+
+
+async def test_incomplete_retryable_with_tenant_flag_off_goes_to_review(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Retryable required field + retries remaining + the deployment kill-switch
+    on, but the TENANT's own auto-retry flag off → no requeue; EXCEPTION_REVIEW
+    with the honest reason auto_retry_disabled. The per-tenant flag is ANDed,
+    not overridden, by the deployment switch."""
+    ctx = seeded_ai_processing_form
+    await ctx.session.execute(
+        update(Tenant).where(Tenant.id == ctx.tenant_id).values(auto_retry_enabled=False)
+    )
+    await ctx.session.flush()
+    turns = [TranscriptTurn(0, "agent", "are they in network")]
+    # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,

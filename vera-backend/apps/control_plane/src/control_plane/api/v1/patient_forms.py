@@ -45,7 +45,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
-from control_plane.queueability import ensure_queueable
+from control_plane.queueability import ensure_queueable, ensure_va_capacity
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
@@ -1229,10 +1229,14 @@ async def update_patient_form_status(
             data={"from": current.value, "to": target.value},
         )
 
+    # Load tenant for the capacity gate and the state-machine retry cap.
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
     # Hard dialability gate: a form that can never be dialed must not enter the queue.
     canonicalized_provider = False
     if target == FormStatus.IN_QUEUE:
         await ensure_queueable(session, kms, form)
+        await ensure_va_capacity(session, tenant, caller.user_id)
         # Canonicalize the provider from the operator's pick so the async dispatcher
         # resolves the right catalog provider (and its IVR playbook) — the string, not
         # a new FK, carries the choice. insurance_provider is GLOBAL (no RLS).
@@ -1263,9 +1267,6 @@ async def update_patient_form_status(
                 message="resolve all disputes before completing this form",
                 data={"unresolved_disputes": remaining},
             )
-
-    # Load tenant for state machine guard (retry cap).
-    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
 
     sm = FormStateMachine()
     try:

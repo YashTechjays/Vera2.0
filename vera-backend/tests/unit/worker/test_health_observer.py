@@ -10,6 +10,7 @@ import pytest
 from agent_worker.health_observer import CallHealthObserver
 from vera_core.call_health import HealthTranscript
 from vera_core.events import CallHealthEvent
+from vera_core.observability.otel_testing import assert_no_phi_values
 
 
 class _FakeLLM:
@@ -174,3 +175,41 @@ async def test_aclose_cancels_inflight_analysis() -> None:
             break
     await obs.aclose()  # must return promptly, not hang on the in-flight call
     assert stream.health == [] and bus.events == []
+
+
+@pytest.mark.asyncio
+async def test_analysis_tags_the_llm_call_span(otel_spans: Any) -> None:
+    llm, stream, bus = _FakeLLM(_OK_REPLY), _FakeCallStream(), _FakeBus()
+    obs, _ = _observer(llm, stream, bus)
+    await _feed(obs, ("agent", "Patient name?"), ("user", "Jane Doe."))
+    await _settle()
+    await _feed(obs, ("agent", "Another?"), ("user", "Yes it's covered."))
+    await _settle()
+    span = next(
+        s for s in otel_spans.get_finished_spans() if s.name == "vera.health_observer.llm_call"
+    )
+    assert span.attributes["vera.llm.purpose"] == "health_observer"
+    # PHI guardrail (design §8): the rendered transcript is raw PHI — only the purpose
+    # label rides on this span. Substring check, so an embedded value fails too.
+    assert_no_phi_values(span, "Jane Doe")
+
+
+@pytest.mark.asyncio
+async def test_analysis_llm_call_span_does_not_record_exceptions(otel_spans: Any) -> None:
+    # PHI guardrail: a provider error message can embed the prompt (raw transcript), so nothing
+    # derived from the exception may reach the span — both OTel knobs asserted below. Before
+    # set_status_on_exception=False was added, this message sat verbatim on
+    # span.status.description.
+    llm, stream, bus = _FakeLLM(_OK_REPLY), _FakeCallStream(), _FakeBus()
+    llm.error = RuntimeError("providers down: rejected prompt for Jane Doe")
+    obs, _ = _observer(llm, stream, bus)
+    await _feed(obs, ("agent", "Question?"), ("user", "Yes."))
+    await _settle()
+    await _feed(obs, ("agent", "Another?"), ("user", "Yes it's covered."))
+    await _settle()
+    span = next(
+        s for s in otel_spans.get_finished_spans() if s.name == "vera.health_observer.llm_call"
+    )
+    assert not span.events  # record_exception=False — no exception event
+    assert span.status.description is None  # set_status_on_exception=False — no str(exc)
+    assert_no_phi_values(span, "Jane Doe", "providers down")

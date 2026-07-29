@@ -25,6 +25,7 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
     form_completion_pct,
+    is_blank_answer,
     retryable_required_paths,
     unsatisfied_required_paths,
     unwrap_value,
@@ -77,10 +78,10 @@ class EvalDeps:
     recording: Any = None
     plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
-    # Mirrors settings.form_auto_retry_enabled — a DEPLOYMENT-WIDE flag (there
-    # is no per-tenant knob today): when off, the eval never auto-redials a
-    # payer (same gate the fallback resolver applies). Default False: safe when
-    # a caller forgets to wire it.
+    # Mirrors settings.form_auto_retry_enabled — the DEPLOYMENT-WIDE kill-switch;
+    # ANDed with tenant.auto_retry_enabled at the decision site, so either one
+    # off means the eval never auto-redials a payer (same gate the fallback
+    # resolver applies). Default False: safe when a caller forgets to wire it.
     auto_retry_enabled: bool = False
 
 
@@ -326,7 +327,11 @@ async def evaluate_call(
     requested = set(missing)
     extracted = [ef for ef in extracted if ef.field_path in requested]
     token_fields = [ef.field_path for ef in extracted if has_phi_token(ef.value)]
-    clean = [ef for ef in extracted if not has_phi_token(ef.value)]
+    # blank answers never demote a baseline (VR2-93) — this writer bypasses
+    # record_answer, so it needs the same guard
+    clean = [
+        ef for ef in extracted if not has_phi_token(ef.value) and not is_blank_answer(ef.value)
+    ]
     # The LLM may emit the same field_path twice; keep the last occurrence. Two
     # inserts for one path would violate the fa_current_uq partial unique index
     # (the batch demote runs before the inserts) and poison-loop the job.
@@ -493,10 +498,12 @@ async def evaluate_call(
                 reviewed=unsatisfied,
                 reason=ReviewReason.USER_ENDED,
             )
-        if deps.auto_retry_enabled:
+        if tenant.allows_auto_retry(deps.auto_retry_enabled):
             return await _finish(
                 FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry"
             )
+        # Covers either gate being off: the deployment kill-switch, the tenant's
+        # own auto_retry_enabled, or both.
         return await _finish(
             FormStatus.EXCEPTION_REVIEW,
             written=len(kept),

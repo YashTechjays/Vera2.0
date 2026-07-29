@@ -22,6 +22,7 @@ from vera_core.events.worker import CallAnswerRecordedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, FlowRule
 from vera_core.llm import LLMUnavailableError
+from vera_core.observability.otel_testing import assert_no_phi_values
 
 ROOM = "call--t--c"
 
@@ -355,6 +356,44 @@ class TestRuleIntervention:
         await _feed(manager, _rep("the answer is no"))
         assert controller.applied == [Terminate(rule_key="stop")]
 
+    @pytest.mark.asyncio
+    async def test_fired_rule_tags_the_evaluate_span(self, otel_spans: Any) -> None:
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "No", 90)])
+        manager, _, _, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is no"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.rule_engine.evaluate"
+        )
+        assert span.attributes["vera.rule_engine.fired"] is True
+        assert span.attributes["vera.handoff.directive_type"] == "Terminate"
+        assert span.attributes["vera.handoff.rule_key"] == "stop"
+        # PHI guardrail (design §6/§8): the answer value that fired this rule ("No") must
+        # never reach the span — only the enum/key metadata above. Substring check, so an
+        # attribute that merely EMBEDS the value (e.g. "answer: No") fails too.
+        assert_no_phi_values(span, "No")
+
+    @pytest.mark.asyncio
+    async def test_non_firing_evaluation_is_still_visible(self, otel_spans: Any) -> None:
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is yes"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.rule_engine.evaluate"
+        )
+        assert span.attributes["vera.rule_engine.fired"] is False
+        assert "vera.handoff.directive_type" not in span.attributes
+        assert_no_phi_values(span, "Yes")
+
 
 class TestCrashIsolation:
     @pytest.mark.asyncio
@@ -393,15 +432,15 @@ class TestCrashIsolation:
 class FakeCompletionLLM:
     """Stands in for vera_core.llm.ResilientLLM's `complete` surface."""
 
-    def __init__(self, reply: str = "[]", *, raises: bool = False) -> None:
+    def __init__(self, reply: str = "[]", *, error: Exception | None = None) -> None:
         self.reply = reply
-        self.raises = raises
+        self.error = error
         self.calls: list[tuple[str, str]] = []
 
     async def complete(self, *, system: str, user: str) -> str:
         self.calls.append((system, user))
-        if self.raises:
-            raise LLMUnavailableError
+        if self.error is not None:
+            raise self.error
         return self.reply
 
 
@@ -422,9 +461,46 @@ class TestResilientExtractor:
         # which would let the caller retire the window as extracted. The raise is what lets
         # TaskObserver re-arm and retry those turns (see test_failed_pass_is_retried_...).
         with pytest.raises(LLMUnavailableError):
-            await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
+            await ResilientAnswerExtractor(FakeCompletionLLM(error=LLMUnavailableError())).extract(
                 _plan().tasks[0], "anything"
             )
+
+    @pytest.mark.asyncio
+    async def test_extract_tags_the_llm_call_span(self, otel_spans: Any) -> None:
+        reply = '[{"field_path": "sections.a.x", "value": "Yes", "confidence": 90}]'
+        llm = FakeCompletionLLM(reply)
+        await ResilientAnswerExtractor(llm).extract(
+            _plan().tasks[0], "Representative: yes, Jane Doe is covered."
+        )
+        span = next(
+            s
+            for s in otel_spans.get_finished_spans()
+            if s.name == "vera.observer.extraction_llm_call"
+        )
+        assert span.attributes["vera.llm.purpose"] == "observer_extraction"
+        assert span.attributes["vera.task.key"] == "t1"
+        # PHI guardrail (design §8): the transcript window handed to the chain is raw PHI —
+        # none of it may ride along on the span.
+        assert_no_phi_values(span, "Jane Doe")
+
+    @pytest.mark.asyncio
+    async def test_extract_llm_call_span_does_not_record_exceptions(self, otel_spans: Any) -> None:
+        # PHI guardrail: a provider error message can embed the prompt/transcript, so nothing
+        # derived from the exception may reach the span — both OTel knobs asserted below.
+        # The exception must CARRY a message for this to test anything: LLMUnavailableError is
+        # always raised bare (str() == ""), so it would pass even unguarded. `complete` is a
+        # Protocol, and an unexpected provider/SDK error escaping it can embed the request body.
+        llm = FakeCompletionLLM(error=RuntimeError("provider rejected prompt for Jane Doe"))
+        with pytest.raises(RuntimeError):
+            await ResilientAnswerExtractor(llm).extract(_plan().tasks[0], "anything")
+        span = next(
+            s
+            for s in otel_spans.get_finished_spans()
+            if s.name == "vera.observer.extraction_llm_call"
+        )
+        assert not span.events  # record_exception=False — no exception event
+        assert span.status.description is None  # set_status_on_exception=False — no str(exc)
+        assert_no_phi_values(span, "Jane Doe")
 
 
 class TestParsing:
@@ -442,3 +518,11 @@ class TestParsing:
     def test_clamps_confidence_and_coerces_value(self) -> None:
         out = _parse_extraction('[{"field_path": "a.b", "value": 500, "confidence": 250}]')
         assert out == [ExtractedAnswer("a.b", "500", 100)]
+
+    def test_blank_values_are_dropped(self) -> None:  # VR2-93
+        out = _parse_extraction(
+            '[{"field_path": "a.b", "value": ""},'
+            ' {"field_path": "a.c", "value": "   "},'
+            ' {"field_path": "a.d", "value": "No"}]'
+        )
+        assert out == [ExtractedAnswer("a.d", "No", None)]

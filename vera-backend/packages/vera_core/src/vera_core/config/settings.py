@@ -168,6 +168,16 @@ class Settings(BaseSettings):
     # bounds the worst-case wait before the endpoint gives up and returns 503.
     summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
 
+    # --- voice cascade (agent worker) -----------------------------------------
+    # The live voice cascade's LLM stage — Deepgram(Flux) -> Gemini -> Cartesia
+    # (agent_worker/cascade.py). A platform SUPER_ADMIN can override this per-call at
+    # runtime (voice_model_config table, platform/llm-config endpoints); this is only
+    # the fallback when no override is active. Deliberately its own setting — not
+    # shared with any other model config (summary/observer/health chains above, or the
+    # post-call gemini_flash_model below): those tune unrelated, out-of-pipeline LLM
+    # calls and must be free to change independently of what the live cascade uses.
+    voice_llm_default_model: str = "gemini-2.5-flash"  # VERA_VOICE_LLM_DEFAULT_MODEL
+
     # --- eval harness call evaluator (tests only) ----------------------------
     # The judge LLM that grades a simulated call from its transcript. Out-of-pipeline, so it goes
     # through vera_core.llm.ResilientLLM like every non-cascade call.
@@ -227,6 +237,12 @@ class Settings(BaseSettings):
     # unanswered in the tasks the call actually visited. False = go straight to the
     # closing task (the pre-gap-pass behavior).
     gap_pass_enabled: bool = True  # VERA_GAP_PASS_ENABLED
+
+    # --- handoff context window (agent worker) ------------------------------
+    # Carry only the previous task's own turns into the next task agent — the window is one
+    # task deep. False falls back to the cumulative behavior, where every handoff forwards the
+    # whole call so far and the prompt grows linearly to wrap-up.
+    previous_task_context_only: bool = True  # VERA_PREVIOUS_TASK_CONTEXT_ONLY
 
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker

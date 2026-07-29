@@ -26,6 +26,7 @@ from .patient_form import PatientForm
 from .rbac import Permission, Role, RolePermission, UserRole
 from .tenant import Tenant
 from .transcript import Recording, Transcript
+from .voice_model_config import VoiceModelConfig
 
 __all__ = [
     "ApiKey",
@@ -64,4 +65,5 @@ __all__ = [
     "Transcript",
     "UserIdentity",
     "UserRole",
+    "VoiceModelConfig",
 ]

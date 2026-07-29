@@ -24,13 +24,15 @@ never double-swap the active agent.
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
+from livekit.agents.llm import ChatItem
+from opentelemetry import trace
 
 from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
-from agent_worker.handoff import carry_chat_ctx
+from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState, takeover_engaged
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
@@ -132,6 +134,7 @@ class PlanTaskAgent(Agent):
                 f"# Current task: {self._task.title}\n{self._task.prompt}",
                 extra_instructions=controller.extra_instructions,
             ),
+            id=self._task.task_key,
         )
 
     async def on_enter(self) -> None:
@@ -168,10 +171,28 @@ class PlanTaskAgent(Agent):
             # Exit speech first; LiveKit drains queued speech through the swap.
             self.session.say(self._task.outro)
         successor = await self._controller.advance_from(self._task_index)
-        # Carry the call so far into the successor — LiveKit doesn't for a
+        # Carry the conversation into the successor — LiveKit doesn't for a
         # tool-returned agent, so without this it re-greets and re-asks.
-        await carry_chat_ctx(self, successor)
+        await self._controller.prepare_successor(self, successor)
+        self._tag_task_complete_handoff(successor)
         return successor
+
+    def _tag_task_complete_handoff(self, successor: Agent) -> None:
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": self._task.task_key,
+                    "vera.handoff.to_task": successor.id,
+                    "vera.handoff.reason": "task_complete",
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-complete handoff span tagging failed (%s)",
+                self._controller.room_name,
+                type(exc).__name__,
+            )
+        logger.info("handoff: %s -> %s (reason=task_complete)", self._task.task_key, successor.id)
 
 
 class WrapUpAgent(VeraAgent):
@@ -189,6 +210,7 @@ class WrapUpAgent(VeraAgent):
                 "do not open new topics or re-ask anything.",
                 extra_instructions=controller.extra_instructions,
             ),
+            id=WRAP_UP_TASK_KEY,
         )
 
     async def on_enter(self) -> None:
@@ -216,13 +238,20 @@ class GapTaskAgent(Agent):
             ),
         )
 
+    @property
+    def task_index(self) -> int:
+        """Which task this agent sweeps."""
+        return self._task_index
+
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
         if takeover_engaged(self.session):
             return
         fields = self._controller.gap_fields(self._task_index)
         if not fields:
-            self.session.update_agent(await self._controller.advance_gap_from(self._task_index))
+            successor = await self._controller.advance_gap_from(self._task_index)
+            await self._controller.prepare_successor(self, successor)
+            self.session.update_agent(successor)
             return
         self.session.generate_reply(instructions=_gap_reask_instruction(fields))
 
@@ -238,7 +267,7 @@ class GapTaskAgent(Agent):
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
         successor = await self._controller.advance_gap_from(self._task_index)
-        await carry_chat_ctx(self, successor)
+        await self._controller.prepare_successor(self, successor)
         return successor
 
 
@@ -259,6 +288,7 @@ class PlanRunController:
         greeting: str | None = None,
         extra_instructions: str | None = None,
         gap_pass_enabled: bool = True,
+        previous_task_only: bool = True,
     ) -> None:
         if not plan.tasks:
             raise ValueError("call plan has no tasks")
@@ -268,6 +298,13 @@ class PlanRunController:
         # Tenant persona-tweak overlay, appended to every plan agent's instructions.
         self.extra_instructions = extra_instructions
         self.gap_pass_enabled = gap_pass_enabled
+        # Carry only the previous task's own turns across a handoff instead of the whole
+        # call — the default. False restores the cumulative pre-window behavior.
+        self.previous_task_only = previous_task_only
+        # The item ids each agent was HANDED, so its own turns are everything else in its
+        # context. Keyed by agent identity, which is why it can't be the usual task index:
+        # a PlanTaskAgent and its GapTaskAgent share one.
+        self._boundaries: dict[Agent, frozenset[str]] = {}
         self._opened = False  # has any task agent spoken the call's opening line yet
         self._run_state = run_state
         # In-process answers snapshot for applicability/skip decisions, seeded
@@ -331,6 +368,49 @@ class PlanRunController:
             # answers during the pass, so the closer's gate can have flipped since entry.
             return self._agent_at(self._next_applicable(self._closing_task_index))
 
+    async def prepare_successor(self, source: Agent, target: Agent) -> None:
+        """Give `target` the conversation it needs before it becomes active — the single seam
+        EVERY agent transition goes through, tool handoff and `update_agent` swap alike.
+
+        Storing the target's resulting item ids is what makes the window work: a path that
+        skipped this seam would leave its target with no boundary, and the hop after it would
+        carry that agent's whole context again."""
+        if not self.previous_task_only:
+            self._boundaries[target] = await carry_chat_ctx(source, target)
+            return
+        self._boundaries[target] = await carry_items(target, self._carry_set(source, target))
+
+    def _carry_set(self, source: Agent, target: Agent) -> list[ChatItem]:
+        """Chronological carry set: the swept task's turns for a gap target, then the
+        source's own turns. Nothing older — the window is one task deep.
+
+        A gap agent re-asks ITS OWN task's missing fields, so it needs that task's turns —
+        mid-call ones, not those of the chronological predecessor it arrives from (the gap
+        pass walks backwards from just before the closing task)."""
+        carried: list[ChatItem] = []
+        if isinstance(target, GapTaskAgent):
+            swept = self.agents[target.task_index]
+            carried += self._own_turns(swept)
+        return [*carried, *self._own_turns(source)]
+
+    def _own_turns(self, agent: Agent) -> list[ChatItem]:
+        """What `agent` contributes to a successor's window.
+
+        Normally its own turns. Two cases must pass their WHOLE context through instead, or the
+        window swallows the conversation rather than bounding it:
+
+        * a **gap agent** is an inserted hop, not a task, so it must not shadow the substantive
+          task the window is meant to carry — the closer would otherwise see only a re-ask;
+        * an agent that **said nothing at all** has no own turns, so it would hand its successor
+          an EMPTY context. Reachable: `GapTaskAgent.on_enter` swaps on without speaking when the
+          Observer answered its fields between selection and entry, and that successor is the
+          closer, which collects the reference number and says goodbye.
+        """
+        own = own_items(agent, self._boundaries.get(agent, frozenset()))
+        if own and not isinstance(agent, GapTaskAgent):
+            return own
+        return list(agent.chat_ctx.items)
+
     @property
     def opened(self) -> bool:
         """Whether the call's opening line has been spoken yet."""
@@ -349,11 +429,27 @@ class PlanRunController:
         self.active_task_index = index
         self._max_task_index = max(self._max_task_index, index)
         self._visited_tasks.add(index)
-        self._write_cursor(self.plan.tasks[index].task_key)
+        task_key = self.plan.tasks[index].task_key
+        self._tag_task_entry(task_key, index)
+        self._write_cursor(task_key)
 
     def note_wrap_up_entered(self) -> None:
         self.active_task_index = None
+        self._tag_task_entry(WRAP_UP_TASK_KEY, None)
         self._write_cursor(WRAP_UP_TASK_KEY)
+
+    def _tag_task_entry(self, task_key: str, index: int | None) -> None:
+        try:
+            attrs: dict[str, str | int] = {"vera.task.key": task_key}
+            if index is not None:
+                attrs["vera.task.index"] = index
+            trace.get_current_span().set_attributes(attrs)
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-entry span tagging failed (%s)",
+                self.room_name,
+                type(exc).__name__,
+            )
 
     # -- Phase-2 seams ----------------------------------------------------------
 
@@ -390,14 +486,35 @@ class PlanRunController:
                 target = self._directive_target(directive)
                 if target is None:  # skip whose target is already at/behind us → no-op
                     return
+                self._tag_rule_handoff(target)
                 if isinstance(directive, Terminate):
                     # A terminate_call flow rule ends the call: no end-of-call gap pass.
                     self._terminated = True
                 await self._session.interrupt()
+                # Same seam as a tool handoff: this path used to swap with no carry at all.
+                await self.prepare_successor(self._session.current_agent, target)
                 self._session.update_agent(target)
         except Exception as exc:
             logger.warning(
                 "plan run %s: directive apply failed (%s)", self.room_name, type(exc).__name__
+            )
+
+    def _tag_rule_handoff(self, target: Agent) -> None:
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": self.plan.tasks[
+                        cast(int, self.active_task_index)
+                    ].task_key,
+                    "vera.handoff.to_task": target.id,
+                    "vera.handoff.reason": "flow_rule",
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: rule-handoff span tagging failed (%s)",
+                self.room_name,
+                type(exc).__name__,
             )
 
     def _directive_target(self, directive: Terminate | SkipToTask) -> Agent | None:
