@@ -265,6 +265,8 @@ class AuthEvent(enum.StrEnum):
     TENANT_OBSERVER_UPDATED = "tenant_observer_updated"
     # Tenant concurrency knobs updated (old/new integer values, no PHI).
     CONCURRENCY_CONFIG_UPDATED = "concurrency_config_updated"
+    # Platform operator changed a tenant's auto-retry config (flag/threshold values, no PHI).
+    TENANT_RETRY_CONFIG_UPDATED = "tenant_retry_config_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

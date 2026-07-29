@@ -7,12 +7,13 @@ auth audit log (null-tenant). The grant itself is what later authorizes the oper
 into one tenant, under that tenant's own RLS — there is no RLS bypass here.
 """
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from control_plane.api.v1.common import AppSettings, Resolver
 from control_plane.auth import elevation
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.platform_tenant_config import set_tenant_observer_enabled
+from control_plane.auth.platform_tenant_config import (
+    set_tenant_observer_enabled,
+    set_tenant_retry_config,
+)
 from control_plane.auth.rbac import platform_require
 from control_plane.deps import (
     client_ip,
@@ -184,6 +188,9 @@ class TenantSummary(BaseModel):
     # None means "not disclosed to this caller" (no platform:tenants:manage), not "off" —
     # the elevation tenant picker reads this endpoint without holding that permission.
     observer_enabled: bool | None = None
+    # Same tri-state disclosure rule as observer_enabled — gated on platform:tenants:manage.
+    auto_retry_enabled: bool | None = None
+    retry_fill_threshold: float | None = None
 
 
 @router.get(
@@ -213,9 +220,22 @@ async def list_tenants(
     # user_id) triple and populated the permission cache.
     _, permissions = await resolver.effective_permissions(session, None, caller.user_id)
     may_manage = TENANTS_MANAGE in permissions
+
+    def _disclose[T](value: T, cast: Callable[[T], T]) -> T | None:
+        """Gate a platform:tenants:manage-only field: withheld (None) unless the
+        caller holds it, so a widened set of managed fields can't skip the check."""
+        return cast(value) if may_manage else None
+
     rows = (
         await session.execute(
-            select(Tenant.id, Tenant.name, Tenant.slug, Tenant.observer_enabled)
+            select(
+                Tenant.id,
+                Tenant.name,
+                Tenant.slug,
+                Tenant.observer_enabled,
+                Tenant.auto_retry_enabled,
+                Tenant.retry_fill_threshold,
+            )
             .where(Tenant.status == "active")
             .order_by(Tenant.name)
         )
@@ -226,7 +246,9 @@ async def list_tenants(
                 id=r.id,
                 name=r.name,
                 slug=r.slug,
-                observer_enabled=r.observer_enabled if may_manage else None,
+                observer_enabled=_disclose(r.observer_enabled, bool),
+                auto_retry_enabled=_disclose(r.auto_retry_enabled, bool),
+                retry_fill_threshold=_disclose(r.retry_fill_threshold, float),
             )
             for r in rows
         ]
@@ -290,6 +312,93 @@ async def set_tenant_observer(
         meta={"target_tenant": str(tenant_id), "observer_enabled": stored},
     )
     return ok(TenantObserverResponse(tenant_id=tenant_id, observer_enabled=stored))
+
+
+class SetTenantRetryConfigRequest(BaseModel):
+    auto_retry_enabled: bool | None = None
+    retry_fill_threshold: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> "SetTenantRetryConfigRequest":
+        if self.auto_retry_enabled is None and self.retry_fill_threshold is None:
+            raise ValueError("provide auto_retry_enabled and/or retry_fill_threshold")
+        return self
+
+
+class TenantRetryConfigResponse(BaseModel):
+    tenant_id: UUID
+    auto_retry_enabled: bool
+    retry_fill_threshold: float
+
+
+@router.post(
+    "/tenants/{tenant_id}/retry-config",
+    response_model=ResponseModel[TenantRetryConfigResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def set_tenant_retry_config_endpoint(
+    tenant_id: UUID,
+    body: SetTenantRetryConfigRequest,
+    request: Request,
+    session: PlatformSession,
+    audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    caller: Annotated[VerifiedIdentity, platform_require(TENANTS_MANAGE)],
+) -> ResponseModel[TenantRetryConfigResponse]:
+    """Set a tenant's auto-retry flag and/or fill threshold. Writes through the
+    platform_set_tenant_retry_config SECURITY DEFINER fn (the tenant table's
+    platform RLS policy is SELECT-only), audited null-tenant like every other
+    /platform authz."""
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        PLATFORM_IDEM_SCOPE,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
+    matched = await set_tenant_retry_config(
+        session,
+        tenant_id=tenant_id,
+        enabled=body.auto_retry_enabled,
+        threshold=body.retry_fill_threshold,
+    )
+    if not matched:
+        raise NotFoundError(message="no such tenant")
+    # Read the values BACK rather than echoing the request (same rationale as
+    # set_tenant_observer: the fn only reports whether a row matched).
+    row = (
+        await session.execute(
+            select(Tenant.auto_retry_enabled, Tenant.retry_fill_threshold).where(
+                Tenant.id == tenant_id
+            )
+        )
+    ).one()
+    enabled = bool(row.auto_retry_enabled)
+    threshold = float(row.retry_fill_threshold)
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_RETRY_CONFIG_UPDATED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={
+            "target_tenant": str(tenant_id),
+            "auto_retry_enabled": enabled,
+            "retry_fill_threshold": threshold,
+        },
+    )
+    return ok(
+        TenantRetryConfigResponse(
+            tenant_id=tenant_id, auto_retry_enabled=enabled, retry_fill_threshold=threshold
+        )
+    )
 
 
 def _map_create_error(exc: IntegrityError) -> CustomAPIException:
