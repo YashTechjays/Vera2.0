@@ -193,6 +193,7 @@ async def _seed_form(database_url: str, *, retry_count: int = 0) -> AsyncGenerat
                 slug=str(tenant_id),
                 name="PostCallEval Test Tenant",
                 status="active",
+                auto_retry_enabled=True,
             )
         )
         # find-or-create form_schema to avoid UNIQUE collision
@@ -956,6 +957,40 @@ async def test_incomplete_retryable_with_auto_retry_disabled_goes_to_review(
     # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
     llm = FakeLLMClient(extracted=[], verdicts=[])
     deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)  # flag defaults off
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == "auto_retry_disabled"
+    assert form.retry_count == 0  # the IN_QUEUE branch never fired
+
+
+async def test_incomplete_retryable_with_tenant_flag_off_goes_to_review(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Retryable required field + retries remaining + the deployment kill-switch
+    on, but the TENANT's own auto-retry flag off → no requeue; EXCEPTION_REVIEW
+    with the honest reason auto_retry_disabled. The per-tenant flag is ANDed,
+    not overridden, by the deployment switch."""
+    ctx = seeded_ai_processing_form
+    await ctx.session.execute(
+        update(Tenant).where(Tenant.id == ctx.tenant_id).values(auto_retry_enabled=False)
+    )
+    await ctx.session.flush()
+    turns = [TranscriptTurn(0, "agent", "are they in network")]
+    # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,

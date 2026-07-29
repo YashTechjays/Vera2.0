@@ -5,9 +5,11 @@ decides the diagrammed system transition: low completion + retries remaining →
 auto-requeue (IN_QUEUE); otherwise → EXCEPTION_REVIEW for human review. COMPLETED
 is never reachable from here — only a reviewer's manual approve sets it.
 
-The auto-retry edge is feature-gated (`auto_retry_enabled`, default OFF): until a
-post-call form-filling mechanism exists, completion never improves between calls,
-so a retry would redial to no benefit — everything goes to EXCEPTION_REVIEW.
+The auto-retry edge is feature-gated behind the deployment kill-switch
+(`auto_retry_enabled`, default OFF) AND the tenant's own `auto_retry_enabled`:
+until a post-call form-filling mechanism exists, completion never improves
+between calls, so a retry would redial to no benefit — everything goes to
+EXCEPTION_REVIEW.
 
 DB seam faked exactly like `test_worker_events.py`: `tenant_session` is
 monkeypatched to a `_FakeSession` routed by target entity.
@@ -105,6 +107,7 @@ def _tenant(tenant_id: UUID, **overrides: Any) -> Tenant:
         "retry_fill_threshold": 0.95,
         "queue_expiry_hours": 48,
         "persona_tweak": {},
+        "auto_retry_enabled": True,
     }
     defaults.update(overrides)
     return Tenant(**defaults)
@@ -216,6 +219,30 @@ async def test_low_completion_with_auto_retry_disabled_goes_to_review(
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.retry_count == 0
     assert audit.records[0].detail["to"] == FormStatus.EXCEPTION_REVIEW.value
+
+
+@pytest.mark.asyncio
+async def test_low_completion_with_tenant_flag_off_goes_to_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env kill-switch on but the tenant's own flag off → no requeue: the
+    per-tenant flag is ANDed, not overridden, by the deployment switch."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=40.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        tenant=_tenant(tenant_id, auto_retry_enabled=False),
+    )
+    audit = _wire(monkeypatch, session)
+
+    requeued = await resolve_ai_processing(
+        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
+    )
+
+    assert requeued is False
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.retry_count == 0
 
 
 @pytest.mark.asyncio
