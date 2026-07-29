@@ -188,14 +188,10 @@ export function FieldRenderer({
         placeholder={hint}
         list={listId}
         style={padStyle}
-        // Chrome paints a picker arrow on any input carrying a datalist, which made
-        // a filled cell read as an unselected dropdown (VR2-91). Hide the arrow, keep
-        // the suggestions — they still open on typing and on ArrowDown.
-        className={cn(
-          "truncate [&::-webkit-calendar-picker-indicator]:hidden",
-          CELL_BASE,
-          look
-        )}
+        // Chrome paints a picker arrow on any input carrying a datalist, which made a
+        // filled cell read as an unselected dropdown (VR2-91). `no-picker-arrow`
+        // (index.css) hides it; the suggestions still open on typing and on ArrowDown.
+        className={cn("truncate no-picker-arrow", CELL_BASE, look)}
       />
       {listId && (
         <datalist id={listId}>

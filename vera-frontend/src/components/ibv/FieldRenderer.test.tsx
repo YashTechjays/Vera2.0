@@ -43,6 +43,6 @@ describe("FieldRenderer text-field suggestions", () => {
   })
 
   it("hides the picker arrow so a filled cell never reads as a dropdown", () => {
-    expect(render("No cycle limit")).toContain("[&amp;::-webkit-calendar-picker-indicator]:hidden")
+    expect(render("No cycle limit")).toContain("no-picker-arrow")
   })
 })
