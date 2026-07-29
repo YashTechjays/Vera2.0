@@ -88,6 +88,11 @@ function railItemClass(active: boolean): string {
     : "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
 }
 
+/** Entry/exit speech preview: absent and blank both mean the agent says nothing. */
+function spokenPreview(text: string | null | undefined): string {
+  return text || "— nothing spoken —"
+}
+
 /** Dialog copy per pending-action kind (spec §3.2: publish confirms via dialog too). */
 function pendingActionCopyFor(
   action: PendingAction,
@@ -507,9 +512,9 @@ export function AgentPrompt(): JSX.Element {
           { label: "Base instructions", text: preview?.base_instructions ?? "" },
         ]
       : [
-          { label: "Intro (spoken on entry)", text: previewTask?.intro ?? "— none —" },
+          { label: "Intro (spoken on entry)", text: spokenPreview(previewTask?.intro) },
           { label: "Compiled instructions", text: previewTask?.prompt ?? "" },
-          { label: "Outro (spoken on exit)", text: previewTask?.outro ?? "— none —" },
+          { label: "Outro (spoken on exit)", text: spokenPreview(previewTask?.outro) },
         ]
   const previewMeta =
     !dirty && loadedVersion !== null

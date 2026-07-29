@@ -71,6 +71,18 @@ class TestTaskText:
         # outro not overridden → schema default survives
         assert intro_task.outro == "Great, let me pull up my questions..."
 
+    def test_blank_override_suppresses_schema_speech(self) -> None:
+        # "" is an explicit "say nothing", never a fall-through to the default.
+        doc = PromptDocument(
+            kind="prompt_document",
+            session=FACTORY_SESSION,
+            task_overrides={"introduction": TaskTextOverride(intro="", outro="")},
+        )
+        intro_task = next(
+            t for t in render_task_prompts(IBV, doc).tasks if t.task_key == "introduction"
+        )
+        assert (intro_task.intro, intro_task.outro) == ("", "")
+
     def test_unknown_override_key_ignored(self) -> None:
         doc = PromptDocument(
             kind="prompt_document",

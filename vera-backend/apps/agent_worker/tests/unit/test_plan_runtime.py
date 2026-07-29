@@ -219,6 +219,19 @@ class TestHandoff:
         mock_session.say.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_blank_outro_no_exit_speech(self) -> None:
+        # A prompt-document override may be "" — an operator's explicit "say nothing".
+        plan = _plan()
+        plan.tasks[0] = plan.tasks[0].model_copy(update={"outro": ""})
+        controller, _ = _controller(plan)
+        agent = controller.agents[0]
+        mock_session = MagicMock()
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        with _session_patch(agent, mock_session):
+            await _tool(agent, "task_complete")()
+        mock_session.say.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_inapplicable_task_is_skipped(self) -> None:
         controller, _ = _controller()
         agent = controller.agents[0]

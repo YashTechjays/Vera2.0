@@ -116,7 +116,10 @@ auth, no react-query, no new deps). Route/gating unchanged: `/agent-prompt` unde
   - `setOverrideField(doc, taskKey, field, text)` — creates/updates an override;
     an entry whose last field is cleared is dropped from `task_overrides`.
   - `clearOverrideField(doc, taskKey, field)` — the "reset to default" op
-    (removal, never blanking — empty string is invalid server-side, min_length=1).
+    (removal, restoring the schema default). Amended 2026-07-29: blanking an
+    `intro`/`outro` override is now a distinct, supported state — `""` means
+    "speak nothing there". A blank `prompt` override stays invalid
+    server-side (min_length=1).
   - `overrideStateOf(doc, defaults, taskKey, field)` →
     `"overridden" | "default" | "no-default"` (schema task `intro`/`outro`/
     `prompt` are all optional).
@@ -172,8 +175,10 @@ Three-pane grid (`lg:` breakpoint; stacks on narrow):
 - **Overridden:** editable textarea + badge `Overridden` + **Reset to default**
   (removes the override field) + `collapsible` muted "Schema default" block
   underneath for comparison (omitted when there is no default).
-- An override textarea left empty is a client-side inline error and blocks save
-  (server would 422/400); reset is the removal path.
+- An empty **Instructions** override is a client-side inline error and blocks save
+  (server would 422/400); reset is the removal path. Amended 2026-07-29: an empty
+  **Intro**/**Outro** override saves fine and means the agent speaks nothing on
+  task entry/exit — the preview shows `— nothing spoken —`.
 
 ### 3.4 Data flow & preview semantics
 
@@ -215,7 +220,8 @@ autocomplete (no editor component in the stack; explicitly descoped).
 
 ### 3.6 Validation UX
 
-- Client-side: session fields required non-empty; override textareas non-empty;
+- Client-side: session fields required non-empty; the Instructions override
+  required non-empty (Intro/Outro may be blank — see §3.3);
   Save disabled with inline messages. No client-side placeholder validation —
   the preview response's `errors` is the authority (identical strings to the
   save 400).

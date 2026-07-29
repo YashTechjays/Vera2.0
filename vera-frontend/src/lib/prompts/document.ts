@@ -1,8 +1,7 @@
 // Pure editing/parsing helpers for the /agent-prompt editor. No React, no I/O —
 // the unit-tested core (spec 2026-07-09 §3.1). PromptDocument semantics:
 // `session` is literal content; `task_overrides` is a sparse patch where an
-// absent field falls through to the schema default and an EMPTY override is
-// invalid server-side (min_length=1) — removal, never blanking.
+// absent field falls through to the schema default and a blank one does not.
 import type { PromptDocument, TaskTextOverride } from "@/lib/api/prompts"
 
 export type OverrideField = "intro" | "outro" | "prompt"
@@ -35,6 +34,10 @@ export type ParsedErrors = {
 }
 
 const OVERRIDE_FIELDS: OverrideField[] = ["intro", "outro", "prompt"]
+
+// Mirrors the server's per-field min_length=1: a blank intro/outro is meaningful
+// (the agent says nothing there), a blank instruction block is not.
+const REQUIRED_OVERRIDE_FIELDS: ReadonlySet<OverrideField> = new Set(["prompt"])
 
 function presentFields(override: TaskTextOverride): TaskTextOverride {
   const out: TaskTextOverride = {}
@@ -130,7 +133,7 @@ export function clientValidationErrors(doc: PromptDocument): Record<string, stri
     if (value.trim() === "") errors[`session.${field}`] = ["Required."]
   }
   for (const [key, override] of Object.entries(doc.task_overrides)) {
-    for (const field of OVERRIDE_FIELDS) {
+    for (const field of REQUIRED_OVERRIDE_FIELDS) {
       const value = override[field]
       if (typeof value === "string" && value.trim() === "") {
         errors[`task_overrides.${key}.${field}`] = [

@@ -19,8 +19,16 @@ type TaskOverrideEditorProps = {
 }
 
 const TASK_FIELDS: { field: OverrideField; label: string; help: string }[] = [
-  { field: "intro", label: "Intro", help: "Spoken verbatim when the task starts." },
-  { field: "outro", label: "Outro", help: "Spoken verbatim when the task completes." },
+  {
+    field: "intro",
+    label: "Intro",
+    help: "Spoken verbatim when the task starts. Leave it blank to say nothing on entry.",
+  },
+  {
+    field: "outro",
+    label: "Outro",
+    help: "Spoken verbatim when the task completes. Leave it blank to say nothing on exit.",
+  },
   {
     field: "prompt",
     label: "Instructions",

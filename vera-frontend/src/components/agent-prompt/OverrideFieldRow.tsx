@@ -30,8 +30,8 @@ function DefaultBlock(props: { text: string }): JSX.Element {
 
 /** One intro/outro/instructions row with provenance: schema default (read-only,
  *  Override to edit), no-default (Add), or overridden (edit + Reset + the
- *  collapsible default for comparison). Reset REMOVES the override — empty
- *  overrides are invalid server-side (spec §3.3). */
+ *  collapsible default for comparison). Reset REMOVES the override, restoring
+ *  the schema default — not the same as blanking it (spec §3.3). */
 export function OverrideFieldRow(props: OverrideFieldRowProps): JSX.Element {
   if (props.state === "overridden") {
     return (
