@@ -97,5 +97,7 @@ def downgrade() -> None:
     op.execute(
         f"REVOKE UPDATE (auto_retry_enabled, retry_fill_threshold) ON tenant FROM {DEFINER_ROLE}"
     )
+    # SELECT (id) is deliberately not revoked — 59308656acda's observer fn shares it;
+    # grants aren't reference-counted.
     op.execute("ALTER TABLE tenant ALTER COLUMN retry_fill_threshold SET DEFAULT 0.95")
     op.execute("ALTER TABLE tenant DROP COLUMN IF EXISTS auto_retry_enabled")
