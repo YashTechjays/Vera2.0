@@ -2,10 +2,15 @@ import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
 import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
-import { confidenceHighlightClass, type DisputeMap } from "@/lib/ibv/disputes"
+import {
+  confidenceHighlightClass,
+  type Dispute,
+  type DisputeFlags,
+  type DisputeMap,
+} from "@/lib/ibv/disputes"
 import { applicabilityReason, isApplicable } from "@/lib/ibv/schema"
 import type { SectionTable, TableCell } from "@/lib/ibv/schema"
-import type { LeafField } from "@/lib/ibv/types"
+import type { FormSchema, FormValues, LeafField } from "@/lib/ibv/types"
 
 const TH = "border border-ibv-input-border bg-ibv-label-bg px-2 py-0.5 font-bold"
 
@@ -44,9 +49,37 @@ const WIDE_WIDTHS = {
   extra: "min-w-[210px]",
 } as const
 
-/** Does any cell in this table carry an unresolved dispute? */
-function hasDispute(table: SectionTable, disputes: DisputeMap): boolean {
-  const disputed = (cell?: TableCell) => cell !== undefined && disputes[cell.path] !== undefined
+/** A field draws its dispute UI only while the dispute is unresolved and the cell applies. */
+function showsDispute(
+  dispute: Dispute | undefined,
+  flags: DisputeFlags,
+  applicable: boolean
+): boolean {
+  return dispute !== undefined && !flags.applied && applicable
+}
+
+/** What hasDispute reads out of the IBV context. */
+type MatrixDisputeContext = {
+  disputes: DisputeMap
+  flagsFor: (path: string) => DisputeFlags
+  schema: FormSchema | null
+  values: FormValues
+}
+
+/** Does any cell in this table still draw dispute UI, so the table narrows back as
+ *  disputes get resolved? */
+// eslint-disable-next-line react-refresh/only-export-components -- pure predicate, unit-tested
+export function hasDispute(
+  table: SectionTable,
+  { disputes, flagsFor, schema, values }: MatrixDisputeContext
+): boolean {
+  const disputed = (cell?: TableCell) =>
+    cell !== undefined &&
+    showsDispute(
+      disputes[cell.path],
+      flagsFor(cell.path),
+      schema !== null && isApplicable(schema, cell.gates, values)
+    )
   return table.groups.some(
     (g) =>
       Object.values(g.extras).some(disputed) ||
@@ -80,7 +113,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   const invalidReason = errors[path]
-  const showDispute = !!dispute && !flags.applied && applicable
+  const showDispute = showsDispute(dispute, flags, applicable)
   const highlightClass = showDispute
     ? confidenceHighlightClass(dispute!.confidence)
     : undefined
@@ -137,10 +170,12 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
  * per-group rowspan cells.
  */
 export function SectionMatrix({ table }: { table: SectionTable }) {
-  const { schema, values, disputes } = useIbv()
+  const { schema, values, disputes, flagsFor } = useIbv()
   // Wide columns keep value + controls + chip on one row (the wrapper scrolls);
   // an undisputed table keeps its natural width.
-  const w = hasDispute(table, disputes) ? WIDE_WIDTHS : COMPACT_WIDTHS
+  const w = hasDispute(table, { disputes, flagsFor, schema, values })
+    ? WIDE_WIDTHS
+    : COMPACT_WIDTHS
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse font-ibv text-[13.3px] text-black">
