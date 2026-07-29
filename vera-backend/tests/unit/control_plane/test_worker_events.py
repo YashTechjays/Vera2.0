@@ -1151,8 +1151,9 @@ async def test_dispatch_serializes_within_a_room_but_parallel_across(
 
     order: list[str] = []
 
-    async def _spy_process(entry_id: str, fields: dict[str, str]) -> None:
+    async def _spy_process(entry_id: str, fields: dict[str, str]) -> bool:
         order.append(entry_id)
+        return True
 
     monkeypatch.setattr(wired.consumer, "_process", _spy_process)
 
@@ -1168,6 +1169,49 @@ async def test_dispatch_serializes_within_a_room_but_parallel_across(
     # within room A, a1 precedes a2 (stream order preserved)
     assert order.index("a1") < order.index("a2")
     assert set(order) == {"a1", "a2", "b1"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_halts_a_room_after_an_unacked_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed (unacked) answer must block LATER entries of the same room: call.ended
+    cannot be processed until the answer is redelivered, else post-call resolution runs
+    on a stale completion_pct and re-dials a form that is actually complete. Other rooms
+    stay independent."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+
+    processed: list[str] = []
+
+    async def _failing_answer(event: object) -> None:
+        processed.append("answer")
+        raise RuntimeError("transient DB error while recording answer")
+
+    async def _ended(event: object) -> None:
+        processed.append("ended")
+
+    async def _other_room(event: object) -> None:
+        processed.append("other")
+
+    wired.consumer._handlers["call.answer_recorded"] = _failing_answer
+    wired.consumer._handlers["call.ended"] = _ended
+    wired.consumer._handlers["call.failed"] = _other_room
+
+    room_a, room_b = _VALID_ROOM, f"call--{uuid4()}--{uuid4()}"
+    answer = CallAnswerRecordedEvent(room_name=room_a, field_path="a", value="v", ts=1)
+    ended = CallEndedEvent(room_name=room_a, ts=2)
+    other = CallFailedEvent(room_name=room_b, reason=CallFailureReason.NO_ANSWER, ts=1)
+    entries = [
+        ("a1", {"event": answer.model_dump_json()}),
+        ("a2", {"event": ended.model_dump_json()}),
+        ("b1", {"event": other.model_dump_json()}),
+    ]
+    await wired.consumer._dispatch(entries)
+
+    assert "ended" not in processed  # room A halted at the failed answer
+    assert "a2" not in redis.acked  # call.ended left unacked for redelivery after the answer
+    assert "other" in processed  # room B unaffected
 
 
 # ---------------------------------------------------------------------------

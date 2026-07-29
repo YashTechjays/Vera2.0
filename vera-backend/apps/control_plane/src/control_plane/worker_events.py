@@ -239,16 +239,23 @@ class WorkerEventConsumer:
 
         async def _process_room(room_entries: list[tuple[str, dict[str, str]]]) -> None:
             for entry_id, fields in room_entries:
-                await self._process(entry_id, fields)
+                if not await self._process(entry_id, fields):
+                    # Entry left unacked for redelivery — stop this room so a later
+                    # entry (e.g. call.ended's post-call resolution) can't overtake it
+                    # and act on a stale projection. XAUTOCLAIM redelivers in order.
+                    break
 
         await asyncio.gather(*(_process_room(group) for group in by_room.values()))
 
-    async def _process(self, entry_id: str, fields: dict[str, str]) -> None:
+    async def _process(self, entry_id: str, fields: dict[str, str]) -> bool:
+        """Process one entry. Returns True when the entry was acked (handled or dropped),
+        False when it was left unacked for redelivery — the caller must then stop the
+        room to preserve per-call stream order."""
         raw = fields.get("event")
         if raw is None:
             logger.warning("worker event %s has no payload; dropping", entry_id)
             await self._ack(entry_id)
-            return
+            return True
         try:
             event = parse_worker_event(raw)
         except Exception as exc:
@@ -258,7 +265,7 @@ class WorkerEventConsumer:
                 "dropping unparseable worker event %s (%s)", entry_id, type(exc).__name__
             )
             await self._ack(entry_id)  # poison entry — drop so it can't wedge the group
-            return
+            return True
         logger.info(
             "consumed worker event %s type=%s room=%s",
             entry_id,
@@ -269,7 +276,7 @@ class WorkerEventConsumer:
         if handler is None:
             logger.warning("no handler for worker event type %s; dropping", event.type)
             await self._ack(entry_id)
-            return
+            return True
         try:
             await handler(event)
         except _RetryEventLater:
@@ -278,7 +285,7 @@ class WorkerEventConsumer:
                 entry_id,
                 getattr(event, "room_name", "?"),
             )
-            return  # do NOT ack → XAUTOCLAIM retries once the Call row has committed
+            return False  # do NOT ack → XAUTOCLAIM retries once the Call row has committed
         except Exception as exc:
             # Type name only — handlers run the transcript finalizer, whose
             # SQLAlchemy/Redis errors embed transcript text (PHI).
@@ -287,8 +294,9 @@ class WorkerEventConsumer:
                 entry_id,
                 type(exc).__name__,
             )
-            return  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
+            return False  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
         await self._ack(entry_id)
+        return True
 
     async def _ack(self, entry_id: str) -> None:
         await self._redis.xack(WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, entry_id)
