@@ -216,30 +216,6 @@ def build_evaluator() -> CallEvaluator:
     )
 
 
-def render_rules(plan: CallPlan) -> str:
-    """The plan's rules as the judge sees them. A transcript cannot contain these, so without them
-    "were flow rules maintained?" is unanswerable."""
-    lines: list[str] = []
-    for rule in plan.flow_rules:
-        action = f"skip to {rule.skip_to_task}" if rule.skip_to_task else "terminate the call"
-        lines.append(f"- flow rule {rule.rule_key}: when {rule.when} -> {action}")
-    for bad in plan.contradictions:
-        lines.append(
-            f"- contradiction {bad.rule_key}: when {bad.when} -> push back once. {bad.reason}"
-        )
-    return "\n".join(lines)
-
-
-def render_tasks(plan: CallPlan) -> str:
-    """The compiled task list with each task's questions, so question coverage and scope
-    discipline have something to be judged against."""
-    lines: list[str] = []
-    for index, task in enumerate(plan.tasks):
-        lines.append(f"{index + 1}. {task.task_key} ({task.title})")
-        lines.extend(f"     - {f.title}" for f in task.fields)
-    return "\n".join(lines)
-
-
 def build_observer(controller: PlanRunController, run_state: RecordingRunState) -> ObserverManager:
     """A REAL ObserverManager with the REAL extraction chain, mirroring `main.py`.
 

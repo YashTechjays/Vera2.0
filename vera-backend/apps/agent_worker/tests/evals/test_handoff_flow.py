@@ -41,12 +41,10 @@ from conftest import (
     judge_strict_enabled,
     make_controller,
     make_entry_agent,
-    render_rules,
-    render_tasks,
     rep_turn,
     settle_observer,
 )
-from judge import Report
+from judge import Report, render_rules, render_tasks
 from livekit.agents import AgentSession
 from livekit.agents.voice.run_result import mock_tools
 from rep import (
@@ -268,10 +266,11 @@ async def _run_call(scenario: Scenario) -> CallRun:
     # the deterministic assertions above are the gate; this is a report.
     try:
         evaluator = build_evaluator()
+        answers = {**controller.plan.prefilled, **dict(run_state.recorded)}
         run.report = await evaluator.evaluate(
             run.transcript_text(),
             rules=render_rules(controller.plan),
-            tasks=render_tasks(controller.plan),
+            tasks=render_tasks(controller.plan, answers),
         )
         print(run.report.render(scenario.label), flush=True)
     except Exception as exc:

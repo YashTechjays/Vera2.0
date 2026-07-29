@@ -16,8 +16,12 @@ evidence turns that from a false alarm into a logged discard.
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from vera_core.forms.call_plan import CallPlan
+from vera_core.forms.conditions import is_applicable
 
 DIMENSIONS: dict[str, str] = {
     "flow_rules": (
@@ -30,9 +34,10 @@ DIMENSIONS: dict[str, str] = {
         "pushing back repeatedly or arguing is also a fail."
     ),
     "task_handoffs": (
-        "Did each task hand off at the right moment — every question answered or refused, nothing "
-        "abandoned mid-topic? After a handoff, did VERA carry on rather than re-greeting, "
-        "re-introducing herself, or re-asking something already answered?"
+        "Did each task hand off at the right moment — every APPLICABLE question answered or "
+        "refused, nothing abandoned mid-topic? A task whose questions are all gated out should "
+        "be completed immediately; that is not abandonment. After a handoff, did VERA carry on "
+        "rather than re-greeting, re-introducing herself, or re-asking something answered?"
     ),
     "tool_calls": (
         "Was every tool call correct? task_complete only once the task was genuinely done; "
@@ -44,8 +49,9 @@ DIMENSIONS: dict[str, str] = {
         "answered? Handing off to the automated assistant is a fail, however human it sounded."
     ),
     "question_coverage": (
-        "Were the compiled questions actually asked, one at a time, with none skipped? Asking "
-        "several at once, or moving on from an unanswered required question, is a fail."
+        "Were the APPLICABLE compiled questions asked, one at a time, with none skipped? Questions "
+        "marked as gated out do not count — omitting them is correct. Asking several at once, or "
+        "moving on from an unanswered applicable question, is a fail."
     ),
     "scope_discipline": (
         "Did VERA stay on the compiled question list and invent no off-script questions?"
@@ -119,6 +125,9 @@ def _instructions() -> str:
         "contradiction occurred). reason is one short sentence. turn is the transcript line number "
         "your verdict is based on, or null if it genuinely applies to no single line.\n\n"
         "Rules for grading:\n"
+        f"- A question marked {GATED_OUT} is excluded by the call plan's gates. VERA is CORRECT "
+        "not to ask it, and asking it anyway is the fault. Never count a gated-out question as "
+        "missing coverage, and never treat a task whose questions are all gated out as skipped.\n"
         "- Base every judgement on the transcript. Never assume something happened that it does "
         "not show.\n"
         "- A turn number you cite MUST exist in the transcript. A finding citing a line that is "
@@ -126,6 +135,57 @@ def _instructions() -> str:
         "- Prefer 'n/a' over inventing a fault when a dimension did not come up.\n"
         "- No prose outside the JSON, and no code fence."
     )
+
+
+GATED_OUT = "[GATED OUT — must NOT be asked on this call]"
+
+
+def render_rules(plan: CallPlan) -> str:
+    """The plan's rules as the judge sees them. A transcript cannot contain these, so without them
+    "were flow rules maintained?" is unanswerable."""
+    lines: list[str] = []
+    for rule in plan.flow_rules:
+        action = (
+            f"skip ahead to task `{rule.skip_to_task}`" if rule.skip_to_task else "end the call"
+        )
+        lines.append(f"- flow rule `{rule.rule_key}`: when {rule.when} -> VERA must {action}")
+        if rule.note:
+            lines.append(f"    intent: {rule.note}")
+    for bad in plan.contradictions:
+        lines.append(
+            f"- contradiction `{bad.rule_key}`: when {bad.when} -> VERA must push back once, "
+            "then accept the correction"
+        )
+        lines.append(f"    why: {bad.reason}")
+        if bad.clarify:
+            lines.append(f"    expected wording: {bad.clarify}")
+    return "\n".join(lines)
+
+
+def render_tasks(plan: CallPlan, answers: Mapping[str, Any] | None = None) -> str:
+    """The compiled task list, with each question marked when its GATES exclude it from this call.
+
+    Without this the judge treats a correct gate-driven skip as a coverage failure — it has no way
+    to know gates exist. Applicability is evaluated against the call's final answer snapshot, the
+    same input `gap_fields()` uses."""
+    values: Mapping[str, Any] = answers if answers is not None else plan.prefilled
+    lines: list[str] = []
+    for index, task in enumerate(plan.tasks):
+        rendered: list[str] = []
+        gated = 0
+        for field in task.fields:
+            if is_applicable(field.gates, values, plan.shared_conditions):
+                rendered.append(f"     - {field.title}")
+            else:
+                gated += 1
+                rendered.append(f"     - {field.title} {GATED_OUT}")
+        header = f"{index + 1}. `{task.task_key}` ({task.title})"
+        if task.fields and gated == len(task.fields):
+            header += "  <- EVERY question is gated out; completing this task without asking "
+            header += "anything is CORRECT"
+        lines.append(header)
+        lines.extend(rendered)
+    return "\n".join(lines)
 
 
 def _brief(transcript: str, rules: str, tasks: str) -> str:
