@@ -277,16 +277,13 @@ class PlanRunController:
         # Tenant persona-tweak overlay, appended to every plan agent's instructions.
         self.extra_instructions = extra_instructions
         self.gap_pass_enabled = gap_pass_enabled
-        # Carry only the previous task's own turns (plus the pinned opening) across a
-        # handoff instead of the whole call. False = the cumulative pre-window behavior.
+        # Carry only the previous task's own turns across a handoff instead of the whole
+        # call. False = the cumulative pre-window behavior.
         self.previous_task_only = previous_task_only
         # The item ids each agent was HANDED, so its own turns are everything else in its
         # context. Keyed by agent identity, which is why it can't be the usual task index:
         # a PlanTaskAgent and its GapTaskAgent share one.
         self._boundaries: dict[Agent, frozenset[str]] = {}
-        # The call's opening turns, captured at the first handoff and carried for the rest of
-        # the call — a plain window would drop exactly this.
-        self._pinned: list[ChatItem] = []
         self._opened = False  # has any task agent spoken the call's opening line yet
         self._run_state = run_state
         # In-process answers snapshot for applicability/skip decisions, seeded
@@ -360,18 +357,16 @@ class PlanRunController:
         if not self.previous_task_only:
             self._boundaries[target] = await carry_chat_ctx(source, target)
             return
-        if not self._pinned:
-            self._pinned = list(source.chat_ctx.items)
         self._boundaries[target] = await carry_items(target, self._carry_set(source, target))
 
     def _carry_set(self, source: Agent, target: Agent) -> list[ChatItem]:
-        """Chronological carry set: the pinned opening, the swept task's turns for a gap
-        target, then the source's own turns.
+        """Chronological carry set: the swept task's turns for a gap target, then the
+        source's own turns. Nothing older — the window is one task deep.
 
         A gap agent re-asks ITS OWN task's missing fields, so it needs that task's turns —
         mid-call ones, not those of the chronological predecessor it arrives from (the gap
         pass walks backwards from just before the closing task)."""
-        carried = list(self._pinned)
+        carried: list[ChatItem] = []
         if isinstance(target, GapTaskAgent):
             swept = self.agents[target.task_index]
             carried += self._own_turns(swept)

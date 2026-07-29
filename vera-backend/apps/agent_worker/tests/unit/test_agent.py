@@ -139,9 +139,8 @@ async def test_carry_items_replaces_rather_than_accumulates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_carry_items_dedupes_the_pinned_overlap() -> None:
-    # The first handoff hands over the very agent whose turns get pinned, so the carry set's
-    # pinned half and its own-turns half genuinely overlap.
+async def test_carry_items_dedupes_by_id() -> None:
+    # The carry set is assembled from several agents' turns, so the same item can appear twice.
     source = VeraAgent(instructions="S")
     source._chat_ctx.add_message(role="user", content="opening turn")
     target = VeraAgent(instructions="T")

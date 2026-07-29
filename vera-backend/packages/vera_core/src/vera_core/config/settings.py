@@ -224,8 +224,8 @@ class Settings(BaseSettings):
     gap_pass_enabled: bool = True  # VERA_GAP_PASS_ENABLED
 
     # --- handoff context window (agent worker) ------------------------------
-    # Carry only the previous task's own turns plus the call's pinned opening into the next
-    # task agent. False = the cumulative default, whose prompt grows linearly to wrap-up.
+    # Carry only the previous task's own turns into the next task agent — the window is one
+    # task deep. False = the cumulative default, whose prompt grows linearly to wrap-up.
     previous_task_context_only: bool = False  # VERA_PREVIOUS_TASK_CONTEXT_ONLY
 
     # --- IVR navigator ------------------------------------------------------

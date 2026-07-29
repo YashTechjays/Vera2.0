@@ -889,15 +889,15 @@ async def _walk(controller: PlanRunController, upto: int) -> Agent:
 
 
 class TestPreviousTaskWindow:
-    """The handoff carries the pinned opening plus only the previous task's own turns,
+    """The handoff carries ONLY the previous task's own turns — the window is one task deep,
     instead of the whole call so far (which grows linearly to wrap-up)."""
 
-    async def test_carries_pinned_opening_and_previous_task_only(self) -> None:
+    async def test_carries_only_the_previous_task(self) -> None:
         controller, _ = _controller(_linear_plan(5), previous_task_only=True)
         landed = await _walk(controller, 4)
         assert landed is controller.agents[4]
-        # Task 0 is pinned; tasks 1-2 have aged out; task 3 is the immediate predecessor.
-        assert chat_ctx_texts(landed) == ["turn-from-task0", "turn-from-task3"]
+        # Task 3 is the immediate predecessor; everything before it has aged out.
+        assert chat_ctx_texts(landed) == ["turn-from-task3"]
 
     async def test_cumulative_when_disabled(self) -> None:
         # The flag-off arm must stay byte-identical to the pre-window behavior.
@@ -905,13 +905,11 @@ class TestPreviousTaskWindow:
         landed = await _walk(controller, 4)
         assert chat_ctx_texts(landed) == [f"turn-from-task{i}" for i in range(4)]
 
-    async def test_pin_survives_to_wrap_up(self) -> None:
-        # The greeting and the recording/supervisor disclosure live in the opening turns:
-        # they must reach the closer, which a plain sliding window would have dropped.
+    async def test_wrap_up_gets_only_the_closing_task(self) -> None:
         controller, _ = _controller(_linear_plan(4), previous_task_only=True)
         landed = await _walk(controller, 4)
         assert landed is controller.wrap_up_agent
-        assert chat_ctx_texts(landed) == ["turn-from-task0", "turn-from-task3"]
+        assert chat_ctx_texts(landed) == ["turn-from-task3"]
 
     async def test_directive_swap_seeds_the_inheritance_boundary(self) -> None:
         # `update_agent` used to swap with no carry at all, so its target got no boundary
@@ -930,12 +928,12 @@ class TestPreviousTaskWindow:
         session.update_agent.assert_called_once_with(controller.agents[4])
 
         target = controller.agents[4]
-        assert chat_ctx_texts(target) == ["turn-from-task0", "turn-from-task2"]
+        assert chat_ctx_texts(target) == ["turn-from-task2"]
         # The boundary is what matters: task 4's own handoff must not re-carry the above.
         target._chat_ctx.add_message(role="user", content="turn-from-task4")
         with _session_patch(target, MagicMock()):
             successor = cast(Agent, await _tool(target, "task_complete")())
-        assert chat_ctx_texts(successor) == ["turn-from-task0", "turn-from-task4"]
+        assert chat_ctx_texts(successor) == ["turn-from-task4"]
 
     async def test_gap_agent_gets_its_own_task_turns(self) -> None:
         # The gap pass walks BACKWARDS, so the chronological predecessor is a late task.
