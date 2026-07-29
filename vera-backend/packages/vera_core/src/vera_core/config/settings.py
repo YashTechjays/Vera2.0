@@ -233,6 +233,12 @@ class Settings(BaseSettings):
     # closing task (the pre-gap-pass behavior).
     gap_pass_enabled: bool = True  # VERA_GAP_PASS_ENABLED
 
+    # --- handoff context window (agent worker) ------------------------------
+    # Carry only the previous task's own turns into the next task agent — the window is one
+    # task deep. False falls back to the cumulative behavior, where every handoff forwards the
+    # whole call so far and the prompt grows linearly to wrap-up.
+    previous_task_context_only: bool = True  # VERA_PREVIOUS_TASK_CONTEXT_ONLY
+
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
     # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:
