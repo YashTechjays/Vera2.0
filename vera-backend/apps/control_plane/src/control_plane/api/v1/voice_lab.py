@@ -58,6 +58,7 @@ from vera_core.observability.correlation import (
 )
 from vera_core.schemas import StartVoiceSessionRequest, VoiceSessionResponse
 from vera_core.services.ivr_selection import add_active_playbook_metadata
+from vera_core.services.model_config import add_llm_model_override_metadata
 from vera_core.transcript import TranscriptEvent
 
 router = APIRouter(tags=["voice-lab"])
@@ -153,6 +154,9 @@ async def start_voice_session(
     # otherwise the worker falls back to the generic navigator (no ivr_playbook key).
     if body.enable_ivr_navigation:
         await add_active_playbook_metadata(session, body.insurance_provider_id, metadata)
+    # Unlike the call above, this one never raises — a broken config-table read degrades
+    # to the hardcoded default instead of failing the session start.
+    await add_llm_model_override_metadata(session, metadata)
     await livekit.create_call_room(room_name, metadata=metadata)
     logger.info(
         "voice-lab: created room + dispatched agent for room %s (outbound=%s)",

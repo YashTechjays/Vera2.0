@@ -85,6 +85,21 @@ class RetentionPolicyUpdate(BaseModel):
     retention_days: int | None = Field(default=None, ge=1, le=3650)
 
 
+class ConcurrencyConfig(BaseModel):
+    """Tenant concurrency knobs: the per-VA in-flight cap (enqueue gate) and the
+    tenant-wide dial ceiling (dispatcher slot math)."""
+
+    max_agents_per_va: int = Field(ge=1, le=20)
+    max_concurrent_calls: int = Field(ge=1, le=100)
+
+
+class ConcurrencyConfigUpdate(BaseModel):
+    """PATCH body: omitted knobs stay unchanged."""
+
+    max_agents_per_va: int | None = Field(default=None, ge=1, le=20)
+    max_concurrent_calls: int | None = Field(default=None, ge=1, le=100)
+
+
 class RecordingPlayback(BaseModel):
     """A short-lived signed URL for one recording. The URL itself is the
     credential — never logged, never cached (Cache-Control: no-store)."""

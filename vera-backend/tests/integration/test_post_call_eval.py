@@ -880,7 +880,7 @@ async def test_incomplete_with_retries_left_requeues(
     so the retry branch fires: form → IN_QUEUE, retry_count incremented to 1.
 
     Note: try_dispatch runs inside the same transaction immediately after the
-    IN_QUEUE transition.  Because max_agents_per_va=3 and no forms are active,
+    IN_QUEUE transition.  Because max_concurrent_calls leaves free slots and no forms are active,
     the fake LiveKit dispatches immediately (IN_QUEUE → IN_CALL within the same
     flush).  We therefore assert on the *outcome* (what _finish returned) rather
     than the post-dispatch DB status, and verify that retry_count was incremented

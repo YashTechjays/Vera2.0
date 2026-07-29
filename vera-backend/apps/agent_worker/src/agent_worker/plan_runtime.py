@@ -24,9 +24,10 @@ never double-swap the active agent.
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
+from opentelemetry import trace
 
 from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
@@ -132,6 +133,7 @@ class PlanTaskAgent(Agent):
                 f"# Current task: {self._task.title}\n{self._task.prompt}",
                 extra_instructions=controller.extra_instructions,
             ),
+            id=self._task.task_key,
         )
 
     async def on_enter(self) -> None:
@@ -171,7 +173,25 @@ class PlanTaskAgent(Agent):
         # Carry the call so far into the successor — LiveKit doesn't for a
         # tool-returned agent, so without this it re-greets and re-asks.
         await carry_chat_ctx(self, successor)
+        self._tag_task_complete_handoff(successor)
         return successor
+
+    def _tag_task_complete_handoff(self, successor: Agent) -> None:
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": self._task.task_key,
+                    "vera.handoff.to_task": successor.id,
+                    "vera.handoff.reason": "task_complete",
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-complete handoff span tagging failed (%s)",
+                self._controller.room_name,
+                type(exc).__name__,
+            )
+        logger.info("handoff: %s -> %s (reason=task_complete)", self._task.task_key, successor.id)
 
 
 class WrapUpAgent(VeraAgent):
@@ -189,6 +209,7 @@ class WrapUpAgent(VeraAgent):
                 "do not open new topics or re-ask anything.",
                 extra_instructions=controller.extra_instructions,
             ),
+            id=WRAP_UP_TASK_KEY,
         )
 
     async def on_enter(self) -> None:
@@ -349,11 +370,27 @@ class PlanRunController:
         self.active_task_index = index
         self._max_task_index = max(self._max_task_index, index)
         self._visited_tasks.add(index)
-        self._write_cursor(self.plan.tasks[index].task_key)
+        task_key = self.plan.tasks[index].task_key
+        self._tag_task_entry(task_key, index)
+        self._write_cursor(task_key)
 
     def note_wrap_up_entered(self) -> None:
         self.active_task_index = None
+        self._tag_task_entry(WRAP_UP_TASK_KEY, None)
         self._write_cursor(WRAP_UP_TASK_KEY)
+
+    def _tag_task_entry(self, task_key: str, index: int | None) -> None:
+        try:
+            attrs: dict[str, str | int] = {"vera.task.key": task_key}
+            if index is not None:
+                attrs["vera.task.index"] = index
+            trace.get_current_span().set_attributes(attrs)
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-entry span tagging failed (%s)",
+                self.room_name,
+                type(exc).__name__,
+            )
 
     # -- Phase-2 seams ----------------------------------------------------------
 
@@ -390,6 +427,7 @@ class PlanRunController:
                 target = self._directive_target(directive)
                 if target is None:  # skip whose target is already at/behind us → no-op
                     return
+                self._tag_rule_handoff(target)
                 if isinstance(directive, Terminate):
                     # A terminate_call flow rule ends the call: no end-of-call gap pass.
                     self._terminated = True
@@ -398,6 +436,24 @@ class PlanRunController:
         except Exception as exc:
             logger.warning(
                 "plan run %s: directive apply failed (%s)", self.room_name, type(exc).__name__
+            )
+
+    def _tag_rule_handoff(self, target: Agent) -> None:
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": self.plan.tasks[
+                        cast(int, self.active_task_index)
+                    ].task_key,
+                    "vera.handoff.to_task": target.id,
+                    "vera.handoff.reason": "flow_rule",
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: rule-handoff span tagging failed (%s)",
+                self.room_name,
+                type(exc).__name__,
             )
 
     def _directive_target(self, directive: Terminate | SkipToTask) -> Agent | None:
