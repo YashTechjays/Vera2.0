@@ -16,7 +16,7 @@ evidence turns that from a false alarm into a logged discard.
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -25,13 +25,16 @@ from vera_core.forms.conditions import is_applicable
 
 DIMENSIONS: dict[str, str] = {
     "flow_rules": (
-        "Did the call honour the plan's flow rules? When a rule's condition became true, did the "
-        "call actually change course, or carry on as if nothing had happened?"
+        "Compare the recorded facts with the transcript. If a flow rule's condition became true in "
+        "the conversation but the facts show NO rule fired, that is a FAIL. If one did fire, did "
+        "the call then do what that rule's stated intent requires? Never infer firing from the "
+        "conversation changing course — the fact block is authoritative."
     ),
     "contradictions": (
-        "When the representative contradicted themselves, did VERA notice it, push back once "
-        "naming the conflict, and accept the correction? Missing a contradiction is a fail; "
-        "pushing back repeatedly or arguing is also a fail."
+        "If the representative contradicted themselves in a way one of the listed contradiction "
+        "rules covers, but the facts show it never fired, that is a FAIL. If it did fire, did VERA "
+        "push back once naming the conflict — ideally close to the rule's expected wording — and "
+        "then accept the correction? Pushing back repeatedly or arguing is also a FAIL."
     ),
     "task_handoffs": (
         "Did each task hand off at the right moment — every APPLICABLE question answered or "
@@ -125,6 +128,10 @@ def _instructions() -> str:
         "contradiction occurred). reason is one short sentence. turn is the transcript line number "
         "your verdict is based on, or null if it genuinely applies to no single line.\n\n"
         "Rules for grading:\n"
+        "- The 'Recorded facts' block is GROUND TRUTH from instrumentation, not inference. Whether "
+        "a rule fired is INVISIBLE in a transcript, so never conclude one fired because the call "
+        "changed course or ended early. If the facts say no rule fired while the plan says one "
+        "should have, that is a FAIL — not a pass.\n"
         f"- A question marked {GATED_OUT} is excluded by the call plan's gates. VERA is CORRECT "
         "not to ask it, and asking it anyway is the fault. Never count a gated-out question as "
         "missing coverage, and never treat a task whose questions are all gated out as skipped.\n"
@@ -188,8 +195,37 @@ def render_tasks(plan: CallPlan, answers: Mapping[str, Any] | None = None) -> st
     return "\n".join(lines)
 
 
-def _brief(transcript: str, rules: str, tasks: str) -> str:
+def render_facts(
+    fired_rules: Sequence[str], answers_extracted: int, *, focused: bool = False
+) -> str:
+    """Recorded facts the TRANSCRIPT CANNOT SHOW, so the judge has to be told them.
+
+    A directive leaves no trace in the conversation. A judge reading only the transcript therefore
+    infers "the rule fired" from the call ending early — and passes a rule that never ran. This
+    block is the authoritative record, taken from instrumentation."""
+    lines = []
+    if fired_rules:
+        joined = ", ".join(f"`{rule}`" for rule in fired_rules)
+        lines.append(f"- Rules that ACTUALLY fired (authoritative): {joined}")
+    else:
+        lines.append("- NO rule fired on this call (authoritative).")
+    lines.append(
+        f"- The Observer extracted {answers_extracted} answer(s). A rule can only fire from an "
+        "extracted answer, so with 0 no rule could have fired, whatever the conversation suggests."
+    )
+    if focused:
+        lines.append(
+            "- This plan was NARROWED to a subset of fields. Known defect: narrowing does not "
+            "shorten the spoken question list, so VERA still asks the task's full set. Questions "
+            "outside the task list below are therefore NOT off-script — return `n/a` for "
+            "scope_discipline on this call."
+        )
+    return "\n".join(lines)
+
+
+def _brief(transcript: str, rules: str, tasks: str, facts: str) -> str:
     return (
+        f"# Recorded facts about this run (ground truth)\n{facts or '(none)'}\n\n"
         f"# Call plan rules\n{rules or '(none)'}\n\n"
         f"# Tasks VERA was to follow, in order\n{tasks or '(none)'}\n\n"
         f"# Transcript\n{transcript}"
@@ -250,9 +286,11 @@ class CallEvaluator:
     def __init__(self, llm: _CompletionLLM) -> None:
         self._llm = llm
 
-    async def evaluate(self, transcript: str, *, rules: str = "", tasks: str = "") -> Report:
+    async def evaluate(
+        self, transcript: str, *, rules: str = "", tasks: str = "", facts: str = ""
+    ) -> Report:
         reply = await self._llm.complete(
-            system=_instructions(), user=_brief(transcript, rules, tasks)
+            system=_instructions(), user=_brief(transcript, rules, tasks, facts)
         )
         findings, discarded = verify_citations(_parse(reply), len(transcript.splitlines()))
         return Report(findings=findings, discarded=discarded)

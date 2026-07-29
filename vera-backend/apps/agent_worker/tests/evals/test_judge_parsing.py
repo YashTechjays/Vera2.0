@@ -12,6 +12,7 @@ from judge import (
     Finding,
     Report,
     _parse,
+    render_facts,
     render_rules,
     render_tasks,
     verify_citations,
@@ -187,3 +188,43 @@ def test_rules_render_note_and_clarify() -> None:
     assert "Skip everything and close." in rendered
     assert "Could you double-check that?" in rendered
     assert "Those cannot both hold." in rendered
+
+
+# --- H4: the judge must be TOLD which rules fired -------------------------------------------
+# A directive leaves no trace in the transcript, so the judge inferred firing from the call ending
+# early and PASSED a rule that never ran. These pin the fact block without an LLM.
+
+
+def test_no_rule_fired_is_stated_authoritatively() -> None:
+    facts = render_facts([], answers_extracted=0)
+    assert "NO rule fired" in facts
+    assert "authoritative" in facts
+
+
+def test_fired_rules_are_named() -> None:
+    facts = render_facts(["insurance_not_active"], answers_extracted=7)
+    assert "insurance_not_active" in facts
+    assert "NO rule fired" not in facts
+
+
+def test_zero_extraction_is_flagged_as_making_firing_impossible() -> None:
+    # The scenario that produced the false pass extracted 0 answers, so no rule COULD have fired.
+    facts = render_facts([], answers_extracted=0)
+    assert "0 answer(s)" in facts
+    assert "no rule could have fired" in facts
+
+
+def test_extraction_count_is_reported() -> None:
+    assert "12 answer(s)" in render_facts(["r"], answers_extracted=12)
+
+
+def test_focused_plans_disclaim_scope_discipline() -> None:
+    # A narrowed plan does not shorten the spoken question list (P7), so the extra questions are
+    # not off-script and scope_discipline cannot be judged on that call.
+    facts = render_facts([], answers_extracted=3, focused=True)
+    assert "NARROWED" in facts
+    assert "scope_discipline" in facts
+
+
+def test_unfocused_plans_say_nothing_about_scope() -> None:
+    assert "scope_discipline" not in render_facts([], answers_extracted=3)

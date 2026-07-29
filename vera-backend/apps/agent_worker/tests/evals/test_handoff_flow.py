@@ -44,7 +44,7 @@ from conftest import (
     rep_turn,
     settle_observer,
 )
-from judge import Report, render_rules, render_tasks
+from judge import Report, render_facts, render_rules, render_tasks
 from livekit.agents import AgentSession
 from livekit.agents.voice.run_result import mock_tools
 from rep import (
@@ -194,9 +194,13 @@ async def _run_call(scenario: Scenario) -> CallRun:
 
     controller.apply_directive_now = recording_apply  # type: ignore[method-assign]
     fields = sum(len(t.fields) for t in controller.plan.tasks)
+    # A scenario's focus_fields overrides VERA_EVALS_FULL, so report what the plan ACTUALLY is —
+    # printing full_walk=True beside a narrowed plan is a lie the reader has to trip over first.
+    focused = bool(scenario.focus_fields)
+    mode = "focused" if focused else ("full walk" if full_walk_enabled() else "focused (default)")
     print(
         f"\n===== {scenario.label}: {len(controller.plan.tasks)} tasks, {fields} fields, "
-        f"full_walk={full_walk_enabled()} =====",
+        f"{mode} =====",
         flush=True,
     )
 
@@ -271,6 +275,10 @@ async def _run_call(scenario: Scenario) -> CallRun:
             run.transcript_text(),
             rules=render_rules(controller.plan),
             tasks=render_tasks(controller.plan, answers),
+            # Whether a directive fired leaves no trace in the conversation, so the judge must be
+            # told — otherwise it infers firing from the call ending early and PASSES a rule that
+            # never ran.
+            facts=render_facts(run.fired_rules(), len(run_state.recorded), focused=focused),
         )
         print(run.report.render(scenario.label), flush=True)
     except Exception as exc:
