@@ -115,6 +115,19 @@ def _entry_room(fields: dict[str, str]) -> str:
     return room if isinstance(room, str) else ""
 
 
+# Close events resolve the form (closeout + retry decision) and must not overtake an
+# earlier same-room event still pending after a failed handler (stale-projection re-dial).
+_CLOSE_EVENT_TYPES: frozenset[str] = frozenset({"call.ended", "call.failed"})
+_PENDING_SCAN = 256  # bounded pending-set scan per close-ordering check
+
+
+def _stream_id_key(stream_id: str) -> tuple[int, int]:
+    """(ms, seq) numeric sort key for a Redis stream id — a lexical compare misorders
+    across a millisecond digit boundary ("100-0" sorts below "99-0")."""
+    ms, _, seq = stream_id.partition("-")
+    return (int(ms), int(seq or 0))
+
+
 def _retry_young_or_drop(room_name: str, ts_ms: int) -> None:
     """A canonical-room event whose Call row isn't there yet: retry if the event is
     young (the dispatcher dials inside the dispatch transaction, so a fast answer/
@@ -136,6 +149,7 @@ class WorkerEventConsumer:
         *,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
+        max_close_deliveries: int = 3,
         teardown_grace_ms: int = 1_500,
         consumer_name: str | None = None,
         form_auto_retry_enabled: bool = False,
@@ -152,6 +166,7 @@ class WorkerEventConsumer:
         self._call_stream = call_stream
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
+        self._max_close_deliveries = max_close_deliveries
         self._teardown_grace_ms = teardown_grace_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._form_auto_retry_enabled = form_auto_retry_enabled
@@ -239,23 +254,16 @@ class WorkerEventConsumer:
 
         async def _process_room(room_entries: list[tuple[str, dict[str, str]]]) -> None:
             for entry_id, fields in room_entries:
-                if not await self._process(entry_id, fields):
-                    # Entry left unacked for redelivery — stop this room so a later
-                    # entry (e.g. call.ended's post-call resolution) can't overtake it
-                    # and act on a stale projection. XAUTOCLAIM redelivers in order.
-                    break
+                await self._process(entry_id, fields)
 
         await asyncio.gather(*(_process_room(group) for group in by_room.values()))
 
-    async def _process(self, entry_id: str, fields: dict[str, str]) -> bool:
-        """Process one entry. Returns True when the entry was acked (handled or dropped),
-        False when it was left unacked for redelivery — the caller must then stop the
-        room to preserve per-call stream order."""
+    async def _process(self, entry_id: str, fields: dict[str, str]) -> None:
         raw = fields.get("event")
         if raw is None:
             logger.warning("worker event %s has no payload; dropping", entry_id)
             await self._ack(entry_id)
-            return True
+            return
         try:
             event = parse_worker_event(raw)
         except Exception as exc:
@@ -265,7 +273,7 @@ class WorkerEventConsumer:
                 "dropping unparseable worker event %s (%s)", entry_id, type(exc).__name__
             )
             await self._ack(entry_id)  # poison entry — drop so it can't wedge the group
-            return True
+            return
         logger.info(
             "consumed worker event %s type=%s room=%s",
             entry_id,
@@ -276,7 +284,17 @@ class WorkerEventConsumer:
         if handler is None:
             logger.warning("no handler for worker event type %s; dropping", event.type)
             await self._ack(entry_id)
-            return True
+            return
+        # Hold a close behind an earlier same-room event still pending from a prior window.
+        room = getattr(event, "room_name", "")
+        if event.type in _CLOSE_EVENT_TYPES and room and await self._close_blocked(entry_id, room):
+            logger.info(
+                "deferring %s (%s) for %s — an earlier same-room event is still pending",
+                entry_id,
+                event.type,
+                room,
+            )
+            return  # unacked → XAUTOCLAIM redelivers after the predecessor is processed
         try:
             await handler(event)
         except _RetryEventLater:
@@ -285,7 +303,7 @@ class WorkerEventConsumer:
                 entry_id,
                 getattr(event, "room_name", "?"),
             )
-            return False  # do NOT ack → XAUTOCLAIM retries once the Call row has committed
+            return  # do NOT ack → XAUTOCLAIM retries once the Call row has committed
         except Exception as exc:
             # Type name only — handlers run the transcript finalizer, whose
             # SQLAlchemy/Redis errors embed transcript text (PHI).
@@ -294,8 +312,40 @@ class WorkerEventConsumer:
                 entry_id,
                 type(exc).__name__,
             )
-            return False  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
+            return  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
         await self._ack(entry_id)
+
+    async def _close_blocked(self, entry_id: str, room_name: str) -> bool:
+        """Whether a close event must wait for an earlier-id, same-room entry still
+        pending — bounded so a poison predecessor past ``max_close_deliveries`` no longer
+        wedges the room."""
+        pending = await self._redis.xpending_range(
+            WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, min="-", max="+", count=_PENDING_SCAN
+        )
+        delivered = next(
+            (int(p["times_delivered"]) for p in pending if p["message_id"] == entry_id), 1
+        )
+        if delivered > self._max_close_deliveries:
+            logger.warning(
+                "close %s for %s proceeding after %d deliveries despite a pending "
+                "predecessor — resolution may run on an incomplete projection",
+                entry_id,
+                room_name,
+                delivered,
+            )
+            return False
+        close_key = _stream_id_key(entry_id)
+        for p in pending:
+            pid = str(p["message_id"])
+            if _stream_id_key(pid) >= close_key:
+                continue  # only entries strictly earlier than the close event
+            rows = cast(
+                "list[tuple[str, dict[str, str]]]",
+                await self._redis.xrange(WORKER_EVENTS_STREAM, min=pid, max=pid),
+            )
+            if rows and _entry_room(rows[0][1]) == room_name:
+                return True
+        return False
         return True
 
     async def _ack(self, entry_id: str) -> None:
