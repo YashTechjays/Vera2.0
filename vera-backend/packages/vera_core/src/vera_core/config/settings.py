@@ -168,6 +168,11 @@ class Settings(BaseSettings):
     # bounds the worst-case wait before the endpoint gives up and returns 503.
     summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
 
+    # --- eval harness call evaluator (tests only) ----------------------------
+    # The judge LLM that grades a simulated call from its transcript. Out-of-pipeline, so it goes
+    # through vera_core.llm.ResilientLLM like every non-cascade call.
+    evals_judge_model: str = "google:gemini-3.5-flash"  # VERA_EVALS_JUDGE_MODEL
+
     # --- observer answer extraction (agent worker) ---------------------------
     observer_extract_primary_model: str = "google:gemini-3.5-flash"
     observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]

@@ -23,6 +23,7 @@ from typing import Any, NoReturn
 import pytest
 from _pytest.outcomes import Skipped
 from google.genai.types import ThinkingConfig
+from judge import CallEvaluator
 from livekit.agents import Agent
 from livekit.plugins import google
 from sqlalchemy import select
@@ -193,6 +194,50 @@ class NullTranscript:
             yield  # pragma: no cover - makes this an async generator
 
         return empty()
+
+
+def judge_strict_enabled() -> bool:
+    """By default the evaluator REPORTS and fails nothing: LLM grading flakes, and a flaky gate
+    gets ignored, then disabled, then deleted. Set this to make a verified `fail` gate the run."""
+    return bool(os.getenv("VERA_EVALS_JUDGE_STRICT"))
+
+
+def build_evaluator() -> CallEvaluator:
+    """The judge goes through vera_core.llm.ResilientLLM — it is an out-of-pipeline LLM call, and
+    vera_core/CLAUDE.md mandates that seam for every call outside the live voice cascade."""
+    spec = LLMSpec.parse(get_settings().evals_judge_model)
+    return CallEvaluator(
+        ResilientLLM(
+            spec,
+            [],  # no fallback tier: the harness must not need an OPENAI_API_KEY
+            options=FallbackOptions(attempt_timeout=60.0),
+            secrets=EnvSecretProvider(),
+        )
+    )
+
+
+def render_rules(plan: CallPlan) -> str:
+    """The plan's rules as the judge sees them. A transcript cannot contain these, so without them
+    "were flow rules maintained?" is unanswerable."""
+    lines: list[str] = []
+    for rule in plan.flow_rules:
+        action = f"skip to {rule.skip_to_task}" if rule.skip_to_task else "terminate the call"
+        lines.append(f"- flow rule {rule.rule_key}: when {rule.when} -> {action}")
+    for bad in plan.contradictions:
+        lines.append(
+            f"- contradiction {bad.rule_key}: when {bad.when} -> push back once. {bad.reason}"
+        )
+    return "\n".join(lines)
+
+
+def render_tasks(plan: CallPlan) -> str:
+    """The compiled task list with each task's questions, so question coverage and scope
+    discipline have something to be judged against."""
+    lines: list[str] = []
+    for index, task in enumerate(plan.tasks):
+        lines.append(f"{index + 1}. {task.task_key} ({task.title})")
+        lines.extend(f"     - {f.title}" for f in task.fields)
+    return "\n".join(lines)
 
 
 def build_observer(controller: PlanRunController, run_state: RecordingRunState) -> ObserverManager:

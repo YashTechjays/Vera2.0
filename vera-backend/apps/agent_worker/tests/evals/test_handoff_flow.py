@@ -33,15 +33,20 @@ from conftest import (
     REP_MODEL,
     RecordingRunState,
     Scenario,
+    build_evaluator,
     build_llm,
     build_observer,
     carried_text,
     full_walk_enabled,
+    judge_strict_enabled,
     make_controller,
     make_entry_agent,
+    render_rules,
+    render_tasks,
     rep_turn,
     settle_observer,
 )
+from judge import Report
 from livekit.agents import AgentSession
 from livekit.agents.voice.run_result import mock_tools
 from rep import (
@@ -101,6 +106,7 @@ INACTIVE_SCENARIO = Scenario(
 
 @dataclass
 class CallRun:
+    report: "Report | None"
     controller: PlanRunController
     run_state: RecordingRunState
     directives: list[Any]
@@ -123,6 +129,20 @@ class CallRun:
     def extracted(self) -> dict[str, Any]:
         """What the Observer actually pulled out of the conversation."""
         return dict(self.run_state.recorded)
+
+    def transcript_lines(self) -> list[str]:
+        """The call as numbered lines. This IS what the evaluator reads, so a cited line number
+        means the same thing to it and to whoever reads the printed run."""
+        lines: list[str] = []
+        for turn in self.turns:
+            lines.append(f"REP  : {turn.rep}")
+            lines.extend(f"VERA : {said}" for said in turn.vera)
+            lines.extend(f"TOOL : {name}" for name in turn.tools)
+            lines.extend(f">>>> HANDOFF {old} -> {new}" for old, new in turn.handoffs)
+        return lines
+
+    def transcript_text(self) -> str:
+        return "\n".join(f"[{i:3d}] {line}" for i, line in enumerate(self.transcript_lines()))
 
     def vera_said(self, turns: list[Turn] | None = None) -> list[str]:
         return [line for turn in (turns if turns is not None else self.turns) for line in turn.vera]
@@ -234,9 +254,7 @@ async def _run_call(scenario: Scenario) -> CallRun:
         f"{len(run_state.recorded)} answers extracted =====",
         flush=True,
     )
-    if directives:
-        print(f"===== directives fired: {[d.rule_key for d in directives]} =====", flush=True)
-    return CallRun(
+    run = CallRun(
         controller=controller,
         run_state=run_state,
         directives=directives,
@@ -244,7 +262,23 @@ async def _run_call(scenario: Scenario) -> CallRun:
         plan=plan,
         landed=landed,
         hit_cap=hit_cap,
+        report=None,
     )
+    # Grade the call from its transcript. A judge failure must never take the run down with it —
+    # the deterministic assertions above are the gate; this is a report.
+    try:
+        evaluator = build_evaluator()
+        run.report = await evaluator.evaluate(
+            run.transcript_text(),
+            rules=render_rules(controller.plan),
+            tasks=render_tasks(controller.plan),
+        )
+        print(run.report.render(scenario.label), flush=True)
+    except Exception as exc:
+        print(f"===== evaluation unavailable ({type(exc).__name__}) =====", flush=True)
+    return run
+    if directives:
+        print(f"===== directives fired: {[d.rule_key for d in directives]} =====", flush=True)
 
 
 @pytest.fixture(scope="module")
@@ -310,6 +344,22 @@ async def test_opening_survives_to_the_end_of_the_call(call: CallRun) -> None:
     assert DISCLOSURE in carried, "the opening did not survive to the end of the call"
     # The rep's most recent answer is the live end of the window.
     assert call.plan[-1].rep[:40] in carried
+
+
+async def test_the_evaluator_graded_the_call(call: CallRun) -> None:
+    # Reports by default: this asserts the evaluator RAN and produced verdicts, not that it liked
+    # the call. Use VERA_EVALS_JUDGE_STRICT=1 to make a `fail` finding gate the run.
+    assert call.report is not None, "the evaluator produced no report"
+    assert call.report.findings, "the evaluator returned no verdicts"
+
+
+@pytest.mark.skipif(
+    not judge_strict_enabled(), reason="set VERA_EVALS_JUDGE_STRICT=1 to gate on the evaluator"
+)
+async def test_the_evaluator_found_no_failures(call: CallRun) -> None:
+    assert call.report is not None
+    failures = [f"{f.dimension} [{f.turn}]: {f.reason}" for f in call.report.failures]
+    assert not failures, "the evaluator failed the call:\n" + "\n".join(failures)
 
 
 async def test_the_observer_extracts_answers(call: CallRun) -> None:
