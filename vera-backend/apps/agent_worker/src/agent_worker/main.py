@@ -287,6 +287,18 @@ def resolve_session(room_name: str, *, is_local: bool) -> str | None:
     return None
 
 
+def observer_enabled_from_meta(meta: dict[str, object]) -> bool:
+    """Whether the AI form-filling observer should run for this call, per the dispatch
+    metadata flag the control plane resolves from the tenant's `observer_enabled`.
+
+    The flag is a dispatch-time SNAPSHOT: flipping the tenant switch never affects a call
+    already in flight, only calls dispatched after it. Defaults to True so a dispatch that
+    predates the flag keeps today's behaviour — deliberately fail-open, which means a tenant
+    who has just disabled the feature can still get observed calls for the length of one
+    dispatch-queue drain across a deploy."""
+    return bool(meta.get("enable_observer", True))
+
+
 def _fan_out_sink(sinks: list[TurnPublisher]) -> TurnPublisher | None:
     """Collapse the enabled stream sinks (the call stream today) behind one
     TurnPublisher, so at most one ReorderingEmitter is ever attached per job: None with
@@ -459,7 +471,21 @@ async def entrypoint(ctx: JobContext) -> None:
         # live call. It routes turns per active task and does nothing during IVR/wrap-up, so
         # it is inert until the conversation path begins. Started for a plan-backed canonical
         # room; the controller gets the session so a rule fire can interrupt/redirect the bot.
-        if controller is not None and run_state is not None and bus is not None:
+        # `enable_observer` is the per-tenant AI form-filling switch (super-admin managed,
+        # snapshotted into the dispatch metadata). Turning it OFF skips this whole block, so:
+        # no answers are extracted (none recorded, form left for manual review); `_answers`
+        # stays at the intake prefill, so `applicable_when` routes off THAT, not off what the
+        # rep says; and `attach_session` is skipped, so `apply_directive_now` no-ops. All
+        # three are intended and pinned by test_plan_runtime.py's two regression fences.
+        # Caveat on the third: it is only self-consistent because directives originate solely
+        # from the Observer's rule engine — a future non-Observer directive source must hoist
+        # `attach_session` out of this gate or it will silently drop its redirects.
+        if (
+            controller is not None
+            and run_state is not None
+            and bus is not None
+            and observer_enabled_from_meta(meta)
+        ):
             controller.attach_session(session)
             observer_redis = create_redis(settings.redis_url)
             # Out-of-pipeline extraction chain (Gemini primary → OpenAI fallback), the

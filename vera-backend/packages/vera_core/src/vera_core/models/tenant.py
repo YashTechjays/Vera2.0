@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, Numeric, String
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,6 +45,7 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     queue_expiry_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
+    observer_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # Recording retention in days; NULL → the platform default
     # (settings.recording_retention_days_default). Stamped onto
     # recording.retention_until at verify time; changing it does NOT rewrite

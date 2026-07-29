@@ -355,6 +355,7 @@ async def try_dispatch(
         metadata: dict[str, Any] = {
             "wait_for_speaker": True,
             "publish_events": True,
+            "enable_observer": tenant.observer_enabled,
         }
         if form.ivr_navigation_enabled:
             metadata["enable_ivr_navigation"] = True
