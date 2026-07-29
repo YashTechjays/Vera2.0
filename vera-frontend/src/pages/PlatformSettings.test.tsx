@@ -108,4 +108,17 @@ describe("PlatformSettings", () => {
       expect(mockedSetTenantRetryConfig).toHaveBeenCalledWith("t1", { retry_fill_threshold: 0.4 })
     })
   })
+
+  it("clearing the threshold and blurring drops the draft instead of committing 0", async () => {
+    mockedUsePermission.mockReturnValue(true)
+    mockedListTenants.mockResolvedValue([tenant])
+    render(<PlatformSettings />)
+
+    const input = await screen.findByLabelText(/retry threshold for acme/i)
+    await userEvent.clear(input)
+    await userEvent.tab()
+
+    await waitFor(() => expect(input).toHaveValue(50))
+    expect(mockedSetTenantRetryConfig).not.toHaveBeenCalled()
+  })
 })

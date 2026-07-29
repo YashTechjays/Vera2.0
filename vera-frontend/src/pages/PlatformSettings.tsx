@@ -96,6 +96,16 @@ export function PlatformSettings() {
   async function commitThreshold(tenant: TenantSummary) {
     const draft = thresholdDrafts[tenant.id]
     if (draft === undefined) return
+    if (draft.trim() === "") {
+      // An emptied field parses to 0 via Number(""), which would silently commit a
+      // 0% threshold — drop the draft instead so the input falls back to the server value.
+      setThresholdDrafts((prev) => {
+        const rest = { ...prev }
+        delete rest[tenant.id]
+        return rest
+      })
+      return
+    }
     const parsed = Number(draft)
     if (!Number.isFinite(parsed) || parsed === retryThresholdPercent(tenant)) return
     setError(null)
