@@ -13,8 +13,11 @@ needs a job context and is mocked), or Observer extraction timing — a live cal
 required before ship.
 """
 
+import asyncio
 import json
 import os
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, replace
 from typing import Any, NoReturn
 
 import pytest
@@ -26,12 +29,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from agent_worker.agent import build_agent
+from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
+from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
+from vera_core.config import EnvSecretProvider
 from vera_core.config.settings import get_settings
 from vera_core.forms.call_plan import CallPlan, compile_call_plan, focus_call_plan, fuse_prefill
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
+from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.models.authoring import FormSchema, PromptVersion, SchemaVersion
 from vera_core.models.enums import VersionStatus
 
@@ -129,11 +136,112 @@ IVR_TURNS = [
 HUMAN_PICKUP = "Hi, this is Martha in provider services. Who am I speaking with?"
 
 
-class NullRunState:
-    """Cursor writes go nowhere: these evals exercise dialogue, not Redis."""
+@dataclass(frozen=True)
+class Scenario:
+    """One call to replay. `facts` is the rep's fact sheet, so a scenario can set up the answers
+    a flow rule or contradiction needs; `focus_fields` narrows the compiled plan to just those,
+    keeping a rule scenario to a handful of turns instead of a 182-field walk."""
+
+    label: str
+    facts: str
+    expect_rule: str | None = None
+    focus_fields: tuple[str, ...] = ()
+
+
+class RecordingRunState:
+    """Stands in for Redis. Cursor writes are discarded, but extracted answers are kept so a
+    test can assert what the Observer actually pulled out of the conversation."""
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[str, Any]] = []
 
     async def set_active_task(self, room_name: str, task_key: str) -> None:
         return None
+
+    async def record_answer(
+        self,
+        room_name: str,
+        field_path: str,
+        *,
+        value: Any,
+        ts: int,
+        confidence: int | None = None,
+        evidence_seq: int | None = None,
+    ) -> None:
+        self.recorded.append((field_path, value))
+
+
+class NullBus:
+    """The Observer emits a CallAnswerRecordedEvent per answer; nothing here consumes them."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event: Any) -> None:
+        self.events.append(event)
+
+
+class NullTranscript:
+    """Required by ObserverManager's constructor but never used: the harness feeds turns
+    straight to `ingest()`, so the Redis tail loop (`start()`/`run()`) never runs."""
+
+    def read(
+        self, room_name: str, *, first_entry_deadline_s: float | None = None
+    ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]:
+        async def empty() -> AsyncIterator[tuple[str, CallStreamEvent] | None]:
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        return empty()
+
+
+def build_observer(controller: PlanRunController, run_state: RecordingRunState) -> ObserverManager:
+    """A REAL ObserverManager with the REAL extraction chain, mirroring `main.py`.
+
+    Without it the rule engine can never fire — `RuleEngine.evaluate` has exactly one call site,
+    inside the Observer's `_record` — and `gap_fields()` would see every field as unanswered."""
+    primary = LLMSpec.parse(get_settings().observer_extract_primary_model)
+    if primary.provider == "google":
+        primary = replace(primary, extra={"thinking_config": ThinkingConfig(thinking_budget=0)})
+    # No fallback tier: the harness must not depend on an OPENAI_API_KEY being present.
+    extract_llm = ResilientLLM(
+        primary,
+        [],
+        options=FallbackOptions(
+            attempt_timeout=get_settings().observer_extract_attempt_timeout_seconds
+        ),
+        secrets=EnvSecretProvider(),
+    )
+    return ObserverManager(
+        controller.plan,
+        controller=controller,
+        run_state=run_state,  # type: ignore[arg-type]
+        bus=NullBus(),  # type: ignore[arg-type]
+        extractor=ResilientAnswerExtractor(extract_llm),
+        transcript=NullTranscript(),  # type: ignore[arg-type]
+        room_name="call--eval--1",
+    )
+
+
+def rep_turn(text: str, seq: int) -> CallStreamEvent:
+    """The transcript frame the voice pipeline would have published for a rep turn."""
+    return CallStreamEvent(
+        type=TYPE_TRANSCRIPT, data={"role": "user", "source": "rep", "text": text}, ts=seq
+    )
+
+
+async def settle_observer(manager: ObserverManager) -> None:
+    """Await extraction instead of sleeping on it.
+
+    `TaskObserver.feed` schedules a pass as an asyncio task and coalesces mid-flight arrivals
+    (`observer.py:_run_passes`), so a completed pass can queue another. Loop until no task is
+    pending. A blind sleep would be both slower and racy against a real LLM call."""
+    for _ in range(40):
+        active = getattr(manager, "_active", None)
+        pending = {*getattr(active, "_passes", set()), *getattr(manager, "_closing", set())}
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def _skip(reason: str) -> NoReturn:
@@ -156,7 +264,9 @@ def _intake_values(doc: FormSchemaDoc) -> dict[str, Any]:
     return {system[key]: value for key, value in CASE.items() if key in system}
 
 
-async def load_published_plan(insurance_type: str = INSURANCE_TYPE) -> CallPlan:
+async def load_published_plan(
+    insurance_type: str = INSURANCE_TYPE, *, focus_fields: Sequence[str] = ()
+) -> CallPlan:
     """Compile the plan exactly as dispatch does.
 
     Mirrors `vera_core/services/queue_dispatcher.py:_resolve_plan_template` step for step —
@@ -223,7 +333,12 @@ async def load_published_plan(insurance_type: str = INSURANCE_TYPE) -> CallPlan:
         schema_version_id=schema_version.id,
         prompt_version_id=prompt_version_id,
     )
-    if not full_walk_enabled():
+    if focus_fields:
+        # A rule scenario narrows to exactly the fields its rule reads, plus the closer so the
+        # chain can still reach wrap-up.
+        paths = [*focus_fields, *(f.path for f in plan.tasks[-1].fields)]
+        plan = focus_call_plan(plan, paths)
+    elif not full_walk_enabled():
         # Narrow to the opening tasks plus the closer, so the chain still reaches wrap-up.
         keep = [*plan.tasks[:2], plan.tasks[-1]]
         plan = focus_call_plan(plan, [f.path for task in keep for f in task.fields])
@@ -242,15 +357,20 @@ def build_llm(model: str = VERA_MODEL) -> google.LLM:
     )
 
 
-async def make_controller() -> PlanRunController:
+async def make_controller(
+    scenario: "Scenario | None" = None,
+) -> tuple[PlanRunController, RecordingRunState]:
     """Default handoff-context behaviour — the evals cover the call FLOW, not any one carry
-    strategy. The gap pass stays on: the simulated rep cannot answer every field, so the
-    end-of-call sweep actually fires, which is the only end-to-end coverage it has."""
-    return PlanRunController(
-        await load_published_plan(),
+    strategy. The gap pass stays on; with a real Observer attached it now sweeps only the fields
+    the rep genuinely left unanswered."""
+    run_state = RecordingRunState()
+    focus = scenario.focus_fields if scenario is not None else ()
+    controller = PlanRunController(
+        await load_published_plan(focus_fields=focus),
         room_name="call--eval--1",
-        run_state=NullRunState(),  # type: ignore[arg-type]
+        run_state=run_state,  # type: ignore[arg-type]
     )
+    return controller, run_state
 
 
 def make_entry_agent(controller: PlanRunController) -> Agent:

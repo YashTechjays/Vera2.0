@@ -122,3 +122,34 @@ class SimulatedRep:
         answer = "".join(parts).strip() or "Sorry, could you repeat that?"
         self._ctx.add_message(role="assistant", content=answer)
         return answer
+
+
+# --- fact sheets that trip the compiled schema's rules -------------------------------------
+# The default FACT_SHEET deliberately fires NO rule (out-of-network IS covered; the mandate and
+# infertility coverage agree), so a rule scenario has to supply its own facts.
+
+# ibv_standard.py:1316 `mandate_requires_infertility_coverage` — a plan mandate obliges coverage,
+# so claiming it is not covered is self-contradictory. This is the push-back seen in the reference
+# call: "With a mandate, infertility services should be covered. Could you double-check…"
+MANDATE_CONTRADICTION_FACTS = """\
+You are looking at the member's plan in your system.
+
+- Plan: UnitedHealthcare Choice Plus, plan type PPO, active, effective January 1 2026.
+- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
+- There IS an infertility plan mandate on this policy.
+- Infertility treatment is NOT covered under this plan.
+- Every CPT code you are asked about is NOT covered.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""
+
+# ibv_standard.py:1265 `insurance_not_active` — an inactive policy ends the call, so the plan
+# skips straight to wrap_up instead of collecting benefits nobody can use.
+INACTIVE_POLICY_FACTS = """\
+You are looking at the member's plan in your system.
+
+- Member: Test T, date of birth April 12 1991, policy POL-661522.
+- The insurance is NOT active. The policy terminated on December 31 2025.
+- Because the policy is inactive you have no benefit details to give: if asked about deductibles,
+  coverage or CPT codes, say the plan is not active so there are no active benefits.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""

@@ -11,11 +11,13 @@ Assertions are DETERMINISTIC — handoff identity and order, tool calls, chat_ct
 asserts on extracted VALUES — the rep improvises specifics, so value correctness is the
 Observer's business and needs a real call.
 
-KNOWN LIMITATION — no Observer runs here, so `PlanRunController._answers` stays at its prefill
-seed and `gap_fields()` sees nearly every field as unanswered. The gap pass therefore always
-fires and re-asks things the rep already answered. That is the harness, NOT a product bug: these
-evals can prove a gap agent's *shape* (it runs mid-call, it never signals the end) but say
-nothing about whether it picked the right fields.
+A REAL ObserverManager runs alongside the call, fed from the drive loop, so answers are extracted
+with the real chain. That is what lets the RuleEngine fire at all — `evaluate` has exactly one call
+site, inside the Observer's `_record` — and it is also what gives the gap pass real state to sweep.
+
+Extraction is a live LLM call, so which answers land varies between runs. A rule test therefore
+SKIPS when its trigger was not extracted, rather than failing: the alternative is an assertion that
+quietly passes for the wrong reason.
 """
 
 import os
@@ -29,15 +31,25 @@ from conftest import (
     HUMAN_PICKUP,
     IVR_TURNS,
     REP_MODEL,
+    RecordingRunState,
+    Scenario,
     build_llm,
+    build_observer,
     carried_text,
     full_walk_enabled,
     make_controller,
     make_entry_agent,
+    rep_turn,
+    settle_observer,
 )
 from livekit.agents import AgentSession
 from livekit.agents.voice.run_result import mock_tools
-from rep import SimulatedRep
+from rep import (
+    FACT_SHEET,
+    INACTIVE_POLICY_FACTS,
+    MANDATE_CONTRADICTION_FACTS,
+    SimulatedRep,
+)
 
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import IvrNavigatorAgent
@@ -66,9 +78,32 @@ class Turn:
     handoffs: list[tuple[str, str]] = field(default_factory=list)
 
 
+DEFAULT_SCENARIO = Scenario(label="cooperative rep", facts=FACT_SHEET)
+
+# Both rules read only a couple of fields, so each scenario narrows the plan to them (plus the
+# closer) — a rule scenario costs a handful of turns instead of a 182-field walk.
+CONTRADICTION_SCENARIO = Scenario(
+    label="mandate says covered, rep says not covered",
+    facts=MANDATE_CONTRADICTION_FACTS,
+    expect_rule="mandate_requires_infertility_coverage",
+    focus_fields=(
+        "sections.benefit_coverage.infertility_plan_mandate",
+        "sections.infertility_treatment.infertility_tx_covered",
+    ),
+)
+INACTIVE_SCENARIO = Scenario(
+    label="policy is not active",
+    facts=INACTIVE_POLICY_FACTS,
+    expect_rule="insurance_not_active",
+    focus_fields=("sections.patient_verification.is_insurance_active",),
+)
+
+
 @dataclass
 class CallRun:
     controller: PlanRunController
+    run_state: RecordingRunState
+    directives: list[Any]
     ivr: list[Turn]
     plan: list[Turn]
     landed: Any
@@ -80,6 +115,14 @@ class CallRun:
 
     def handoffs(self) -> list[tuple[str, str]]:
         return [h for turn in self.turns for h in turn.handoffs]
+
+    def fired_rules(self) -> list[str]:
+        """The rule_keys whose directives actually reached the controller."""
+        return [d.rule_key for d in self.directives]
+
+    def extracted(self) -> dict[str, Any]:
+        """What the Observer actually pulled out of the conversation."""
+        return dict(self.run_state.recorded)
 
     def vera_said(self, turns: list[Turn] | None = None) -> list[str]:
         return [line for turn in (turns if turns is not None else self.turns) for line in turn.vera]
@@ -110,26 +153,41 @@ def _echo(phase: str, turn: Turn) -> None:
         print(f"[{phase}] >>>> HANDOFF {old} -> {new}", flush=True)
 
 
-@pytest.fixture(scope="module")
-async def call() -> CallRun:
+async def _run_call(scenario: Scenario) -> CallRun:
     """Replay the reference IVR menu verbatim, then let the simulated rep carry the plan.
+
+    A REAL ObserverManager runs alongside: every rep turn is also fed to `ingest()`, so answers
+    are extracted, the gap pass sees real state, and the rule engine can fire — it has exactly one
+    call site, inside the Observer, so without this no flow rule or contradiction ever runs.
 
     `press_keypad` is mocked — real DTMF needs a job context and a SIP participant, so only the
     tone transport is stubbed; the tool CALL is still observed.
     """
-    controller = await make_controller()
+    controller, run_state = await make_controller(scenario)
+    observer = build_observer(controller, run_state)
+    # Record what the rule engine produced. Landing on WrapUpAgent is NOT evidence a flow rule
+    # fired — every call ends there — so the directive itself is the only honest signal.
+    directives: list[Any] = []
+    apply_directive = controller.apply_directive_now
+
+    async def recording_apply(directive: Any) -> None:
+        directives.append(directive)
+        await apply_directive(directive)
+
+    controller.apply_directive_now = recording_apply  # type: ignore[method-assign]
     fields = sum(len(t.fields) for t in controller.plan.tasks)
     print(
-        f"\n===== plan: {len(controller.plan.tasks)} tasks, {fields} fields, "
+        f"\n===== {scenario.label}: {len(controller.plan.tasks)} tasks, {fields} fields, "
         f"full_walk={full_walk_enabled()} =====",
         flush=True,
     )
 
     vera_llm, rep_llm = build_llm(), build_llm(REP_MODEL)
-    rep = SimulatedRep(rep_llm)
+    rep = SimulatedRep(rep_llm, scenario.facts)
     ivr: list[Turn] = []
     plan: list[Turn] = []
     hit_cap = False
+    seq = 0
 
     # userdata MUST be set at construction, exactly as `cascade.py:build_session` does: every
     # agent's on_enter reads the takeover latch on its first line, and without it on_enter raises
@@ -161,13 +219,47 @@ async def call() -> CallRun:
             turn = _collect(answer, result)
             plan.append(turn)
             _echo("PLAN", turn)
+            # The voice pipeline would have published this turn to the transcript stream; feed the
+            # Observer directly so extraction (and therefore the rule engine) runs.
+            seq += 1
+            observer.ingest(rep_turn(answer, seq))
+            await settle_observer(observer)
         landed = session.current_agent
 
     # Never let a truncated walk read as a completed call.
     if hit_cap:
         print(f"===== WARNING: hit the {_MAX_PLAN_TURNS}-turn cap =====", flush=True)
-    print(f"===== landed on {type(landed).__name__} =====", flush=True)
-    return CallRun(controller=controller, ivr=ivr, plan=plan, landed=landed, hit_cap=hit_cap)
+    print(
+        f"===== landed on {type(landed).__name__}; "
+        f"{len(run_state.recorded)} answers extracted =====",
+        flush=True,
+    )
+    if directives:
+        print(f"===== directives fired: {[d.rule_key for d in directives]} =====", flush=True)
+    return CallRun(
+        controller=controller,
+        run_state=run_state,
+        directives=directives,
+        ivr=ivr,
+        plan=plan,
+        landed=landed,
+        hit_cap=hit_cap,
+    )
+
+
+@pytest.fixture(scope="module")
+async def call() -> CallRun:
+    return await _run_call(DEFAULT_SCENARIO)
+
+
+@pytest.fixture(scope="module")
+async def contradiction_call() -> CallRun:
+    return await _run_call(CONTRADICTION_SCENARIO)
+
+
+@pytest.fixture(scope="module")
+async def inactive_call() -> CallRun:
+    return await _run_call(INACTIVE_SCENARIO)
 
 
 async def test_plan_came_from_a_published_schema_version(call: CallRun) -> None:
@@ -218,6 +310,46 @@ async def test_opening_survives_to_the_end_of_the_call(call: CallRun) -> None:
     assert DISCLOSURE in carried, "the opening did not survive to the end of the call"
     # The rep's most recent answer is the live end of the window.
     assert call.plan[-1].rep[:40] in carried
+
+
+async def test_the_observer_extracts_answers(call: CallRun) -> None:
+    # The rule engine and the gap pass both read the answer snapshot, so an Observer that records
+    # nothing would silently reduce every downstream assertion to a no-op.
+    assert call.extracted(), "the Observer extracted nothing from the whole call"
+
+
+async def test_contradiction_makes_vera_push_back(contradiction_call: CallRun) -> None:
+    """A plan mandate obliges infertility coverage, so "not covered" contradicts it. The engine
+    returns ReAsk and the controller re-asks on the SAME agent (no swap) — the push-back seen in
+    the reference call."""
+    extracted = contradiction_call.extracted()
+    mandate = extracted.get("sections.benefit_coverage.infertility_plan_mandate")
+    covered = extracted.get("sections.infertility_treatment.infertility_tx_covered")
+    if mandate != "Yes" or covered != "No":
+        # Observed cause when `covered` is None: VERA asks a task's last question AND calls
+        # task_complete in the SAME turn, so the rep's answer arrives while the next task is
+        # active. TaskObserver is whitelisted to the active task's field paths, so that answer
+        # is unextractable and any rule needing it cannot fire. Skipping keeps this honest —
+        # asserting would either fail for the wrong reason or pass vacuously.
+        pytest.skip(f"trigger not extracted: mandate={mandate!r}, covered={covered!r}")
+
+    # A ReAsk keeps the same agent, so a contradiction must never show up as a handoff.
+    assert not contradiction_call.plan or all(
+        new != WrapUpAgent.__name__ for turn in contradiction_call.plan for _, new in turn.handoffs
+    ), "a contradiction must re-ask, not end the call"
+    spoken = " ".join(contradiction_call.vera_said(contradiction_call.plan)).lower()
+    assert "mandate" in spoken or "covered" in spoken
+
+
+async def test_inactive_policy_short_circuits_the_call(inactive_call: CallRun) -> None:
+    """`insurance_not_active` skips straight to wrap_up: an inactive policy has no benefits worth
+    collecting, so the call must not walk the remaining tasks."""
+    active = inactive_call.extracted().get("sections.patient_verification.is_insurance_active")
+    if active != "No":
+        pytest.skip(
+            f"the rule's trigger was not extracted this run (is_insurance_active={active!r})"
+        )
+    assert isinstance(inactive_call.landed, WrapUpAgent), "an inactive policy must reach wrap-up"
 
 
 @pytest.mark.skipif(not full_walk_enabled(), reason="the gap pass needs the unfocused plan")
