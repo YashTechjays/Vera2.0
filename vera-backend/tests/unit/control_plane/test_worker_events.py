@@ -308,6 +308,7 @@ def _tenant(**overrides: Any) -> Tenant:
         "retry_fill_threshold": 0.95,
         "queue_expiry_hours": 48,
         "persona_tweak": {},
+        "auto_retry_enabled": True,
     }
     defaults.update(overrides)
     return Tenant(**defaults)
