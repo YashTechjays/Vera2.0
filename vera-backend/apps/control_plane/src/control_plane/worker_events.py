@@ -319,26 +319,34 @@ class WorkerEventConsumer:
         """Whether a close event must wait for an earlier-id, same-room entry still
         pending — bounded so a poison predecessor past ``max_close_deliveries`` no longer
         wedges the room."""
-        pending = await self._redis.xpending_range(
-            WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, min="-", max="+", count=_PENDING_SCAN
+        # Read the close's OWN delivery count directly (a single-id XPENDING), so the cap
+        # trips no matter how deep the pending set is. If it is not pending we are somehow
+        # not its delivery owner — fail OPEN (proceed): deferring a phantom would wedge.
+        own = await self._redis.xpending_range(
+            WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, min=entry_id, max=entry_id, count=1
         )
-        delivered = next(
-            (int(p["times_delivered"]) for p in pending if p["message_id"] == entry_id), 1
-        )
+        if not own:
+            return False
+        delivered = int(own[0]["times_delivered"])
         if delivered > self._max_close_deliveries:
             logger.warning(
-                "close %s for %s proceeding after %d deliveries despite a pending "
+                "close %s for %s proceeding after %d deliveries despite a possible pending "
                 "predecessor — resolution may run on an incomplete projection",
                 entry_id,
                 room_name,
                 delivered,
             )
             return False
+        # Earlier-id pending entries only (bounded to ids <= the close, lowest first, so the
+        # oldest — the stuck predecessors — are the ones surfaced).
+        earlier = await self._redis.xpending_range(
+            WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, min="-", max=entry_id, count=_PENDING_SCAN
+        )
         close_key = _stream_id_key(entry_id)
-        for p in pending:
+        for p in earlier:
             pid = str(p["message_id"])
             if _stream_id_key(pid) >= close_key:
-                continue  # only entries strictly earlier than the close event
+                continue  # the close's own id is the range max — exclude it
             rows = cast(
                 "list[tuple[str, dict[str, str]]]",
                 await self._redis.xrange(WORKER_EVENTS_STREAM, min=pid, max=pid),
@@ -346,7 +354,6 @@ class WorkerEventConsumer:
             if rows and _entry_room(rows[0][1]) == room_name:
                 return True
         return False
-        return True
 
     async def _ack(self, entry_id: str) -> None:
         await self._redis.xack(WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, entry_id)

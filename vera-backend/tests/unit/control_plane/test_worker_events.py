@@ -86,7 +86,19 @@ class _FakeRedis:
     async def xpending_range(
         self, name: str, groupname: str, min: str, max: str, count: int, **kw: object
     ) -> list[dict[str, object]]:
-        return list(self.pending)
+        def key(mid: str) -> tuple[int, int]:
+            ms, _, seq = mid.partition("-")
+            return (int(ms), int(seq or 0))
+
+        lo = None if min == "-" else key(min)
+        hi = None if max == "+" else key(max)
+        out = [
+            p
+            for p in self.pending
+            if (lo is None or key(str(p["message_id"])) >= lo)
+            and (hi is None or key(str(p["message_id"])) <= hi)
+        ]
+        return out[:count]
 
     async def xrange(
         self, name: str, min: str = "-", max: str = "+", count: int | None = None
@@ -1259,6 +1271,29 @@ async def test_close_ignores_pending_entries_from_other_rooms(
     await wired.consumer._process("2-0", {"event": ended.model_dump_json()})
 
     assert ran == ["ended"]  # a different room's pending entry does not block this close
+    assert redis.acked == ["2-0"]
+
+
+@pytest.mark.asyncio
+async def test_close_fails_open_when_its_own_entry_is_not_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: if the close entry is not in the group's pending set (so its
+    delivery count can't be read and the cap could never trip), proceed rather than defer
+    a phantom forever — even though an earlier same-room entry is pending."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+    room = _VALID_ROOM
+    answer = CallAnswerRecordedEvent(room_name=room, field_path="a", value="v", ts=1)
+    redis.entries["1-0"] = {"event": answer.model_dump_json()}
+    redis.pending = [_pending("1-0")]  # predecessor pending; the close (2-0) is NOT
+
+    ran: list[str] = []
+    wired.consumer._handlers["call.ended"] = _appender(ran, "ended")
+    ended = CallEndedEvent(room_name=room, ts=2)
+    await wired.consumer._process("2-0", {"event": ended.model_dump_json()})
+
+    assert ran == ["ended"]  # fails open — proceeds instead of deferring indefinitely
     assert redis.acked == ["2-0"]
 
 
