@@ -288,7 +288,7 @@ class PlanRunController:
         greeting: str | None = None,
         extra_instructions: str | None = None,
         gap_pass_enabled: bool = True,
-        previous_task_only: bool = False,
+        previous_task_only: bool = True,
     ) -> None:
         if not plan.tasks:
             raise ValueError("call plan has no tasks")
@@ -299,7 +299,7 @@ class PlanRunController:
         self.extra_instructions = extra_instructions
         self.gap_pass_enabled = gap_pass_enabled
         # Carry only the previous task's own turns across a handoff instead of the whole
-        # call. False = the cumulative pre-window behavior.
+        # call — the default. False restores the cumulative pre-window behavior.
         self.previous_task_only = previous_task_only
         # The item ids each agent was HANDED, so its own turns are everything else in its
         # context. Keyed by agent identity, which is why it can't be the usual task index:

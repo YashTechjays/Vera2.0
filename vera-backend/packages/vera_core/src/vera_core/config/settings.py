@@ -235,8 +235,9 @@ class Settings(BaseSettings):
 
     # --- handoff context window (agent worker) ------------------------------
     # Carry only the previous task's own turns into the next task agent — the window is one
-    # task deep. False = the cumulative default, whose prompt grows linearly to wrap-up.
-    previous_task_context_only: bool = False  # VERA_PREVIOUS_TASK_CONTEXT_ONLY
+    # task deep. False falls back to the cumulative behavior, where every handoff forwards the
+    # whole call so far and the prompt grows linearly to wrap-up.
+    previous_task_context_only: bool = True  # VERA_PREVIOUS_TASK_CONTEXT_ONLY
 
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker

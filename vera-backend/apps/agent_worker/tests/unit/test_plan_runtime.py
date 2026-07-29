@@ -72,7 +72,7 @@ def _controller(
     greeting: str | None = None,
     extra_instructions: str | None = None,
     gap_pass_enabled: bool = True,
-    previous_task_only: bool = False,
+    previous_task_only: bool = True,
 ) -> tuple[PlanRunController, FakeRunState]:
     state = run_state or FakeRunState()
     controller = PlanRunController(
@@ -1047,8 +1047,17 @@ class TestPreviousTaskWindow:
         # Task 3 is the immediate predecessor; everything before it has aged out.
         assert chat_ctx_texts(landed) == ["turn-from-task3"]
 
+    async def test_windowed_by_default(self) -> None:
+        # The window is the DEFAULT, so a controller built without the kwarg must be bounded —
+        # the previous assertion only proved the flag works when passed explicitly.
+        controller = PlanRunController(
+            _linear_plan(5), room_name=ROOM, run_state=cast(Any, FakeRunState())
+        )
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == ["turn-from-task3"]
+
     async def test_cumulative_when_disabled(self) -> None:
-        # The flag-off arm must stay byte-identical to the pre-window behavior.
+        # The opt-out must still restore the pre-window behavior byte for byte.
         controller, _ = _controller(_linear_plan(5), previous_task_only=False)
         landed = await _walk(controller, 4)
         assert chat_ctx_texts(landed) == [f"turn-from-task{i}" for i in range(4)]
