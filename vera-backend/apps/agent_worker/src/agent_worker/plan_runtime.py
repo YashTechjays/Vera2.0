@@ -394,7 +394,22 @@ class PlanRunController:
         return [*carried, *self._own_turns(source)]
 
     def _own_turns(self, agent: Agent) -> list[ChatItem]:
-        return own_items(agent, self._boundaries.get(agent, frozenset()))
+        """What `agent` contributes to a successor's window.
+
+        Normally its own turns. Two cases must pass their WHOLE context through instead, or the
+        window swallows the conversation rather than bounding it:
+
+        * a **gap agent** is an inserted hop, not a task, so it must not shadow the substantive
+          task the window is meant to carry — the closer would otherwise see only a re-ask;
+        * an agent that **said nothing at all** has no own turns, so it would hand its successor
+          an EMPTY context. Reachable: `GapTaskAgent.on_enter` swaps on without speaking when the
+          Observer answered its fields between selection and entry, and that successor is the
+          closer, which collects the reference number and says goodbye.
+        """
+        own = own_items(agent, self._boundaries.get(agent, frozenset()))
+        if own and not isinstance(agent, GapTaskAgent):
+            return own
+        return list(agent.chat_ctx.items)
 
     @property
     def opened(self) -> bool:

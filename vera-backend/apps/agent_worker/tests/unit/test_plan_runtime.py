@@ -1092,6 +1092,45 @@ class TestPreviousTaskWindow:
             successor = cast(Agent, await _tool(target, "task_complete")())
         assert chat_ctx_texts(successor) == ["turn-from-task4"]
 
+    async def test_the_closer_sees_the_substantive_task_through_a_gap_agent(self) -> None:
+        # The gap pass inserts a hop between the last substantive task and the closer. A gap
+        # agent is not a task, so it must be TRANSPARENT: otherwise "one task deep" would leave
+        # the closer looking at a re-ask exchange and nothing else.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        gap._chat_ctx.add_message(role="assistant", content="re-ask from the gap pass")
+        with _session_patch(gap, MagicMock()):
+            successor = cast(Agent, await _tool(gap, "gap_complete")())
+        texts = chat_ctx_texts(successor)
+        assert "turn-from-task2" in texts  # the substantive task it came from
+        assert "re-ask from the gap pass" in texts  # plus what the gap agent actually said
+
+    async def test_a_silent_gap_agent_does_not_wipe_its_successor(self) -> None:
+        # `GapTaskAgent.on_enter` swaps on WITHOUT SPEAKING when the Observer answered its
+        # fields between selection and entry. Such an agent has no turns of its own, so a
+        # naive "carry the source's own turns" hands the successor an EMPTY context — and the
+        # successor here is the closer, which collects the reference number and says goodbye.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        # The Observer now answers everything, so this gap agent has nothing left to re-ask.
+        controller.update_answers(
+            {
+                "sections.a.in_network": "Yes",
+                "sections.intro.rep_name": "Martha",
+                "sections.gated.copay": "$20",
+                "sections.cov.deductible": "Met",
+            }
+        )
+        mock_session = MagicMock()
+        with _session_patch(gap, mock_session):
+            await gap.on_enter()
+        successor = mock_session.update_agent.call_args.args[0]
+        assert chat_ctx_texts(successor), "a silent gap agent handed over an empty context"
+
     async def test_gap_agent_gets_its_own_task_turns(self) -> None:
         # The gap pass walks BACKWARDS, so the chronological predecessor is a late task.
         # A gap agent re-asks its OWN task's fields, so it needs that task's turns.
