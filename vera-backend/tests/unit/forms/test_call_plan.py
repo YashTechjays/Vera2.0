@@ -117,6 +117,22 @@ class TestTasks:
         )
         assert plan_task(plan, "introduction").outro == "Onward."
 
+    def test_blank_override_survives_compile_and_fuse(self) -> None:
+        # A blank override must reach the worker blank, never as the schema default.
+        doc = PromptDocument(
+            kind="prompt_document",
+            session=FACTORY_SESSION,
+            task_overrides={"introduction": TaskTextOverride(intro="", outro="")},
+        )
+        plan = compile_call_plan(
+            IBV, doc, schema_version_id=SCHEMA_VERSION_ID, prompt_version_id=PROMPT_VERSION_ID
+        )
+        fused = fuse_prefill(IBV, plan, {}, current_year=2026)
+        assert (plan_task(fused, "introduction").intro, plan_task(fused, "introduction").outro) == (
+            "",
+            "",
+        )
+
     def test_applicable_when_carried_from_schema_task(self) -> None:
         for plan_t, doc_t in zip(PLAN.tasks, IBV.tasks, strict=True):
             assert plan_t.applicable_when == doc_t.applicable_when
