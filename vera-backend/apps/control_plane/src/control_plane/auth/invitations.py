@@ -7,12 +7,13 @@ account it provisions — so a Redis dump cannot be replayed into account access
 TTL and credential-setup power). Expiry auto-revokes; accept deletes the entry
 (single use). Invitees are workforce members, so this carries no PHI.
 
-Four namespaces share one store:
+Five namespaces share one store:
   * "invite"           — the onboarding token that lets an invitee set their password;
   * "invite_mfa"       — a short-lived token bridging password-set → MFA activation when
                          the tenant enforces MFA, so onboarding completes without a session;
   * "platform_invite"  — the onboarding token for a platform-operator (tenant_id is None);
-  * "platform_invite_mfa" — the short-lived MFA token for a platform-operator.
+  * "platform_invite_mfa" — the short-lived MFA token for a platform-operator;
+  * "pwreset"          — the self-service password-reset token (tenant tier).
 """
 
 import hashlib
@@ -29,6 +30,7 @@ INVITE_NS = "invite"
 INVITE_MFA_NS = "invite_mfa"
 PLATFORM_INVITE_NS = "platform_invite"
 PLATFORM_INVITE_MFA_NS = "platform_invite_mfa"
+PASSWORD_RESET_NS = "pwreset"
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ from control_plane.dispatch import drain_pending
 from control_plane.email import InMemoryEmailSender
 from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
 from control_plane.main import create_app
+from control_plane.rate_limit import InMemoryPasswordResetRateLimiter
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.call_stream import CallStreamEvent, CallStreamService
 from vera_core.config import EnvSecretProvider, Settings
@@ -474,6 +475,11 @@ async def authz_app(
         permission_cache=InMemoryPermissionCache(),
         email_sender=email_sender,
         invitation_store=invitation_store,
+        # Generous window so unrelated tests never trip it; the rate-limit test
+        # builds its own app with a tight limit.
+        password_reset_rate_limiter=InMemoryPasswordResetRateLimiter(
+            limit=1000, window_seconds=900
+        ),
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
         call_stream_service=call_stream_service,

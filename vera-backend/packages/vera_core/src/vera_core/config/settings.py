@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     # invitees are workforce members. `frontend_base_url` builds the accept link.
     invite_ttl_seconds: int = 72 * 3600
 
+    # Self-service password reset: token far shorter-lived than the 72 h invite
+    # (live recovery, not scheduled onboarding); over-limit is a silent generic 200.
+    password_reset_ttl_seconds: int = 3600
+    password_reset_rate_limit: int = 3
+    password_reset_rate_limit_window_seconds: int = 15 * 60
+
     # --- email (invites) ---------------------------------------------------
     # Local dev uses the msztolcman/sendria SMTP sandbox (docker-compose): SMTP on
     # 1025, captured mail viewable at http://localhost:1080. Production points these
