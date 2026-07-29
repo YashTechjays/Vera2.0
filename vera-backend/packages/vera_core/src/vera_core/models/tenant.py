@@ -13,8 +13,8 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
 
     RLS on this table keys on `id` (not tenant_id): a request sees only its own
     tenant row. Holds the runtime knobs the worker reads per call
-    (max_agents_per_va, max_concurrent_calls, retry_fill_threshold, persona_tweak) so behaviour is
-    tenant config, not code.
+    (max_agents_per_va, max_concurrent_calls, retry_fill_threshold, auto_retry_enabled,
+    persona_tweak) so behaviour is tenant config, not code.
 
     `gcip_tenant_id` maps this row to its Google Cloud Identity Platform tenant
     (GCIP is natively multi-tenant); nullable so a tenant can exist before its
@@ -41,7 +41,10 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     # Tenant-wide dial ceiling (dispatcher slot math). Distinct from the per-VA
     # in-flight cap above, which gates each VA at enqueue time.
     max_concurrent_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=25)
-    retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.95)
+    retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.50)
+    # Per-tenant auto-retry switch, ANDed with the deployment kill-switch
+    # (VERA_FORM_AUTO_RETRY_ENABLED); platform-managed, off until enabled.
+    auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     queue_expiry_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
