@@ -27,10 +27,11 @@ import logging
 from typing import Any
 
 from livekit.agents import Agent, AgentSession, llm
+from livekit.agents.llm import ChatItem
 
 from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
-from agent_worker.handoff import carry_chat_ctx
+from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState, takeover_engaged
 from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
@@ -168,9 +169,9 @@ class PlanTaskAgent(Agent):
             # Exit speech first; LiveKit drains queued speech through the swap.
             self.session.say(self._task.outro)
         successor = await self._controller.advance_from(self._task_index)
-        # Carry the call so far into the successor — LiveKit doesn't for a
+        # Carry the conversation into the successor — LiveKit doesn't for a
         # tool-returned agent, so without this it re-greets and re-asks.
-        await carry_chat_ctx(self, successor)
+        await self._controller.prepare_successor(self, successor)
         return successor
 
 
@@ -216,13 +217,20 @@ class GapTaskAgent(Agent):
             ),
         )
 
+    @property
+    def task_index(self) -> int:
+        """Which task this agent sweeps."""
+        return self._task_index
+
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
         if takeover_engaged(self.session):
             return
         fields = self._controller.gap_fields(self._task_index)
         if not fields:
-            self.session.update_agent(await self._controller.advance_gap_from(self._task_index))
+            successor = await self._controller.advance_gap_from(self._task_index)
+            await self._controller.prepare_successor(self, successor)
+            self.session.update_agent(successor)
             return
         self.session.generate_reply(instructions=_gap_reask_instruction(fields))
 
@@ -238,7 +246,7 @@ class GapTaskAgent(Agent):
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
         successor = await self._controller.advance_gap_from(self._task_index)
-        await carry_chat_ctx(self, successor)
+        await self._controller.prepare_successor(self, successor)
         return successor
 
 
@@ -259,6 +267,7 @@ class PlanRunController:
         greeting: str | None = None,
         extra_instructions: str | None = None,
         gap_pass_enabled: bool = True,
+        previous_task_only: bool = False,
     ) -> None:
         if not plan.tasks:
             raise ValueError("call plan has no tasks")
@@ -268,6 +277,16 @@ class PlanRunController:
         # Tenant persona-tweak overlay, appended to every plan agent's instructions.
         self.extra_instructions = extra_instructions
         self.gap_pass_enabled = gap_pass_enabled
+        # Carry only the previous task's own turns (plus the pinned opening) across a
+        # handoff instead of the whole call. False = the cumulative pre-window behavior.
+        self.previous_task_only = previous_task_only
+        # The item ids each agent was HANDED, so its own turns are everything else in its
+        # context. Keyed by agent identity, which is why it can't be the usual task index:
+        # a PlanTaskAgent and its GapTaskAgent share one.
+        self._boundaries: dict[Agent, frozenset[str]] = {}
+        # The call's opening turns, captured at the first handoff and carried for the rest of
+        # the call — a plain window would drop exactly this.
+        self._pinned: list[ChatItem] = []
         self._opened = False  # has any task agent spoken the call's opening line yet
         self._run_state = run_state
         # In-process answers snapshot for applicability/skip decisions, seeded
@@ -330,6 +349,36 @@ class PlanRunController:
             # Re-check applicability like every other transition: the Observer keeps writing
             # answers during the pass, so the closer's gate can have flipped since entry.
             return self._agent_at(self._next_applicable(self._closing_task_index))
+
+    async def prepare_successor(self, source: Agent, target: Agent) -> None:
+        """Give `target` the conversation it needs before it becomes active — the single seam
+        EVERY agent transition goes through, tool handoff and `update_agent` swap alike.
+
+        Storing the target's resulting item ids is what makes the window work: a path that
+        skipped this seam would leave its target with no boundary, and the hop after it would
+        carry that agent's whole context again."""
+        if not self.previous_task_only:
+            self._boundaries[target] = await carry_chat_ctx(source, target)
+            return
+        if not self._pinned:
+            self._pinned = list(source.chat_ctx.items)
+        self._boundaries[target] = await carry_items(target, self._carry_set(source, target))
+
+    def _carry_set(self, source: Agent, target: Agent) -> list[ChatItem]:
+        """Chronological carry set: the pinned opening, the swept task's turns for a gap
+        target, then the source's own turns.
+
+        A gap agent re-asks ITS OWN task's missing fields, so it needs that task's turns —
+        mid-call ones, not those of the chronological predecessor it arrives from (the gap
+        pass walks backwards from just before the closing task)."""
+        carried = list(self._pinned)
+        if isinstance(target, GapTaskAgent):
+            swept = self.agents[target.task_index]
+            carried += self._own_turns(swept)
+        return [*carried, *self._own_turns(source)]
+
+    def _own_turns(self, agent: Agent) -> list[ChatItem]:
+        return own_items(agent, self._boundaries.get(agent, frozenset()))
 
     @property
     def opened(self) -> bool:
@@ -394,6 +443,8 @@ class PlanRunController:
                     # A terminate_call flow rule ends the call: no end-of-call gap pass.
                     self._terminated = True
                 await self._session.interrupt()
+                # Same seam as a tool handoff: this path used to swap with no carry at all.
+                await self.prepare_successor(self._session.current_agent, target)
                 self._session.update_agent(target)
         except Exception as exc:
             logger.warning(

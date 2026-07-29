@@ -72,6 +72,7 @@ def _controller(
     greeting: str | None = None,
     extra_instructions: str | None = None,
     gap_pass_enabled: bool = True,
+    previous_task_only: bool = False,
 ) -> tuple[PlanRunController, FakeRunState]:
     state = run_state or FakeRunState()
     controller = PlanRunController(
@@ -81,6 +82,7 @@ def _controller(
         greeting=greeting,
         extra_instructions=extra_instructions,
         gap_pass_enabled=gap_pass_enabled,
+        previous_task_only=previous_task_only,
     )
     return controller, state
 
@@ -856,3 +858,94 @@ class TestGapAgentConstruction:
         assert "Final gap check" not in instructions
         assert "do NOT say goodbye" in instructions
         assert "more questions may still follow" in instructions
+
+
+def _linear_plan(count: int) -> CallPlan:
+    """`count` ungated tasks, so a walk visits every one in order."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(task_key=f"task{i}", title=f"Task {i}", prompt=f"Prompt {i}")
+            for i in range(count)
+        ],
+    )
+
+
+async def _walk(controller: PlanRunController, upto: int) -> Agent:
+    """Drive `task_complete` from task 0 through task `upto - 1`, giving each agent one
+    distinctive turn of its own first. Returns the agent the chain lands on."""
+    current: Agent = controller.agents[0]
+    for index in range(upto):
+        agent = controller.agents[index]
+        controller.note_task_entered(index)  # on_enter's job; the walk drives tools directly
+        agent._chat_ctx.add_message(role="user", content=f"turn-from-task{index}")
+        with _session_patch(agent, MagicMock()):
+            current = cast(Agent, await _tool(agent, "task_complete")())
+    return current
+
+
+class TestPreviousTaskWindow:
+    """The handoff carries the pinned opening plus only the previous task's own turns,
+    instead of the whole call so far (which grows linearly to wrap-up)."""
+
+    async def test_carries_pinned_opening_and_previous_task_only(self) -> None:
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        landed = await _walk(controller, 4)
+        assert landed is controller.agents[4]
+        # Task 0 is pinned; tasks 1-2 have aged out; task 3 is the immediate predecessor.
+        assert chat_ctx_texts(landed) == ["turn-from-task0", "turn-from-task3"]
+
+    async def test_cumulative_when_disabled(self) -> None:
+        # The flag-off arm must stay byte-identical to the pre-window behavior.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=False)
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == [f"turn-from-task{i}" for i in range(4)]
+
+    async def test_pin_survives_to_wrap_up(self) -> None:
+        # The greeting and the recording/supervisor disclosure live in the opening turns:
+        # they must reach the closer, which a plain sliding window would have dropped.
+        controller, _ = _controller(_linear_plan(4), previous_task_only=True)
+        landed = await _walk(controller, 4)
+        assert landed is controller.wrap_up_agent
+        assert chat_ctx_texts(landed) == ["turn-from-task0", "turn-from-task3"]
+
+    async def test_directive_swap_seeds_the_inheritance_boundary(self) -> None:
+        # `update_agent` used to swap with no carry at all, so its target got no boundary
+        # either — and the NEXT handoff would treat the whole inherited context as that
+        # agent's own turns, silently reverting to cumulative. Regression guard.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        await _walk(controller, 2)
+        live = controller.agents[2]
+        live._chat_ctx.add_message(role="user", content="turn-from-task2")
+        session = MagicMock()
+        session.userdata = TakeoverState()
+        session.interrupt = AsyncMock()
+        session.current_agent = live
+        controller.attach_session(session)
+        await controller.apply_directive_now(SkipToTask(rule_key="r", task_key="task4"))
+        session.update_agent.assert_called_once_with(controller.agents[4])
+
+        target = controller.agents[4]
+        assert chat_ctx_texts(target) == ["turn-from-task0", "turn-from-task2"]
+        # The boundary is what matters: task 4's own handoff must not re-carry the above.
+        target._chat_ctx.add_message(role="user", content="turn-from-task4")
+        with _session_patch(target, MagicMock()):
+            successor = cast(Agent, await _tool(target, "task_complete")())
+        assert chat_ctx_texts(successor) == ["turn-from-task0", "turn-from-task4"]
+
+    async def test_gap_agent_gets_its_own_task_turns(self) -> None:
+        # The gap pass walks BACKWARDS, so the chronological predecessor is a late task.
+        # A gap agent re-asks its OWN task's fields, so it needs that task's turns.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name still missing
+        landed = await _walk(controller, 3)  # completing task 2 diverts into the gap pass
+        assert isinstance(landed, GapTaskAgent)
+        assert landed.task_index == 0
+        texts = chat_ctx_texts(landed)
+        assert "turn-from-task0" in texts  # the swept task's own turns
+        assert "turn-from-task2" in texts  # the source it arrived from
+        assert "turn-from-task1" not in texts  # not the whole call

@@ -15,7 +15,7 @@ from livekit.agents.llm import FunctionTool
 from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
-from agent_worker.handoff import carry_chat_ctx
+from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
@@ -107,6 +107,49 @@ async def test_carry_chat_ctx_copies_spoken_turns_not_instructions() -> None:
     assert "The member ID is POL-661522." in texts  # prior user turn carried
     assert "SOURCE INSTRUCTIONS" not in texts  # source's own instructions excluded
     assert target.instructions == "TARGET INSTRUCTIONS"  # target keeps its own
+
+
+@pytest.mark.asyncio
+async def test_carry_returns_the_inheritance_boundary() -> None:
+    # The returned ids are what later lets `own_items` tell the target's own turns from
+    # the ones it inherited — the whole basis of the previous-task window.
+    source = VeraAgent(instructions="S")
+    source._chat_ctx.add_message(role="user", content="inherited turn")
+    target = VeraAgent(instructions="T")
+
+    boundary = await carry_chat_ctx(source, target)
+
+    assert own_items(target, boundary) == []  # nothing of its own yet
+    target._chat_ctx.add_message(role="user", content="its own turn")
+    assert [i.text_content for i in own_items(target, boundary)] == ["its own turn"]
+
+
+@pytest.mark.asyncio
+async def test_carry_items_replaces_rather_than_accumulates() -> None:
+    source = VeraAgent(instructions="S")
+    source._chat_ctx.add_message(role="user", content="keep me")
+    source._chat_ctx.add_message(role="system", content="SOURCE INSTRUCTIONS")
+    target = VeraAgent(instructions="T")
+    target._chat_ctx.add_message(role="user", content="stale turn")
+
+    await carry_items(target, source.chat_ctx.items)
+
+    # Replaced, not merged — and the same instruction filter `merge` applies still holds.
+    assert chat_ctx_texts(target) == ["keep me"]
+
+
+@pytest.mark.asyncio
+async def test_carry_items_dedupes_the_pinned_overlap() -> None:
+    # The first handoff hands over the very agent whose turns get pinned, so the carry set's
+    # pinned half and its own-turns half genuinely overlap.
+    source = VeraAgent(instructions="S")
+    source._chat_ctx.add_message(role="user", content="opening turn")
+    target = VeraAgent(instructions="T")
+    overlapping = [*source.chat_ctx.items, *source.chat_ctx.items]
+
+    await carry_items(target, overlapping)
+
+    assert chat_ctx_texts(target) == ["opening turn"]
 
 
 def test_vera_agent_carries_only_the_end_call_tool() -> None:
