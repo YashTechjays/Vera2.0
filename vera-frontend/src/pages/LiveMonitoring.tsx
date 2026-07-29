@@ -36,7 +36,6 @@ import {
 import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
 import { elapsed } from "@/lib/monitoring/liveTimer"
-import { applyEndedPins, pinEnded, type EndedPins } from "@/lib/monitoring/endedPins"
 import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
 import { humanizeSegment } from "@/lib/patient-forms/display"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
@@ -168,13 +167,13 @@ export function LiveMonitoring() {
   // first fetch has even had a chance to include the target call.
   const hasLoadedOnce = useRef(false)
   // Calls the modal's SSE saw end before the DB caught up (the worker's shutdown
-  // drain defers the status flip by many seconds — VR2-72). The pin carries the
-  // REAL terminal status, so a failed call never reads as a green "Completed".
-  const endedBySse = useRef<EndedPins>(new Map())
+  // drain defers the status flip by many seconds — VR2-72). Pinned as completed
+  // across polls until the server stops returning them as active.
+  const endedBySse = useRef<Set<string>>(new Set())
 
-  const markEnded = useCallback((callId: string, status: string) => {
-    const pin = pinEnded(endedBySse.current, callId, status, new Date().toISOString())
-    setCalls((prev) => prev.map((c) => (c.id === callId ? { ...c, ...pin } : c)))
+  const markEnded = useCallback((callId: string) => {
+    endedBySse.current.add(callId)
+    setCalls((prev) => prev.map((c) => (c.id === callId ? { ...c, status: "completed" } : c)))
   }, [])
 
   // Load + poll (skip while the tab is hidden); a realtime notification
@@ -190,7 +189,12 @@ export function LiveMonitoring() {
       ])
       if (cancelled) return
       if (items.status === "fulfilled") {
-        setCalls(applyEndedPins(endedBySse.current, items.value))
+        const ended = endedBySse.current
+        // Server no longer lists it as active → it caught up; drop the pin.
+        for (const id of [...ended]) if (!items.value.some((c) => c.id === id)) ended.delete(id)
+        setCalls(
+          items.value.map((c) => (ended.has(c.id) ? { ...c, status: "completed" } : c)),
+        )
         setError(null)
       } else {
         setError(
@@ -270,24 +274,19 @@ export function LiveMonitoring() {
   }, [tab, calls, history])
 
   // Stat cards from GET /calls/stats (same visibility as the list); zeros until it loads.
-  // While a pin is live the server still counts that call, so derive live/critical from
-  // the pinned rows instead — the cards must never contradict the row (VR2-72).
   const statCards = useMemo(() => {
-    const pinned = calls.some((c) => isTerminalCallStatus(c.status))
-    const live = pinned
-      ? calls.filter((c) => !isTerminalCallStatus(c.status)).length
-      : (stats?.live ?? 0)
-    const critical = pinned
-      ? calls.filter((c) => categoryOf(c.status) === "critical").length
-      : (stats?.critical ?? 0)
     const cards: { label: string; value: number; icon: LucideIcon; tone?: "critical" }[] = [
       { label: "Total Calls Today", value: stats?.total_today ?? 0, icon: Phone },
-      { label: "Active Calls", value: live, icon: PhoneCall },
-      { label: "Running Smoothly", value: live - critical, icon: CheckCircle2 },
-      { label: "Critical Alerts", value: critical, icon: AlertCircle, tone: "critical" },
+      { label: "Active Calls", value: stats?.live ?? 0, icon: PhoneCall },
+      {
+        label: "Running Smoothly",
+        value: (stats?.live ?? 0) - (stats?.critical ?? 0),
+        icon: CheckCircle2,
+      },
+      { label: "Critical Alerts", value: stats?.critical ?? 0, icon: AlertCircle, tone: "critical" },
     ]
     return cards
-  }, [stats, calls])
+  }, [stats])
 
   // Render the freshest polled row, falling back to the click-time snapshot once the call leaves the active list so its header survives while the modal is open.
   const modalCall = useMemo(() => {
