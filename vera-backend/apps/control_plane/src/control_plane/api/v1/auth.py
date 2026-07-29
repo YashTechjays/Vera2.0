@@ -20,6 +20,8 @@ the bearer token alone (`current_identity`); scope is derived from the verified 
 """
 
 import asyncio
+import hashlib
+import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Annotated, Literal
@@ -34,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from control_plane.api.v1.common import (
     AppSettings,
     AuthAudit,
+    Email,
     Invites,
     Resolver,
     SelfScopedSession,
@@ -41,7 +44,12 @@ from control_plane.api.v1.common import (
 )
 from control_plane.auth import elevation, mfa
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.invitations import INVITE_MFA_NS, INVITE_NS
+from control_plane.auth.invitations import (
+    INVITE_MFA_NS,
+    INVITE_NS,
+    PASSWORD_RESET_NS,
+    InviteData,
+)
 from control_plane.auth.password import (
     MAX_PASSWORD_BYTES,
     hash_password,
@@ -54,9 +62,12 @@ from control_plane.deps import (
     client_ip,
     current_identity,
     get_kms,
+    get_password_reset_rate_limiter,
     get_session_store,
     get_sessionmaker,
 )
+from control_plane.dispatch import schedule_detached
+from control_plane.email import EmailMessage, EmailSender
 from control_plane.exceptions import (
     BadRequestError,
     CustomAPIException,
@@ -64,12 +75,15 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     UnauthorizedError,
 )
+from control_plane.rate_limit import PasswordResetRateLimiter
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuthAuditSink, emit_auth_event
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import tenant_session
 from vera_core.models import AppUser, Role, SsoProvider, UserIdentity, UserRole
 from vera_core.models.enums import AccountType, AuthEvent, ProviderKind
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["auth"])
 
@@ -78,6 +92,7 @@ _bearer = HTTPBearer(auto_error=False)
 Sessionmaker = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
 Store = Annotated[SessionStore, Depends(get_session_store)]
 KMS = Annotated[KeyManagementService, Depends(get_kms)]
+ResetLimiter = Annotated[PasswordResetRateLimiter, Depends(get_password_reset_rate_limiter)]
 
 
 # --- request/response models -------------------------------------------------
@@ -907,3 +922,200 @@ async def activate_invitation_mfa(
         user_id=invite.app_user_id,
     )
     return ok(RecoveryCodesResponse(recovery_codes=list(codes)))
+
+
+# --- self-service password reset (tenant tier) --------------------------------
+
+
+class PasswordResetRequestBody(BaseModel):
+    email: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str
+    password: str
+
+
+async def _send_password_reset_email(
+    email_sender: EmailSender, *, to: str, reset_url: str, ttl_seconds: int
+) -> None:
+    """Deliver the reset link; never raises, never logs the URL/token."""
+    try:
+        await email_sender.send(
+            EmailMessage(
+                to=to,
+                subject="Reset your Vera password",
+                body=(
+                    "A password reset was requested for your Vera account. Open this "
+                    f"link to set a new password (valid for {ttl_seconds // 60} minutes):\n\n"
+                    f"{reset_url}\n\n"
+                    "If you didn't request this, you can ignore this email."
+                ),
+            )
+        )
+    except Exception:
+        logger.warning("password reset email to %s could not be sent", to, exc_info=True)
+
+
+@router.post(
+    "/tenants/{tenant_slug}/auth/password-reset/request",
+    response_model=ResponseModel[None],
+)
+async def request_password_reset(
+    tenant_slug: str,
+    body: PasswordResetRequestBody,
+    request: Request,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    invites: Invites,
+    email_sender: Email,
+    audit: AuthAudit,
+    limiter: ResetLimiter,
+    settings: AppSettings,
+) -> ResponseModel[None]:
+    """Always the same generic 200 — unknown slug/email, ineligible accounts, and
+    over-limit requests are indistinguishable (no user enumeration). The email is a
+    detached task, so response timing can't leak eligibility either."""
+    response.headers["Cache-Control"] = "no-store"
+    slug = normalize_slug(tenant_slug)
+    email = body.email.strip()
+    # Hashed key: no raw email in Redis; counted before any lookup.
+    limiter_key = hashlib.sha256(f"{slug}:{email.lower()}".encode()).hexdigest()
+    allowed = await limiter.check_and_increment(limiter_key)
+    tenant_id = await resolve_tenant_id(sessionmaker, tenant_slug)
+    if tenant_id is None:
+        return ok(None)  # un-audited, same posture as login's unknown-slug path
+    if not allowed:
+        await _audit(
+            audit,
+            tenant_id=tenant_id,
+            event=AuthEvent.PASSWORD_RESET_REQUESTED,
+            ip=client_ip(request),
+            reason="rate_limited",
+        )
+        return ok(None)
+
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        creds = await _load_password_creds(session, email, account_type=AccountType.TENANT.value)
+    if creds is None or creds.status != "active" or creds.hashed_password is None:
+        await _audit(
+            audit,
+            tenant_id=tenant_id,
+            event=AuthEvent.PASSWORD_RESET_REQUESTED,
+            ip=client_ip(request),
+            user_id=creds.user_id if creds is not None else None,
+            reason="ineligible",
+        )
+        return ok(None)
+
+    token = await invites.put(
+        PASSWORD_RESET_NS,
+        InviteData(tenant_id=tenant_id, app_user_id=creds.user_id, email=creds.email),
+        settings.password_reset_ttl_seconds,
+    )
+    reset_url = f"{settings.frontend_base_url}/tenants/{slug}/reset-password?token={token}"
+    schedule_detached(
+        _send_password_reset_email(
+            email_sender,
+            to=creds.email,
+            reset_url=reset_url,
+            ttl_seconds=settings.password_reset_ttl_seconds,
+        )
+    )
+    await _audit(
+        audit,
+        tenant_id=tenant_id,
+        event=AuthEvent.PASSWORD_RESET_REQUESTED,
+        ip=client_ip(request),
+        user_id=creds.user_id,
+    )
+    return ok(None)
+
+
+@router.get(
+    "/tenants/{tenant_slug}/auth/password-reset/validate",
+    response_model=ResponseModel[InviteValidateResponse],
+)
+async def validate_password_reset(
+    tenant_slug: str,
+    token: str,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    invites: Invites,
+) -> ResponseModel[InviteValidateResponse]:
+    """Token-scoped pre-flight (mirrors validate_invitation): returns the state
+    without consuming the token. The caller already holds the high-entropy token,
+    so this enables no enumeration."""
+    response.headers["Cache-Control"] = "no-store"
+    tenant_id, reset = await asyncio.gather(
+        resolve_tenant_id(sessionmaker, tenant_slug),
+        invites.get(PASSWORD_RESET_NS, token),
+    )
+    if tenant_id is None or reset is None or reset.tenant_id != tenant_id:
+        return ok(InviteValidateResponse(state="invalid"))
+
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        row = (
+            await session.execute(select(AppUser.status).where(AppUser.id == reset.app_user_id))
+        ).one_or_none()
+
+    if row is None:
+        return ok(InviteValidateResponse(state="invalid"))
+    if row.status == "active":
+        return ok(InviteValidateResponse(state="valid"))
+    if row.status == "deactivated":
+        return ok(InviteValidateResponse(state="deactivated"))
+    return ok(InviteValidateResponse(state="invalid"))
+
+
+@router.post(
+    "/tenants/{tenant_slug}/auth/password-reset/confirm",
+    response_model=ResponseModel[None],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.BAD_REQUEST,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.VALIDATION_ERROR,
+    ),
+)
+async def confirm_password_reset(
+    tenant_slug: str,
+    body: PasswordResetConfirmRequest,
+    request: Request,
+    response: Response,
+    sessionmaker: Sessionmaker,
+    invites: Invites,
+    store: Store,
+    audit: AuthAudit,
+) -> ResponseModel[None]:
+    """Unauthenticated, token-gated: sets the new password on the EXISTING
+    identity (MFA enrollment untouched), spends the token, and revokes every live
+    session — the user signs in again through the normal MFA gate."""
+    response.headers["Cache-Control"] = "no-store"
+    tenant_id = await resolve_tenant_id(sessionmaker, tenant_slug)
+    reset = await invites.get(PASSWORD_RESET_NS, body.token)
+    if tenant_id is None or reset is None or reset.tenant_id != tenant_id:
+        raise _unauthorized()
+    if len(body.password.encode()) > MAX_PASSWORD_BYTES:
+        raise BadRequestError(message="password too long")
+
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        status = (
+            await session.execute(select(AppUser.status).where(AppUser.id == reset.app_user_id))
+        ).scalar_one_or_none()
+        if status != "active":  # gone, invited, or deactivated
+            raise _unauthorized()
+        ident = await _password_identity_row(session, reset.app_user_id, for_update=True)
+        if ident is None:
+            raise _unauthorized()  # request never mints for identity-less users
+        ident.hashed_password = hash_password(body.password)
+
+    await invites.delete(PASSWORD_RESET_NS, body.token)
+    await store.delete_all_for_user(reset.app_user_id)
+    await _audit(
+        audit,
+        tenant_id=tenant_id,
+        event=AuthEvent.PASSWORD_RESET_COMPLETED,
+        ip=client_ip(request),
+        user_id=reset.app_user_id,
+    )
+    return ok(None)
