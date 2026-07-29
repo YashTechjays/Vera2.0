@@ -164,7 +164,7 @@ async def test_list_tenants_discloses_retry_config_to_manager(
     resp = await client.get("/api/v1/platform/tenants", headers=_auth(world.super_admin_token))
     assert resp.status_code == 200, resp.text
     row = next(r for r in resp.json()["data"] if r["id"] == str(world.tenant_id))
-    assert row["auto_retry_enabled"] is False
+    assert row["auto_retry_enabled"] is True
     assert row["retry_fill_threshold"] == 0.50
 
 
@@ -220,7 +220,7 @@ async def test_set_threshold_only(
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()["data"]
-    assert body["auto_retry_enabled"] is False
+    assert body["auto_retry_enabled"] is True
     assert body["retry_fill_threshold"] == 0.42
 
 

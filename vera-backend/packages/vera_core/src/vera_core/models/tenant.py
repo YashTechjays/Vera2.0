@@ -43,8 +43,8 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     max_concurrent_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=25)
     retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.50)
     # Per-tenant auto-retry switch, ANDed with the deployment kill-switch
-    # (VERA_FORM_AUTO_RETRY_ENABLED); platform-managed, off until enabled.
-    auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # (VERA_FORM_AUTO_RETRY_ENABLED); platform-managed, on until a platform operator opts out.
+    auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     queue_expiry_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=48)

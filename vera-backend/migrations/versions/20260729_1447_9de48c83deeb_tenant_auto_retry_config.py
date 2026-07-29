@@ -76,7 +76,7 @@ $$
 def upgrade() -> None:
     op.execute(
         "ALTER TABLE tenant ADD COLUMN IF NOT EXISTS auto_retry_enabled"
-        " boolean NOT NULL DEFAULT false"
+        " boolean NOT NULL DEFAULT true"
     )
     op.execute("ALTER TABLE tenant ALTER COLUMN retry_fill_threshold SET DEFAULT 0.50")
     op.execute(BACKFILL_THRESHOLD)

@@ -13,9 +13,10 @@ pattern (PR #11, `feat/enable-disable-form-filling`).
 - **Flag layering:** auto-retry fires only when BOTH the deployment-wide
   `VERA_FORM_AUTO_RETRY_ENABLED` env var (retained as an ops kill-switch) AND
   the new per-tenant flag are on.
-- **Flag default:** `Tenant.auto_retry_enabled` defaults to **False** — a
-  platform operator explicitly enables it per tenant. (The test tenant needs
-  one toggle after deploy to resume retries.)
+- **Flag default:** `Tenant.auto_retry_enabled` defaults to **True** (revised
+  post-review from the original off-by-default choice) — retry behavior
+  continues uninterrupted wherever the env kill-switch is on, and platform
+  operators opt tenants *out* per tenant.
 - **Threshold:** model default changes `0.95 → 0.50`, and a migration
   backfills tenants still at the untouched old default
   (`WHERE retry_fill_threshold = 0.95`). Deliberately-set values are left
@@ -159,8 +160,9 @@ In `api/v1/platform.py`, mirroring `set_tenant_observer`:
 
 ## Risks & trade-offs
 
-- Post-deploy, no tenant auto-retries until a platform operator flips the
-  toggle (chosen default) — the test tenant needs one click.
+- Post-deploy, every tenant auto-retries wherever the env kill-switch is on
+  (revised default) — a tenant that must not redial needs a platform operator
+  to toggle it off.
 - The 0.95→0.50 backfill assumes 0.95 means "never touched"; true today.
 - The definer fn's COALESCE partial-update means an all-NULL call is a no-op
   that still returns true for a matching tenant — the endpoint's
