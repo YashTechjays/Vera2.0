@@ -67,3 +67,8 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     )
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def allows_auto_retry(self, deployment_enabled: bool) -> bool:
+        """AND-gate shared by both retry-decision sites: the deployment kill-switch
+        and this tenant's own switch must both be on."""
+        return deployment_enabled and self.auto_retry_enabled

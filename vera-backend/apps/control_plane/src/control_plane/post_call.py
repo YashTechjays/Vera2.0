@@ -94,7 +94,7 @@ async def resolve_ai_processing(
         )
         # completion_pct is 0-100; retry_fill_threshold is a 0-1 fraction.
         low_fill = float(form.completion_pct) < float(tenant.retry_fill_threshold) * 100
-        if auto_retry_enabled and tenant.auto_retry_enabled and low_fill and not user_ended:
+        if tenant.allows_auto_retry(auto_retry_enabled) and low_fill and not user_ended:
             # Auto-retry while retries remain; fall through to human review when exhausted.
             with contextlib.suppress(InvalidTransitionError):
                 sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)

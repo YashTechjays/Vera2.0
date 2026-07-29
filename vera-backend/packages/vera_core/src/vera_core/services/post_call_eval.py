@@ -498,7 +498,7 @@ async def evaluate_call(
                 reviewed=unsatisfied,
                 reason=ReviewReason.USER_ENDED,
             )
-        if deps.auto_retry_enabled and tenant.auto_retry_enabled:
+        if tenant.allows_auto_retry(deps.auto_retry_enabled):
             return await _finish(
                 FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry"
             )

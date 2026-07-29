@@ -59,42 +59,38 @@ export function PlatformSettings() {
     )
   }
 
-  async function onToggle(tenant: TenantSummary, next: boolean) {
+  // Shared optimistic-toggle shape for both boolean switches: flip the field in place,
+  // call the API, revert on failure. `field` narrows to the boolean-typed columns only.
+  async function toggleField(
+    field: "observer_enabled" | "auto_retry_enabled",
+    tenant: TenantSummary,
+    next: boolean,
+    setSavingFieldId: (id: string | null) => void,
+    call: () => Promise<unknown>,
+  ) {
     setError(null)
-    setSavingId(tenant.id)
-    // Optimistic: flip in place, revert on failure.
-    setTenants((prev) =>
-      prev?.map((t) => (t.id === tenant.id ? { ...t, observer_enabled: next } : t)) ?? prev,
-    )
+    setSavingFieldId(tenant.id)
+    setTenants((prev) => prev?.map((t) => (t.id === tenant.id ? { ...t, [field]: next } : t)) ?? prev)
     try {
-      await setTenantObserverEnabled(tenant.id, next)
+      await call()
     } catch (err) {
-      setTenants((prev) =>
-        prev?.map((t) => (t.id === tenant.id ? { ...t, observer_enabled: !next } : t)) ?? prev,
-      )
+      setTenants((prev) => prev?.map((t) => (t.id === tenant.id ? { ...t, [field]: !next } : t)) ?? prev)
       setError(err instanceof ApiError ? err.message : "Could not update the tenant.")
     } finally {
-      setSavingId(null)
+      setSavingFieldId(null)
     }
   }
 
-  async function onToggleRetry(tenant: TenantSummary, next: boolean) {
-    setError(null)
-    setSavingRetryId(tenant.id)
-    // Optimistic: flip in place, revert on failure.
-    setTenants((prev) =>
-      prev?.map((t) => (t.id === tenant.id ? { ...t, auto_retry_enabled: next } : t)) ?? prev,
+  async function onToggle(tenant: TenantSummary, next: boolean) {
+    await toggleField("observer_enabled", tenant, next, setSavingId, () =>
+      setTenantObserverEnabled(tenant.id, next),
     )
-    try {
-      await setTenantRetryConfig(tenant.id, { auto_retry_enabled: next })
-    } catch (err) {
-      setTenants((prev) =>
-        prev?.map((t) => (t.id === tenant.id ? { ...t, auto_retry_enabled: !next } : t)) ?? prev,
-      )
-      setError(err instanceof ApiError ? err.message : "Could not update the tenant.")
-    } finally {
-      setSavingRetryId(null)
-    }
+  }
+
+  async function onToggleRetry(tenant: TenantSummary, next: boolean) {
+    await toggleField("auto_retry_enabled", tenant, next, setSavingRetryId, () =>
+      setTenantRetryConfig(tenant.id, { auto_retry_enabled: next }),
+    )
   }
 
   async function commitThreshold(tenant: TenantSummary) {
