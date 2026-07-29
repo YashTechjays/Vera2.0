@@ -683,6 +683,43 @@ async def test_token_valued_field_routes_to_review(
     assert form.enqueued_at is None  # review path must not queue the form
 
 
+async def test_blank_valued_field_is_never_stored(  # VR2-93
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    # This writer bypasses record_answer, so a blank extraction would demote the
+    # baseline and leave an empty field flagged as a dispute.
+    ctx = seeded_ai_processing_form
+    path = ctx.collection_path
+    turns = [TranscriptTurn(0, "user", "I don't have that information")]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(path, "  ", 40, 0)],
+        verdicts=[],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    rows = (
+        (
+            await ctx.session.execute(
+                select(FieldAnswer).where(FieldAnswer.source == AnswerSource.AI_CALL.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == []  # a blank value must never become the current answer
+
+
 async def test_redelivery_is_a_noop(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,

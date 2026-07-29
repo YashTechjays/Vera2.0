@@ -7,6 +7,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+from vera_core.forms.review import is_blank_answer
 from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
 
 
@@ -33,6 +34,7 @@ def _clamp_confidence(raw: Any) -> int:
 
 
 def parse_extract_response(data: list[dict[str, Any]]) -> list[ExtractedField]:
+    # the response schema forces a value on every item, so unheard fields arrive as "" (VR2-93)
     return [
         ExtractedField(
             field_path=str(d["field_path"]),
@@ -41,6 +43,7 @@ def parse_extract_response(data: list[dict[str, Any]]) -> list[ExtractedField]:
             evidence_seq=int(d["evidence_seq"]),
         )
         for d in data
+        if not is_blank_answer(d["value"])
     ]
 
 

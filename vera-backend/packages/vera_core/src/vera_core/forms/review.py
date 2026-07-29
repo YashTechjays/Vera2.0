@@ -68,6 +68,14 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
+def is_blank_answer(value: Any) -> bool:
+    """True when a value counts as "not answered": None or whitespace-only. A blank
+    AI answer must never supersede a baseline — it would demote the real value and
+    flag an empty field as a dispute (VR2-93). Single definition for every AI write
+    path; humans/intake may still clear a value."""
+    return value is None or not str(value).strip()
+
+
 def dispute_view(
     *,
     source: str,

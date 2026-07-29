@@ -203,6 +203,35 @@ def _summary(
     )
 
 
+def _end_call_audit(
+    request: Request,
+    *,
+    tenant_id: UUID,
+    call: Call,
+    caller: VerifiedIdentity,
+    actor_label: str,
+    phase: str,
+) -> AuditRecord:
+    """One shape for every end-call trail — `phase` names which branch acted
+    (`pre_answer`, `live`, or `terminal_reap`, the stranded-room hangup)."""
+    return AuditRecord(
+        tenant_id=tenant_id,
+        actor_type=ActorType.USER,
+        actor_user_id=caller.user_id,
+        actor_label=actor_label,
+        event_type=AuditEvent.CALL_END.value,
+        resource_type="call",
+        resource_id=str(call.id),
+        permission_key="calls:read",
+        decision="allow",
+        request_id=current_request_id(request),
+        detail={
+            "owner_id": str(call.initiated_by_id) if call.initiated_by_id else None,
+            "phase": phase,
+        },
+    )
+
+
 @router.get(
     "/calls/{call_id}/join-token",
     response_model=ResponseModel[JoinTokenResponse],
@@ -674,8 +703,6 @@ async def end_call(
     ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None or _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")
-    if call.current_status in TERMINAL_VALUES:
-        return ok(None, message="Call already ended.")  # idempotent no-op
     room_name = room_name_for_call(tenant_id, call.id)
     # Lock-free read by design: holding the row lock across the presence probe is worse
     # than the benign race with a fresh claim (worst case: a moments-ago-legal end).
@@ -695,24 +722,40 @@ async def end_call(
         and call.initiated_by_id != caller.user_id
     ):
         raise ConflictError(message="only the call's owner can end this call before intervention")
-    pre_answer = call.started_at is None
     actor_label = caller.email or caller.subject
+    if call.current_status in TERMINAL_VALUES:
+        # The row can go terminal while the room survives (the agent self-ended but
+        # the room delete never took) — and deleting the room is the ONLY thing that
+        # hangs up the phone leg, so the idempotent no-op must still reap it (VR2-60).
+        # Stays BELOW the authz gates: that surviving room is a live phone call, so
+        # reaping it is exactly what VR2-59 restricts to the owner/intervener.
+        # Audited like any other end: the closeout is a no-op here, but hanging up a
+        # live leg is a real disclosure-relevant action, so it needs its own trail.
+        await audit.emit(
+            _end_call_audit(
+                request,
+                tenant_id=tenant_id,
+                call=call,
+                caller=caller,
+                actor_label=actor_label,
+                phase="terminal_reap",
+            )
+        )
+        # Best-effort teardown: a hiccup must not turn "already ended" into a 500.
+        try:
+            await livekit.delete_room(room_name)
+        except Exception as exc:
+            logger.warning("end_call: terminal-room reap failed (%s)", type(exc).__name__)
+        return ok(None, message="Call already ended.")
+    pre_answer = call.started_at is None
     await audit.emit(
-        AuditRecord(
+        _end_call_audit(
+            request,
             tenant_id=tenant_id,
-            actor_type=ActorType.USER,
-            actor_user_id=caller.user_id,
+            call=call,
+            caller=caller,
             actor_label=actor_label,
-            event_type=AuditEvent.CALL_END.value,
-            resource_type="call",
-            resource_id=str(call.id),
-            permission_key="calls:read",
-            decision="allow",
-            request_id=current_request_id(request),
-            detail={
-                "owner_id": str(call.initiated_by_id) if call.initiated_by_id else None,
-                "phase": "pre_answer" if pre_answer else "live",
-            },
+            phase="pre_answer" if pre_answer else "live",
         )
     )
     if pre_answer:

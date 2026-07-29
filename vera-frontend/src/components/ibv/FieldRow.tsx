@@ -3,12 +3,8 @@ import { Info } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import {
-  ApplyButton,
-  SwapButton,
-  DisputeBadge,
-} from "./DisputeControls"
-import { badgeValue, confidenceHighlightClass } from "@/lib/ibv/disputes"
+import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
+import { confidenceHighlightClass } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable, isRequired } from "@/lib/ibv/schema"
 import { USAGE_META } from "./usageMeta"
 import {
@@ -54,6 +50,9 @@ type Props = {
   depth: number
   /** applicable_when chain from the section down to this leaf */
   gates: Condition[]
+  /** narrow layout (the 340px rail): controls + badge overflow the ~120px input,
+   *  so the badge folds into the tooltip */
+  compact?: boolean
 }
 
 /**
@@ -62,7 +61,7 @@ type Props = {
  * Inapplicable rows (own or ancestor `applicable_when` false) gray out and show
  * the field's `inapplicable_value`.
  */
-export function FieldRow({ field, path, depth, gates }: Props) {
+export function FieldRow({ field, path, depth, gates, compact }: Props) {
   const {
     schema,
     values,
@@ -92,6 +91,7 @@ export function FieldRow({ field, path, depth, gates }: Props) {
   const highlightClass = showDispute
     ? confidenceHighlightClass(dispute!.confidence)
     : undefined
+  const disputeGutter = compact ? "50px" : "150px"
 
   return (
     <div className="flex min-h-[26px]">
@@ -125,20 +125,27 @@ export function FieldRow({ field, path, depth, gates }: Props) {
           title={disabledReason ?? invalidReason}
           invalid={!!invalidReason}
           highlightClass={highlightClass}
-          inputPaddingRight={showDispute ? "150px" : undefined}
+          inputPaddingRight={showDispute ? disputeGutter : undefined}
           noRightBorder
         />
-        {showDispute && (
-          <div className="absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-1">
-            <SwapButton swapped={flags.swapped} onClick={() => swapDispute(path)} />
-            <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
-            <DisputeBadge
-              value={badgeValue(dispute!, flags)}
+        {showDispute &&
+          (compact ? (
+            <CompactDisputeControls
               dispute={dispute!}
-              label={flags.swapped ? "Captured" : "Prior"}
+              flags={flags}
+              className="top-1/2 right-1 -translate-y-1/2"
+              onSwap={() => swapDispute(path)}
+              onApply={() => applyDispute(path)}
             />
-          </div>
-        )}
+          ) : (
+            <InlineDisputeControls
+              dispute={dispute!}
+              flags={flags}
+              className="right-1.5"
+              onSwap={() => swapDispute(path)}
+              onApply={() => applyDispute(path)}
+            />
+          ))}
       </div>
     </div>
   )

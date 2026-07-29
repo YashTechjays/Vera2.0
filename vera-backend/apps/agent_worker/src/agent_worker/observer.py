@@ -40,6 +40,7 @@ from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
+from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
     SOURCE_BOT,
@@ -150,7 +151,8 @@ def _parse_extraction(text: str) -> list[ExtractedAnswer]:
         if not isinstance(row, dict):
             continue
         path, value = row.get("field_path"), row.get("value")
-        if not isinstance(path, str) or value is None:
+        # blank/absent answers must not supersede the intake baseline (VR2-93)
+        if not isinstance(path, str) or is_blank_answer(value):
             continue
         answers.append(
             ExtractedAnswer(

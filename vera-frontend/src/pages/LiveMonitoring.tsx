@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle,
   ArrowUp,
@@ -166,6 +166,15 @@ export function LiveMonitoring() {
   // verdict below so a notification's deep link isn't given up on before the
   // first fetch has even had a chance to include the target call.
   const hasLoadedOnce = useRef(false)
+  // Calls the modal's SSE saw end before the DB caught up (the worker's shutdown
+  // drain defers the status flip by many seconds — VR2-72). Pinned as completed
+  // across polls until the server stops returning them as active.
+  const endedBySse = useRef<Set<string>>(new Set())
+
+  const markEnded = useCallback((callId: string) => {
+    endedBySse.current.add(callId)
+    setCalls((prev) => prev.map((c) => (c.id === callId ? { ...c, status: "completed" } : c)))
+  }, [])
 
   // Load + poll (skip while the tab is hidden); a realtime notification
   // (intervention alert) refetches immediately instead of waiting the poll out.
@@ -180,7 +189,12 @@ export function LiveMonitoring() {
       ])
       if (cancelled) return
       if (items.status === "fulfilled") {
-        setCalls(items.value)
+        const ended = endedBySse.current
+        // Server no longer lists it as active → it caught up; drop the pin.
+        for (const id of [...ended]) if (!items.value.some((c) => c.id === id)) ended.delete(id)
+        setCalls(
+          items.value.map((c) => (ended.has(c.id) ? { ...c, status: "completed" } : c)),
+        )
         setError(null)
       } else {
         setError(
@@ -450,6 +464,7 @@ export function LiveMonitoring() {
           if (selected.form_id === loadedFormId) openLoadedForm()
           else openFormById(selected.form_id)
         }}
+        onCallEnded={markEnded}
       />
     </div>
   )
