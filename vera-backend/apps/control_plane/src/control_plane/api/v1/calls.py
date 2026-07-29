@@ -12,11 +12,12 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,6 +34,7 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_authz import authorize_or_403 as _authorize_or_403
 from control_plane.call_authz import call_hidden_from as _call_hidden_from
+from control_plane.call_authz import visible_to as _visible_to
 from control_plane.call_closeout import TERMINAL_VALUES, announce_terminal_status, close_call
 from control_plane.call_summary import (
     CallSummaryResponse,
@@ -66,14 +68,23 @@ from control_plane.transcript_finalizer import finalize_transcript
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
+    TYPE_FIELD_ANSWER,
     TYPE_TRANSCRIPT,
     CallStreamEvent,
     CallStreamService,
 )
 from vera_core.config.kms import KeyManagementService
 from vera_core.db.rls import tenant_session
+from vera_core.forms.review import unwrap_value
 from vera_core.llm import LLMUnavailableError, ResilientLLM
-from vera_core.models import Call, InterventionEvent, PatientForm, Recording, Transcript
+from vera_core.models import (
+    Call,
+    FieldAnswer,
+    InterventionEvent,
+    PatientForm,
+    Recording,
+    Transcript,
+)
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
@@ -85,6 +96,7 @@ from vera_core.observability.correlation import (
     room_name_for_call,
 )
 from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
+from vera_core.services.call_visibility import recording_playable
 
 logger = logging.getLogger(__name__)
 
@@ -188,17 +200,6 @@ def _summary(
         health_flag=call.health_flag,
         health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
-    )
-
-
-def _visible_to(caller_id: UUID) -> ColumnElement[bool]:
-    """Calls the caller may see: their own, published ones, and ownerless
-    (pre-ownership dispatcher) calls — hidden, those would have no monitoring
-    and no owner to ever publish them."""
-    return or_(
-        Call.initiated_by_id == caller_id,
-        Call.published.is_(True),
-        Call.initiated_by_id.is_(None),
     )
 
 
@@ -401,6 +402,29 @@ async def stream_call_events(
                 .scalars()
                 .all()
             )
+            # Current answers + completion so a client that only tails the SSE sees the
+            # filled form for a terminal call (the live stream is already gone). Carries
+            # the real source/confidence so it matches the REST form load — no drift.
+            answer_rows = (
+                await session.execute(
+                    select(
+                        FieldAnswer.field_path,
+                        FieldAnswer.value,
+                        FieldAnswer.source,
+                        FieldAnswer.confidence,
+                        FieldAnswer.evidence_seq,
+                    ).where(
+                        FieldAnswer.form_id == call.form_id,
+                        FieldAnswer.is_current.is_(True),
+                    )
+                )
+            ).all()
+            completion_raw = (
+                await session.execute(
+                    select(PatientForm.completion_pct).where(PatientForm.id == call.form_id)
+                )
+            ).scalar_one_or_none()
+            completion_pct = float(completion_raw) if completion_raw is not None else None
         db_events = [
             (
                 f"db-{row.seq}",
@@ -416,13 +440,36 @@ async def stream_call_events(
             )
             for row in rows
         ]
+        snapshot_ts = _epoch_ms(call.ended_at) or int(time.time() * 1000)
+        # One snapshot, so every frame carries the SAME completion_pct — the form's value
+        # as of this read, not a per-answer running total (these rows have no ordering to
+        # reconstruct one from). `dispute` is deliberately absent, not null: a replay must
+        # leave the disputes the REST form load already populated alone.
+        db_events.extend(
+            (
+                f"db-answer-{seq}",
+                CallStreamEvent(
+                    type=TYPE_FIELD_ANSWER,
+                    data={
+                        "field_path": field_path,
+                        "value": unwrap_value(value),
+                        "source": source,
+                        "confidence": confidence,
+                        "evidence_seq": evidence_seq,
+                        "completion_pct": completion_pct,
+                    },
+                    ts=snapshot_ts,
+                ),
+            )
+            for seq, (field_path, value, source, confidence, evidence_seq) in enumerate(answer_rows)
+        )
         db_events.append(
             (
                 "db-status",
                 CallStreamEvent(
                     type=TYPE_CALL_STATUS,
                     data={"status": call.current_status},
-                    ts=_epoch_ms(call.ended_at) or int(time.time() * 1000),
+                    ts=snapshot_ts,
                 ),
             )
         )
@@ -610,8 +657,17 @@ async def end_call(
     already terminal and no-op).
 
     Visibility matches join-token (`_call_hidden_from`): anyone who may watch
-    the call may end it; a hidden call 404s so it is never revealed. While a
+    the call may end it if it is published (VR2-59 tightens this to just the
+    owner — see below); a hidden call 404s so it is never revealed. While a
     takeover is live, only the intervening supervisor may end the call.
+
+    VR2-59: before anyone has EVER intervened (`intervener_user_id` still
+    null), only the call's owner may end it — a published/"visible to all"
+    call let every watching VA end a call they never joined. A stale/abandoned
+    takeover (crashed supervisor) keeps the existing crash-recovery openness:
+    any viewer may still end it, same as before this change. Ownerless calls
+    (dispatcher-created, no `initiated_by_id`) are unaffected: there is no
+    owner to restrict to.
     """
     call = (
         await session.execute(select(Call).where(Call.id == call_id))
@@ -630,6 +686,15 @@ async def end_call(
         and await _intervener_lock_live(session, livekit, room_name, call, holder)
     ):
         raise ConflictError(message="only the intervening supervisor can end this call")
+    # Only gates the never-intervened case: a stale/abandoned holder (crashed
+    # supervisor) already falls through the check above, and must stay endable
+    # by any viewer — that's the crash-recovery path, distinct from VR2-59.
+    if (
+        holder is None
+        and call.initiated_by_id is not None
+        and call.initiated_by_id != caller.user_id
+    ):
+        raise ConflictError(message="only the call's owner can end this call before intervention")
     pre_answer = call.started_at is None
     actor_label = caller.email or caller.subject
     await audit.emit(
@@ -787,6 +852,162 @@ async def call_stats(
     ).one()
     total_today, live, critical = row
     return ok(CallStats(total_today=total_today, live=live, critical=critical))
+
+
+class CallHistoryRow(BaseModel):
+    """One call attempt in the tenant-wide Call History list. Carries the patient
+    identifiers the list displays (PHI) plus call metadata; no field values or
+    transcript. `recording_available` is caller-aware (see `_call_attempt_view`)."""
+
+    id: UUID
+    form_id: UUID
+    mode: str
+    status: str
+    created_at: datetime
+    patient_name: str | None
+    member_id: str | None
+    insurance_provider: str | None
+    recording_available: bool
+
+
+class PaginatedCalls(BaseModel):
+    items: list[CallHistoryRow]
+    page: int
+    page_size: int
+    total: int
+
+
+@router.get(
+    "/call-history",
+    response_model=ResponseModel[PaginatedCalls],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_call_history(
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    audit: Audit,
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status: Annotated[str | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
+    date_from: Annotated[datetime | None, Query()] = None,
+    date_to: Annotated[datetime | None, Query()] = None,
+    caller: VerifiedIdentity = require("calls:read"),
+) -> ResponseModel[PaginatedCalls]:
+    """The tenant's calls as a flat, newest-first list across every form — the
+    cross-form counterpart to `/patient-forms/{id}/calls`. RLS scopes rows to the
+    tenant; patient identifiers are a PHI disclosure (audited, no-store)."""
+    response.headers["Cache-Control"] = "no-store"
+    conds: list[ColumnElement[bool]] = []
+    if status is not None:
+        conds.append(Call.current_status == status)
+    if q:
+        # patient_name is trigram-indexed (contains match); member_id is not, so it
+        # takes a prefix match — the natural way to search a policy number and the
+        # only index-friendly shape.
+        conds.append(
+            or_(PatientForm.patient_name.ilike(f"%{q}%"), PatientForm.member_id.ilike(f"{q}%"))
+        )
+    if date_from is not None:
+        conds.append(Call.created_at >= date_from)
+    if date_to is not None:
+        conds.append(Call.created_at <= date_to)
+
+    has_recording = (
+        select(Recording.id)
+        .where(Recording.call_id == Call.id, Recording.status == RecordingStatus.AVAILABLE.value)
+        .exists()
+    )
+
+    async def _fetch_page() -> tuple[list[Any], int]:
+        """The page rows joined to their form, with the filtered total as a window
+        column. An out-of-range page returns no rows; fall back to a bare count."""
+        rows = (
+            await session.execute(
+                select(
+                    Call.id,
+                    Call.form_id,
+                    Call.mode,
+                    Call.current_status,
+                    Call.created_at,
+                    Call.initiated_by_id,
+                    Call.published,
+                    PatientForm.patient_name,
+                    PatientForm.member_id,
+                    PatientForm.insurance_provider,
+                    has_recording.label("has_recording"),
+                    func.count().over().label("total"),
+                )
+                .join(PatientForm, PatientForm.id == Call.form_id)
+                .where(*conds)
+                # id (UUIDv7) tie-break keeps pages stable across equal timestamps.
+                .order_by(Call.created_at.desc(), Call.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        if rows:
+            return list(rows), int(rows[0].total)
+        total = (
+            await session.execute(
+                select(func.count()).select_from(Call).join(PatientForm).where(*conds)
+            )
+        ).scalar_one()
+        return [], total
+
+    fetch_result, audit_result = await asyncio.gather(
+        _fetch_page(),
+        emit_phi_read_audit(
+            audit,
+            request,
+            tenant_id=tenant_id,
+            caller=caller,
+            resource_type="call",
+            resource_id="list",
+            fields=["patient_name", "member_id", "insurance_provider"],
+        ),
+        return_exceptions=True,
+    )
+    if isinstance(audit_result, BaseException):
+        raise audit_result
+    if isinstance(fetch_result, BaseException):
+        raise fetch_result
+    rows, total = fetch_result
+
+    # recordings:read shapes recording_available only (the timeline needs just
+    # calls:read; the playback endpoint re-enforces it). Skip the resolve when the
+    # page is empty — can_play is consumed only per row.
+    can_play = (
+        bool(rows)
+        and "recordings:read"
+        in (await resolver.effective_permissions(session, tenant_id, caller.user_id))[1]
+    )
+    items = [
+        CallHistoryRow(
+            id=r.id,
+            form_id=r.form_id,
+            mode=r.mode,
+            status=r.current_status,
+            created_at=r.created_at,
+            patient_name=r.patient_name,
+            member_id=r.member_id,
+            insurance_provider=r.insurance_provider,
+            recording_available=recording_playable(
+                has_recording=r.has_recording,
+                initiated_by_id=r.initiated_by_id,
+                published=r.published,
+                user_id=caller.user_id,
+                can_play=can_play,
+            ),
+        )
+        for r in rows
+    ]
+    return ok(PaginatedCalls(items=items, page=page, page_size=page_size, total=total))
 
 
 @router.get(

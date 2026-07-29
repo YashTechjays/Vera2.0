@@ -1,6 +1,8 @@
 from .dto import (
     CallStats,
     CallSummary,
+    ConcurrencyConfig,
+    ConcurrencyConfigUpdate,
     JoinTokenResponse,
     RecordingPlayback,
     RetentionPolicy,
@@ -15,6 +17,8 @@ from .persona import PersonaTweak
 __all__ = [
     "CallStats",
     "CallSummary",
+    "ConcurrencyConfig",
+    "ConcurrencyConfigUpdate",
     "FieldType",
     "FormField",
     "FormTemplate",

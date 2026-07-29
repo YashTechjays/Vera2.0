@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Loader2, Mic, MicOff, PhoneOff, Radio, Volume2, VolumeX } from "lucide-react"
+import { ChevronDown, Loader2, Mic, MicOff, PhoneOff, Radio, Volume2, VolumeX } from "lucide-react"
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -12,6 +12,11 @@ import {
 import { ConnectionState, ParticipantKind, Track, type Participant } from "livekit-client"
 
 import { Button } from "@/components/ui/button"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
 import { terminalStatusMessage } from "@/lib/api/callEvents"
@@ -154,6 +159,7 @@ function RoomView({
   const state = useConnectionState()
   const participants = useParticipants()
   const [outputMuted, setOutputMuted] = useState(false)
+  const [rosterOpen, setRosterOpen] = useState(true)
   // Latch: once connected, a later disconnect means the room is gone, not a connect still in flight.
   const [everConnected, setEverConnected] = useState(false)
   if (state === ConnectionState.Connected && !everConnected) setEverConnected(true)
@@ -195,16 +201,26 @@ function RoomView({
         <p className="text-muted-foreground">Waiting for the call…</p>
       )}
       {roster.length > 0 && (
-        <div>
-          <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Participants ({roster.length})
-          </p>
-          <ul className="space-y-1">
-            {roster.map((p) => (
-              <ParticipantRow key={p.sid} participant={p} />
-            ))}
-          </ul>
-        </div>
+        <Collapsible open={rosterOpen} onOpenChange={setRosterOpen}>
+          <CollapsibleTrigger
+            className="flex w-full items-center justify-between"
+            title={rosterOpen ? "Collapse participants" : "Expand participants"}
+          >
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Participants ({roster.length})
+            </span>
+            <ChevronDown
+              className={`size-3.5 text-muted-foreground transition-transform ${rosterOpen ? "" : "-rotate-90"}`}
+            />
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <ul className="mt-1 space-y-1">
+              {roster.map((p) => (
+                <ParticipantRow key={p.sid} participant={p} />
+              ))}
+            </ul>
+          </CollapsibleContent>
+        </Collapsible>
       )}
       <RoomAudioRenderer muted={outputMuted} />
     </div>

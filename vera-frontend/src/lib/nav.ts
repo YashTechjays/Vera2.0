@@ -2,6 +2,7 @@ import {
   Activity,
   Bot,
   Building2,
+  Cpu,
   PhoneCall,
   BarChart3,
   Database,
@@ -39,6 +40,7 @@ export const navItems: NavItem[] = [
   { title: "Insurance Providers", to: "/insurance-providers", icon: Building2, permission: "platform:insurance_providers:read" },
   { title: "IVR Playbooks", to: "/ivr-playbooks", icon: ListTree, permission: "platform:ivr_playbooks:read" },
   { title: "Form Schemas", to: "/form-schemas", icon: FileText, permission: "platform:form_schemas:read" },
+  { title: "Voice Model", to: "/voice-model", icon: Cpu, permission: "platform:llm_config:read" },
   { title: "Users", to: "/users", icon: Users, permission: "users:read" },
   { title: "Settings", to: "/settings", icon: Settings },
 ]

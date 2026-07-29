@@ -26,12 +26,14 @@ import { endCall } from "@/lib/api/calls"
 import type { CallHealth } from "@/lib/api/callEvents"
 import {
   coachingPanelVisible,
+  endCallButtonState,
   interveneButtonState,
   shouldAllowClose,
   type LiveCallMode,
   type RoomStatus,
 } from "@/lib/monitoring/liveCallView"
 import { healthTone, healthToneClass } from "@/lib/monitoring/health"
+import { useIbv } from "@/components/ibv/IbvProvider"
 import { SchemaForm } from "@/components/ibv/SchemaForm"
 import { CallSummaryPanel } from "./CallSummaryPanel"
 import { CallTranscript } from "./CallTranscript"
@@ -41,6 +43,81 @@ import { LiveCallRoom } from "./LiveCallRoom"
 import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
+
+/** Collapsible form panel; loads the call's own form on expand (VR2-64). */
+function FormPanel({
+  formId,
+  progress,
+  onExpand,
+}: {
+  formId: string | undefined
+  progress: number
+  onExpand: () => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const { loadFormById, formId: loadedFormId, loading, error, schema } = useIbv()
+
+  function toggleExpanded() {
+    // Skip when already loaded: a refetch would wipe live answers applied so far and any edit.
+    if (!expanded && formId && formId !== loadedFormId) loadFormById(formId)
+    setExpanded((v) => !v)
+  }
+
+  return (
+    <>
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-white px-4 py-3">
+        <button type="button" onClick={toggleExpanded} className="flex items-center gap-3">
+          <span className="font-semibold text-foreground">Patient Information Form</span>
+          <span className="text-sm font-semibold text-foreground">{progress}%</span>
+        </button>
+        <div className="flex items-center gap-2">
+          <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-all"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={onExpand}
+            title="Open full form"
+            className="flex size-7 items-center justify-center rounded-md text-foreground hover:bg-muted"
+          >
+            <Maximize2 className="size-4" />
+          </button>
+          <button
+            type="button"
+            onClick={toggleExpanded}
+            title={expanded ? "Collapse" : "Expand"}
+            className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
+          >
+            {expanded ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
+          </button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="overflow-auto rounded-lg border border-border bg-white p-4">
+          {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          )}
+          {!formId && (
+            <p className="text-sm text-muted-foreground">No form linked to this call.</p>
+          )}
+          {/* IbvFormModal's natural width; the box scrolls both ways. */}
+          {schema && !loading && !error && (
+            <div className="min-w-[1100px]">
+              <SchemaForm />
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
 
 /**
  * The live-call modal: auto-connects listen-only, and upgrades in place to publish via
@@ -63,12 +140,14 @@ export function LiveCallModal({
   onExpand: () => void
 }) {
   const canIntervene = usePermission("calls:intervene")
+  // The app-level provider IbvFormModal also renders from — one form, so live answers show
+  // up inline and full-screen alike.
+  const { applyLiveAnswer } = useIbv()
   const [mode, setMode] = useState<LiveCallMode>("listen")
   const [roomStatus, setRoomStatus] = useState<RoomStatus | null>(null)
   const [ending, setEnding] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [keypadOpen, setKeypadOpen] = useState(false)
-  const [formExpanded, setFormExpanded] = useState(false)
   // Full-width/height presentation of this modal (the header ⛶), not the IBV form.
   const [maximized, setMaximized] = useState(false)
   // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
@@ -78,15 +157,21 @@ export function LiveCallModal({
   useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
   const [liveHealth, setLiveHealth] = useState<CallHealth | null>(null)
-  // Reset liveHealth during render when the call changes (React's previous-render
+  // Live form completion from the SSE field_answer frames (0-100); null until the
+  // first answer, then it drives the progress bar in place of the polled value.
+  const [liveCompletion, setLiveCompletion] = useState<number | null>(null)
+  // Reset live state during render when the call changes (React's previous-render
   // pattern, mirroring useCallStatus.ts) — an effect-based reset trips react-hooks
   // v6's set-state-in-effect rule. Close still resets it too, below.
   const [healthForCallId, setHealthForCallId] = useState(call?.id)
   if (call?.id !== healthForCallId) {
     setHealthForCallId(call?.id)
     setLiveHealth(null)
+    setLiveCompletion(null)
   }
-  const progress = call?.formProgress ?? 0
+  // Prefer the live SSE completion; fall back to the polled list value until the first frame.
+  const progress = Math.round(liveCompletion ?? call?.formProgress ?? 0)
+
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
@@ -104,6 +189,7 @@ export function LiveCallModal({
   const callEnded = sseEnded
   const closeAllowed = shouldAllowClose(mode, callEnded, false)
   const intervene = interveneButtonState(canIntervene, roomStatus)
+  const endCallState = endCallButtonState(call?.isOwner ?? false, mode === "intervene", roomStatus)
   const canCoach = coachingPanelVisible(canIntervene, call?.isOwner ?? false, callEnded)
 
   // Tab close / refresh while intervening abandons the call with a silenced agent — warn.
@@ -127,6 +213,7 @@ export function LiveCallModal({
       setTranscriptCopied(false)
       setRightTab("transcript")
       setLiveHealth(null)
+      setLiveCompletion(null)
     }
     onOpenChange(next)
   }
@@ -231,54 +318,13 @@ export function LiveCallModal({
 
         <div className="flex min-h-[360px] flex-1 gap-4 overflow-hidden bg-[#f8f9fa] p-4">
           <div className="flex flex-1 flex-col gap-3 overflow-auto">
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-white px-4 py-3">
-              <button
-                type="button"
-                onClick={() => setFormExpanded((v) => !v)}
-                className="flex items-center gap-3"
-              >
-                <span className="font-semibold text-foreground">
-                  Patient Information Form
-                </span>
-                <span className="text-sm font-semibold text-foreground">
-                  {progress}%
-                </span>
-              </button>
-              <div className="flex items-center gap-2">
-                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-primary transition-all"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={onExpand}
-                  title="Open full form"
-                  className="flex size-7 items-center justify-center rounded-md text-foreground hover:bg-muted"
-                >
-                  <Maximize2 className="size-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFormExpanded((v) => !v)}
-                  title={formExpanded ? "Collapse" : "Expand"}
-                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
-                >
-                  {formExpanded ? (
-                    <ChevronUp className="size-4" />
-                  ) : (
-                    <ChevronDown className="size-4" />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {formExpanded && (
-              <div className="overflow-auto rounded-lg border border-border bg-white p-4">
-                <SchemaForm />
-              </div>
-            )}
+            {/* Keyed per call: expand state must not carry from one call to the next. */}
+            <FormPanel
+              key={call?.id ?? "none"}
+              formId={call?.formId}
+              progress={progress}
+              onExpand={onExpand}
+            />
 
             {/* Timer starts on the SSE "active" event (callee answered) and freezes on a terminal status. */}
             <div className="flex items-center justify-between rounded-lg border border-border bg-white px-4 py-3">
@@ -373,6 +419,10 @@ export function LiveCallModal({
                     onCallStatus={onCallStatus}
                     onTextChange={setTranscript}
                     onHealth={setLiveHealth}
+                    onFieldAnswer={(a) => {
+                      if (call.formId) applyLiveAnswer(call.formId, a.fieldPath, a.value, a.dispute)
+                      if (a.completionPct !== null) setLiveCompletion(a.completionPct)
+                    }}
                     supervisorLabel={roomStatus?.intervenerLabel ?? undefined}
                   />
                   {canCoach && <CoachingPanel callId={call.id} />}
@@ -393,7 +443,7 @@ export function LiveCallModal({
             {!callEnded && (
               <Button
                 onClick={() => void handleEndCall()}
-                disabled={ending || roomStatus?.otherIntervener}
+                disabled={ending || endCallState.disabled}
                 className="bg-red-500 text-white hover:bg-red-600"
               >
                 {ending ? "Ending…" : "End Call"}
@@ -406,10 +456,8 @@ export function LiveCallModal({
             )}
             {actionError && <span className="text-sm text-destructive">{actionError}</span>}
             {/* Helper text, not a title: the disabled button swallows hover events. */}
-            {!actionError && !callEnded && roomStatus?.otherIntervener && (
-              <span className="text-sm text-muted-foreground">
-                Only the intervening supervisor can end this call
-              </span>
+            {!actionError && !callEnded && endCallState.title && (
+              <span className="text-sm text-muted-foreground">{endCallState.title}</span>
             )}
           </div>
           {intervene.visible && mode === "listen" && !callEnded && (

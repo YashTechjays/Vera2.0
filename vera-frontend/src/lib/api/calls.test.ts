@@ -23,12 +23,14 @@ import {
   getCallSummary,
   getJoinToken,
   getRecordingPlayback,
+  listCallHistory,
   listCalls,
   publishCall,
   type CallStats,
   type CallSummary,
   type JoinTokenResponse,
   type LiveCallSummary,
+  type PaginatedCalls,
 } from "./calls"
 
 const call: CallSummary = {
@@ -165,5 +167,42 @@ describe("calls API client", () => {
 
     await expect(getRecordingPlayback("call-1")).resolves.toEqual(playback)
     expect(apiRequest).toHaveBeenCalledWith("/calls/call-1/recording")
+  })
+
+  it("listCallHistory sends default paging to GET /call-history", async () => {
+    const page: PaginatedCalls = { items: [], page: 1, page_size: 20, total: 0 }
+    vi.mocked(apiRequest).mockResolvedValue(page)
+    await expect(listCallHistory()).resolves.toEqual(page)
+    expect(apiRequest).toHaveBeenCalledWith("/call-history?page=1&page_size=20")
+  })
+
+  it("listCallHistory serializes filters into the query string", async () => {
+    const page: PaginatedCalls = { items: [], page: 2, page_size: 50, total: 0 }
+    vi.mocked(apiRequest).mockResolvedValue(page)
+    await listCallHistory({
+      page: 2,
+      page_size: 50,
+      status: "completed",
+      q: "jane",
+      date_from: "2026-07-01T00:00:00Z",
+      date_to: "2026-07-31T23:59:59Z",
+    })
+    const path = vi.mocked(apiRequest).mock.calls[0][0]
+    const qs = new URLSearchParams(path.split("?")[1])
+    expect(path.startsWith("/call-history?")).toBe(true)
+    expect(Object.fromEntries(qs)).toEqual({
+      page: "2",
+      page_size: "50",
+      status: "completed",
+      q: "jane",
+      date_from: "2026-07-01T00:00:00Z",
+      date_to: "2026-07-31T23:59:59Z",
+    })
+  })
+
+  it("listCallHistory omits absent filters", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
+    await listCallHistory({ q: "smith" })
+    expect(apiRequest).toHaveBeenCalledWith("/call-history?page=1&page_size=20&q=smith")
   })
 })

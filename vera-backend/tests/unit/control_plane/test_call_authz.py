@@ -14,7 +14,7 @@ from control_plane.call_authz import authorize_or_403, authorize_publish, call_h
 from control_plane.exceptions import CustomAPIException
 from tests.unit.auth.conftest import SpyAudit, make_request
 from vera_core.models import Call
-from vera_core.models.enums import AccountType
+from vera_core.models.enums import AccountType, CallStatus
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,9 +58,19 @@ def test_published_call_visible_to_a_non_owner() -> None:
     assert call_hidden_from(call, uuid4()) is False
 
 
-def test_ownerless_call_visible_to_anyone() -> None:
-    call = Call(initiated_by_id=None, published=False)
-    assert call_hidden_from(call, uuid4()) is False
+@pytest.mark.parametrize(
+    ("published", "status", "hidden"),
+    [
+        (False, CallStatus.ACTIVE, False),  # unclaimed dispatcher call stays visible
+        (False, CallStatus.COMPLETED, True),  # terminal: nothing left to claim (VR2-62)
+        (True, CallStatus.COMPLETED, False),  # published trumps ownerless-terminal
+    ],
+)
+def test_ownerless_call_visibility(published: bool, status: CallStatus, hidden: bool) -> None:
+    """Ownerless visibility is a live-queue affordance; once terminal (owner
+    deleted — SET NULL) the call goes private unless it was published."""
+    call = Call(initiated_by_id=None, published=published, current_status=status.value)
+    assert call_hidden_from(call, uuid4()) is hidden
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
 
     RLS on this table keys on `id` (not tenant_id): a request sees only its own
     tenant row. Holds the runtime knobs the worker reads per call
-    (max_agents_per_va, retry_fill_threshold, persona_tweak) so behaviour is
+    (max_agents_per_va, max_concurrent_calls, retry_fill_threshold, persona_tweak) so behaviour is
     tenant config, not code.
 
     `gcip_tenant_id` maps this row to its Google Cloud Identity Platform tenant
@@ -38,6 +38,9 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     # Runtime knobs (spec Fig 7). retry_fill_threshold is the fill-% below which
     # a form auto-requeues for a retry call; persona_tweak overlays the prompt.
     max_agents_per_va: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    # Tenant-wide dial ceiling (dispatcher slot math). Distinct from the per-VA
+    # in-flight cap above, which gates each VA at enqueue time.
+    max_concurrent_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=25)
     retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.95)
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)

@@ -1,11 +1,16 @@
 """tenant observer_enabled column + platform write definer fn
 
 Revision ID: 59308656acda
-Revises: 9cec58e69e92
+Revises: 94f5bc060fac
 Create Date: 2026-07-23 15:20:00.000000
 
 Adds the per-tenant AI form-filling (observer) master switch and the sanctioned
 write path a super-admin uses to flip it.
+
+Originally chained off 9cec58e69e92; re-pointed at dev's tip 94f5bc060fac when this
+branch merged dev, which had independently added six migrations from the same parent.
+Relinking keeps one linear chain instead of authoring an `alembic merge heads`
+revision, matching adbae2bd.
 
 `tenant.observer_enabled` is added idempotently (`ADD COLUMN IF NOT EXISTS`): the CI
 gate runs `create_all` from 0001 on a fresh DB, which already materializes the column
@@ -27,7 +32,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "59308656acda"
-down_revision: str | None = "9cec58e69e92"
+down_revision: str | None = "94f5bc060fac"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -148,6 +148,15 @@ class ReviewReason(enum.StrEnum):
     # A supervisor ended the call by hand — it is never auto-redialed even with
     # unsatisfied retryable fields; a human takes it from here.
     USER_ENDED = "user_ended"
+    # Required fields are unsatisfied and retryable, but the deployment-wide
+    # form_auto_retry_enabled flag is off — the eval never auto-redials, so
+    # the form parks for a human instead of re-queueing.
+    AUTO_RETRY_DISABLED = "auto_retry_disabled"
+    # The automated post-call eval did not run for this form — either the eval
+    # consumer isn't configured (no Vertex/Gemini), so the close path resolved
+    # the form synchronously, or the pipeline sweeper reclaimed a form stranded
+    # in AI_PROCESSING. A human reviews it without AI-extracted values.
+    NOT_EVALUATED = "not_evaluated"
 
 
 class VersionStatus(enum.StrEnum):
@@ -178,6 +187,15 @@ class PlaybookStatus(enum.StrEnum):
 
     ACTIVE = "active"
     INACTIVE = "inactive"
+
+
+class VoiceModelStage(enum.StrEnum):
+    """Which voice-cascade stage a `voice_model_config` row overrides. Only LLM is
+    read by the cascade today; STT/TTS are schema-ready for a future iteration."""
+
+    STT = "stt"
+    LLM = "llm"
+    TTS = "tts"
 
 
 class EvalScope(enum.StrEnum):
@@ -243,10 +261,10 @@ class AuthEvent(enum.StrEnum):
     PLATFORM_USER_ACTIVATED = "platform_user_activated"
     PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
     PLATFORM_INVITE_RESENT = "platform_invite_resent"
-    # Super-admin flipped a tenant's AI form-filling (observer) master switch. Recorded
-    # null-tenant in the auth audit log (via emit_auth_event), like every other /platform
-    # action — the tenant-scoped audit_log cannot hold a platform row.
+    # Super-admin flipped a tenant's AI form-filling (observer) switch; recorded null-tenant.
     TENANT_OBSERVER_UPDATED = "tenant_observer_updated"
+    # Tenant concurrency knobs updated (old/new integer values, no PHI).
+    CONCURRENCY_CONFIG_UPDATED = "concurrency_config_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

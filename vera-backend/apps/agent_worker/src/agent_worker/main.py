@@ -29,7 +29,13 @@ from opentelemetry import trace
 from redis.asyncio import Redis
 
 from agent_worker.agent import build_agent
-from agent_worker.cascade import _build_vad, build_session
+from agent_worker.cascade import (
+    _build_vad,
+    build_session,
+    llm_trace_attributes,
+    resolve_llm_model,
+    resolve_thinking_attrs,
+)
 from agent_worker.coaching import CoachingListener
 from agent_worker.health_observer import CallHealthObserver, build_health_observer
 from agent_worker.intervention import AgentTakeoverController, intervener_present
@@ -418,6 +424,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         # An explicit tenant greeting overrides the plan's first-task
                         # intro; extra_instructions overlay every plan agent.
                         greeting=tweak.greeting,
+                        gap_pass_enabled=settings.gap_pass_enabled,
                         extra_instructions=tweak.extra_instructions or None,
                     )
                 except Exception:
@@ -427,9 +434,20 @@ async def entrypoint(ctx: JobContext) -> None:
         else:
             logger.info("no use_call_plan for %s — voice-lab preview (plan-less)", room_name)
 
+        resolved_model = resolve_llm_model(
+            meta.get("llm_model_override"), settings.voice_llm_default_model
+        )
+        thinking_attrs = resolve_thinking_attrs(resolved_model, meta.get("llm_thinking_override"))
+        trace.get_current_span().set_attributes(
+            llm_trace_attributes(resolved_model, thinking_attrs)
+        )
+
         session = build_session(
             vad=ctx.proc.userdata.get("vad"),
             key_terms=controller.plan.stt_key_terms if controller is not None else None,
+            llm_model=meta.get("llm_model_override"),
+            thinking_override=meta.get("llm_thinking_override"),
+            default_model=settings.voice_llm_default_model,
         )
 
         # THE call event stream: transcript turns + call_status frames, feeding the

@@ -45,7 +45,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
-from control_plane.queueability import ensure_queueable
+from control_plane.queueability import ensure_queueable, ensure_va_capacity
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
@@ -98,8 +98,12 @@ from vera_core.services.call_provenance import (
     load_call_attempts,
     load_field_provenance,
 )
-from vera_core.services.call_visibility import call_hidden_from
-from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.call_visibility import recording_playable
+from vera_core.services.field_answers import (
+    BASELINE_ORDER,
+    BASELINE_SOURCES,
+    current_values_by_path,
+)
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
@@ -439,7 +443,6 @@ class CallAttemptView(BaseModel):
 
 
 def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
-    visible = not call_hidden_from(a.initiated_by_id, a.published, caller_id)
     return CallAttemptView(
         id=a.id,
         attempt=a.attempt,
@@ -448,7 +451,13 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -
         created_at=a.created_at,
         retry_of=a.retry_of,
         changed_paths=a.changed_paths,
-        recording_available=a.recording_available and visible and can_play,
+        recording_available=recording_playable(
+            has_recording=a.recording_available,
+            initiated_by_id=a.initiated_by_id,
+            published=a.published,
+            user_id=caller_id,
+            can_play=can_play,
+        ),
     )
 
 
@@ -460,19 +469,16 @@ class ResolveRequest(BaseModel):
 
 def _baseline_query(form_id: UUID) -> Any:
     """`(field_path, value)` of the most recent `intake`/`human` answer per `field_path`
-    for one form — the dispute baseline `B`. `created_at` is the transaction time, so
-    same-transaction rows tie; `id DESC` (UUIDv7) breaks the tie deterministically."""
+    for one form — the dispute baseline `B`. The whole-form counterpart to
+    `baseline_value`, which resolves a single path for the live SSE relay; both read the
+    shared `BASELINE_SOURCES` / `BASELINE_ORDER` so the two can never disagree."""
     return (
         select(FieldAnswer.field_path, FieldAnswer.value)
         .where(
             FieldAnswer.form_id == form_id,
-            FieldAnswer.source.in_([AnswerSource.INTAKE.value, AnswerSource.HUMAN.value]),
+            FieldAnswer.source.in_(BASELINE_SOURCES),
         )
-        .order_by(
-            FieldAnswer.field_path,
-            FieldAnswer.created_at.desc(),
-            FieldAnswer.id.desc(),
-        )
+        .order_by(FieldAnswer.field_path, *BASELINE_ORDER)
         .distinct(FieldAnswer.field_path)
     )
 
@@ -1223,10 +1229,14 @@ async def update_patient_form_status(
             data={"from": current.value, "to": target.value},
         )
 
+    # Load tenant for the capacity gate and the state-machine retry cap.
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
     # Hard dialability gate: a form that can never be dialed must not enter the queue.
     canonicalized_provider = False
     if target == FormStatus.IN_QUEUE:
         await ensure_queueable(session, kms, form)
+        await ensure_va_capacity(session, tenant, caller.user_id)
         # Canonicalize the provider from the operator's pick so the async dispatcher
         # resolves the right catalog provider (and its IVR playbook) — the string, not
         # a new FK, carries the choice. insurance_provider is GLOBAL (no RLS).
@@ -1257,9 +1267,6 @@ async def update_patient_form_status(
                 message="resolve all disputes before completing this form",
                 data={"unresolved_disputes": remaining},
             )
-
-    # Load tenant for state machine guard (retry cap).
-    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
 
     sm = FormStateMachine()
     try:

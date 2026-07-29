@@ -51,6 +51,8 @@ PLATFORM_PERMISSIONS: Final[dict[str, str]] = {
     "platform:users:invite": "Invite, resend invitations to, and deactivate platform operators",
     "platform:users:read": "View platform operators",
     "platform:tenants:manage": "View tenants and toggle their AI form-filling (observer) feature",
+    "platform:llm_config:read": "View the active voice cascade LLM model override",
+    "platform:llm_config:write": "Set or reset the voice cascade LLM model override",
 }
 
 # The full catalog seeded into `permission` (tenant + platform).
@@ -81,6 +83,13 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "VIRTUAL_ASSISTANT": frozenset(
-        {"voice_lab:sandbox", "calls:read", "calls:publish", "forms:read", "forms:write"}
+        {
+            "voice_lab:sandbox",
+            "calls:read",
+            "calls:publish",
+            "calls:intervene",
+            "forms:read",
+            "forms:write",
+        }
     ),
 }

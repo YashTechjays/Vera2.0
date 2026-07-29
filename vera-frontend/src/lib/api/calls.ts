@@ -64,6 +64,57 @@ export function getCallStats(): Promise<CallStats> {
   return apiRequest<CallStats>("/calls/stats")
 }
 
+/** One row in the tenant-wide Call History list (GET /call-history). Call metadata
+ *  plus the patient identifiers the list displays — no field values or transcript. */
+export type CallHistoryRow = {
+  id: string
+  /** The patient form this call fills — links the row to the form detail. */
+  form_id: string
+  /** "full" (fresh dial) or "retry" (an automatic re-dial). */
+  mode: string
+  /** current_status — the backend call-status enum (e.g. "completed", "busy"). */
+  status: string
+  created_at: string
+  patient_name: string | null
+  member_id: string | null
+  insurance_provider: string | null
+  /** True only when this caller may actually play the recording (AVAILABLE, visible,
+   *  and holds recordings:read) — matches the per-form timeline's gate. */
+  recording_available: boolean
+}
+
+export type PaginatedCalls = {
+  items: CallHistoryRow[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export type ListCallHistoryParams = {
+  page?: number
+  page_size?: number
+  /** Filter by call status (backend enum value). */
+  status?: string
+  /** Case-insensitive search over patient name / member id. */
+  q?: string
+  /** ISO-8601 lower/upper bounds on the call's created_at. */
+  date_from?: string
+  date_to?: string
+}
+
+/** GET /call-history — the tenant's calls as a flat, newest-first, paginated list
+ *  across every form (needs calls:read). The cross-form counterpart to the per-form
+ *  call timeline; `recording_available` gates the inline player per row. */
+export function listCallHistory(params: ListCallHistoryParams = {}): Promise<PaginatedCalls> {
+  const { page = 1, page_size = 20, status, q, date_from, date_to } = params
+  const qs = new URLSearchParams({ page: String(page), page_size: String(page_size) })
+  if (status) qs.set("status", status)
+  if (q) qs.set("q", q)
+  if (date_from) qs.set("date_from", date_from)
+  if (date_to) qs.set("date_to", date_to)
+  return apiRequest<PaginatedCalls>(`/call-history?${qs}`)
+}
+
 /** POST /calls/{id}/publish — owner-only, one-way, idempotent. */
 export function publishCall(callId: string): Promise<CallSummary> {
   return apiRequest<CallSummary>(`/calls/${encodeURIComponent(callId)}/publish`, {

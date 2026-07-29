@@ -16,12 +16,11 @@ def test_calls_publish_permission_is_catalogued_and_granted() -> None:
 
 def test_calls_intervene_permission_is_catalogued_and_granted() -> None:
     assert "calls:intervene" in DEFAULT_PERMISSIONS
-    # All three roles the seed migration grants it to (SUPER_ADMIN holds every permission).
     assert "calls:intervene" in SYSTEM_ROLES["SUPER_ADMIN"]
     assert "calls:intervene" in SYSTEM_ROLES["SUPERVISOR"]
     assert "calls:intervene" in SYSTEM_ROLES["TENANT_ADMIN"]
-    # A VA never intervenes — sandbox only.
-    assert "calls:intervene" not in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
+    # VR2-77: VAs intervene on published ("Visible to All") calls.
+    assert "calls:intervene" in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
 
 
 def test_insurance_provider_permissions_are_catalogued_and_super_admin_only() -> None:
@@ -36,6 +35,13 @@ def test_form_schemas_read_permission_is_catalogued_and_super_admin_only() -> No
     assert "platform:form_schemas:read" in PLATFORM_PERMISSIONS
     assert "platform:form_schemas:read" in SYSTEM_ROLES["SUPER_ADMIN"]
     assert "platform:form_schemas:read" not in SYSTEM_ROLES["TENANT_ADMIN"]
+
+
+def test_llm_config_permissions_are_catalogued_and_super_admin_only() -> None:
+    for code in ("platform:llm_config:read", "platform:llm_config:write"):
+        assert code in PLATFORM_PERMISSIONS
+        assert code in SYSTEM_ROLES["SUPER_ADMIN"]
+        assert code not in SYSTEM_ROLES["TENANT_ADMIN"]
 
 
 def test_virtual_assistant_has_live_monitoring_and_data_management_access() -> None:
