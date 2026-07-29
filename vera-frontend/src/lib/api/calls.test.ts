@@ -51,6 +51,7 @@ const call: CallSummary = {
   health_flag: null,
   health_reason: null,
   health_analyzed_at: null,
+  completion_pct: null,
 }
 
 const joinToken: JoinTokenResponse = {
