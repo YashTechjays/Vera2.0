@@ -78,10 +78,13 @@ class SessionBlock(_Doc):
 
 
 class TaskTextOverride(_Doc):
-    """Sparse patch over one task's schema-authored text; set fields win."""
+    """Sparse patch over one task's schema-authored text; set fields win.
 
-    intro: str | None = Field(default=None, min_length=1)
-    outro: str | None = Field(default=None, min_length=1)
+    A blank `intro`/`outro` means "speak nothing there" — distinct from absent,
+    which inherits the schema default."""
+
+    intro: str | None = None
+    outro: str | None = None
     prompt: str | None = Field(default=None, min_length=1)
 
 
@@ -165,8 +168,9 @@ def render_task_prompts(
     """Session text + one compiled instruction prompt per task (spec §3).
 
     Deterministic: same doc + same prompt_doc = byte-identical output. `intro`/
-    `outro` pass through (override ?? schema default) — they are AgentTask
-    entry/exit speech, never folded into the instruction text."""
+    `outro` pass through (override ?? schema default, so a blank override is
+    honored) — they are AgentTask entry/exit speech, never folded into the
+    instruction text."""
     if prompt_doc is None:
         logger.warning(
             "no prompt document for insurance_type=%s — using factory session text",
@@ -215,8 +219,8 @@ def render_task_prompts(
             RenderedTaskPrompt(
                 task_key=task.task_key,
                 title=task.title,
-                intro=override.intro or task.intro,
-                outro=override.outro or task.outro,
+                intro=task.intro if override.intro is None else override.intro,
+                outro=task.outro if override.outro is None else override.outro,
                 prompt=_task_text(
                     doc,
                     task,
@@ -449,9 +453,9 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
     """Content errors of a prompt document against its pinned schema (spec §4).
 
     Shape errors are pydantic's job; this checks the parts that need the schema:
-    task keys exist, overrides are non-empty, placeholders resolve. Reserved
-    runtime tokens ({{value}}, {{current_year}}) are exempt — the call-plan
-    fuse handles them, not field lookup."""
+    task keys exist, no override entry is entirely empty, placeholders resolve.
+    Reserved runtime tokens ({{value}}, {{current_year}}) are exempt — the
+    call-plan fuse handles them, not field lookup."""
     errors: list[str] = []
     valid_tokens = (
         set(schema_doc.system_fields or {})

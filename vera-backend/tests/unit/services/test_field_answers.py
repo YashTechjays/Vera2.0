@@ -154,3 +154,13 @@ async def test_human_resolve_supersedes_regardless_of_seq() -> None:
         evidence_seq=None,
     )
     assert wrote is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", "   ", None])
+async def test_blank_ai_value_never_supersedes(blank: Any) -> None:  # VR2-93
+    current = _current("W12345", source=AnswerSource.INTAKE.value)
+    session = _FakeSession(current=current)
+    assert await _record(session, blank) is False
+    assert session.events == []
+    assert current.is_current is True

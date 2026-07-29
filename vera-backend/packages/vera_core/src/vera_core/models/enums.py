@@ -189,6 +189,15 @@ class PlaybookStatus(enum.StrEnum):
     INACTIVE = "inactive"
 
 
+class VoiceModelStage(enum.StrEnum):
+    """Which voice-cascade stage a `voice_model_config` row overrides. Only LLM is
+    read by the cascade today; STT/TTS are schema-ready for a future iteration."""
+
+    STT = "stt"
+    LLM = "llm"
+    TTS = "tts"
+
+
 class EvalScope(enum.StrEnum):
     COMPONENT = "component"
     E2E = "e2e"
@@ -252,6 +261,10 @@ class AuthEvent(enum.StrEnum):
     PLATFORM_USER_ACTIVATED = "platform_user_activated"
     PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
     PLATFORM_INVITE_RESENT = "platform_invite_resent"
+    # Super-admin flipped a tenant's AI form-filling (observer) switch; recorded null-tenant.
+    TENANT_OBSERVER_UPDATED = "tenant_observer_updated"
+    # Tenant concurrency knobs updated (old/new integer values, no PHI).
+    CONCURRENCY_CONFIG_UPDATED = "concurrency_config_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:
