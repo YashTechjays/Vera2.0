@@ -16,10 +16,13 @@ vi.mock("@/lib/api/client", () => {
 
 import { apiRequest } from "@/lib/api/client"
 import {
+  confirmPasswordReset,
   platformAcceptInvite,
   platformActivateInviteMfa,
   platformValidateInvite,
+  requestPasswordReset,
   resendInvitation,
+  validatePasswordReset,
 } from "./api"
 
 describe("auth api client — resend and platform invite", () => {
@@ -66,6 +69,40 @@ describe("auth api client — resend and platform invite", () => {
     expect(apiRequest).toHaveBeenCalledWith("/platform/auth/invitations/activate-mfa", {
       method: "POST",
       body: { mfa_token: "mfa-tok", code: "123456" },
+      auth: false,
+    })
+  })
+})
+
+describe("auth api client — password reset (VR2-104)", () => {
+  beforeEach(() => vi.resetAllMocks())
+
+  it("requests a reset link unauthenticated, slug-scoped", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(null)
+    await requestPasswordReset("acme", "a@b.com")
+    expect(apiRequest).toHaveBeenCalledWith("/tenants/acme/auth/password-reset/request", {
+      method: "POST",
+      body: { email: "a@b.com" },
+      auth: false,
+    })
+  })
+
+  it("validates a reset token without consuming it", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({ state: "valid" })
+    const result = await validatePasswordReset("acme", "tok/123")
+    expect(apiRequest).toHaveBeenCalledWith(
+      "/tenants/acme/auth/password-reset/validate?token=tok%2F123",
+      { method: "GET", auth: false },
+    )
+    expect(result).toEqual({ state: "valid" })
+  })
+
+  it("confirms the reset with token and new password", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(null)
+    await confirmPasswordReset("acme", "tok123", "a-strong-password")
+    expect(apiRequest).toHaveBeenCalledWith("/tenants/acme/auth/password-reset/confirm", {
+      method: "POST",
+      body: { token: "tok123", password: "a-strong-password" },
       auth: false,
     })
   })
