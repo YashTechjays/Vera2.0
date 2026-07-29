@@ -48,25 +48,24 @@ function baseLook(borderless?: boolean, noRightBorder?: boolean): string {
 }
 
 /**
- * Explain a disabled-or-invalid control on hover. A `disabled` form control
- * doesn't fire hover/focus events in Chrome (disabled elements are excluded from
- * pointer hit-testing), so a native `title` on it never shows — wrap in a
- * non-disabled trigger instead (same box, `flex h-full w-full`, so it doesn't
- * affect layout) and render the reason as a real tooltip. Applied whenever there's
- * something to explain (gated off, or failing validation), not just when disabled.
+ * Explain a disabled-or-invalid control on hover. Chrome excludes disabled controls
+ * from pointer hit-testing, so a native `title` on one never shows — wrap it in a
+ * non-disabled trigger instead (same box, `flex h-full w-full`, so layout is
+ * unchanged) and render the reason as a real tooltip. Always wrap, even with nothing
+ * to explain: adding the wrapper only once a reason exists remounts the control and
+ * drops focus on the keystroke that flips the field valid⇄invalid.
  */
 function withReasonTooltip(
   node: ReactNode,
   shouldExplain: boolean | undefined,
   reason: string | undefined
 ): ReactNode {
-  if (!shouldExplain || !reason) return node
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="flex h-full w-full">{node}</span>
       </TooltipTrigger>
-      <TooltipContent>{reason}</TooltipContent>
+      {shouldExplain && reason ? <TooltipContent>{reason}</TooltipContent> : null}
     </Tooltip>
   )
 }

@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react"
 import { describe, expect, it } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
 
@@ -17,13 +18,17 @@ describe("FieldRenderer text-field suggestions", () => {
     special_values: ["No Limit"],
   }
 
-  const render = (value: string) =>
+  const render = (
+    value: string,
+    extra?: Partial<ComponentProps<typeof FieldRenderer>>
+  ) =>
     renderToStaticMarkup(
       <FieldRenderer
         field={cycleLimit}
         path="sections.infertility_treatment.iui.cycle_limit"
         value={value}
         onChange={() => {}}
+        {...extra}
       />
     )
 
@@ -44,5 +49,15 @@ describe("FieldRenderer text-field suggestions", () => {
 
   it("hides the picker arrow so a filled cell never reads as a dropdown", () => {
     expect(render("No cycle limit")).toContain("no-picker-arrow")
+  })
+
+  // A wrapper that appears only when invalid would remount the <input> and drop focus
+  // on the very keystroke that flips the field.
+  it("keeps the input's ancestor structure stable when validity flips", () => {
+    const ancestorTags = (html: string) =>
+      [...html.slice(0, html.indexOf("<input")).matchAll(/<([a-zA-Z-]+)/g)].map((m) => m[1])
+    const valid = render("No cycle limit")
+    const invalid = render("bad", { invalid: true, title: "Enter a valid value" })
+    expect(ancestorTags(invalid)).toEqual(ancestorTags(valid))
   })
 })
