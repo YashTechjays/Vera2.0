@@ -37,6 +37,14 @@ from vera_core.models.enums import VersionStatus
 
 INSURANCE_TYPE = "infertility_treatment"
 
+# VERA runs the model the voice cascade ships (`cascade.py`) — an eval on a different model
+# would not be testing what reps actually get. The simulated rep is scenery, not the subject,
+# so it uses the newer tier the Observer already trusts for grounded extraction
+# (`settings.observer_extract_primary_model`): it sticks to the fact sheet and invents fewer
+# values. Both are paired with thinking_budget=0, as `main.py` does for extraction.
+VERA_MODEL = "gemini-2.5-flash"
+REP_MODEL = "gemini-3.5-flash"
+
 # One synthetic case, so the IVR menu context and the intake prefill can never contradict
 # each other. Nothing here is real patient data and this harness must never be pointed at a
 # production database.
@@ -222,12 +230,12 @@ async def load_published_plan(insurance_type: str = INSURANCE_TYPE) -> CallPlan:
     return fuse_prefill(doc, plan, _intake_values(doc), current_year=2026)
 
 
-def build_llm() -> google.LLM:
+def build_llm(model: str = VERA_MODEL) -> google.LLM:
     """The SAME plugin the worker uses (`cascade.py`) — Vertex Gemini, inside the BAA
     boundary. NEVER `livekit.agents.inference.*`: that is LiveKit Cloud, streams off-box,
     and is a bright-line violation (vera-backend/CLAUDE.md)."""
     return google.LLM(
-        model="gemini-2.5-flash",
+        model=model,
         vertexai=True,
         location="global",
         thinking_config=ThinkingConfig(thinking_budget=0),

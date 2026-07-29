@@ -28,6 +28,7 @@ from conftest import (
     DISCLOSURE,
     HUMAN_PICKUP,
     IVR_TURNS,
+    REP_MODEL,
     build_llm,
     carried_text,
     full_walk_enabled,
@@ -124,7 +125,7 @@ async def call() -> CallRun:
         flush=True,
     )
 
-    vera_llm, rep_llm = build_llm(), build_llm()
+    vera_llm, rep_llm = build_llm(), build_llm(REP_MODEL)
     rep = SimulatedRep(rep_llm)
     ivr: list[Turn] = []
     plan: list[Turn] = []
