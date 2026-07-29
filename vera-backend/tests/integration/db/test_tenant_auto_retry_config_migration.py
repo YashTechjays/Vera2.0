@@ -16,7 +16,9 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera_core.db import uuid7
@@ -139,3 +141,21 @@ async def test_definer_fn_partial_update(
         ).scalar_one()
         assert unknown is False
         # never committed — nothing here needs to persist
+
+
+async def test_threshold_check_constraint_rejects_out_of_range(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The DB CHECK is the real 0..1 guard: the definer fn is EXECUTE-granted
+    role-wide with no in-fn bounds check, so a direct write past the API layer
+    must fail at the database."""
+    async with admin_sessionmaker() as session:
+        tenant = Tenant(slug="retry-threshold-check-mig", name="Threshold Check")
+        session.add(tenant)
+        await session.flush()
+        with pytest.raises(IntegrityError, match="ck_tenant_retry_fill_threshold_range"):
+            await session.execute(
+                text("UPDATE tenant SET retry_fill_threshold = 5.0 WHERE id = :id"),
+                {"id": tenant.id},
+            )
+        # never committed — the aborted transaction rolls back on exit

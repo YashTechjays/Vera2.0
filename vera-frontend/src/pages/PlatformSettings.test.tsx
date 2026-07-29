@@ -121,4 +121,20 @@ describe("PlatformSettings", () => {
     await waitFor(() => expect(input).toHaveValue(50))
     expect(mockedSetTenantRetryConfig).not.toHaveBeenCalled()
   })
+
+  it("rejects an out-of-range threshold with a range message and no request", async () => {
+    mockedUsePermission.mockReturnValue(true)
+    mockedListTenants.mockResolvedValue([tenant])
+    render(<PlatformSettings />)
+
+    const input = await screen.findByLabelText(/retry threshold for acme/i)
+    await userEvent.clear(input)
+    await userEvent.type(input, "150")
+    await userEvent.tab()
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/between 0 and 100/i),
+    )
+    expect(mockedSetTenantRetryConfig).not.toHaveBeenCalled()
+  })
 })

@@ -55,7 +55,7 @@ pattern (PR #11, `feat/enable-disable-form-filling`).
 
 `vera_core/models/tenant.py`:
 
-- `auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)`
+- `auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)`
   placed with the runtime knobs.
 - `retry_fill_threshold` default changes `0.95 → 0.50` (column type unchanged).
 
@@ -64,7 +64,7 @@ Two new migrations, chained onto the current dev head (discover with
 (create_all off live models) and provisioned DBs:
 
 **Migration A — column + backfill + definer fn** (mirrors `59308656acda`):
-1. `ALTER TABLE tenant ADD COLUMN IF NOT EXISTS auto_retry_enabled boolean NOT NULL DEFAULT false`
+1. `ALTER TABLE tenant ADD COLUMN IF NOT EXISTS auto_retry_enabled boolean NOT NULL DEFAULT true`
 2. `ALTER TABLE tenant ALTER COLUMN retry_fill_threshold SET DEFAULT 0.50`
 3. Backfill: `UPDATE tenant SET retry_fill_threshold = 0.50 WHERE retry_fill_threshold = 0.95`
    (0.95 = the never-admin-settable old default; runs against zero rows on

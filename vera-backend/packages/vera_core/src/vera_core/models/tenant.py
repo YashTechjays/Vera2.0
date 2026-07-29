@@ -64,6 +64,12 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
             "recording_retention_days BETWEEN 1 AND 3650",
             name="recording_retention_days_range",
         ),
+        # Mirrors the API bound (SetTenantRetryConfigRequest ge=0 le=1): the retry-config
+        # definer fn is EXECUTE-granted role-wide, so the DB is the real guard rail.
+        CheckConstraint(
+            "retry_fill_threshold BETWEEN 0 AND 1",
+            name="retry_fill_threshold_range",
+        ),
     )
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

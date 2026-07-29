@@ -80,6 +80,16 @@ def upgrade() -> None:
     )
     op.execute("ALTER TABLE tenant ALTER COLUMN retry_fill_threshold SET DEFAULT 0.50")
     op.execute(BACKFILL_THRESHOLD)
+    # The definer fn below is EXECUTE-granted role-wide with no in-fn bounds check,
+    # so the DB CHECK is the real 0..1 guard (fresh CI gets it via 0001's create_all).
+    op.execute(
+        """
+        DO $$ BEGIN
+            ALTER TABLE tenant ADD CONSTRAINT ck_tenant_retry_fill_threshold_range
+                CHECK (retry_fill_threshold BETWEEN 0 AND 1);
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$
+        """
+    )
     op.execute(f"GRANT SELECT (id) ON tenant TO {DEFINER_ROLE}")
     op.execute(
         f"GRANT UPDATE (auto_retry_enabled, retry_fill_threshold) ON tenant TO {DEFINER_ROLE}"
@@ -99,5 +109,6 @@ def downgrade() -> None:
     )
     # SELECT (id) is deliberately not revoked — 59308656acda's observer fn shares it;
     # grants aren't reference-counted.
+    op.execute("ALTER TABLE tenant DROP CONSTRAINT IF EXISTS ck_tenant_retry_fill_threshold_range")
     op.execute("ALTER TABLE tenant ALTER COLUMN retry_fill_threshold SET DEFAULT 0.95")
     op.execute("ALTER TABLE tenant DROP COLUMN IF EXISTS auto_retry_enabled")

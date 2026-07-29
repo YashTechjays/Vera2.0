@@ -4,7 +4,7 @@
 
 **Goal:** Platform operators can enable/disable auto-retry and set the retry fill threshold per tenant; the threshold default drops to 0.50; the env var stays as a deployment kill-switch ANDed with the tenant flag.
 
-**Architecture:** Mirror the tenant observer-toggle pattern end to end: a `Tenant.auto_retry_enabled` column (default False) written through a new `platform_set_tenant_retry_config` SECURITY DEFINER function (platform RLS on `tenant` is SELECT-only), a `POST /platform/tenants/{id}/retry-config` endpoint gated by the existing `platform:tenants:manage` permission, conditional disclosure in `list_tenants`, and two new controls on the PlatformSettings page. The two retry decision sites (`post_call.resolve_ai_processing`, `post_call_eval.evaluate_call`) AND the tenant flag with the env kill-switch they already receive.
+**Architecture:** Mirror the tenant observer-toggle pattern end to end: a `Tenant.auto_retry_enabled` column (default True — opt-out, revised post-review) written through a new `platform_set_tenant_retry_config` SECURITY DEFINER function (platform RLS on `tenant` is SELECT-only), a `POST /platform/tenants/{id}/retry-config` endpoint gated by the existing `platform:tenants:manage` permission, conditional disclosure in `list_tenants`, and two new controls on the PlatformSettings page. The two retry decision sites (`post_call.resolve_ai_processing`, `post_call_eval.evaluate_call`) AND the tenant flag with the env kill-switch they already receive.
 
 **Tech Stack:** FastAPI + SQLAlchemy async + Alembic + pytest (mypy --strict, ruff); React + Vite + TS + vitest (jsdom/RTL infra exists).
 
@@ -17,7 +17,7 @@
 - Migrations: alembic-generated random-hex IDs (`uv run alembic revision -m "..."`); idempotent for BOTH fresh-CI (0001 `create_all` off live models already materializes new columns) and provisioned DBs; chain onto the current head (`uv run alembic heads` → `2435e03793ff` at plan time — re-check before generating, dev moves fast).
 - Definer-fn security posture copied exactly from migration `20260723_1520_59308656acda_tenant_observer_enabled_and_definer.py`: fixed search_path, `app.platform` GUC fail-closed check, owner `vera_definer_owner`, column-scoped grants, EXECUTE revoked from PUBLIC and granted to the app role.
 - Audit: `emit_auth_event` only, `tenant_id=None` on platform routes, meta carries config values (ints/bools/floats — no PHI).
-- Bounds verbatim: `retry_fill_threshold` ge=0 le=1. Tenant flag default False. Threshold default 0.50; backfill only `WHERE retry_fill_threshold = 0.95`.
+- Bounds verbatim: `retry_fill_threshold` ge=0 le=1. Tenant flag default True (opt-out; revised post-review from the plan's original default-off). Threshold default 0.50; backfill only `WHERE retry_fill_threshold = 0.95`.
 - Comments one line, non-obvious constraints only; docstrings short; timestamps via DB clock.
 - Local docker infra is up; shared `vera_test` DB is healthy on dev's migration graph. After Task 1's migration lands, run `just migrate` and re-run `DROP DATABASE vera_test`-style refresh only if conftest complains (it migrates fresh test DBs automatically).
 
@@ -31,7 +31,7 @@
 - Test: `vera-backend/tests/integration/db/test_tenant_auto_retry_config_migration.py`
 
 **Interfaces:**
-- Produces: `Tenant.auto_retry_enabled: Mapped[bool]` (NOT NULL default False) and `retry_fill_threshold` default 0.50 — read by Tasks 2–4. SQL fn `platform_set_tenant_retry_config(uuid, boolean, numeric) RETURNS boolean` — called by Task 3's helper.
+- Produces: `Tenant.auto_retry_enabled: Mapped[bool]` (NOT NULL default True) and `retry_fill_threshold` default 0.50 — read by Tasks 2–4. SQL fn `platform_set_tenant_retry_config(uuid, boolean, numeric) RETURNS boolean` — called by Task 3's helper.
 
 - [ ] **Step 1: Model edits**
 
@@ -41,7 +41,7 @@ In `tenant.py`, below `retry_fill_threshold` (line ~44), and change its default:
     retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.50)
     # Per-tenant auto-retry switch, ANDed with the deployment kill-switch
     # (VERA_FORM_AUTO_RETRY_ENABLED); platform-managed, off until enabled.
-    auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 ```
 
 Update the comment above `retry_fill_threshold` (line ~38) if it names 0.95, and the class docstring knob list (line ~16) to include `auto_retry_enabled`.
@@ -94,7 +94,7 @@ $$
 
 def upgrade() -> None:
     op.execute(
-        "ALTER TABLE tenant ADD COLUMN IF NOT EXISTS auto_retry_enabled boolean NOT NULL DEFAULT false"
+        "ALTER TABLE tenant ADD COLUMN IF NOT EXISTS auto_retry_enabled boolean NOT NULL DEFAULT true"
     )
     op.execute("ALTER TABLE tenant ALTER COLUMN retry_fill_threshold SET DEFAULT 0.50")
     # 0.95 = the never-admin-settable old default (no API/UI ever wrote this column),
@@ -296,7 +296,7 @@ Create `tests/integration/control_plane/test_platform_tenant_retry_config.py` by
 
 ```python
 async def test_list_tenants_discloses_retry_config_to_manager(...):
-    # GET /api/v1/platform/tenants → rows carry auto_retry_enabled (False) and
+    # GET /api/v1/platform/tenants → rows carry auto_retry_enabled (True) and
     # retry_fill_threshold (0.50) for the manager persona.
 
 async def test_set_flag_only_persists_and_audits(...):
