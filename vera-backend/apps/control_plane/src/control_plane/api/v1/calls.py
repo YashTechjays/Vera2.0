@@ -920,6 +920,8 @@ class CallHistoryRow(BaseModel):
     member_id: str | None
     insurance_provider: str | None
     recording_available: bool
+    # True when a stored transcript exists for this call — gates the row's "View transcript".
+    transcript_available: bool
 
 
 class PaginatedCalls(BaseModel):
@@ -975,6 +977,7 @@ async def list_call_history(
         .where(Recording.call_id == Call.id, Recording.status == RecordingStatus.AVAILABLE.value)
         .exists()
     )
+    has_transcript = select(Transcript.id).where(Transcript.call_id == Call.id).exists()
 
     async def _fetch_page() -> tuple[list[Any], int]:
         """The page rows joined to their form, with the filtered total as a window
@@ -993,6 +996,8 @@ async def list_call_history(
                     PatientForm.member_id,
                     PatientForm.insurance_provider,
                     has_recording.label("has_recording"),
+                    has_transcript.label("has_transcript"),
+                    func.coalesce(_visible_to(caller.user_id), False).label("caller_visible"),
                     func.count().over().label("total"),
                 )
                 .join(PatientForm, PatientForm.id == Call.form_id)
@@ -1056,6 +1061,7 @@ async def list_call_history(
                 user_id=caller.user_id,
                 can_play=can_play,
             ),
+            transcript_available=r.has_transcript and r.caller_visible,
         )
         for r in rows
     ]
