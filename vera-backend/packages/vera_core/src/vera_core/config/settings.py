@@ -178,6 +178,11 @@ class Settings(BaseSettings):
     # calls and must be free to change independently of what the live cascade uses.
     voice_llm_default_model: str = "gemini-2.5-flash"  # VERA_VOICE_LLM_DEFAULT_MODEL
 
+    # --- eval harness call evaluator (tests only) ----------------------------
+    # The judge LLM that grades a simulated call from its transcript. Out-of-pipeline, so it goes
+    # through vera_core.llm.ResilientLLM like every non-cascade call.
+    evals_judge_model: str = "google:gemini-3.6-flash"  # VERA_EVALS_JUDGE_MODEL
+
     # --- observer answer extraction (agent worker) ---------------------------
     observer_extract_primary_model: str = "google:gemini-3.5-flash"
     observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]
