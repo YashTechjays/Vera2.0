@@ -9,9 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from conftest import chat_ctx_texts
 from livekit.agents import Agent
-from livekit.agents.llm import FunctionTool
+from livekit.agents.llm import ChatMessage, FunctionTool
 
 from agent_worker.directives import ReAsk, SkipToTask, Terminate
+from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState
 from agent_worker.plan_runtime import (
     WRAP_UP_TASK_KEY,
@@ -96,6 +97,8 @@ def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
     mock_session.userdata = TakeoverState()
     # on_enter awaits the intro's playout before leading into the task.
     mock_session.say.return_value.wait_for_playout = AsyncMock()
+    # on_enter pins the opening from the say's chat items; a bare MagicMock is not iterable.
+    mock_session.say.return_value.chat_items = []
     return patch.object(type(agent), "session", new=property(lambda self: mock_session))
 
 
@@ -1143,3 +1146,166 @@ class TestPreviousTaskWindow:
         assert "turn-from-task0" in texts  # the swept task's own turns
         assert "turn-from-task2" in texts  # the source it arrived from
         assert "turn-from-task1" not in texts  # not the whole call
+
+
+_OPENING = "Hello, I'm VERA. This call is recorded for quality and training purposes."
+
+
+def _pin_opening(controller: PlanRunController, agent: Agent) -> ChatMessage:
+    """Pin an opening the way `on_enter` does: the item the `say` added, by identity."""
+    message = agent._chat_ctx.add_message(role="assistant", content=_OPENING)
+    controller.note_opening_spoken([message])
+    return message
+
+
+async def _inherit_opening(controller: PlanRunController, *replies: str) -> None:
+    """Hand the first task agent an opening it did NOT speak, the way
+    `ivr_agent.transfer_to_verification` does — nothing pinned it, so only `_ensure_anchor`'s
+    positional fallback can find it."""
+    navigator = Agent(instructions="navigate the menu")
+    navigator._chat_ctx.add_message(role="assistant", content=_OPENING)
+    for reply in replies:
+        navigator._chat_ctx.add_message(role="user", content=reply)
+    await carry_chat_ctx(navigator, controller.first_agent())
+
+
+class TestOpeningAnchor:
+    """The call's opening — greeting plus the recording/identity disclosure — is PINNED: it leads
+    every carry set however deep the walk goes, while the rest of the window stays one task deep.
+    Without it a seven-task walk hands the closer a context in which VERA never introduced
+    herself, and she re-introduces herself to a rep she already greeted."""
+
+    async def test_on_enter_pins_the_spoken_opening(self) -> None:
+        controller, _ = _controller()
+        opener = controller.agents[0]
+        message = opener._chat_ctx.add_message(role="assistant", content=_OPENING)
+        session = MagicMock()
+        with _session_patch(opener, session):
+            session.say.return_value.chat_items = [message]
+            await opener.on_enter()
+        assert [item.id for item in controller._anchor_items] == [message.id]
+
+    async def test_a_later_task_intro_does_not_overwrite_the_opening(self) -> None:
+        # Only the CALL's opening is an introduction; task 2's intro is just a section header.
+        controller, _ = _controller()
+        message = _pin_opening(controller, controller.agents[0])
+        later = controller.agents[2]
+        session = MagicMock()
+        with _session_patch(later, session):
+            session.say.return_value.chat_items = [
+                later._chat_ctx.add_message(role="assistant", content="Next up.")
+            ]
+            await later.on_enter()
+        assert [item.id for item in controller._anchor_items] == [message.id]
+
+    async def test_opening_survives_a_seven_task_walk(self) -> None:
+        # The eval failure (`test_opening_survives_to_the_end_of_the_call`) at unit level: the
+        # opening leads, and everything but the immediate predecessor has still aged out.
+        controller, _ = _controller(_linear_plan(8), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 7)
+        assert chat_ctx_texts(landed) == [_OPENING, "turn-from-task6"]
+
+    async def test_wrap_up_gets_the_opening_and_the_closing_task(self) -> None:
+        controller, _ = _controller(_linear_plan(4), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 4)
+        assert landed is controller.wrap_up_agent
+        assert chat_ctx_texts(landed) == [_OPENING, "turn-from-task3"]
+
+    async def test_anchor_is_not_duplicated_on_the_first_hop(self) -> None:
+        # On the first hop the opener IS the source, so the opening is in the carry set twice.
+        # `carry_items` dedupes on id keeping the first, so it stays single and stays in front.
+        controller, _ = _controller(_linear_plan(3), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 1)
+        texts = chat_ctx_texts(landed)
+        assert texts.count(_OPENING) == 1
+        assert texts == [_OPENING, "turn-from-task0"]
+
+    async def test_anchor_falls_back_to_an_inherited_opening(self) -> None:
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        await _inherit_opening(controller)
+        landed = await _walk(controller, 4)
+        texts = chat_ctx_texts(landed)
+        assert texts[0] == _OPENING
+        assert "turn-from-task3" in texts  # the predecessor, still there
+        assert "turn-from-task1" not in texts  # and the window is still one task deep
+
+    async def test_anchor_closes_the_exchange_with_the_reps_reply(self) -> None:
+        # A lone opening question invites the closer to re-ask it; the rep's reply comes along so
+        # the pinned pair reads as an exchange already had.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        await _inherit_opening(controller, "Yes, that's the member.")
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == [_OPENING, "Yes, that's the member.", "turn-from-task3"]
+
+    async def test_a_later_assistant_turn_is_never_mistaken_for_the_opening(self) -> None:
+        # The fallback is positional, so it is gated to the FIRST handoff — otherwise a gap
+        # agent's re-ask would be pinned as the call's introduction.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        gap._chat_ctx.add_message(role="assistant", content="re-ask from the gap pass")
+        with _session_patch(gap, MagicMock()):
+            successor = cast(Agent, await _tool(gap, "gap_complete")())
+        assert controller._anchor_items == []
+        assert _OPENING not in chat_ctx_texts(successor)
+
+    async def test_the_opening_leads_a_gap_agents_context(self) -> None:
+        # A re-ask agent that cannot see the opening is the same re-introduction hazard.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name still missing
+        landed = await _walk(controller, 3)
+        assert isinstance(landed, GapTaskAgent)
+        texts = chat_ctx_texts(landed)
+        assert texts[0] == _OPENING
+        assert texts.index(_OPENING) < texts.index("turn-from-task0")
+
+    async def test_a_silent_gap_agent_still_passes_the_opening_through(self) -> None:
+        # `_own_turns`' whole-context escape hatch for a silent gap agent must compose with the
+        # anchor: the closer still gets the opening, and still exactly once.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        controller.update_answers(
+            {
+                "sections.a.in_network": "Yes",
+                "sections.intro.rep_name": "Martha",
+                "sections.gated.copay": "$20",
+                "sections.cov.deductible": "Met",
+            }
+        )
+        mock_session = MagicMock()
+        with _session_patch(gap, mock_session):
+            await gap.on_enter()
+        successor = mock_session.update_agent.call_args.args[0]
+        texts = chat_ctx_texts(successor)
+        assert texts.count(_OPENING) == 1
+        assert texts[0] == _OPENING
+
+    async def test_cumulative_mode_is_unaffected_by_the_anchor(self) -> None:
+        # The opt-out already carries the whole call, so it must not gain a prepended copy.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=False)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == [_OPENING] + [f"turn-from-task{i}" for i in range(4)]
+
+    async def test_directive_swap_carries_the_opening(self) -> None:
+        # `apply_directive_now` is the other path into wrap-up, and it goes through the same seam.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        await _walk(controller, 2)
+        live = controller.agents[2]
+        live._chat_ctx.add_message(role="user", content="turn-from-task2")
+        session = MagicMock()
+        session.userdata = TakeoverState()
+        session.interrupt = AsyncMock()
+        session.current_agent = live
+        controller.attach_session(session)
+        await controller.apply_directive_now(Terminate(rule_key="r"))
+        assert chat_ctx_texts(controller.wrap_up_agent) == [_OPENING, "turn-from-task2"]

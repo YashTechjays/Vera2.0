@@ -24,6 +24,7 @@ never double-swap the active agent.
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from typing import Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
@@ -34,7 +35,7 @@ from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState, takeover_engaged
-from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SCOPE_DISCIPLINE
+from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, HANDOFF_DISCIPLINE, SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.plan_store import PlanRunStateService
@@ -91,6 +92,11 @@ def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
     )
 
 
+def _is_message(item: ChatItem, role: str) -> bool:
+    """Whether `item` is a spoken message from `role` — a function call or its output is not."""
+    return item.type == "message" and item.role == role
+
+
 def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
@@ -116,6 +122,7 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
     parts.append(SCOPE_DISCIPLINE)
+    parts.append(HANDOFF_DISCIPLINE)
     parts.append(CARTESIA_MARKUP_GUIDE)
     return "\n\n".join(parts)
 
@@ -147,7 +154,11 @@ class PlanTaskAgent(Agent):
         opening = self._controller.opening_line(self._task.intro)
         if opening:
             # Awaited, so the lead below can never be queued on top of in-flight TTS.
-            await self.session.say(opening).wait_for_playout()
+            handle = self.session.say(opening)
+            await handle.wait_for_playout()
+            if is_opening_turn:
+                # Only the CALL's opening is pinned — a later task's intro is not an introduction.
+                self._controller.note_opening_spoken(handle.chat_items)
         if not is_opening_turn:
             # The call's opening turn belongs to the rep — they answer the greeting
             # first. Every later swap leads proactively so it never lands in silence.
@@ -159,7 +170,8 @@ class PlanTaskAgent(Agent):
             "Move on to the next task of the call. Call this ONLY when every "
             "question in the current task has been answered or the representative "
             "has confirmed they cannot answer what remains. Never call it to skip "
-            "questions that are still answerable."
+            "questions that are still answerable, and never in the same turn as a "
+            "question — the representative's answer must arrive first."
         ),
     )
     async def _task_complete(self) -> Agent | str:
@@ -260,7 +272,8 @@ class GapTaskAgent(Agent):
         description=(
             "Finish re-asking the outstanding questions and move on. Call this once "
             "you have re-asked every question you were given — whether or not the "
-            "representative could answer them."
+            "representative could answer them — and never in the same turn as a "
+            "question, since their answer must arrive first."
         ),
     )
     async def _gap_complete(self) -> Agent | str:
@@ -306,6 +319,10 @@ class PlanRunController:
         # a PlanTaskAgent and its GapTaskAgent share one.
         self._boundaries: dict[Agent, frozenset[str]] = {}
         self._opened = False  # has any task agent spoken the call's opening line yet
+        # The call's opening (greeting + recording/identity disclosure). Pinned: it leads EVERY
+        # carry set while the rest of the window stays one task deep, or a long walk hands the
+        # closer a context in which VERA never introduced herself.
+        self._anchor_items: list[ChatItem] = []
         self._run_state = run_state
         # In-process answers snapshot for applicability/skip decisions, seeded
         # with the form's intake prefill (so gates work from call start); the
@@ -374,24 +391,33 @@ class PlanRunController:
 
         Storing the target's resulting item ids is what makes the window work: a path that
         skipped this seam would leave its target with no boundary, and the hop after it would
-        carry that agent's whole context again."""
+        carry that agent's whole context again.
+
+        The call's opening is ANCHORED here — pinned on first capture, then prepended to every
+        carry set, so a seven-task walk still shows the closer that VERA already introduced
+        herself."""
+        self._ensure_anchor(source)
         if not self.previous_task_only:
             self._boundaries[target] = await carry_chat_ctx(source, target)
             return
         self._boundaries[target] = await carry_items(target, self._carry_set(source, target))
 
     def _carry_set(self, source: Agent, target: Agent) -> list[ChatItem]:
-        """Chronological carry set: the swept task's turns for a gap target, then the
-        source's own turns. Nothing older — the window is one task deep.
+        """Chronological carry set: the pinned opening, then the swept task's turns for a gap
+        target, then the source's own turns. Nothing older — the window is one task deep.
 
         A gap agent re-asks ITS OWN task's missing fields, so it needs that task's turns —
         mid-call ones, not those of the chronological predecessor it arrives from (the gap
-        pass walks backwards from just before the closing task)."""
+        pass walks backwards from just before the closing task).
+
+        `carry_items` dedupes on id keeping the FIRST occurrence, so on the hop where the opener
+        is itself the source the anchor keeps the lead and the later copy drops — the order is
+        unchanged from before the anchor existed."""
         carried: list[ChatItem] = []
         if isinstance(target, GapTaskAgent):
             swept = self.agents[target.task_index]
             carried += self._own_turns(swept)
-        return [*carried, *self._own_turns(source)]
+        return [*self._anchor_items, *carried, *self._own_turns(source)]
 
     def _own_turns(self, agent: Agent) -> list[ChatItem]:
         """What `agent` contributes to a successor's window.
@@ -424,6 +450,40 @@ class PlanRunController:
         opening = (self.greeting or intro) if not self._opened else intro
         self._opened = True
         return opening
+
+    def note_opening_spoken(self, items: Sequence[ChatItem]) -> None:
+        """Pin the items the call's opening line produced, by identity — called by the agent that
+        spoke it with its `SpeechHandle.chat_items`, so nothing here depends on the wording.
+
+        Idempotent and empty-safe: an interrupted `say` can forward no text and so add no item, in
+        which case `_ensure_anchor`'s first-handoff fallback takes over."""
+        if self._anchor_items or not items:
+            return
+        self._anchor_items = [item for item in items if item.type == "message"]
+
+    def _ensure_anchor(self, source: Agent) -> None:
+        """Last-chance anchor capture, at the FIRST handoff only.
+
+        Two gaps `note_opening_spoken` cannot cover: `ivr_agent.transfer_to_verification` carries
+        with `carry_chat_ctx` directly and never reaches `prepare_successor`, so the opening can
+        arrive INHERITED; and an interrupted say adds no chat item. Both leave the opening as the
+        earliest assistant message in the source's context — positional and id-preserving, not a
+        text match. Restricted to the first handoff so a later assistant turn (a gap re-ask, say)
+        can never be mistaken for the opening.
+
+        The rep's reply comes along when it directly follows: a pinned exchange reads as answered,
+        where a lone opening question invites the closer to re-ask it."""
+        if self._anchor_items or self._boundaries:
+            return
+        items = list(source.chat_ctx.items)
+        index = next((i for i, item in enumerate(items) if _is_message(item, "assistant")), None)
+        if index is None:
+            return
+        anchor = [items[index]]
+        following = items[index + 1 : index + 2]
+        if following and _is_message(following[0], "user"):
+            anchor += following
+        self._anchor_items = anchor
 
     def note_task_entered(self, index: int) -> None:
         self.active_task_index = index

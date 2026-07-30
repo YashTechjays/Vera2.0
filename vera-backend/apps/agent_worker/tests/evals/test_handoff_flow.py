@@ -83,12 +83,14 @@ class Turn:
 
 DEFAULT_SCENARIO = Scenario(label="cooperative rep", facts=FACT_SHEET)
 
+CONTRADICTION_RULE = "mandate_requires_infertility_coverage"
+
 # Both rules read only a couple of fields, so each scenario narrows the plan to them (plus the
 # closer) — a rule scenario costs a handful of turns instead of a 182-field walk.
 CONTRADICTION_SCENARIO = Scenario(
     label="mandate says covered, rep says not covered",
     facts=MANDATE_CONTRADICTION_FACTS,
-    expect_rule="mandate_requires_infertility_coverage",
+    expect_rule=CONTRADICTION_RULE,
     focus_fields=(
         "sections.benefit_coverage.infertility_plan_mandate",
         "sections.infertility_treatment.infertility_tx_covered",
@@ -103,11 +105,22 @@ INACTIVE_SCENARIO = Scenario(
 
 
 @dataclass
+class Fired:
+    """A directive that reached the controller, and WHICH plan turn it fired on.
+
+    The turn matters for re-ask assertions: a `ReAsk` must not swap the agent, and only the
+    firing turn can show that. Nothing else in the call is evidence either way."""
+
+    turn: int
+    directive: Any
+
+
+@dataclass
 class CallRun:
     report: "Report | None"
     controller: PlanRunController
     run_state: RecordingRunState
-    directives: list[Any]
+    directives: list[Fired]
     ivr: list[Turn]
     plan: list[Turn]
     landed: Any
@@ -122,7 +135,11 @@ class CallRun:
 
     def fired_rules(self) -> list[str]:
         """The rule_keys whose directives actually reached the controller."""
-        return [d.rule_key for d in self.directives]
+        return [f.directive.rule_key for f in self.directives]
+
+    def fired(self, rule_key: str) -> "Fired | None":
+        """The first firing of `rule_key`, or None if that rule never reached the controller."""
+        return next((f for f in self.directives if f.directive.rule_key == rule_key), None)
 
     def extracted(self) -> dict[str, Any]:
         """What the Observer actually pulled out of the conversation."""
@@ -185,11 +202,13 @@ async def _run_call(scenario: Scenario) -> CallRun:
     observer = build_observer(controller, run_state)
     # Record what the rule engine produced. Landing on WrapUpAgent is NOT evidence a flow rule
     # fired — every call ends there — so the directive itself is the only honest signal.
-    directives: list[Any] = []
+    directives: list[Fired] = []
     apply_directive = controller.apply_directive_now
 
     async def recording_apply(directive: Any) -> None:
-        directives.append(directive)
+        # The drive loop appends the turn BEFORE feeding it to the Observer, so the last recorded
+        # turn is the one whose answer triggered this directive.
+        directives.append(Fired(turn=len(plan) - 1, directive=directive))
         await apply_directive(directive)
 
     controller.apply_directive_now = recording_apply  # type: ignore[method-assign]
@@ -283,9 +302,12 @@ async def _run_call(scenario: Scenario) -> CallRun:
         print(run.report.render(scenario.label), flush=True)
     except Exception as exc:
         print(f"===== evaluation unavailable ({type(exc).__name__}) =====", flush=True)
-    return run
     if directives:
-        print(f"===== directives fired: {[d.rule_key for d in directives]} =====", flush=True)
+        print(
+            f"===== directives fired: {[(f.turn, f.directive.rule_key) for f in directives]} =====",
+            flush=True,
+        )
+    return run
 
 
 @pytest.fixture(scope="module")
@@ -383,17 +405,22 @@ async def test_contradiction_makes_vera_push_back(contradiction_call: CallRun) -
     mandate = extracted.get("sections.benefit_coverage.infertility_plan_mandate")
     covered = extracted.get("sections.infertility_treatment.infertility_tx_covered")
     if mandate != "Yes" or covered != "No":
-        # Observed cause when `covered` is None: VERA asks a task's last question AND calls
-        # task_complete in the SAME turn, so the rep's answer arrives while the next task is
-        # active. TaskObserver is whitelisted to the active task's field paths, so that answer
-        # is unextractable and any rule needing it cannot fire. Skipping keeps this honest —
-        # asserting would either fail for the wrong reason or pass vacuously.
+        # Extraction is a live LLM call, so a trigger can simply not land. Skipping keeps this
+        # honest — asserting would either fail for the wrong reason or pass vacuously.
         pytest.skip(f"trigger not extracted: mandate={mandate!r}, covered={covered!r}")
 
-    # A ReAsk keeps the same agent, so a contradiction must never show up as a handoff.
-    assert not contradiction_call.plan or all(
-        new != WrapUpAgent.__name__ for turn in contradiction_call.plan for _, new in turn.handoffs
-    ), "a contradiction must re-ask, not end the call"
+    fired = contradiction_call.fired(CONTRADICTION_RULE)
+    if fired is None:
+        pytest.skip("the trigger was extracted but no directive reached the controller")
+
+    # A ReAsk re-asks on the SAME agent, so the contradiction must produce no handoff. Scoped to
+    # the firing turn and the one after — the directive interrupts outside `session.run`, so its
+    # swap would surface on the following turn's events. Every call ends at WrapUpAgent, so a
+    # whole-call scan would fail on healthy calls.
+    window = contradiction_call.plan[fired.turn : fired.turn + 2]
+    assert not [h for turn in window for h in turn.handoffs], (
+        f"a contradiction must re-ask, not hand off (turn {fired.turn})"
+    )
     spoken = " ".join(contradiction_call.vera_said(contradiction_call.plan)).lower()
     assert "mandate" in spoken or "covered" in spoken
 
