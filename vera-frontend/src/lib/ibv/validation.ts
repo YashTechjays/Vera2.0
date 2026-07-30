@@ -1,10 +1,4 @@
-import {
-  allLeaves,
-  isApplicable,
-  isRequired,
-  leafByPath,
-  systemFieldPaths,
-} from "./schema"
+import { allLeaves, createRequiredPaths, isApplicable, isRequired } from "./schema"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -169,13 +163,16 @@ export function validateCreate(
     if (message) errors[leaf.path] = message
   }
   if (!includeRequired) return errors
-  const byPath = leafByPath(schema)
-  for (const path of systemFieldPaths(schema)) {
-    const leaf = byPath.get(path)
-    if (!leaf || leaf.field.default !== undefined) continue
-    if ((values[path] ?? "").trim() === "") {
-      errors[path] = `${leaf.field.title} is required`
-    }
+  for (const leaf of missingCreateLeaves(schema, values)) {
+    errors[leaf.path] = `${leaf.field.title} is required`
   }
   return errors
+}
+
+/** The create-required leaves still blank, in document order. */
+export function missingCreateLeaves(schema: FormSchema, values: FormValues): FlatLeaf[] {
+  const required = createRequiredPaths(schema)
+  return allLeaves(schema).filter(
+    (leaf) => required.has(leaf.path) && (values[leaf.path] ?? "").trim() === "",
+  )
 }

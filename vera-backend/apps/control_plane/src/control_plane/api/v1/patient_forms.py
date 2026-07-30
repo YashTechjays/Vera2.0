@@ -40,15 +40,17 @@ from control_plane.api.v1.common import (
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
-from control_plane.deps import get_audit, get_sessionmaker
+from control_plane.deps import get_audit, get_idempotency_store, get_sessionmaker
 from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
     ConflictError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
+    ExceptionCode,
     NotFoundError,
 )
+from control_plane.idempotency import claim_or_conflict, require_idempotency_key
 from control_plane.queueability import ensure_queueable, ensure_va_capacity
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
@@ -353,6 +355,9 @@ async def upload_patient_form(
 class PatientFormCreateRequest(BaseModel):
     schema_id: UUID  # form_schema.id — the server binds to its published version
     intake_payload: dict[str, Any]  # nested by section_key
+    # Optimistic concurrency: the version the client rendered, so a version
+    # published mid-flow is rejected rather than silently bound.
+    published_version_id: UUID | None = None
 
 
 @router.post(
@@ -364,6 +369,8 @@ class PatientFormCreateRequest(BaseModel):
         DefaultExceptionCode.VALIDATION_ERROR,
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
+        ExceptionCode.MISSING_IDEMPOTENCY_KEY,
+        ExceptionCode.IDEMPOTENCY_CONFLICT,
     ),
 )
 async def create_patient_form(
@@ -372,6 +379,8 @@ async def create_patient_form(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormResponse]:
     """In-app patient-form creation (Data Management). Unlike the API-key intake
@@ -379,6 +388,14 @@ async def create_patient_form(
     caller picks only the form family; the server resolves and binds its single
     published version, so an in-app form can never be created against a draft."""
     response.headers["Cache-Control"] = "no-store"
+    # `patient_form` has no natural key, so this lock is the only duplicate guard.
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        tenant_id,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
     form_schema = (
         await session.execute(select(FormSchema).where(FormSchema.id == body.schema_id))
     ).scalar_one_or_none()
@@ -388,6 +405,11 @@ async def create_patient_form(
     if version is None:
         # E.g. demoted between the picker fetch and this submit.
         raise ConflictError(message="this form schema has no published version")
+    if body.published_version_id is not None and body.published_version_id != version.id:
+        raise ConflictError(
+            message="a newer version of this form schema has been published — "
+            "reopen the form to continue"
+        )
 
     created = await _create_patient_form(
         session,

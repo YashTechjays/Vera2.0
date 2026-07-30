@@ -112,13 +112,23 @@ export function listIntakeSchemas(): Promise<IntakeSchemaOption[]> {
 }
 
 /** POST /patient-forms:create — create a patient form from a family's published
- *  schema version (resolved server-side; the client never picks a version). */
+ *  schema version. The server resolves the version; `publishedVersionId` is the one
+ *  this client rendered, sent so a version published mid-flow 409s instead of
+ *  silently binding a document the user never filled. `idempotencyKey` must be
+ *  stable across retries of one submit — a fresh key per call de-dups nothing. */
 export function createPatientForm(
   schemaId: string,
+  publishedVersionId: string,
   intakePayload: Record<string, unknown>,
+  idempotencyKey: string,
 ): Promise<PatientFormCreateResult> {
   return apiRequest<PatientFormCreateResult>("/patient-forms:create", {
     method: "POST",
-    body: { schema_id: schemaId, intake_payload: intakePayload },
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: {
+      schema_id: schemaId,
+      published_version_id: publishedVersionId,
+      intake_payload: intakePayload,
+    },
   })
 }

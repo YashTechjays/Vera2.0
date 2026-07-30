@@ -15,6 +15,20 @@ import { humanizeSegment } from "@/lib/patient-forms/display"
 import { useIbv } from "./IbvProvider"
 import { SchemaForm } from "./SchemaForm"
 
+/**
+ * Bring a blocked field into view and focus it. The wide form scrolls
+ * horizontally and the reference sections sit off-screen entirely, so an
+ * `invalid` outline on its own is unreachable feedback.
+ */
+function revealField(dialog: HTMLElement | null, path: string): void {
+  const row = (dialog ?? document).querySelector<HTMLElement>(
+    `[data-field-path="${CSS.escape(path)}"]`,
+  )
+  if (!row) return
+  row.scrollIntoView?.({ block: "center", inline: "center", behavior: "smooth" })
+  row.querySelector<HTMLElement>("input, select, textarea")?.focus({ preventScroll: true })
+}
+
 /** The schema-picker step, split out so its local state (options, the
  *  in-progress selection) resets by mounting fresh rather than by an effect
  *  reacting to a boolean — it mounts each time the dialog opens and each
@@ -75,7 +89,7 @@ function SchemaPicker({
           <option value="">Select a form schema…</option>
           {options.map((o) => (
             <option key={o.schema_id} value={o.schema_id}>
-              {o.name} ({humanizeSegment(o.insurance_type)})
+              {o.name} ({humanizeSegment(o.insurance_type)}) · v{o.published_version}
             </option>
           ))}
         </Select>
@@ -144,7 +158,7 @@ export function CreatePatientFormModal() {
           <DialogDescription>
             {picking
               ? "Choose the form type to create."
-              : "Fill in the patient details. Fields marked as system fields are required."}
+              : "Fill in the patient details. Fields marked * are required to create the form; the rest are collected on the call."}
           </DialogDescription>
         </DialogHeader>
 
@@ -182,7 +196,10 @@ export function CreatePatientFormModal() {
                   Cancel
                 </Button>
                 <Button
-                  onClick={() => void submitCreate()}
+                  onClick={(e) => {
+                    const dialog = e.currentTarget.closest<HTMLElement>("[role=dialog]")
+                    void submitCreate().then((p) => p && revealField(dialog, p))
+                  }}
                   disabled={createSubmitting}
                   className="min-w-[140px]"
                 >
