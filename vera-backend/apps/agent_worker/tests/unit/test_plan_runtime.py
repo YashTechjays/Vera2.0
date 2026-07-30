@@ -15,6 +15,7 @@ from agent_worker.directives import ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState
 from agent_worker.plan_runtime import (
+    _OPENING_DIRECTIVE,
     _WRAP_UP_DIRECTIVE,
     WRAP_UP_TASK_KEY,
     GapTaskAgent,
@@ -131,6 +132,13 @@ class TestConstruction:
         controller, _ = _controller()
         for agent in [*controller.agents, controller.wrap_up_agent]:
             assert "only the questions listed" in agent.instructions.lower()
+
+    def test_closing_discipline_appended_to_every_agent(self) -> None:
+        # A task's authored outro IS the closing line; a farewell the model adds itself lands
+        # immediately before it and signs the call off twice.
+        controller, _ = _controller()
+        for agent in [*controller.agents, controller.wrap_up_agent]:
+            assert "never say goodbye" in agent.instructions.lower()
 
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")
@@ -1401,3 +1409,156 @@ class TestOpeningAnchor:
         controller.attach_session(session)
         await controller.apply_directive_now(Terminate(rule_key="r"))
         assert chat_ctx_texts(controller.wrap_up_agent) == [_OPENING, "turn-from-task2"]
+
+
+_MALE_GATE = Comparison(field="sections.patient.spouse_gender", op="eq", value="Male")
+
+
+def _gated_task_plan() -> CallPlan:
+    """Three tasks; the MIDDLE one's every question is gated on a value that never holds — the
+    shape of the schema's `male_partner` task on a call with no male spouse."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="basics",
+                title="Basics",
+                intro="Hello rep.",
+                outro="Noted.",
+                prompt="Basics.",
+                fields=[_field("sections.a.plan_type", "Plan type")],
+            ),
+            PlanTask(
+                task_key="male_partner",
+                title="Male Partner Coverage",
+                intro="Now I'd like to ask about male partner fertility coverage.",
+                outro="Thanks, that covers the male partner benefits.",
+                prompt="Male partner.",
+                fields=[
+                    _field("sections.male.covered", "Male partner covered", gates=(_MALE_GATE,)),
+                    _field("sections.male.cpt_89320", "CPT 89320", gates=(_MALE_GATE,)),
+                ],
+            ),
+            PlanTask(
+                task_key="closing_task",
+                title="Wrap Up",
+                prompt="Close.",
+                fields=[_field("sections.rep.name", "Representative name")],
+            ),
+        ],
+    )
+
+
+class TestGatedOutTask:
+    """A task whose every question is excluded by its gates must be handed straight on. The
+    compiled prompt is rendered per schema, before any answer exists, so it lists every question
+    and expresses each gate only as prose the model must evaluate against a value it may never
+    have been given — which is how the eval judge caught VERA asking all of them."""
+
+    def test_applicable_fields_drops_the_gated_ones(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        assert controller.applicable_fields(1) == []
+        assert [f.title for f in controller.inapplicable_fields(1)] == [
+            "Male partner covered",
+            "CPT 89320",
+        ]
+
+    def test_the_gate_holding_makes_them_applicable_again(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Male"})
+        assert len(controller.applicable_fields(1)) == 2
+        assert controller.inapplicable_fields(1) == []
+
+    @pytest.mark.asyncio
+    async def test_a_fully_gated_task_is_skipped_without_speaking(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")  # the call has already opened
+        gated = controller.agents[1]
+        mock_session = MagicMock()
+        with _session_patch(gated, mock_session):
+            await gated.on_enter()
+        mock_session.say.assert_not_called()  # no "Now I'd like to ask about male partner…"
+        mock_session.generate_reply.assert_not_called()
+        assert mock_session.update_agent.call_args.args[0] is controller.agents[2]
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_task_leaves_the_closer_to_sign_off(self) -> None:
+        # It speaks no outro, so the flag `note_task_outro` sets must not be left True by the
+        # task before it — otherwise wrap-up closes silently and nobody says goodbye.
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")
+        basics = controller.agents[0]
+        with _session_patch(basics, MagicMock()):
+            await _tool(basics, "task_complete")()
+        assert controller.signed_off, "the first task's outro was not recorded"
+        with _session_patch(controller.agents[1], MagicMock()):
+            await controller.agents[1].on_enter()
+        assert not controller.signed_off
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_task_still_counts_as_visited(self) -> None:
+        # The cursor and the visited set drive the gap pass and the compiled-order assertion; a
+        # skipped task is entered, it just says nothing.
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")
+        with _session_patch(controller.agents[1], MagicMock()):
+            await controller.agents[1].on_enter()
+        assert 1 in controller._visited_tasks
+
+    @pytest.mark.asyncio
+    async def test_the_opening_task_is_never_skipped_silently(self) -> None:
+        # The greeting and the recording/identity disclosure ride on the opening task's intro.
+        plan = _gated_task_plan()
+        plan.tasks[0] = plan.tasks[0].model_copy(
+            update={"fields": [_field("sections.a.x", "Gated", gates=(_MALE_GATE,))]}
+        )
+        controller, _ = _controller(plan)
+        opener = controller.agents[0]
+        mock_session = MagicMock()
+        with _session_patch(opener, mock_session):
+            await opener.on_enter()
+        mock_session.say.assert_called_once_with("Hello rep.")
+        mock_session.update_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_task_with_no_fields_at_all_still_runs(self) -> None:
+        # `_plan`'s tasks carry only speech; "no applicable fields" must not mean "no fields".
+        controller, _ = _controller()
+        controller.opening_line("Hello rep.")
+        agent = controller.agents[2]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+        mock_session.say.assert_called_once_with("Next up.")
+        mock_session.update_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_partly_gated_task_names_the_exclusions_in_its_lead(self) -> None:
+        # The other half of the same defect: the task runs, but the model must be told which of
+        # its listed questions are out of scope this call.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})  # gates out `oon_note`
+        controller.opening_line("Hello rep.")
+        coverage = controller.agents[2]
+        mock_session = MagicMock()
+        with _session_patch(coverage, mock_session):
+            await coverage.on_enter()
+        directive = mock_session.generate_reply.call_args.kwargs["instructions"]
+        assert "OON note" in directive
+        assert "do NOT apply" in directive
+        assert "Deductible" not in directive  # the applicable one is not excluded
+
+    @pytest.mark.asyncio
+    async def test_an_ungated_task_keeps_the_plain_lead(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "No"})  # every coverage field applies
+        controller.opening_line("Hello rep.")
+        coverage = controller.agents[2]
+        mock_session = MagicMock()
+        with _session_patch(coverage, mock_session):
+            await coverage.on_enter()
+        assert mock_session.generate_reply.call_args.kwargs["instructions"] == _OPENING_DIRECTIVE

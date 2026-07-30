@@ -35,7 +35,12 @@ from agent_worker.agent import VeraAgent
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState, takeover_engaged
-from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, HANDOFF_DISCIPLINE, SCOPE_DISCIPLINE
+from agent_worker.prompt import (
+    CARTESIA_MARKUP_GUIDE,
+    CLOSING_DISCIPLINE,
+    HANDOFF_DISCIPLINE,
+    SCOPE_DISCIPLINE,
+)
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.plan_store import PlanRunStateService
@@ -123,6 +128,7 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
     parts.append(task_block)
     parts.append(SCOPE_DISCIPLINE)
     parts.append(HANDOFF_DISCIPLINE)
+    parts.append(CLOSING_DISCIPLINE)
     parts.append(CARTESIA_MARKUP_GUIDE)
     return "\n\n".join(parts)
 
@@ -149,6 +155,8 @@ class PlanTaskAgent(Agent):
         if takeover_engaged(self.session):
             logger.info("task entered under supervisor takeover; staying silent")
             return
+        if await self._skip_when_nothing_applies():
+            return
         # Read before opening_line — that call flips `opened` as a side effect.
         is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
@@ -162,7 +170,43 @@ class PlanTaskAgent(Agent):
         if not is_opening_turn:
             # The call's opening turn belongs to the rep — they answer the greeting
             # first. Every later swap leads proactively so it never lands in silence.
-            self.session.generate_reply(instructions=_OPENING_DIRECTIVE)
+            self.session.generate_reply(instructions=self._opening_directive())
+
+    async def _skip_when_nothing_applies(self) -> bool:
+        """Hand straight on, silently, when the gates exclude every question in this task.
+
+        Announcing a section and closing it in the same breath ("Now I'd like to ask about male
+        partner coverage… Thanks, that covers the male partner benefits.") sounds broken, and
+        asking those questions anyway is worse. A task with NO fields at all is a different thing
+        — it carries only speech, so it still runs."""
+        if not self._task.fields or self._controller.applicable_fields(self._task_index):
+            return False
+        if not self._controller.opened:
+            # The call's greeting and recording disclosure ride on the opening task's intro;
+            # skipping silently here would drop them from the call altogether.
+            return False
+        logger.info("task %s skipped: every question is gated out", self._task.task_key)
+        # Nothing was spoken, so the closer must still sign off (see note_task_outro).
+        self._controller.note_task_outro(None)
+        successor = await self._controller.advance_from(self._task_index)
+        await self._controller.prepare_successor(self, successor)
+        self.session.update_agent(successor)
+        return True
+
+    def _opening_directive(self) -> str:
+        """The lead-in, naming any question the gates exclude on this call.
+
+        `SCOPE_DISCIPLINE` tells the agent its task list is "the complete set of questions for
+        this call", which is what makes a gated-out question look mandatory; this is the only
+        place that list gets narrowed against live answers."""
+        excluded = self._controller.inapplicable_fields(self._task_index)
+        if not excluded:
+            return _OPENING_DIRECTIVE
+        titles = ", ".join(field.title for field in excluded)
+        return (
+            f"{_OPENING_DIRECTIVE}\n\nThese questions do NOT apply on this call and must not be "
+            f"asked, whatever the task list says: {titles}."
+        )
 
     @llm.function_tool(
         name="task_complete",
@@ -619,6 +663,29 @@ class PlanRunController:
 
     # -- gap-pass API -------------------------------------------------------------
 
+    def applicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """A task's questions whose gates hold, so they are askable on THIS call."""
+        shared = self.plan.shared_conditions
+        return [
+            field
+            for field in self.plan.tasks[task_index].fields
+            if is_applicable(field.gates, self._answers, shared)
+        ]
+
+    def inapplicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """The complement: questions the compiled prompt still lists but the gates exclude.
+
+        The prompt is rendered per schema, before any answer exists, so it enumerates every
+        question and can only express a gate as prose the model must evaluate itself — often
+        against a value it was never given. Naming the exclusions live is the only signal it has.
+        """
+        shared = self.plan.shared_conditions
+        return [
+            field
+            for field in self.plan.tasks[task_index].fields
+            if not is_applicable(field.gates, self._answers, shared)
+        ]
+
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
         """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,
         against the live answer snapshot — the same required/applicable set the form's
@@ -626,10 +693,8 @@ class PlanRunController:
         shared = self.plan.shared_conditions
         return [
             field
-            for field in self.plan.tasks[task_index].fields
-            if is_applicable(field.gates, self._answers, shared)
-            and is_required(field, self._answers, shared)
-            and not self._is_answered(field.path)
+            for field in self.applicable_fields(task_index)
+            if is_required(field, self._answers, shared) and not self._is_answered(field.path)
         ]
 
     def _is_answered(self, path: str) -> bool:
