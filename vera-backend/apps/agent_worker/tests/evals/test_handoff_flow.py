@@ -21,7 +21,8 @@ quietly passes for the wrong reason.
 """
 
 import os
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -53,6 +54,7 @@ from rep import (
     MANDATE_CONTRADICTION_FACTS,
     SimulatedRep,
 )
+from transcript import Turn, collect, echo
 
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import IvrNavigatorAgent
@@ -70,15 +72,10 @@ pytestmark = [
 # is 7 tasks over 184 fields.
 _MAX_PLAN_TURNS = 250
 
-
-@dataclass
-class Turn:
-    """One exchange: what the rep said, and what VERA did with it."""
-
-    rep: str
-    vera: list[str] = field(default_factory=list)
-    tools: list[str] = field(default_factory=list)
-    handoffs: list[tuple[str, str]] = field(default_factory=list)
+# How VERA names herself. Deliberately only self-identification: "calling on behalf of Dr. Smith"
+# is legitimate mid-call context, while naming herself again is what a rep hears as a second
+# introduction. The compiled intro says "I'm VERA", so one match is the opening and is expected.
+_SELF_IDENTIFICATION = re.compile(r"\b(?:i'?m|i am|my name is|this is)\s+vera\b", re.IGNORECASE)
 
 
 DEFAULT_SCENARIO = Scenario(label="cooperative rep", facts=FACT_SHEET)
@@ -147,45 +144,14 @@ class CallRun:
 
     def transcript_lines(self) -> list[str]:
         """The call as numbered lines. This IS what the evaluator reads, so a cited line number
-        means the same thing to it and to whoever reads the printed run."""
-        lines: list[str] = []
-        for turn in self.turns:
-            lines.append(f"REP  : {turn.rep}")
-            lines.extend(f"VERA : {said}" for said in turn.vera)
-            lines.extend(f"TOOL : {name}" for name in turn.tools)
-            lines.extend(f">>>> HANDOFF {old} -> {new}" for old, new in turn.handoffs)
-        return lines
+        means the same thing to it, to whoever reads the printed run, and to the real call."""
+        return [line for turn in self.turns for line in turn.lines()]
 
     def transcript_text(self) -> str:
         return "\n".join(f"[{i:3d}] {line}" for i, line in enumerate(self.transcript_lines()))
 
     def vera_said(self, turns: list[Turn] | None = None) -> list[str]:
         return [line for turn in (turns if turns is not None else self.turns) for line in turn.vera]
-
-
-def _collect(rep_said: str, result: Any) -> Turn:
-    """Fold one RunResult into a readable Turn."""
-    turn = Turn(rep=rep_said)
-    for ev in result.events:
-        if ev.type == "message" and ev.item.role == "assistant":
-            turn.vera.append(ev.item.text_content or "")
-        elif ev.type == "function_call":
-            turn.tools.append(ev.item.name)
-        elif ev.type == "agent_handoff":
-            turn.handoffs.append((type(ev.old_agent).__name__, type(ev.new_agent).__name__))
-    return turn
-
-
-def _echo(phase: str, turn: Turn) -> None:
-    """Live transcript, visible under `pytest -s`. flush=True so a piped run still streams —
-    without it the call buffers and a stall looks identical to slow progress."""
-    print(f"[{phase}] REP  : {turn.rep}", flush=True)
-    for line in turn.vera:
-        print(f"[{phase}] VERA : {line}", flush=True)
-    for name in turn.tools:
-        print(f"[{phase}] TOOL : {name}", flush=True)
-    for old, new in turn.handoffs:
-        print(f"[{phase}] >>>> HANDOFF {old} -> {new}", flush=True)
 
 
 async def _run_call(scenario: Scenario) -> CallRun:
@@ -241,9 +207,9 @@ async def _run_call(scenario: Scenario) -> CallRun:
         with mock_tools(IvrNavigatorAgent, {"press_keypad": lambda digits: "Sent the tones."}):
             await session.start(make_entry_agent(controller))
             for machine_turn in [*IVR_TURNS, HUMAN_PICKUP]:
-                turn = _collect(machine_turn, await session.run(user_input=machine_turn))
+                turn = collect(machine_turn, await session.run(user_input=machine_turn))
                 ivr.append(turn)
-                _echo("IVR", turn)
+                echo("IVR", turn)
 
         hit_cap = True
         for _ in range(_MAX_PLAN_TURNS):
@@ -257,9 +223,9 @@ async def _run_call(scenario: Scenario) -> CallRun:
             except RuntimeError:
                 hit_cap = False  # end_call closed the session: the call ended normally
                 break
-            turn = _collect(answer, result)
+            turn = collect(answer, result)
             plan.append(turn)
-            _echo("PLAN", turn)
+            echo("PLAN", turn)
             # The voice pipeline would have published this turn to the transcript stream; feed the
             # Observer directly so extraction (and therefore the rule engine) runs.
             seq += 1
@@ -362,8 +328,30 @@ async def test_tasks_are_visited_in_compiled_order(call: CallRun) -> None:
 
 async def test_no_task_reintroduces_itself(call: CallRun) -> None:
     # Spoken once, by whichever agent opens the plan conversation. Any repeat across the
-    # handoffs is the re-introduction bug the window must not cause.
+    # handoffs is the re-introduction bug the window must not cause. Catches only a duplicated
+    # `session.say(intro)` — see the self-identification test below for the paraphrase case.
     assert sum(DISCLOSURE in line for line in call.vera_said()) <= 1
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Pre-existing, tracked as NEW-2: the rule 'never re-introduce yourself for the rest of "
+        "the call' lives only in the introduction task's OWN prompt, and `_instructions` injects "
+        "only the current task's block — so it is dropped at the very handoff where it starts to "
+        "matter. The next task has no authored intro, so `on_enter` goes straight to "
+        "generate_reply(_OPENING_DIRECTIVE), which never says 'do not greet', and the model "
+        "invents an opener modelled on the pinned anchor. strict=False because whether the model "
+        "re-identifies itself on any given run is LLM variance; the missing instruction is not."
+    ),
+    strict=False,
+)
+async def test_vera_never_re_identifies_herself(call: CallRun) -> None:
+    # The disclosure substring cannot see this: the observed second introduction ("my name is
+    # VERA, calling on behalf of...") carries no disclosure text at all, so counting it passes
+    # green through the actual defect. Match how VERA names HERSELF instead, which is what a rep
+    # hears as being introduced to twice.
+    said = [line for line in call.vera_said() if _SELF_IDENTIFICATION.search(line)]
+    assert len(said) <= 1, f"introduced herself {len(said)}x: {said}"
 
 
 async def test_opening_survives_to_the_end_of_the_call(call: CallRun) -> None:
