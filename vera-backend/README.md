@@ -48,61 +48,29 @@ degrades gracefully (drops spans) when it's down.
 
 ### Eval harness (call-flow simulation) — opt-in
 
-`apps/agent_worker/tests/evals/` replays a **whole call** without placing one: the real entrypoint
-(`build_agent`) drives the IVR navigator → a real compiled CallPlan → the gap pass → wrap-up, with a
-second Gemini playing the payer rep. An evaluator LLM then grades the transcript across 11
-dimensions (flow rules, contradictions, task handoffs, tool calls, IVR navigation, question
-coverage, scope discipline, answer handling, gap conduct, closing, overall) and prints a scorecard.
+`apps/agent_worker/tests/evals/` replays a whole call without placing one — real entrypoint, real
+compiled CallPlan, a second Gemini as the payer rep — then an evaluator LLM grades the transcript and
+prints a scorecard. Live Gemini calls, so the `evals` marker keeps them out of `just check`.
 
-These call live Gemini, so they are **excluded from `just check`** by the `evals` pytest marker and
-never run by accident.
-
-**Prerequisites:** Vertex ADC (`gcloud auth application-default login`) **and** a seeded local
-Postgres (`just up && just migrate && just seed`) — the plan is read from the published
-`schema_version` row, so an unseeded database skips the whole suite.
+Needs Vertex ADC (`gcloud auth application-default login`) and a seeded Postgres
+(`just up && just migrate && just seed`) — the plan comes from the published `schema_version` row.
 
 ```bash
-# full run: 3 scenarios, the cooperative rep over all 7 tasks / 182 fields (~12 min)
+# full: 3 scenarios over all 7 tasks / 182 fields (~12 min). Drop VERA_EVALS_FULL for a ~3-min
+# focused loop; add -k inactive for one scenario; VERA_EVALS_JUDGE_STRICT=1 to gate on the verdict.
 VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
-
-# fast loop: focused plans, a few turns each (~3 min)
-VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
-
-# one scenario
-VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs -k inactive
-
-# make a verified evaluator failure fail the run (default: it only reports)
-VERA_EVALS_JUDGE_STRICT=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
 ```
 
-Three of those flags are load-bearing and easy to omit:
+- **`-m evals` is required.** Without it you get the 20 LLM-free tests and **no simulations** — which
+  looks like a clean pass. A real run prints a `===== <scenario>: … =====` banner per scenario.
+- `-s` or the transcript and scorecard are swallowed; `-rs` or skip reasons are hidden (an unseeded DB
+  otherwise looks like "nothing to run").
+- Check `N answers extracted` per scenario: **0 means the Observer contributed nothing**, so no rule
+  could fire, yet most dimensions still read `pass`.
 
-| flag | why you need it |
-| --- | --- |
-| `-m evals` | **required.** `addopts` carries `-m 'not evals'`, so omitting it silently runs only the 20 LLM-free tests and **no simulations at all** — which looks like a clean pass |
-| `-s` | otherwise pytest swallows the transcript and the scorecard |
-| `-rs` | shows skip *reasons* — without it an unseeded DB looks identical to "nothing to run" |
-| `VERA_EVALS_ENABLED=1` | master switch; every simulation skips without it |
-| `VERA_EVALS_FULL=1` | walks the whole plan instead of a narrowed subset |
-
-A real run prints a `===== <scenario>: N tasks, M fields, … =====` banner per scenario. If you see no
-banners, no simulation ran.
-
-**Read two things in the output, not just the exit code.** The scenario banner reports the plan's
-real mode (`focused` vs `full walk`), and each scenario ends with `N answers extracted` — a run that
-extracted **0** means the Observer contributed nothing, so no rule could fire and the gap pass had no
-state, yet most dimensions will still read `pass`.
-
-The harness cannot see STT damage (text mode has no audio), real DTMF (`press_keypad` is mocked), or
-a rule that fired too late to matter — extraction settles between turns, so rules fire earlier and
-more reliably here than on a real call. It shortens the feedback loop; it does not replace a live
-call.
-
-The LLM-free parts (`test_judge_parsing.py`, 20 tests covering the evaluator's parsing, citation
-checks and brief rendering) are deliberately **not** `evals`-marked and run in `just check`.
-
-Defects it has already found are catalogued in
-`docs/superpowers/plans/2026-07-30-call-flow-eval-findings-remediation.md`.
+No STT, no real DTMF (`press_keypad` is mocked), and extraction settles between turns so rules fire
+more reliably than on a real call. It shortens the loop; it does not replace a live call. Defects
+found so far: `docs/superpowers/plans/2026-07-30-call-flow-eval-findings-remediation.md`.
 
 ### Seeding a dev login
 
