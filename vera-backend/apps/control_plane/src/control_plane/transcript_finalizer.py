@@ -21,40 +21,30 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent, CallStreamService
 from vera_core.db.rls import tenant_session
-from vera_core.models.enums import TranscriptSource
 from vera_core.models.transcript import Transcript
 from vera_core.observability.correlation import RoomRef
+from vera_core.transcript import resolve_turn_source
 
 logger = logging.getLogger(__name__)
 
-# The producer-stamped envelope `source` is authoritative (validated against the
-# CHECK-constrained enum). The role map below is the fallback for legacy envelopes
-# published before `source` existed: "user" is the payer rep, the human on a real
-# call; "agent" is Vera's speech; "dtmf" is a keypad press Vera sent. A turn whose
-# source can't be established either way can only come from a corrupted envelope —
-# it is dropped rather than guessed at (mapping it to BOT would misattribute speech
-# that may not be the agent's).
-_VALID_SOURCES: frozenset[str] = frozenset(s.value for s in TranscriptSource)
-_SOURCE_BY_ROLE: dict[str, TranscriptSource] = {
-    "user": TranscriptSource.REP,
-    "agent": TranscriptSource.BOT,
-    "dtmf": TranscriptSource.BOT,
-}
 
-
-def _row_source(data: dict[str, Any]) -> str | None:
-    """The `source` to persist for a transcript envelope, or None to skip the turn."""
-    stamped = data.get("source")
-    if isinstance(stamped, str) and stamped in _VALID_SOURCES:
-        return stamped
-    mapped = _SOURCE_BY_ROLE.get(str(data.get("role", "")))
-    return mapped.value if mapped is not None else None
+def _row_speaker_user_id(data: dict[str, Any]) -> UUID | None:
+    """The supervisor id to persist, or None (Vera/rep turns, or a malformed envelope
+    value — never fail the whole turn over an unparseable id)."""
+    raw = data.get("user_id")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
 
 
 def _build_rows(
@@ -72,7 +62,7 @@ def _build_rows(
     for event in events:
         if event.type != TYPE_TRANSCRIPT:
             continue
-        source = _row_source(event.data)
+        source = resolve_turn_source(event.data)
         if source is None:
             skipped += 1
             continue
@@ -85,6 +75,7 @@ def _build_rows(
                 "role": str(event.data.get("role", "")),
                 "message": str(event.data.get("text", "")),
                 "spoke_at": datetime.fromtimestamp(event.ts / 1000, tz=UTC),
+                "speaker_user_id": _row_speaker_user_id(event.data),
             }
         )
         seq += 1

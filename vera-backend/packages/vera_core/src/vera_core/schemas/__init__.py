@@ -1,7 +1,12 @@
 from .dto import (
+    CallStats,
     CallSummary,
+    ConcurrencyConfig,
+    ConcurrencyConfigUpdate,
     JoinTokenResponse,
-    RevokeAccessRequest,
+    RecordingPlayback,
+    RetentionPolicy,
+    RetentionPolicyUpdate,
     StartVoiceSessionRequest,
     VoiceSessionResponse,
 )
@@ -10,14 +15,19 @@ from .ivr_playbook import IvrPlaybookConfig
 from .persona import PersonaTweak
 
 __all__ = [
+    "CallStats",
     "CallSummary",
+    "ConcurrencyConfig",
+    "ConcurrencyConfigUpdate",
     "FieldType",
     "FormField",
     "FormTemplate",
     "IvrPlaybookConfig",
     "JoinTokenResponse",
     "PersonaTweak",
-    "RevokeAccessRequest",
+    "RecordingPlayback",
+    "RetentionPolicy",
+    "RetentionPolicyUpdate",
     "StartVoiceSessionRequest",
     "VoiceSessionResponse",
 ]

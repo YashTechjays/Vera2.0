@@ -22,6 +22,27 @@ export type PatientFormStatusResult = {
 /** Where a field's current value came from (vera_core AnswerSource enum). */
 export type FieldSource = "intake" | "ai_call" | "human"
 
+/** Judge verdict attached to a field's provenance. */
+export type FieldJudge = { confidence: number | null; supported: boolean; evidence: string | null }
+
+/** Which call attempt produced a field's current value and the judge verdict. */
+export type FieldProvenance = { attempt: number; mode: "full" | "retry"; judge: FieldJudge | null }
+
+/** One entry in the call-attempt timeline (GET /patient-forms/{id}/calls). */
+export type CallAttempt = {
+  id: string
+  attempt: number
+  mode: "full" | "retry"
+  status: string
+  created_at: string
+  retry_of: string | null
+  changed_paths: string[]
+  /** True when THIS caller may fetch the attempt's recording (it is AVAILABLE,
+   *  the call is owner-or-published visible, and the caller holds
+   *  recordings:read) — false means render no play control. */
+  recording_available: boolean
+}
+
 /** JSONB field value — the backend stores/returns `Any`. */
 export type FieldValue = string | number | boolean | null
 
@@ -44,6 +65,7 @@ export type PatientFormField = {
   source: FieldSource
   confidence: number | null
   dispute: FieldDispute | null
+  provenance: FieldProvenance | null
 }
 
 /** Worklist row (GET /patient-forms). */
@@ -61,6 +83,7 @@ export type PatientFormSummary = {
   completion_pct: number
   created_at: string
   updated_at: string
+  review_reason: string | null
 }
 
 /** Full review payload (GET /patient-forms/{id} and the resolve response). */
@@ -75,9 +98,19 @@ export type PatientFormDetail = {
   patient_name: string | null
   chart_number: string | null
   appointment_date: string | null
+  /** The form's current insurance provider — the send-to-queue picker pre-selects
+   *  the matching catalog provider from this string. */
+  insurance_provider: string | null
   fields: PatientFormField[]
   /** Stored queue-time choice: run the IVR navigator on this form's calls. */
   ivr_navigation_enabled: boolean
+}
+
+/** Active insurance-provider option for the send-to-queue picker
+ *  (GET /patient-forms/insurance-providers). Non-PHI catalog reference. */
+export type ProviderOption = {
+  id: string
+  name: string
 }
 
 /** Paginated worklist envelope `data`. */
@@ -88,6 +121,16 @@ export type PaginatedPatientForms = {
   total: number
 }
 
+/** Server-side sort columns the worklist endpoint whitelists. */
+export type PatientFormSortKey =
+  | "appointment_date"
+  | "appointment_type"
+  | "patient_name"
+  | "member_id"
+  | "insurance_provider"
+  | "status"
+  | "created_at"
+
 export type ListPatientFormsParams = {
   page?: number
   page_size?: number
@@ -95,6 +138,9 @@ export type ListPatientFormsParams = {
   status?: PatientFormStatus
   /** case-insensitive substring match on patient_name */
   q?: string
+  /** server-side sort; the backend defaults to created_at desc, nulls last */
+  sort_by?: PatientFormSortKey
+  sort_dir?: "asc" | "desc"
 }
 
 /** Request body for POST /patient-forms/{id}/disputes:resolve. Mirrors the

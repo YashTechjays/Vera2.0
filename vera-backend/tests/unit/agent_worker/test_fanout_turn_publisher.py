@@ -18,7 +18,14 @@ class _AnnotatedBoomSink:
     command, including the turn text."""
 
     async def publish_turn(
-        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        self,
+        room_name: str,
+        role: str,
+        text: str,
+        *,
+        ts: int,
+        source: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         raise RuntimeError(f"Command # 1 (XADD stream '*' text {text!r}) of pipeline: OOM")
 
@@ -26,17 +33,31 @@ class _AnnotatedBoomSink:
 class _RecordingSink:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.calls: list[tuple[str, str, str, int, str | None]] = []
+        self.calls: list[tuple[str, str, str, int, str | None, str | None]] = []
 
     async def publish_turn(
-        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        self,
+        room_name: str,
+        role: str,
+        text: str,
+        *,
+        ts: int,
+        source: str | None = None,
+        user_id: str | None = None,
     ) -> None:
-        self.calls.append((room_name, role, text, ts, source))
+        self.calls.append((room_name, role, text, ts, source, user_id))
 
 
 class _BoomSink:
     async def publish_turn(
-        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        self,
+        room_name: str,
+        role: str,
+        text: str,
+        *,
+        ts: int,
+        source: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         raise RuntimeError("sink down")
 
@@ -50,7 +71,14 @@ async def test_publishes_to_all_sinks_in_registration_order() -> None:
             self._name = name
 
         async def publish_turn(
-            self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+            self,
+            room_name: str,
+            role: str,
+            text: str,
+            *,
+            ts: int,
+            source: str | None = None,
+            user_id: str | None = None,
         ) -> None:
             order.append(self._name)
 
@@ -64,8 +92,21 @@ async def test_all_sinks_receive_the_same_turn_including_source() -> None:
     a, b = _RecordingSink("a"), _RecordingSink("b")
     fan = FanOutTurnPublisher([a, b])
     await fan.publish_turn("room", "agent", "hi there", ts=42, source="bot")
-    assert a.calls == [("room", "agent", "hi there", 42, "bot")]
-    assert b.calls == [("room", "agent", "hi there", 42, "bot")]
+    assert a.calls == [("room", "agent", "hi there", 42, "bot", None)]
+    assert b.calls == [("room", "agent", "hi there", 42, "bot", None)]
+
+
+@pytest.mark.asyncio
+async def test_user_id_is_forwarded_to_every_sink() -> None:
+    """A regression here would silently drop speaker attribution for any
+    fan-out with more than one sink (e.g. call_stream + health_observer)."""
+    a, b = _RecordingSink("a"), _RecordingSink("b")
+    fan = FanOutTurnPublisher([a, b])
+    await fan.publish_turn(
+        "room", "coaching", "ask about the deductible", ts=42, source="supervisor", user_id="u-1"
+    )
+    assert a.calls == [("room", "coaching", "ask about the deductible", 42, "supervisor", "u-1")]
+    assert b.calls == [("room", "coaching", "ask about the deductible", 42, "supervisor", "u-1")]
 
 
 @pytest.mark.asyncio
@@ -73,7 +114,7 @@ async def test_a_raising_sink_does_not_block_later_sinks_or_raise() -> None:
     after = _RecordingSink("after")
     fan = FanOutTurnPublisher([_BoomSink(), after])
     await fan.publish_turn("room", "user", "hello", ts=1)  # must not raise
-    assert after.calls == [("room", "user", "hello", 1, None)]
+    assert after.calls == [("room", "user", "hello", 1, None, None)]
 
 
 @pytest.mark.asyncio

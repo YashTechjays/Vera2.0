@@ -20,6 +20,7 @@ from vera_core.models.enums import InsuranceType, VersionStatus
 
 INTAKE_PAYLOAD = {
     "patient_information": {
+        "chart_number": "CH-10293",
         "patient_name": "Jane Doe",
         "patient_dob": "1990-04-12",
         "patient_gender": "Female",
@@ -28,9 +29,12 @@ INTAKE_PAYLOAD = {
     "insurance_information": {"policy_number": "POL-550411"},
     "insurance_reference_information": {
         "insurance_provider_name": "Demo Health Plan",
-        "insurance_phone_number": "+1 555 0100",
+        "insurance_phone_number": "+15550100",
     },
-    "verification_information": {"verified_by": "Dr. Reyes"},
+    "verification_information": {
+        "verified_by": "Dr. Reyes",
+        "callback_number": "+1 555 0199",
+    },
     "hospital_information": {
         "hospital_name": "Demo Health Partners",
         "hospital_address": "123 Demo St, Austin, TX",
@@ -152,7 +156,7 @@ async def test_create_binds_published_version_and_persists(
             .scalars()
             .all()
         )
-        assert len(answers) == 14  # one INTAKE answer per provided leaf
+        assert len(answers) == 16  # one INTAKE answer per provided leaf
         assert all(a.source == "intake" and a.is_current and a.call_id is None for a in answers)
         assert "sections.patient_information.patient_name" in {a.field_path for a in answers}
 

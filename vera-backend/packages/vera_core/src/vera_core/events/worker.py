@@ -1,18 +1,27 @@
 """Worker→control-plane event bus over Redis Streams + a consumer group.
 
 The agent worker is DB-less; this is its first-class channel to signal domain
-events (call failures, and the answered/ended call-status transitions that
-drive the consumer's closeout) to the control plane. Events are PHI-free by
-construction: only a room_name (tenant+call UUIDs), an enum, and a timestamp —
-never a phone number or transcript text.
+events (call failures, the answered/ended call-status transitions that drive
+the consumer's closeout, the answers extracted from the live call by the
+Observer runtime, and the call-health observer's periodic assessments) to the
+control plane.
+
+Most events are PHI-free by construction: only a room_name (tenant+call UUIDs),
+an enum, and a timestamp. Two exceptions carry PHI and rely on the stream
+being in-boundary Redis (BAA-covered, CMEK at rest) under the SAME posture as
+``vera:transcript:*`` — never logged, never echoed by any handler:
+``CallAnswerRecordedEvent``, whose extracted answer value is tokenized by
+contract and raw today under passthrough; and ``CallHealthEvent``, whose
+``reason`` sentence is derived from the conversation. Adding any further
+value-bearing event is a compliance decision, not a routine change.
 """
 
 from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
-from redis.asyncio import Redis
-from redis.exceptions import ResponseError
+
+from vera_core.events.stream_bus import StreamBus
 
 WORKER_EVENTS_STREAM = "vera:worker-events"
 WORKER_EVENTS_GROUP = "control-plane"
@@ -46,19 +55,51 @@ class CallAnsweredEvent(BaseModel):
 
 class CallEndedEvent(BaseModel):
     """Emitted from the worker's shutdown callback — the session finished after
-    the call was live (hangup by either side, or the agent's end_call tool)."""
+    the call was live (hangup by either side, or the agent's end_call tool).
+    Written AFTER the transcript ended-sentinel, so it doubles as the control
+    plane's trigger to persist the tokenized transcript to Postgres."""
 
     type: Literal["call.ended"] = "call.ended"
     room_name: str
     ts: int  # epoch milliseconds
 
 
-type WorkerEvent = CallFailedEvent | CallAnsweredEvent | CallEndedEvent
+class CallAnswerRecordedEvent(BaseModel):
+    """Emitted by the Observer when it extracts an answer from the live call, so the
+    control plane can write the field_answer row (worker stays DB-less). Carries the
+    value — see the module docstring's compliance note. ``evidence_seq`` points into
+    ``transcript.seq`` for the supporting turn; ``confidence`` is 0-100."""
+
+    type: Literal["call.answer_recorded"] = "call.answer_recorded"
+    room_name: str
+    field_path: str
+    value: str
+    confidence: int | None = None
+    evidence_seq: int | None = None
+    ts: int  # epoch milliseconds
+
+
+class CallHealthEvent(BaseModel):
+    """Emitted by the worker's call-health observer after each assessable
+    analysis. `reason` is PHI (see module docstring) — never log it."""
+
+    type: Literal["call.health"] = "call.health"
+    room_name: str
+    score: int  # 0-100 (clamped at the producer)
+    flag: str  # a CallHealthFlag value ("none" = healthy)
+    reason: str  # PHI — never log
+    # The analyzer's WINDOWED transcript turn count at analysis time — capped by
+    # health_max_turns and reset by re-anchoring (spec §4.2) — NOT the call's
+    # cumulative total turn count.
+    turn_count: int
+    ts: int  # analyzed_at, epoch milliseconds — the consumer's idempotency key
+
+
+type WorkerEvent = (
+    CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent | CallHealthEvent
+)
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
-    Annotated[
-        CallFailedEvent | CallAnsweredEvent | CallEndedEvent,
-        Field(discriminator="type"),
-    ]
+    Annotated[WorkerEvent, Field(discriminator="type")]
 )
 
 
@@ -67,29 +108,12 @@ def parse_worker_event(raw: str) -> WorkerEvent:
     return _ADAPTER.validate_json(raw)
 
 
-class WorkerEventBus:
+class WorkerEventBus(StreamBus):
     """XADD publish side (worker) + consumer-group bootstrap. One stream, one group."""
 
-    def __init__(self, redis: Redis, *, maxlen: int = 10_000) -> None:
-        self._redis = redis
-        self._maxlen = maxlen
+    stream = WORKER_EVENTS_STREAM
+    group = WORKER_EVENTS_GROUP
+    payload_field = _EVENT_FIELD
 
     async def emit(self, event: WorkerEvent) -> None:
-        await self._redis.xadd(
-            WORKER_EVENTS_STREAM,
-            {_EVENT_FIELD: event.model_dump_json()},
-            maxlen=self._maxlen,
-            approximate=True,
-        )
-
-    async def ensure_group(self) -> None:
-        try:
-            # id="0" (not "$"): the group starts at the beginning of the stream, so
-            # events published before the group first exists are still delivered
-            # (at-least-once across bootstrap) instead of being silently dropped.
-            await self._redis.xgroup_create(
-                WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, id="0", mkstream=True
-            )
-        except ResponseError as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
+        await self._emit_raw(event.model_dump_json())

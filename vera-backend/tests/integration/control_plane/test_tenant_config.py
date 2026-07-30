@@ -91,3 +91,53 @@ async def test_requires_permission(client: httpx.AsyncClient, rbac_world: RBACWo
     assert (
         await client.put(PERSONA_PATH, json={}, headers=_auth(rbac_world.norole_token))
     ).status_code == 403
+
+
+CONCURRENCY_PATH = "/api/v1/tenant/config/concurrency"
+
+
+async def test_concurrency_get_patch_round_trip(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, admin_session: AsyncSession
+) -> None:
+    got = await client.get(CONCURRENCY_PATH, headers=_auth(rbac_world.admin_token))
+    assert got.status_code == 200
+    before = got.json()["data"]
+    assert set(before) == {"max_agents_per_va", "max_concurrent_calls"}
+
+    patched = await client.patch(
+        CONCURRENCY_PATH,
+        json={"max_agents_per_va": 4},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert patched.status_code == 200
+    assert patched.json()["data"]["max_agents_per_va"] == 4
+
+    # Auth-audit row with before/after values landed for this tenant.
+    rows = (
+        (
+            await admin_session.execute(
+                select(AuthAuditLog).where(
+                    AuthAuditLog.tenant_id == rbac_world.tenant_id,
+                    AuthAuditLog.event_type == "concurrency_config_updated",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert any(r.meta["new"]["max_agents_per_va"] == 4 for r in rows)
+
+    # Restore so other tests in the shared world see the original value.
+    restore = await client.patch(
+        CONCURRENCY_PATH,
+        json={"max_agents_per_va": before["max_agents_per_va"]},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert restore.status_code == 200
+
+
+async def test_concurrency_denied_without_permission(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(CONCURRENCY_PATH, headers=_auth(rbac_world.norole_token))
+    assert resp.status_code == 403

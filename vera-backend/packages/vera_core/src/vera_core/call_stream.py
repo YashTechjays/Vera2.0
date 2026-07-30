@@ -1,11 +1,12 @@
-"""Generalized live per-call event stream — envelope model, Redis transport, service.
+"""The single live per-call event stream — envelope model, Redis transport, service.
 
-The real-call counterpart of `vera_core.transcript` (which stays voice-lab-only):
-one stream per room carrying typed envelopes so ONE SSE can deliver every live
-surface — transcript turns today, call-status frames, and (later) form-filling
-progress — without a new pipe per event type. Payloads are tokenized /
-de-identified only (same PHI contract as the transcript stream); never hydrated
-raw PHI.
+One stream per room (`vera:call-events:{room}`) carrying typed envelopes, so ONE pipe
+feeds every live surface: transcript turns and call-status frames today, form-filling
+progress later. It is the only live transport — the real-call SSE, the voice-lab SSE
+(which adapts envelopes back to a flat turn wire), the transcript finalizer, the call
+summariser and the worker's Observer (filtering `type == "transcript"`) all read it.
+The turn vocabulary these envelopes carry lives in `vera_core.transcript`.
+Payloads are de-identified only; never hydrated raw PHI.
 """
 
 import asyncio
@@ -28,6 +29,8 @@ _ENDED_VALUE = "ended"
 
 TYPE_TRANSCRIPT = "transcript"
 TYPE_CALL_STATUS = "call_status"
+TYPE_HEALTH = "health"
+TYPE_FIELD_ANSWER = "field_answer"
 
 
 def call_stream_key(room_name: str) -> str:
@@ -37,7 +40,7 @@ def call_stream_key(room_name: str) -> str:
 class CallStreamEvent(BaseModel):
     """One live event. `data` is type-specific and de-identified by construction."""
 
-    type: str  # "transcript" | "call_status" | future types (e.g. "form_field")
+    type: str  # "transcript" | "call_status" | "health" | "field_answer" | future types
     data: dict[str, Any]
     ts: int  # epoch milliseconds
 
@@ -56,15 +59,19 @@ class CallStreamStore(Protocol):
     async def delete(self, room_name: str) -> None: ...
     async def exists(self, room_name: str) -> bool: ...
     def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]: ...
     async def read_all(self, room_name: str) -> list[CallStreamEvent]: ...
 
 
 class RedisCallStreamStore:
-    """Redis Streams transport; identical lifecycle to RedisTranscriptStore
-    (rolling backstop TTL on publish; ended sentinel + grace TTL; replay-then-tail
-    read that stops on the sentinel or a vanished key)."""
+    """Redis Streams transport: rolling backstop TTL on publish; ended sentinel + grace
+    TTL; replay-then-tail read that stops on the sentinel or a vanished key. `read` is the
+    canonical BLOCK-timeout handling every tailing consumer copies (see repo CLAUDE.md)."""
 
     def __init__(
         self,
@@ -100,21 +107,28 @@ class RedisCallStreamStore:
         return bool(await self._redis.exists(call_stream_key(room_name)))
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]:
-        """Replay-then-tail. When `first_entry_deadline_s` is set and nothing has
-        EVER been seen on this stream, give up once that many seconds have elapsed
-        since the read started — bounds a tail on a stream that may never appear
-        (see `stream_call_events`'s live-no-stream branch). A stream that has
-        already yielded at least one entry tails indefinitely regardless — the
-        deadline only guards the "is anything ever going to show up" question.
+        """Replay-then-tail from `start_id` ("0" replays everything; Redis's "$"
+        sentinel tails only entries added after this call starts — the coaching
+        listener uses "$" so a restart mid-call can't re-inject a stale note).
+        When `first_entry_deadline_s` is set and nothing has EVER been seen on
+        this stream, give up once that many seconds have elapsed since the read
+        started — bounds a tail on a stream that may never appear (see
+        `stream_call_events`'s live-no-stream branch). A stream that has already
+        yielded at least one entry tails indefinitely regardless — the deadline
+        only guards the "is anything ever going to show up" question.
 
         Every idle BLOCK window yields a `None` keepalive tick so a consumer
         holding a byte stream open (the SSE endpoint) can emit a heartbeat —
         a silent call must not starve proxy read timeouts (nginx defaults to
         60s) into killing the connection."""
         key = call_stream_key(room_name)
-        last_id = "0"
+        last_id = start_id
         seen = False
         loop = asyncio.get_running_loop()
         deadline = (
@@ -184,16 +198,21 @@ class CallStreamService:
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Publish one finalized turn. `source` (the acting side — drives UI attribution)
-        defaults from the role; producers pass it explicitly when they know better."""
+        defaults from the role; producers pass it explicitly when they know better.
+        `user_id` (the specific supervisor who spoke/coached, if known) is only added
+        to the envelope when present, so older consumers see no shape change."""
+        data: dict[str, Any] = {
+            "role": role,
+            "source": source or source_for_role(role),
+            "text": text,
+        }
+        if user_id is not None:
+            data["user_id"] = user_id
         await self._store.publish(
-            room_name,
-            CallStreamEvent(
-                type=TYPE_TRANSCRIPT,
-                data={"role": role, "source": source or source_for_role(role), "text": text},
-                ts=ts,
-            ),
+            room_name, CallStreamEvent(type=TYPE_TRANSCRIPT, data=data, ts=ts)
         )
 
     async def publish_status(self, room_name: str, status: str, *, ts: int) -> None:
@@ -201,11 +220,63 @@ class CallStreamService:
             room_name, CallStreamEvent(type=TYPE_CALL_STATUS, data={"status": status}, ts=ts)
         )
 
+    async def publish_health(
+        self, room_name: str, *, score: int, flag: str, reason: str, ts: int
+    ) -> None:
+        """Publish one call-health-observer assessment frame (spec: rides the
+        same /calls/{id}/events SSE — no new pipe per event type)."""
+        await self._store.publish(
+            room_name,
+            CallStreamEvent(
+                type=TYPE_HEALTH, data={"score": score, "flag": flag, "reason": reason}, ts=ts
+            ),
+        )
+
+    async def publish_field_answer(
+        self,
+        room_name: str,
+        *,
+        field_path: str,
+        value: str,
+        confidence: int | None,
+        evidence_seq: int | None,
+        completion_pct: float | None,
+        dispute: dict[str, Any] | None,
+        ts: int,
+    ) -> None:
+        """Publish one Observer-extracted field answer (spec: rides the same
+        /calls/{id}/events SSE — no new pipe per event type). `value` is PHI: it lives
+        only in-boundary on this CMEK-protected stream and reaches the browser inside the
+        already-authorized SSE session — never log it."""
+        await self._store.publish(
+            room_name,
+            CallStreamEvent(
+                type=TYPE_FIELD_ANSWER,
+                data={
+                    "field_path": field_path,
+                    "value": value,
+                    "source": "ai_call",
+                    "confidence": confidence,
+                    "evidence_seq": evidence_seq,
+                    "completion_pct": completion_pct,
+                    "dispute": dispute,
+                },
+                ts=ts,
+            ),
+        )
+
     def consume(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]:
-        """Replay-then-tail; a `None` item is an idle-window keepalive tick."""
-        return self._store.read(room_name, first_entry_deadline_s=first_entry_deadline_s)
+        """Replay-then-tail from `start_id`; a `None` item is an idle-window
+        keepalive tick."""
+        return self._store.read(
+            room_name, start_id=start_id, first_entry_deadline_s=first_entry_deadline_s
+        )
 
     async def exists(self, room_name: str) -> bool:
         return await self._store.exists(room_name)

@@ -27,6 +27,7 @@
     "insurance_provider": "sections.insurance_reference_information.insurance_provider_name",
     "insurance_provider_phone_number": "sections.insurance_reference_information.insurance_phone_number"
   },
+  "rep_call_reference_number_field": "sections.representative_details.call_reference_number",
   "shared_conditions": {
     "disease_covered": {
       "field": "sections.coverage_summary.disease_coverage_active",
@@ -875,6 +876,7 @@
                   "min": 0
                 }
               },
+              "inapplicable_value": "$0",
               "applicable_when": {
                 "field": "sections.covered_diseases.kidney_failure.covered",
                 "op": "eq",
@@ -895,6 +897,7 @@
                   "max": 100
                 }
               },
+              "inapplicable_value": "0%",
               "applicable_when": {
                 "field": "sections.covered_diseases.kidney_failure.covered",
                 "op": "eq",
@@ -920,6 +923,7 @@
               "tags": [
                 "prior_auth"
               ],
+              "inapplicable_value": "N/A",
               "applicable_when": {
                 "field": "sections.covered_diseases.kidney_failure.covered",
                 "op": "eq",

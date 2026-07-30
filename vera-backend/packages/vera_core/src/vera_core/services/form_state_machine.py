@@ -19,10 +19,15 @@ from vera_core.models.enums import FormStatus
 # the form directly; it parks it in AI_PROCESSING for post-call resolution.
 ALLOWED_TRANSITIONS: dict[FormStatus, frozenset[FormStatus]] = {
     FormStatus.READY_FOR_PROCESSING: frozenset({FormStatus.IN_QUEUE, FormStatus.EXCEPTION_REVIEW}),
-    FormStatus.IN_QUEUE: frozenset({FormStatus.IN_CALL, FormStatus.EXPIRED}),
+    FormStatus.IN_QUEUE: frozenset(
+        {FormStatus.IN_CALL, FormStatus.EXPIRED, FormStatus.CALL_FAILED}
+    ),
     FormStatus.IN_CALL: frozenset({FormStatus.AI_PROCESSING, FormStatus.CALL_FAILED}),
-    # → EXCEPTION_REVIEW when post-call processing finishes; → IN_QUEUE is the
-    # system auto-retry on low completion (guarded by the retry cap below).
+    # → EXCEPTION_REVIEW is the terminal post-call parking spot (even an
+    # all-satisfied form goes here for human sign-off — the pipeline never
+    # auto-COMPLETEs); → IN_QUEUE is the system auto-retry on low completion
+    # (guarded by the retry cap below). COMPLETED is deliberately NOT reachable
+    # here — it is a human-only edge out of EXCEPTION_REVIEW.
     FormStatus.AI_PROCESSING: frozenset({FormStatus.EXCEPTION_REVIEW, FormStatus.IN_QUEUE}),
     FormStatus.CALL_FAILED: frozenset({FormStatus.IN_QUEUE}),
     FormStatus.EXCEPTION_REVIEW: frozenset({FormStatus.IN_QUEUE, FormStatus.COMPLETED}),
@@ -54,6 +59,7 @@ class FormStateMachine:
         *,
         tenant_max_retries: int,
         manual: bool = False,
+        reason: str | None = None,
     ) -> None:
         """Move *form* to *target* status, applying side effects.
 
@@ -73,6 +79,11 @@ class FormStateMachine:
             episode; a manual enqueue starts a fresh episode — it is never
             blocked by the cap and resets ``retry_count`` so the new episode
             gets its full auto-retry allowance.
+        reason:
+            Why the pipeline routed the form to ``EXCEPTION_REVIEW`` (a
+            ``ReviewReason`` value). Stamped onto ``form.review_reason`` on that
+            target and cleared on every other — the machine owns the lifecycle of
+            this column so callers can't leave a stale reason behind.
 
         Raises
         ------
@@ -102,3 +113,13 @@ class FormStateMachine:
                 form.retry_count += 1
 
         form.status = target.value
+        # The machine owns review_reason's lifecycle: stamped entering
+        # EXCEPTION_REVIEW, cleared on every other target — a caller can never
+        # leave a stale reason behind on a form that moved on.
+        form.review_reason = reason if target == FormStatus.EXCEPTION_REVIEW else None
+
+    def can_retry(self, form: Any, *, tenant_max_retries: int) -> bool:
+        """True when the retry-cap guard would allow another retry (IN_QUEUE hop).
+        The one encoding of the cap comparison — callers deciding retry-vs-review
+        use this instead of re-implementing it."""
+        return bool(form.retry_count < tenant_max_retries)

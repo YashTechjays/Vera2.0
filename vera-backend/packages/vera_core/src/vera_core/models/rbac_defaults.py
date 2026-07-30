@@ -16,9 +16,13 @@ DEFAULT_PERMISSIONS: Final[dict[str, str]] = {
     "calls:read": "View calls and their status/results",
     "calls:write": "Create and manage verification calls",
     "calls:publish": "Publish a call so other VAs in the tenant can view and intervene",
+    "calls:intervene": "Speak into a live call (publish audio) while supervising",
+    "recordings:read": "Play back call recordings (every playback is audited)",
+    "recordings:manage": "Manage the tenant's recording retention policy",
     "voice_lab:sandbox": "Use the Voice Lab sandbox to start and monitor test voice sessions",
     "forms:read": "View form templates and filled forms",
     "forms:write": "Create and edit form templates",
+    "forms:export": "Export a completed form as a file (PHI disclosure; every export is audited)",
     "users:read": "View users in the tenant",
     "users:manage": "Invite, deactivate, and manage users",
     "roles:manage": "Manage roles and role assignments",
@@ -44,6 +48,11 @@ PLATFORM_PERMISSIONS: Final[dict[str, str]] = {
     "platform:ivr_playbooks:read": "View IVR playbooks",
     "platform:ivr_playbooks:write": "Create and manage IVR playbooks",
     "platform:form_schemas:read": "View form schemas and their versions",
+    "platform:users:invite": "Invite, resend invitations to, and deactivate platform operators",
+    "platform:users:read": "View platform operators",
+    "platform:tenants:manage": "View tenants and toggle their AI form-filling (observer) feature",
+    "platform:llm_config:read": "View the active voice cascade LLM model override",
+    "platform:llm_config:write": "Set or reset the voice cascade LLM model override",
 }
 
 # The full catalog seeded into `permission` (tenant + platform).
@@ -62,13 +71,25 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
             "calls:read",
             "calls:write",
             "calls:publish",
+            "calls:intervene",
+            "recordings:read",
             "voice_lab:sandbox",
             "forms:read",
             "forms:write",
+            "forms:export",
             "users:read",
             "audit:read",
             "phi:detokenize",
         }
     ),
-    "VIRTUAL_ASSISTANT": frozenset({"voice_lab:sandbox"}),
+    "VIRTUAL_ASSISTANT": frozenset(
+        {
+            "voice_lab:sandbox",
+            "calls:read",
+            "calls:publish",
+            "calls:intervene",
+            "forms:read",
+            "forms:write",
+        }
+    ),
 }

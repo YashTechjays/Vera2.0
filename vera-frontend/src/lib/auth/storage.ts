@@ -5,15 +5,22 @@
 // belongs to is fetched from /auth/me on demand. Session timeouts also come from
 // /auth/me, so no session start time is stored client-side.
 
+import { clearReadCursor } from "@/lib/notifications/store"
+
 const TOKEN_KEY = "vera.session_token"
 const TENANT_SLUG_KEY = "vera.tenant_slug"
 // Non-sensitive hint (no token) for which login plane an in-flight MFA challenge is on,
 // so a refresh bounces back to the right login.
 const AUTH_PLANE_KEY = "vera.auth_plane"
 
-let token: string | null = sessionStorage.getItem(TOKEN_KEY)
-let tenantSlug: string | null = sessionStorage.getItem(TENANT_SLUG_KEY)
-let authPlane: string | null = sessionStorage.getItem(AUTH_PLANE_KEY)
+// sessionStorage only exists in a browser. Unit tests import this module through
+// the api-client chain under plain Node, so degrade to memory-only there (reads
+// start empty, writes skip the mirror).
+const storage: Storage | null = typeof sessionStorage === "undefined" ? null : sessionStorage
+
+let token: string | null = storage?.getItem(TOKEN_KEY) ?? null
+let tenantSlug: string | null = storage?.getItem(TENANT_SLUG_KEY) ?? null
+let authPlane: string | null = storage?.getItem(AUTH_PLANE_KEY) ?? null
 
 export function getToken(): string | null {
   return token
@@ -29,26 +36,29 @@ export function getAuthPlane(): string | null {
 
 export function setAuthPlane(plane: "platform" | "tenant"): void {
   authPlane = plane
-  sessionStorage.setItem(AUTH_PLANE_KEY, plane)
+  storage?.setItem(AUTH_PLANE_KEY, plane)
 }
 
 export function setSession(nextToken: string, nextTenantSlug: string): void {
   token = nextToken
   tenantSlug = nextTenantSlug
-  sessionStorage.setItem(TOKEN_KEY, nextToken)
-  sessionStorage.setItem(TENANT_SLUG_KEY, nextTenantSlug)
+  storage?.setItem(TOKEN_KEY, nextToken)
+  storage?.setItem(TENANT_SLUG_KEY, nextTenantSlug)
   clearAuthPlane()  // challenge complete — the pending-plane hint is moot
 }
 
 export function clearSession(): void {
   token = null
   tenantSlug = null
-  sessionStorage.removeItem(TOKEN_KEY)
-  sessionStorage.removeItem(TENANT_SLUG_KEY)
+  storage?.removeItem(TOKEN_KEY)
+  storage?.removeItem(TENANT_SLUG_KEY)
   clearAuthPlane()
+  // A shared tab's next login (shift change) must start with a clean inbox,
+  // not inherit the outgoing user's read cursor.
+  clearReadCursor()
 }
 
 function clearAuthPlane(): void {
   authPlane = null
-  sessionStorage.removeItem(AUTH_PLANE_KEY)
+  storage?.removeItem(AUTH_PLANE_KEY)
 }

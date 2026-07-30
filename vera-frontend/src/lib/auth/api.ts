@@ -119,6 +119,17 @@ export function activateInviteMfa(slug: string, mfaToken: string, code: string) 
   })
 }
 
+export type InviteValidateResult = {
+  state: "valid" | "invalid" | "deactivated"
+}
+
+export function validateInvite(slug: string, token: string) {
+  return apiRequest<InviteValidateResult>(
+    `${tenantAuth(slug)}/invitations/validate?token=${encodeURIComponent(token)}`,
+    { method: "GET", auth: false },
+  )
+}
+
 export function getMe() {
   return apiRequest<MeResponse>(`/auth/me`)
 }
@@ -172,6 +183,8 @@ export type UserSummary = {
   /** "invited" | "active" | "deactivated" */
   status: string
   last_login_at: string | null
+  /** Assigned role names, e.g. ["TENANT_ADMIN"]; empty when none. */
+  roles: string[]
 }
 
 /** List all users in the caller's tenant (RLS-scoped). Requires `users:read`. */
@@ -183,6 +196,42 @@ export function listUsers() {
 export function deactivateUser(userId: string) {
   return apiRequest<null>(`/users/${encodeURIComponent(userId)}/deactivate`, {
     method: "POST",
+  })
+}
+
+/** Reissue a fresh invite link for a user stuck in status="invited" (their
+ *  original link or MFA bridge token expired). Requires `users:manage`. */
+export function resendInvitation(userId: string) {
+  return apiRequest<InviteUserResult>(`/users/${encodeURIComponent(userId)}/resend-invitation`, {
+    method: "POST",
+    headers: { "Idempotency-Key": randomId() },
+  })
+}
+
+// --- Platform-operator invite acceptance: no tenant slug (the invitee belongs to
+// no tenant). MFA is always required (see PlatformAcceptInvite). ---
+
+export function platformValidateInvite(token: string) {
+  return apiRequest<InviteValidateResult>(
+    `/platform/auth/invitations/validate?token=${encodeURIComponent(token)}`,
+    { method: "GET", auth: false },
+  )
+}
+
+export function platformAcceptInvite(token: string, password: string) {
+  return apiRequest<AcceptInviteResult>(`/platform/auth/invitations/accept`, {
+    method: "POST",
+    body: { token, password },
+    auth: false,
+  })
+}
+
+/** No recovery codes on this path — platform MFA is TOTP-only everywhere. */
+export function platformActivateInviteMfa(mfaToken: string, code: string) {
+  return apiRequest<null>(`/platform/auth/invitations/activate-mfa`, {
+    method: "POST",
+    body: { mfa_token: mfaToken, code },
+    auth: false,
   })
 }
 

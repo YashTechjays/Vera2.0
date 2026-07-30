@@ -13,6 +13,7 @@ from vera_core.forms.dsl import (
     PromotedFields,
     Validation,
     compile_document,
+    format_date,
     load_document,
     parse_date_format,
 )
@@ -40,6 +41,7 @@ def minimal_doc(**overrides: Any) -> dict[str, Any]:
         "insurance_type": "infertility_treatment",
         "system_fields": {"plan_type": "sections.basics.plan_type"},
         "promoted_fields": dict.fromkeys(PROMOTED_COLUMNS, "sections.basics.plan_type"),
+        "rep_call_reference_number_field": "sections.basics.plan_type",
         "sections": {
             "basics": {
                 "title": "Basics",
@@ -107,7 +109,7 @@ class TestCompiledArtifacts:
         assert "{{member_id}}" in (intro_task.prompt or "")
         assert intro_task.outro == "Great, let me pull up my questions..."
         rule_keys = [r.rule_key for r in doc.flow_rules or []]
-        assert rule_keys[0] == "patient_not_on_plan"
+        assert rule_keys[0] == "insurance_not_active"
         rule = (doc.flow_rules or [])[0]
         assert rule.action == "terminate_call"
         assert rule.skip_to_task == "wrap_up"
@@ -146,6 +148,20 @@ class TestCompiledArtifacts:
             insurance_provider_phone_number=(
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
+        )
+
+    def test_ibv_rep_call_reference_number_field(self) -> None:
+        doc = SCHEMAS["infertility_treatment"][1]()
+        assert (
+            doc.rep_call_reference_number_field
+            == "sections.insurance_representative.call_reference_number"
+        )
+
+    def test_disease_only_rep_call_reference_number_field(self) -> None:
+        doc = SCHEMAS["disease_only"][1]()
+        assert (
+            doc.rep_call_reference_number_field
+            == "sections.representative_details.call_reference_number"
         )
 
 
@@ -401,6 +417,18 @@ class TestDocumentValidation:
         with pytest.raises(ValidationError, match="not a system_fields target"):
             FormSchemaDoc.model_validate(doc)
 
+    def test_rep_call_reference_number_field_is_required(self) -> None:
+        doc = minimal_doc()
+        del doc["rep_call_reference_number_field"]
+        with pytest.raises(ValidationError):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_rep_call_reference_number_field_rejects_path_not_a_leaf(self) -> None:
+        doc = minimal_doc()
+        doc["rep_call_reference_number_field"] = "sections.basics.missing"
+        with pytest.raises(ValidationError, match="does not resolve to a leaf"):
+            FormSchemaDoc.model_validate(doc)
+
 
 class TestParseDateFormat:
     """`parse_date_format` — the display/entry `date_format` fallback parser used
@@ -433,6 +461,30 @@ class TestParseDateFormat:
         assert parse_date_format("12/4/1999", "M/M/YYYY") is None
 
 
+class TestFormatDate:
+    """`format_date` — the inverse of `parse_date_format`: renders a parsed `date`
+    back into a leaf's declared display/entry `date_format`, so a date leaf's
+    stored answer always matches that format regardless of how it was submitted."""
+
+    def test_renders_m_d_yyyy_without_padding(self) -> None:
+        assert format_date(date(1999, 12, 4), "M/D/YYYY") == "12/4/1999"
+
+    def test_renders_single_digit_month_and_day_without_padding(self) -> None:
+        assert format_date(date(2026, 7, 1), "M/D/YYYY") == "7/1/2026"
+
+    def test_pads_to_mm_dd_yyyy(self) -> None:
+        assert format_date(date(2026, 7, 1), "MM/DD/YYYY") == "07/01/2026"
+
+    def test_renders_dd_mm_yyyy_with_dash_separator(self) -> None:
+        assert format_date(date(1990, 12, 4), "DD-MM-YYYY") == "04-12-1990"
+
+    def test_round_trips_through_parse_date_format(self) -> None:
+        for text, fmt in [("12/4/1999", "M/D/YYYY"), ("07/01/2026", "MM/DD/YYYY")]:
+            parsed = parse_date_format(text, fmt)
+            assert parsed is not None
+            assert format_date(parsed, fmt) == text
+
+
 class TestDateFormatRejectsTwoDigitYear:
     """A 2-digit year is unsafe on a DOB field (e.g. "55" is ambiguous between
     1955 and 2055) — rejected at schema-authoring time, not just at parse time."""
@@ -443,6 +495,33 @@ class TestDateFormatRejectsTwoDigitYear:
     def test_yy_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="date_format"):
             Validation(date_format="M/D/YY")
+
+
+class TestDateFormatRequiresOneOfEachToken:
+    """A `date_format` missing a token ("MM/YYYY" — `format_date` would silently
+    drop the day from every stored value) or repeating one ("M/M/YYYY" — renders
+    the month twice, and `parse_date_format` can never match it) is lossy, so it's
+    rejected at schema-authoring time, before any value can be corrupted."""
+
+    def test_each_complete_format_is_accepted(self) -> None:
+        for fmt in ["M/D/YYYY", "MM/DD/YYYY", "DD-MM-YYYY", "YYYY.MM.DD"]:
+            Validation(date_format=fmt)
+
+    def test_missing_day_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="MM/YYYY")
+
+    def test_missing_year_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="M/D")
+
+    def test_repeated_month_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="M/M/YYYY")
+
+    def test_repeated_day_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="date_format"):
+            Validation(date_format="D/DD/YYYY")
 
 
 class TestPromotedColumnParity:

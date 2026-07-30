@@ -39,6 +39,23 @@ def test_no_host_returns_none() -> None:
     assert result is None
 
 
+def test_exporter_endpoint_targets_otel_traces_path() -> None:
+    settings = _make_settings(langfuse_host="http://localhost:3000")
+    captured: dict[str, object] = {}
+
+    def fake_exporter(**kwargs: object) -> MagicMock:
+        captured.update(kwargs)
+        return MagicMock()
+
+    with patch(
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter",
+        side_effect=fake_exporter,
+    ):
+        configure_observability(settings)
+
+    assert captured.get("endpoint") == "http://localhost:3000/api/public/otel/v1/traces"
+
+
 def test_with_keys_sends_basic_auth_header() -> None:
     settings = _make_settings(
         langfuse_host="http://localhost:3000",

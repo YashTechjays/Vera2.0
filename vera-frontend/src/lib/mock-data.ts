@@ -1,26 +1,3 @@
-import {
-  Phone,
-  PhoneCall,
-  CheckCircle2,
-  AlertCircle,
-  type LucideIcon,
-} from "lucide-react"
-
-export type Stat = {
-  label: string
-  value: string
-  icon: LucideIcon
-  /** "critical" renders the value + icon in red */
-  tone?: "default" | "critical"
-}
-
-export const stats: Stat[] = [
-  { label: "Total Calls", value: "248", icon: Phone },
-  { label: "Active Calls", value: "5", icon: PhoneCall },
-  { label: "Running Smoothly", value: "3", icon: CheckCircle2 },
-  { label: "Critical Alerts", value: "2", icon: AlertCircle, tone: "critical" },
-]
-
 /** Visual category — drives the row tint, indicator, duration color, and badge. */
 export type CallCategory = "critical" | "active" | "processing" | "completed"
 export type CallAction = "intervene" | "view" | "add-info"
@@ -40,10 +17,18 @@ export type LiveCall = {
   insurance: string
   confidence: number
   formProgress: number
+  /** The patient form this call fills — the inline panel loads it and live AI answers
+   *  from SSE are applied to it. Absent on mock rows. */
+  formId?: string
   callTime: string
   /** ISO start time from the API (null until the callee answers) — the modals'
    *  live-timer seed. Absent on mock rows. */
   startedAt?: string | null
+  /** Latest observer health score (0-100); null/undefined = not assessed. */
+  healthScore?: number | null
+  /** True when the current caller owns the call — gates coaching for an owner
+   *  who lacks calls:intervene. Absent (falsy) on mock rows. */
+  isOwner?: boolean
 }
 
 export const liveCalls: LiveCall[] = [

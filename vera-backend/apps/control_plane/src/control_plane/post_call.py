@@ -7,7 +7,8 @@ then decides the lifecycle's next system transition:
 
 - completion below the tenant's ``retry_fill_threshold`` and retries remaining
   → auto-requeue (``AI_PROCESSING → IN_QUEUE``, consuming the retry budget) —
-  feature-gated behind ``auto_retry_enabled`` (default OFF) until a post-call
+  feature-gated behind the deployment kill-switch (``settings.form_auto_retry_enabled``,
+  default OFF) AND the tenant's own ``auto_retry_enabled``, until a post-call
   form-filling mechanism exists, since today nothing raises ``completion_pct``
   between calls and a retry would redial to no benefit. NEVER taken for a
   user-ended (CANCELED) call — the supervisor who ended it does not want the
@@ -38,7 +39,7 @@ from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db.rls import tenant_session
 from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.enums import CallStatus, FormStatus
+from vera_core.models.enums import CallStatus, FormStatus, ReviewReason
 from vera_core.observability.correlation import RoomRef
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
@@ -57,9 +58,10 @@ async def resolve_ai_processing(
     """Resolve *ref*'s form out of AI_PROCESSING. Returns True when the form was
     auto-requeued for a retry call (a dispatch pass should follow either way —
     leaving AI_PROCESSING frees a concurrency slot). The low-completion
-    auto-retry edge only runs when *auto_retry_enabled* (settings
-    ``form_auto_retry_enabled``, default off) — otherwise every form goes to
-    EXCEPTION_REVIEW."""
+    auto-retry edge only runs when feature-gated behind the deployment
+    kill-switch (*auto_retry_enabled*, settings ``form_auto_retry_enabled``,
+    default off) AND the tenant's own ``auto_retry_enabled`` — otherwise every
+    form goes to EXCEPTION_REVIEW."""
     async with tenant_session(sessionmaker, ref.tenant_id) as session:
         call = (
             await session.execute(select(Call).where(Call.id == ref.call_id))
@@ -77,6 +79,10 @@ async def resolve_ai_processing(
             await session.execute(select(Tenant).where(Tenant.id == ref.tenant_id))
         ).scalar_one()
 
+        # completion_pct is already current here: the Observer's ai_call answers are
+        # stream-ordered before call.ended and, under the consumer's per-room sequential
+        # dispatch, each recomputed the projection as it landed — so this reads the fresh
+        # value with no recompute needed on this path.
         sm = FormStateMachine()
         requeued = False
         # A user-ended (CANCELED) call never auto-retries, whatever the fill:
@@ -88,14 +94,24 @@ async def resolve_ai_processing(
         )
         # completion_pct is 0-100; retry_fill_threshold is a 0-1 fraction.
         low_fill = float(form.completion_pct) < float(tenant.retry_fill_threshold) * 100
-        if auto_retry_enabled and low_fill and not user_ended:
+        if tenant.allows_auto_retry(auto_retry_enabled) and low_fill and not user_ended:
             # Auto-retry while retries remain; fall through to human review when exhausted.
             with contextlib.suppress(InvalidTransitionError):
                 sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
                 form.enqueued_at = func.now()
                 requeued = True
         if not requeued:
-            sm.transition(form, FormStatus.EXCEPTION_REVIEW, tenant_max_retries=tenant.max_retries)
+            # Stamp WHY so the reviewer isn't left with a blank reason: a
+            # supervisor-ended call is USER_ENDED; anything else reaching this
+            # fallback (eval consumer unconfigured, or the sweeper reclaiming a
+            # stranded form) was never AI-evaluated.
+            reason = ReviewReason.USER_ENDED if user_ended else ReviewReason.NOT_EVALUATED
+            sm.transition(
+                form,
+                FormStatus.EXCEPTION_REVIEW,
+                tenant_max_retries=tenant.max_retries,
+                reason=reason,
+            )
 
         await audit.emit(
             AuditRecord(

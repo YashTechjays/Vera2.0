@@ -7,7 +7,14 @@ from agent_worker.transcript_publisher import FanOutTurnPublisher
 
 class _Sink:
     async def publish_turn(
-        self, room_name: str, role: str, text: str, *, ts: int, source: str | None = None
+        self,
+        room_name: str,
+        role: str,
+        text: str,
+        *,
+        ts: int,
+        source: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         pass
 

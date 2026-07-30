@@ -7,20 +7,31 @@ auth audit log (null-tenant). The grant itself is what later authorizes the oper
 into one tenant, under that tenant's own RLS — there is no RLS bypass here.
 """
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from control_plane.api.v1.common import AppSettings, Resolver
 from control_plane.auth import elevation
 from control_plane.auth.identity import VerifiedIdentity
+from control_plane.auth.platform_tenant_config import (
+    set_tenant_observer_enabled,
+    set_tenant_retry_config,
+)
 from control_plane.auth.rbac import platform_require
-from control_plane.deps import client_ip, get_auth_audit, platform_scoped_session
+from control_plane.deps import (
+    client_ip,
+    get_auth_audit,
+    get_idempotency_store,
+    platform_scoped_session,
+)
 from control_plane.exceptions import (
     BadRequestError,
     CustomAPIException,
@@ -28,8 +39,13 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.idempotency import (
+    PLATFORM_IDEM_SCOPE,
+    claim_or_conflict,
+    require_idempotency_key,
+)
 from control_plane.responses import ResponseModel, ok
-from vera_core.audit import AuthAuditRecord, AuthAuditSink
+from vera_core.audit import AuthAuditSink, emit_auth_event
 from vera_core.models import Tenant
 from vera_core.models.enums import AuthEvent
 
@@ -41,6 +57,10 @@ MAX_ELEVATION_MINUTES = 8 * 60
 
 PlatformSession = Annotated[AsyncSession, Depends(platform_scoped_session)]
 AuthAudit = Annotated[AuthAuditSink, Depends(get_auth_audit)]
+
+# Named because the write gate and `list_tenants`' disclosure check must stay the same
+# code — a typo in either would silently widen or break the split.
+TENANTS_MANAGE = "platform:tenants:manage"
 
 
 class CreateElevationRequest(BaseModel):
@@ -99,14 +119,13 @@ async def create_elevation(
     except IntegrityError as exc:
         raise _map_create_error(exc) from exc
 
-    await audit.emit(
-        AuthAuditRecord(
-            tenant_id=None,
-            app_user_id=caller.user_id,
-            event_type=AuthEvent.TENANT_ELEVATION_GRANTED.value,
-            ip_address=client_ip(request),
-            meta={"elevation_id": str(grant_id), "target_tenant": str(body.target_tenant_id)},
-        )
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_ELEVATION_GRANTED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"elevation_id": str(grant_id), "target_tenant": str(body.target_tenant_id)},
     )
     grant = await elevation.active_grant_for(
         session, super_admin_user_id=caller.user_id, target_tenant_id=body.target_tenant_id
@@ -135,14 +154,13 @@ async def end_elevation(
     ended = await elevation.end_grant(session, elevation_id)
     if not ended:
         raise NotFoundError(message="no active elevation with that id")
-    await audit.emit(
-        AuthAuditRecord(
-            tenant_id=None,
-            app_user_id=caller.user_id,
-            event_type=AuthEvent.TENANT_ELEVATION_ENDED.value,
-            ip_address=client_ip(request),
-            meta={"elevation_id": str(elevation_id)},
-        )
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_ELEVATION_ENDED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"elevation_id": str(elevation_id)},
     )
     return ok(None, message="Elevation ended.")
 
@@ -167,6 +185,12 @@ class TenantSummary(BaseModel):
     id: UUID
     name: str
     slug: str
+    # None means "not disclosed to this caller" (no platform:tenants:manage), not "off" —
+    # the elevation tenant picker reads this endpoint without holding that permission.
+    observer_enabled: bool | None = None
+    # Same tri-state disclosure rule as observer_enabled — gated on platform:tenants:manage.
+    auto_retry_enabled: bool | None = None
+    retry_fill_threshold: float | None = None
 
 
 @router.get(
@@ -179,19 +203,202 @@ class TenantSummary(BaseModel):
 )
 async def list_tenants(
     session: PlatformSession,
-    _caller: Annotated[VerifiedIdentity, platform_require("platform:elevations:read")],
+    resolver: Resolver,
+    caller: Annotated[VerifiedIdentity, platform_require("platform:elevations:read")],
 ) -> ResponseModel[list[TenantSummary]]:
-    """Active tenants (id / name / slug — org metadata, not PHI) for the elevation
-    tenant picker. Readable here via the tenant_platform_read RLS policy (migration
-    0020); gated on platform:elevations:read since it serves the elevation workflow."""
+    """Active tenants (id / name / slug — org metadata, not PHI) for the elevation tenant
+    picker and the platform-settings screen. Readable here via the tenant_platform_read RLS
+    policy (migration 0022); gated on platform:elevations:read because it serves the
+    elevation workflow.
+
+    The AI form-filling switch is governed by platform:tenants:manage, NOT by that gate, so
+    `observer_enabled` is populated only for a caller who holds it and is left None for
+    everyone else. The two permissions happen to sit on the same seeded role today; the whole
+    point of minting a separate one is that it can be granted apart, so the disclosure is
+    resolved per-caller rather than assumed from the role."""
+    # A cache hit in practice: platform_require just resolved the same (session, None,
+    # user_id) triple and populated the permission cache.
+    _, permissions = await resolver.effective_permissions(session, None, caller.user_id)
+    may_manage = TENANTS_MANAGE in permissions
+
+    def _disclose[T](value: T, cast: Callable[[T], T]) -> T | None:
+        """Gate a platform:tenants:manage-only field: withheld (None) unless the
+        caller holds it, so a widened set of managed fields can't skip the check."""
+        return cast(value) if may_manage else None
+
     rows = (
         await session.execute(
-            select(Tenant.id, Tenant.name, Tenant.slug)
+            select(
+                Tenant.id,
+                Tenant.name,
+                Tenant.slug,
+                Tenant.observer_enabled,
+                Tenant.auto_retry_enabled,
+                Tenant.retry_fill_threshold,
+            )
             .where(Tenant.status == "active")
             .order_by(Tenant.name)
         )
     ).all()
-    return ok([TenantSummary(id=r.id, name=r.name, slug=r.slug) for r in rows])
+    return ok(
+        [
+            TenantSummary(
+                id=r.id,
+                name=r.name,
+                slug=r.slug,
+                observer_enabled=_disclose(r.observer_enabled, bool),
+                auto_retry_enabled=_disclose(r.auto_retry_enabled, bool),
+                retry_fill_threshold=_disclose(r.retry_fill_threshold, float),
+            )
+            for r in rows
+        ]
+    )
+
+
+class SetTenantObserverRequest(BaseModel):
+    enabled: bool
+
+
+class TenantObserverResponse(BaseModel):
+    tenant_id: UUID
+    observer_enabled: bool
+
+
+@router.post(
+    "/tenants/{tenant_id}/observer",
+    response_model=ResponseModel[TenantObserverResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def set_tenant_observer(
+    tenant_id: UUID,
+    body: SetTenantObserverRequest,
+    request: Request,
+    session: PlatformSession,
+    audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    caller: Annotated[VerifiedIdentity, platform_require(TENANTS_MANAGE)],
+) -> ResponseModel[TenantObserverResponse]:
+    """Toggle a tenant's AI form-filling (observer) feature. Writes through the
+    platform_set_tenant_observer_enabled SECURITY DEFINER fn (the tenant table's platform
+    RLS policy is SELECT-only), audited null-tenant like every other /platform authz."""
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        PLATFORM_IDEM_SCOPE,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
+    flipped = await set_tenant_observer_enabled(session, tenant_id=tenant_id, enabled=body.enabled)
+    if not flipped:
+        raise NotFoundError(message="no such tenant")
+    # Read the value BACK rather than echoing the request: the definer fn only reports whether
+    # a row matched, so echoing would quietly lie if the stored value ever diverged (a trigger
+    # normalising it, a concurrent flip). Readable via the tenant_platform_read RLS policy.
+    stored = bool(
+        await session.scalar(select(Tenant.observer_enabled).where(Tenant.id == tenant_id))
+    )
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_OBSERVER_UPDATED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={"target_tenant": str(tenant_id), "observer_enabled": stored},
+    )
+    return ok(TenantObserverResponse(tenant_id=tenant_id, observer_enabled=stored))
+
+
+class SetTenantRetryConfigRequest(BaseModel):
+    auto_retry_enabled: bool | None = None
+    retry_fill_threshold: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> "SetTenantRetryConfigRequest":
+        if self.auto_retry_enabled is None and self.retry_fill_threshold is None:
+            raise ValueError("provide auto_retry_enabled and/or retry_fill_threshold")
+        return self
+
+
+class TenantRetryConfigResponse(BaseModel):
+    tenant_id: UUID
+    auto_retry_enabled: bool
+    retry_fill_threshold: float
+
+
+@router.post(
+    "/tenants/{tenant_id}/retry-config",
+    response_model=ResponseModel[TenantRetryConfigResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def set_tenant_retry_config_endpoint(
+    tenant_id: UUID,
+    body: SetTenantRetryConfigRequest,
+    request: Request,
+    session: PlatformSession,
+    audit: AuthAudit,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    caller: Annotated[VerifiedIdentity, platform_require(TENANTS_MANAGE)],
+) -> ResponseModel[TenantRetryConfigResponse]:
+    """Set a tenant's auto-retry flag and/or fill threshold. Writes through the
+    platform_set_tenant_retry_config SECURITY DEFINER fn (the tenant table's
+    platform RLS policy is SELECT-only), audited null-tenant like every other
+    /platform authz."""
+    await claim_or_conflict(
+        get_idempotency_store(request),
+        PLATFORM_IDEM_SCOPE,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    )
+    matched = await set_tenant_retry_config(
+        session,
+        tenant_id=tenant_id,
+        enabled=body.auto_retry_enabled,
+        threshold=body.retry_fill_threshold,
+    )
+    if not matched:
+        raise NotFoundError(message="no such tenant")
+    # Read the values BACK rather than echoing the request (same rationale as
+    # set_tenant_observer: the fn only reports whether a row matched).
+    row = (
+        await session.execute(
+            select(Tenant.auto_retry_enabled, Tenant.retry_fill_threshold).where(
+                Tenant.id == tenant_id
+            )
+        )
+    ).one()
+    enabled = bool(row.auto_retry_enabled)
+    threshold = float(row.retry_fill_threshold)
+    await emit_auth_event(
+        audit,
+        tenant_id=None,
+        event=AuthEvent.TENANT_RETRY_CONFIG_UPDATED,
+        ip=client_ip(request),
+        user_id=caller.user_id,
+        meta={
+            "target_tenant": str(tenant_id),
+            "auto_retry_enabled": enabled,
+            "retry_fill_threshold": threshold,
+        },
+    )
+    return ok(
+        TenantRetryConfigResponse(
+            tenant_id=tenant_id, auto_retry_enabled=enabled, retry_fill_threshold=threshold
+        )
+    )
 
 
 def _map_create_error(exc: IntegrityError) -> CustomAPIException:

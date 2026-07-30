@@ -21,10 +21,12 @@ from vera_core.models import (
     DisputeAction,
     FieldAnswer,
     FormSchema,
+    InsuranceProvider,
     PatientForm,
     SchemaVersion,
 )
 from vera_core.models.enums import AnswerSource, FormStatus, InsuranceType, VersionStatus
+from vera_core.services.queue_dispatcher import _resolve_provider
 
 HEALTH_PLAN = "insurance_information.health_plan"
 
@@ -116,6 +118,7 @@ async def _make_form_with_dispute(
     tenant_id: UUID,
     schema_version_id: UUID,
     status: FormStatus = FormStatus.EXCEPTION_REVIEW,
+    appointment_date: date | None = None,
 ) -> UUID:
     """Create a form with one undisputed INTAKE field, plus a disputed field: an INTAKE
     baseline answer + a current AI_CALL answer that diverges from it (the dispute signal
@@ -128,6 +131,7 @@ async def _make_form_with_dispute(
             status=status.value,
             intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
             patient_name="jane doe",
+            appointment_date=appointment_date,
             completion_pct=0,
             retry_count=0,
         )
@@ -184,6 +188,7 @@ async def dispute_form(
 
 
 INSURANCE_PROVIDER_NAME = "sections.insurance_reference_information.insurance_provider_name"
+INSURANCE_PHONE = "sections.insurance_reference_information.insurance_phone_number"
 
 
 async def _make_form_with_promoted_field(
@@ -262,9 +267,109 @@ async def test_list_returns_paginated_summaries(
     assert "dispute_count" not in row
 
 
+async def test_list_out_of_range_page_returns_empty_items_and_correct_total(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, dispute_form: UUID
+) -> None:
+    """The merged count+page query reads `total` off a `count(*) OVER()` window
+    column on the page rows; an out-of-range page has no rows to read it from,
+    so it falls back to a bare count. `total` must still be correct."""
+    resp = await client.get(
+        "/api/v1/patient-forms",
+        params={"page": 2, "page_size": 20},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert body["items"] == []
+    assert body["total"] == 1
+
+
+async def test_list_total_reflects_full_filtered_count_not_just_the_page(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """`total` must reflect every row matching the filter, not the page_size-limited
+    slice actually returned — this is what the window function replaces two
+    round trips (bare count + page select) with."""
+    for _ in range(2):
+        await _make_form_with_dispute(
+            admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+        )
+    resp = await client.get(
+        "/api/v1/patient-forms",
+        params={"page": 1, "page_size": 1},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert len(body["items"]) == 1
+    assert body["total"] == 2
+
+
+async def test_list_sorts_by_appointment_date_with_nulls_last(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """Server-side sort drives the Data Management worklist: the chosen column
+    orders the whole result set (not just one page), dateless forms sink to the
+    end in either direction."""
+    dated = {
+        d: await _make_form_with_dispute(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            schema_version_id=schema_version_id,
+            appointment_date=d,
+        )
+        for d in (date(2026, 7, 10), date(2026, 7, 20))
+    }
+    undated = await _make_form_with_dispute(
+        admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+    )
+
+    async def _ids(sort_dir: str) -> list[str]:
+        resp = await client.get(
+            "/api/v1/patient-forms",
+            params={"sort_by": "appointment_date", "sort_dir": sort_dir},
+            headers=_auth(rbac_world.admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        return [row["id"] for row in resp.json()["data"]["items"]]
+
+    newest_first = [str(dated[date(2026, 7, 20)]), str(dated[date(2026, 7, 10)]), str(undated)]
+    assert await _ids("desc") == newest_first
+    assert await _ids("asc") == [newest_first[1], newest_first[0], newest_first[2]]
+
+
+async def test_list_rejects_unknown_sort_column(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        "/api/v1/patient-forms",
+        params={"sort_by": "intake_payload"},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+
+
 async def test_list_requires_forms_read(client: httpx.AsyncClient, rbac_world: RBACWorld) -> None:
     resp = await client.get("/api/v1/patient-forms", headers=_auth(rbac_world.norole_token))
     assert resp.status_code == 403, resp.text
+
+
+async def test_virtual_assistant_can_list_patient_forms(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """VA now holds forms:read/forms:write (Data Management page access)."""
+    resp = await client.get(
+        "/api/v1/patient-forms", headers=_auth(rbac_world.virtual_assistant_token)
+    )
+    assert resp.status_code == 200, resp.text
 
 
 # ---- schema version lookup ----------------------------------------------------
@@ -555,7 +660,7 @@ async def test_resolve_leaves_promoted_columns_untouched_for_a_non_promoted_fiel
 ) -> None:
     resp = await client.post(
         f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
-        json={"form_data": {"sections.patient_verification.patient_on_plan": "Yes"}},
+        json={"form_data": {"sections.patient_verification.is_insurance_active": "Yes"}},
         headers=_auth(rbac_world.admin_token),
     )
     assert resp.status_code == 200, resp.text
@@ -608,6 +713,135 @@ async def test_resolve_accepts_a_date_in_the_leafs_declared_format(
             await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
         ).scalar_one()
         assert form.patient_dob == date(1999, 12, 4)
+
+
+async def test_resolve_reformats_a_non_promoted_date_leaf_to_its_declared_format(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """spouse_partner_dob is a date leaf but NOT one of the eight promoted
+    columns — proves the fix isn't scoped to patient_dob/appointment_date:
+    resolve must reformat ANY date leaf's ISO-submitted value to the leaf's
+    declared date_format ("M/D/YYYY" for ibv_standard), matching what the review
+    UI's edit-form validator expects when it re-populates from the stored value."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.spouse_partner_dob": "1999-12-04"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        current = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == "sections.patient_information.spouse_partner_dob",
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert current.value == {"value": "12/4/1999"}
+
+
+async def test_resolve_with_invalid_non_promoted_date_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    """Same 422 contract as the promoted-column case
+    (`test_resolve_with_invalid_promoted_date_returns_422`), now for a date leaf
+    that isn't one of the eight promoted columns."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.patient_information.spouse_partner_dob": "not-a-date"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["data"]["fields"] == ["sections.patient_information.spouse_partner_dob"]
+
+
+async def test_resolve_auto_formats_missing_plus_on_insurance_phone(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "15550100"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15550100"
+
+        answer = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == INSURANCE_PHONE,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15550100"}
+        assert answer.source == "human"
+
+
+async def test_resolve_leaves_already_prefixed_phone_unchanged(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    promoted_field_form: UUID,
+) -> None:
+    """A number that already has a leading '+' is left exactly as submitted — no
+    reformatting is applied beyond adding a missing '+' (2026-07-15 design doc)."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "+15559990000"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with admin_sessionmaker() as s:
+        form = (
+            await s.execute(select(PatientForm).where(PatientForm.id == promoted_field_form))
+        ).scalar_one()
+        assert form.insurance_provider_phone_number == "+15559990000"
+
+        answer = (
+            await s.execute(
+                select(FieldAnswer).where(
+                    FieldAnswer.form_id == promoted_field_form,
+                    FieldAnswer.field_path == INSURANCE_PHONE,
+                    FieldAnswer.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert answer.value == {"value": "+15559990000"}
+        assert answer.source == "human"
+
+
+async def test_resolve_with_invalid_promoted_phone_returns_422(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {INSURANCE_PHONE: "555 000 1234"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["data"]["fields"] == [INSURANCE_PHONE]
 
 
 # ---- baseline-derived dispute behavior --------------------------------------
@@ -1185,6 +1419,7 @@ async def _make_plain_form(
     schema_version_id: UUID,
     status: FormStatus,
     phone: str | None = None,
+    insurance_provider: str | None = None,
 ) -> UUID:
     """A bare form in `status` with no field answers (so no disputes)."""
     async with sm() as s, s.begin():
@@ -1197,6 +1432,7 @@ async def _make_plain_form(
             completion_pct=0,
             retry_count=0,
             insurance_provider_phone_number=phone,
+            insurance_provider=insurance_provider,
         )
         s.add(form)
         await s.flush()
@@ -1395,6 +1631,65 @@ async def test_status_unknown_form_returns_404(
     assert resp.status_code == 404, resp.text
 
 
+# ---- review_reason ----------------------------------------------------------
+
+
+@pytest.fixture
+async def review_form_id(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> UUID:
+    """A plain EXCEPTION_REVIEW form with no disputes — used for review_reason tests.
+    Carries a valid E.164 provider phone: the requeue test drives it back to
+    IN_QUEUE, which the queueability gate refuses without one."""
+    return await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+        phone="+15551234567",
+    )
+
+
+@pytest.mark.asyncio
+async def test_requeue_clears_review_reason(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    review_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    trunk_integration_type: None,
+) -> None:
+    """Leaving EXCEPTION_REVIEW by hand nulls review_reason."""
+    # Requeue runs the queueability gate — the tenant needs an outbound trunk.
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    # Seed the reason directly (the pipeline normally stamps it).
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(
+            text("UPDATE patient_form SET review_reason = 'llm_error' WHERE id = :fid").bindparams(
+                fid=review_form_id
+            )
+        )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{review_form_id}/status",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+    async with admin_sessionmaker() as session:
+        reason = (
+            await session.execute(
+                text("SELECT review_reason FROM patient_form WHERE id = :fid").bindparams(
+                    fid=review_form_id
+                )
+            )
+        ).scalar_one()
+    assert reason is None
+
+
 async def test_status_same_status_is_idempotent_noop(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -1417,3 +1712,184 @@ async def test_status_same_status_is_idempotent_noop(
     )
     assert resp.status_code == 200, resp.text
     assert await _status(admin_sessionmaker, form_id) == "in_call"
+
+
+# ---- send-to-queue provider selection ---------------------------------------
+# The picker canonicalizes the form's insurance_provider string to the chosen
+# catalog name so the async dispatcher resolves the right provider + IVR playbook.
+
+
+async def _seed_provider(
+    sm: async_sessionmaker[AsyncSession], *, name: str, status: str = "active"
+) -> UUID:
+    """A GLOBAL insurance_provider row (the caller deletes it in a finally)."""
+    provider_id = uuid4()
+    async with sm() as s, s.begin():
+        s.add(InsuranceProvider(id=provider_id, name=name, status=status))
+    return provider_id
+
+
+async def _delete_provider(sm: async_sessionmaker[AsyncSession], provider_id: UUID) -> None:
+    async with sm() as s, s.begin():
+        # A dispatched call FK-references the provider (cleanup_forms deletes the call
+        # later); detach it first so the provider row is deletable now.
+        await s.execute(
+            text(
+                "UPDATE call SET insurance_provider_id = NULL WHERE insurance_provider_id = :i"
+            ).bindparams(i=provider_id)
+        )
+        await s.execute(
+            text("DELETE FROM insurance_provider WHERE id = :i").bindparams(i=provider_id)
+        )
+
+
+async def _provider_string(sm: async_sessionmaker[AsyncSession], form_id: UUID) -> str | None:
+    async with sm() as s:
+        return (
+            await s.execute(select(PatientForm.insurance_provider).where(PatientForm.id == form_id))
+        ).scalar_one()
+
+
+async def test_status_canonicalizes_provider_from_picked_id(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    name = f"Cigna {uuid4().hex[:8]}"
+    provider_id = await _seed_provider(admin_sessionmaker, name=name)
+    try:
+        # Intake string deliberately disagrees with the catalog name.
+        form_id = await _make_plain_form(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            schema_version_id=schema_version_id,
+            status=FormStatus.READY_FOR_PROCESSING,
+            phone="+15551234567",
+            insurance_provider="Stale Provider",
+        )
+        resp = await client.put(
+            f"/api/v1/patient-forms/{form_id}/status",
+            headers=_auth(rbac_world.admin_token),
+            json={"status": "in_queue", "insurance_provider_id": str(provider_id)},
+        )
+        assert resp.status_code == 200, resp.text
+        await drain_pending()
+        # The string is now the exact catalog name — dispatch resolves the provider.
+        assert await _provider_string(admin_sessionmaker, form_id) == name
+    finally:
+        await _delete_provider(admin_sessionmaker, provider_id)
+
+
+async def test_status_rejects_unknown_provider_id(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+        phone="+15551234567",
+        insurance_provider="Original",
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue", "insurance_provider_id": str(uuid4())},
+    )
+    assert resp.status_code == 422, resp.text
+    # Rejected before the transition: status and the string both stand.
+    assert await _status(admin_sessionmaker, form_id) == "ready_for_processing"
+    assert await _provider_string(admin_sessionmaker, form_id) == "Original"
+
+
+async def test_status_without_provider_id_leaves_string_untouched(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+    trunk_integration_type: None,
+) -> None:
+    await seed_outbound_trunk(
+        admin_sessionmaker, LocalDevKMS(master_key=b"a" * 32), rbac_world.tenant_id
+    )
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.READY_FOR_PROCESSING,
+        phone="+15551234567",
+        insurance_provider="Original",
+    )
+    resp = await client.put(
+        f"/api/v1/patient-forms/{form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+    await drain_pending()
+    assert await _provider_string(admin_sessionmaker, form_id) == "Original"
+
+
+async def test_list_form_insurance_providers_returns_active_only(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    active_id = await _seed_provider(admin_sessionmaker, name=f"Active {uuid4().hex[:8]}")
+    inactive_id = await _seed_provider(
+        admin_sessionmaker, name=f"Inactive {uuid4().hex[:8]}", status="inactive"
+    )
+    try:
+        # Literal path is matched (not captured as a {form_id} UUID param).
+        resp = await client.get(
+            "/api/v1/patient-forms/insurance-providers",
+            headers=_auth(rbac_world.admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        ids = {p["id"] for p in resp.json()["data"]}
+        assert str(active_id) in ids
+        assert str(inactive_id) not in ids
+    finally:
+        await _delete_provider(admin_sessionmaker, active_id)
+        await _delete_provider(admin_sessionmaker, inactive_id)
+
+
+async def test_list_form_insurance_providers_requires_forms_read(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        "/api/v1/patient-forms/insurance-providers",
+        headers=_auth(rbac_world.norole_token),
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_resolve_provider_matches_case_insensitively(
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    name = f"CignaCase{uuid4().hex[:8]}"
+    provider_id = await _seed_provider(admin_sessionmaker, name=name)
+    try:
+        form = PatientForm(insurance_provider=f"  {name.lower()}  ")  # cased + padded
+        async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+            provider = await _resolve_provider(s, form)
+        assert provider is not None
+        assert provider.id == provider_id
+    finally:
+        await _delete_provider(admin_sessionmaker, provider_id)

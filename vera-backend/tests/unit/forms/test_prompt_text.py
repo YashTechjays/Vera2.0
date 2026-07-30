@@ -14,6 +14,7 @@ def doc_with(conditions: dict[str, Any] | None = None) -> FormSchemaDoc:
             "insurance_type": "infertility_treatment",
             "system_fields": {"x": "sections.a.x"},
             "promoted_fields": dict.fromkeys(PromotedFields.model_fields, "sections.a.x"),
+            "rep_call_reference_number_field": "sections.a.x",
             "shared_conditions": conditions or {},
             "sections": {
                 "a": {

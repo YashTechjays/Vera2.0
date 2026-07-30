@@ -8,8 +8,16 @@ the single source of truth. The defaults below are local-dev only.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _split_csv(value: object) -> object:
+    """Accept a comma-separated string for a list field (friendlier than JSON in
+    .env); pass anything else through untouched for pydantic to validate."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return value
 
 
 class Settings(BaseSettings):
@@ -33,8 +41,11 @@ class Settings(BaseSettings):
     # Live-transcript Redis stream lifetime (Voice Lab / SSE). The rolling backstop
     # TTL is refreshed on every publish so an abandoned stream self-clears; the end
     # grace TTL lets connected readers drain the `ended` sentinel before it clears.
+    # The grace window is also the persistence-finalizer's durability budget: the
+    # control plane must consume call.ended and drain the stream before it expires,
+    # so it is sized to ride out a control-plane restart, not just an SSE drain.
     transcript_stream_ttl_seconds: int = 3600  # VERA_TRANSCRIPT_STREAM_TTL_SECONDS
-    transcript_end_grace_seconds: int = 60  # VERA_TRANSCRIPT_END_GRACE_SECONDS
+    transcript_end_grace_seconds: int = 900  # VERA_TRANSCRIPT_END_GRACE_SECONDS
 
     # Worker→control-plane event bus (Redis Streams + consumer group). Stream is
     # MAXLEN-trimmed; the consumer blocks for block_ms, reclaims entries a crashed
@@ -45,6 +56,13 @@ class Settings(BaseSettings):
     worker_events_reclaim_idle_ms: int = 60_000  # VERA_WORKER_EVENTS_RECLAIM_IDLE_MS
     call_failed_teardown_grace_ms: int = 1_500  # VERA_CALL_FAILED_TEARDOWN_GRACE_MS
 
+    # Post-call re-read (LLM eval). Gemini Flash on Vertex (BAA-covered); the review
+    # floor routes low-confidence/unsupported fields to EXCEPTION_REVIEW.
+    gemini_flash_model: str = "gemini-2.5-flash"  # VERA_GEMINI_FLASH_MODEL
+    vertex_location: str = "us-central1"  # VERA_VERTEX_LOCATION
+    post_call_review_floor: int = 70  # VERA_POST_CALL_REVIEW_FLOOR
+    post_call_block_ms: int = 5_000  # VERA_POST_CALL_BLOCK_MS
+    post_call_reclaim_idle_ms: int = 60_000  # VERA_POST_CALL_RECLAIM_IDLE_MS
     # Pipeline sweeper: reconciles stuck calls (worker crash / lost event) and
     # wakes the dispatcher on a timer (working-hours reopen, queue expiry).
     pipeline_sweep_interval_seconds: int = 60  # VERA_PIPELINE_SWEEP_INTERVAL_SECONDS
@@ -138,6 +156,94 @@ class Settings(BaseSettings):
     # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
     livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
 
+    # --- live-call summary (control plane) -----------------------------------
+    # Fault-tolerant summarizer chain, "provider:model" selectors resolved by
+    # vera_core.llm (google = Vertex Gemini; openai = GPT under the OpenAI BAA).
+    summary_primary_model: str = "google:gemini-3.1-flash-lite"  # VERA_SUMMARY_PRIMARY_MODEL
+    summary_fallback_models: list[str] = ["openai:gpt-5.4-mini"]  # VERA_SUMMARY_FALLBACK_MODELS
+    summary_attempt_timeout_seconds: float = 8.0  # VERA_SUMMARY_ATTEMPT_TIMEOUT_SECONDS
+    # Short cache so tab-flipping supervisors reuse one summary; staleness cap.
+    summary_cache_ttl_seconds: int = 5  # VERA_SUMMARY_CACHE_TTL_SECONDS
+    # Overall request budget for the summarizer chain (cache + fallback attempts);
+    # bounds the worst-case wait before the endpoint gives up and returns 503.
+    summary_total_timeout_seconds: float = 20.0  # VERA_SUMMARY_TOTAL_TIMEOUT_SECONDS
+
+    # --- voice cascade (agent worker) -----------------------------------------
+    # The live voice cascade's LLM stage — Deepgram(Flux) -> Gemini -> Cartesia
+    # (agent_worker/cascade.py). A platform SUPER_ADMIN can override this per-call at
+    # runtime (voice_model_config table, platform/llm-config endpoints); this is only
+    # the fallback when no override is active. Deliberately its own setting — not
+    # shared with any other model config (summary/observer/health chains above, or the
+    # post-call gemini_flash_model below): those tune unrelated, out-of-pipeline LLM
+    # calls and must be free to change independently of what the live cascade uses.
+    voice_llm_default_model: str = "gemini-2.5-flash"  # VERA_VOICE_LLM_DEFAULT_MODEL
+
+    # --- eval harness call evaluator (tests only) ----------------------------
+    # The judge LLM that grades a simulated call from its transcript. Out-of-pipeline, so it goes
+    # through vera_core.llm.ResilientLLM like every non-cascade call.
+    evals_judge_model: str = "google:gemini-3.6-flash"  # VERA_EVALS_JUDGE_MODEL
+
+    # --- observer answer extraction (agent worker) ---------------------------
+    observer_extract_primary_model: str = "google:gemini-3.5-flash"
+    observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]
+    observer_extract_attempt_timeout_seconds: float = 8.0
+
+    # --- coaching mode (control plane) ---------------------------------------
+    # Shared rolling-window cap on coaching + whisper-transcribe actions PER CALL
+    # (one counter, not per supervisor) — any number of authorized supervisors
+    # coaching the same call draw from it, so a runaway client can't flood Vera's
+    # context or the whisper STT provider.
+    coaching_rate_limit_per_minute: int = 15  # VERA_COACHING_RATE_LIMIT_PER_MINUTE
+    coaching_rate_limit_window_seconds: int = 60  # VERA_COACHING_RATE_LIMIT_WINDOW_SECONDS
+    # Fault-tolerant whisper-transcribe chain (vera_core.stt.ResilientSTT), same
+    # "provider:model" selector shape as the summarizer. AssemblyAI has no API key
+    # provisioned yet — its factory exists but fails at construction and is
+    # dropped with a warning until ASSEMBLYAI_API_KEY is added; Deepgram alone is
+    # expected to serve every whisper request until then.
+    whisper_stt_primary_model: str = "deepgram:flux-general-en"  # VERA_WHISPER_STT_PRIMARY_MODEL
+    whisper_stt_fallback_models: list[str] = ["assemblyai:best"]  # VERA_WHISPER_STT_FALLBACK_MODELS
+
+    @field_validator(
+        "summary_fallback_models",
+        "observer_extract_fallback_models",
+        "whisper_stt_fallback_models",
+        mode="before",
+    )
+    @classmethod
+    def _split_fallback_models(cls, value: object) -> object:
+        return _split_csv(value)
+
+    # --- call-health observer (agent worker) --------------------------------
+    # Fault-tolerant analyzer chain, same "provider:model" selector format as the
+    # summary chain; runs INSIDE the agent worker as a per-call background task.
+    health_primary_model: str = "google:gemini-3.1-flash-lite"  # VERA_HEALTH_PRIMARY_MODEL
+    health_fallback_models: list[str] = ["openai:gpt-5.4-mini"]  # VERA_HEALTH_FALLBACK_MODELS
+    health_attempt_timeout_seconds: float = 8.0  # VERA_HEALTH_ATTEMPT_TIMEOUT_SECONDS
+    # A completed user turn triggers an analysis, at most one in flight and at
+    # least this many seconds apart (silence triggers nothing).
+    health_min_interval_seconds: float = 15.0  # VERA_HEALTH_MIN_INTERVAL_SECONDS
+    # Cold-start gate: no analysis until this many user turns exist.
+    health_min_user_turns: int = 2  # VERA_HEALTH_MIN_USER_TURNS
+    # Transcript window cap (chunked re-anchoring — see vera_core.call_health).
+    health_max_turns: int = 60  # VERA_HEALTH_MAX_TURNS
+
+    @field_validator("health_fallback_models", mode="before")
+    @classmethod
+    def _split_health_fallback_models(cls, value: object) -> object:
+        return _split_csv(value)
+
+    # --- end-of-call gap pass (agent worker) --------------------------------
+    # Before wrapping up a plan-backed call, re-ask required fields that were left
+    # unanswered in the tasks the call actually visited. False = go straight to the
+    # closing task (the pre-gap-pass behavior).
+    gap_pass_enabled: bool = True  # VERA_GAP_PASS_ENABLED
+
+    # --- handoff context window (agent worker) ------------------------------
+    # Carry only the previous task's own turns into the next task agent — the window is one
+    # task deep. False falls back to the cumulative behavior, where every handoff forwards the
+    # whole call so far and the prompt grows linearly to wrap-up.
+    previous_task_context_only: bool = True  # VERA_PREVIOUS_TASK_CONTEXT_ONLY
+
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker
     # `ivr_agent.ivr_turn_handling`). min_delay is the key IVR-patience tunable:
@@ -154,6 +260,21 @@ class Settings(BaseSettings):
     audit_anchor_bucket: str | None = None
     audit_anchor_prefix: str = "audit-anchors"
     audit_anchor_local_dir: str = ".audit-anchors"
+    # --- call recording (LiveKit composite egress → GCS) --------------------
+    # Unset bucket → recording disabled end-to-end (no egress started, no
+    # Recording rows, playback 409s) — mirrors the langfuse_host no-op switch.
+    recording_bucket: str | None = None  # VERA_RECORDING_BUCKET
+    recording_prefix: str = "recordings"  # VERA_RECORDING_PREFIX
+    recording_retention_days_default: int = 90  # VERA_RECORDING_RETENTION_DAYS_DEFAULT
+    # Bounded: a misconfigured env var must not mint day-long bearer URLs.
+    recording_signed_url_ttl_seconds: int = Field(
+        default=600, ge=60, le=3600
+    )  # VERA_RECORDING_SIGNED_URL_TTL_SECONDS
+    recording_verify_interval_seconds: int = 30  # VERA_RECORDING_VERIFY_INTERVAL_SECONDS
+    retention_sweep_interval_seconds: int = 3600  # VERA_RETENTION_SWEEP_INTERVAL_SECONDS
+    # An orphan egress (no Recording row) is reaped only once it is older than this,
+    # so a just-started recording whose row is still committing is never killed.
+    recording_orphan_grace_seconds: int = 300  # VERA_RECORDING_ORPHAN_GRACE_SECONDS
     # --- cors ---------------------------------------------------------------
     # Browser origins allowed to call the API cross-origin (the SPA dev server;
     # the deployed frontend origin(s) in prod). No "*": credentials + PHI require
@@ -167,14 +288,15 @@ class Settings(BaseSettings):
     @field_validator("cors_allow_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
-        # Accept a comma-separated string (friendlier than JSON in .env).
-        if isinstance(value, str):
-            return [origin.strip() for origin in value.split(",") if origin.strip()]
-        return value
+        return _split_csv(value)
 
     @property
     def is_local(self) -> bool:
         return self.env == "local"
+
+    @property
+    def call_plan_ttl_seconds(self) -> int:
+        return self.call_max_duration_seconds + 3600
 
 
 @lru_cache

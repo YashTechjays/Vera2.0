@@ -20,13 +20,22 @@ import {
 import type { FlatRow } from "@/lib/ibv/schema"
 import type { Section as SectionModel } from "@/lib/ibv/types"
 
-function Rows({ rows }: { rows: FlatRow[] }) {
+function Rows({ rows, compact }: { rows: FlatRow[]; compact?: boolean }) {
   const { schema, values } = useIbv()
   return (
     <div>
       {rows.map(({ path, field, depth, gates }) => {
         if (!isGroup(field)) {
-          return <FieldRow key={path} field={field} path={path} depth={depth} gates={gates} />
+          return (
+            <FieldRow
+              key={path}
+              field={field}
+              path={path}
+              depth={depth}
+              gates={gates}
+              compact={compact}
+            />
+          )
         }
         // A non-applicable node always yields a reason, so it also drives the graying.
         const disabledReason =
@@ -63,10 +72,13 @@ export function Section({
   sectionKey,
   section,
   defaultOpen = true,
+  compact,
 }: {
   sectionKey: string
   section: SectionModel
   defaultOpen?: boolean
+  /** narrow-column rendering — see FieldRow's compact prop */
+  compact?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const green = section.role === "context"
@@ -117,10 +129,10 @@ export function Section({
           // leaves need their own wrapper for it. The matrix itself doesn't:
           // its <table> already owns a complete collapsed-border frame.
           <div className={cn("border-x", green ? "border-[#1f9d57]" : "border-ibv-input-border")}>
-            <Rows rows={rows} />
+            <Rows rows={rows} compact={compact} />
           </div>
         ) : (
-          <Rows rows={rows} />
+          <Rows rows={rows} compact={compact} />
         )}
         {table && <SectionMatrix table={table} />}
       </CollapsibleContent>

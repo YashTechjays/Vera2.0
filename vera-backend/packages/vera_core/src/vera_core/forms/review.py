@@ -14,14 +14,20 @@ derived purely from `field_answer` history — `field_evaluation` plays no part,
 values — callers never log them.
 """
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from vera_core.forms.conditions import is_applicable, is_required, leaf_gates
-from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.conditions import is_applicable, is_required, is_v2, leaf_gates
+from vera_core.forms.dsl import COLLECTED_ROLES, FormSchemaDoc
 from vera_core.models.enums import AnswerSource, DisputeActionType
+
+# A judge verdict below this confidence (or unsupported) routes the field to review,
+# and an AI answer below it is not "satisfied" for the retry decision. The single
+# default for the whole post-call pipeline; `settings.post_call_review_floor` overrides
+# it at consumer wiring time.
+REVIEW_CONFIDENCE_FLOOR = 70
 
 
 @dataclass(frozen=True)
@@ -62,16 +68,49 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
+def is_blank_answer(value: Any) -> bool:
+    """True when a value counts as "not answered": None or whitespace-only. A blank
+    AI answer must never supersede a baseline — it would demote the real value and
+    flag an empty field as a dispute (VR2-93). Single definition for every AI write
+    path; humans/intake may still clear a value."""
+    return value is None or not str(value).strip()
+
+
+def dispute_view(
+    *,
+    source: str,
+    value: Any,
+    confidence: int | None,
+    evidence: str | None,
+    baseline_value: Any,
+) -> dict[str, Any] | None:
+    """The `{previous_value, current_value, confidence, evidence, reasoning}` payload for one
+    field, or `None` when it is not disputed."""
+    if source != AnswerSource.AI_CALL.value:
+        return None
+    if normalize_value(unwrap_value(value)) == normalize_value(unwrap_value(baseline_value)):
+        return None
+    return {
+        "previous_value": unwrap_value(baseline_value),
+        "current_value": unwrap_value(value),
+        "confidence": confidence,
+        "evidence": evidence,
+        "reasoning": None,
+    }
+
+
 def is_disputed(current: AnswerRow, baseline_value: Any) -> bool:
     """True when the current value came from the AI call and diverges from the
-    human/intake baseline. `baseline_value` is the stored baseline (`{"value": ...}`) or
-    `None` if absent; `!=` matches `IS DISTINCT FROM` semantics for `None`. Values are
-    normalized first, so case/whitespace-only differences are not disputes."""
-    if current.source != AnswerSource.AI_CALL.value:
-        return False
-    return bool(
-        normalize_value(unwrap_value(current.value))
-        != normalize_value(unwrap_value(baseline_value))
+    human/intake baseline. Thin wrapper over `dispute_view` so there is one rule."""
+    return (
+        dispute_view(
+            source=current.source,
+            value=current.value,
+            confidence=current.confidence,
+            evidence=current.evidence,
+            baseline_value=baseline_value,
+        )
+        is not None
     )
 
 
@@ -118,6 +157,14 @@ def completion_pct_v2(values: Mapping[str, Any], schema_json: Mapping[str, Any])
     return round(filled / len(relevant) * 100, 2)
 
 
+def form_completion_pct(values: Mapping[str, Any], schema_json: Mapping[str, Any]) -> float:
+    """Version-gated completion %: v2 evaluates conditions against the values;
+    v1 only needs which paths are filled."""
+    if is_v2(schema_json):
+        return completion_pct_v2(values, schema_json)
+    return completion_pct(set(values), schema_json)
+
+
 def adjudication_action(new_value: Any, current_value: Any, prior_values: Collection[Any]) -> str:
     """Which `DisputeActionType` a human edit represents: ACCEPT (unchanged),
     OVERRIDE (reverted to a known prior value), else CORRECT (a fresh value)."""
@@ -141,15 +188,13 @@ def build_field_views(
     views: list[dict[str, Any]] = []
     for answer in sorted(current_answers, key=lambda a: a.field_path):
         baseline = baseline_value_by_path.get(answer.field_path)
-        dispute: dict[str, Any] | None = None
-        if is_disputed(answer, baseline):
-            dispute = {
-                "previous_value": unwrap_value(baseline),
-                "current_value": unwrap_value(answer.value),
-                "confidence": answer.confidence,  # the AI answer's own confidence
-                "evidence": answer.evidence,  # what the AI captured
-                "reasoning": None,  # field_evaluation is not part of disputes
-            }
+        dispute = dispute_view(
+            source=answer.source,
+            value=answer.value,
+            confidence=answer.confidence,
+            evidence=answer.evidence,
+            baseline_value=baseline,
+        )
         views.append(
             {
                 "field_path": answer.field_path,
@@ -160,3 +205,132 @@ def build_field_views(
             }
         )
     return views
+
+
+@dataclass(frozen=True)
+class FieldStatus:
+    """Immutable snapshot of a filled field's satisfaction state: source and AI
+    confidence. An unfilled field has no status at all (absent from the map)."""
+
+    source: str | None
+    ai_supported: bool | None
+    ai_confidence: int | None
+
+
+def is_field_satisfied(status: FieldStatus | None, *, floor: int) -> bool:
+    """True when a field's status meets retry-gate requirements: human/intake-sourced
+    (trusted), or AI-sourced with supported language and confidence >= floor.
+    ``None`` means the field is unfilled — never satisfied."""
+    if status is None:
+        return False
+    if status.source in (AnswerSource.INTAKE.value, AnswerSource.HUMAN.value):
+        return True
+    if status.source == AnswerSource.AI_CALL.value:
+        return bool(status.ai_supported) and (status.ai_confidence or 0) >= floor
+    return True  # unknown source but filled — treat as satisfied
+
+
+def _required_paths(
+    schema_json: Mapping[str, Any], values: Mapping[str, Any], *, askable_only: bool
+) -> list[str]:
+    """Paths of required, applicable leaves — optionally only collectible
+    (ask/confirm role) ones. v2: filters by role + applicability. v1: returns
+    all required paths (no role concept)."""
+    if is_v2(schema_json):
+        doc = FormSchemaDoc.model_validate(schema_json)
+        shared = doc.shared_conditions or {}
+        return [
+            path
+            for path, leaf, gates in leaf_gates(doc)
+            if (not askable_only or leaf.role in COLLECTED_ROLES)
+            and is_applicable(gates, values, shared)
+            and is_required(leaf, values, shared)
+        ]
+    return all_required_paths(schema_json)
+
+
+def _gate_values(
+    status_by_path: Mapping[str, FieldStatus], values: Mapping[str, Any] | None
+) -> Mapping[str, Any]:
+    """The values conditions evaluate against. With *values* (the form's real
+    current answers — PHI, so only in-session callers pass them) gates evaluate
+    exactly. Without, a sentinel stands in for each filled field (PHI-free):
+    presence-based gates evaluate exactly; a value-comparing gate (``eq``/``in``…)
+    sees the sentinel and reads as "not matching", so its dependents are treated
+    as inapplicable — a deliberate conservative approximation for the dispatcher's
+    retry nudge, never for an authoritative status decision."""
+    return values if values is not None else dict.fromkeys(status_by_path, "x")
+
+
+def unsatisfied_required_paths(
+    status_by_path: Mapping[str, FieldStatus],
+    schema_json: Mapping[str, Any],
+    *,
+    floor: int,
+    values: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Paths of required, applicable fields (ANY role) that are not yet satisfied.
+    The authoritative completeness check: a form may only auto-COMPLETE when this
+    is empty — an unsatisfied non-askable field can never be fixed by a retry
+    call, so it must route to human review instead."""
+    gate_values = _gate_values(status_by_path, values)
+    return [
+        path
+        for path in _required_paths(schema_json, gate_values, askable_only=False)
+        if not is_field_satisfied(status_by_path.get(path), floor=floor)
+    ]
+
+
+def retryable_required_paths(
+    status_by_path: Mapping[str, FieldStatus],
+    schema_json: Mapping[str, Any],
+    *,
+    floor: int,
+    values: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Paths of required, applicable, askable fields that are not yet satisfied.
+    These are the fields a retry call should attempt to fill. See _gate_values
+    for the values-vs-sentinel evaluation contract."""
+    gate_values = _gate_values(status_by_path, values)
+    return [
+        path
+        for path in _required_paths(schema_json, gate_values, askable_only=True)
+        if not is_field_satisfied(status_by_path.get(path), floor=floor)
+    ]
+
+
+def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[str]:
+    """Human-readable labels for field paths: leaf titles in v2, else the paths themselves."""
+    if not is_v2(schema_json):
+        return list(paths)
+    doc = FormSchemaDoc.model_validate(schema_json)
+    titles = {path: leaf.title for path, leaf, _ in leaf_gates(doc)}
+    return [titles.get(p, p) for p in paths]
+
+
+def has_call_reference(status_by_path: Mapping[str, "FieldStatus"], doc: FormSchemaDoc) -> bool:
+    """True when the form already has a current answer at the schema's
+    `rep_call_reference_number_field` leaf. The retry-SCOPE gate: with a reference
+    number captured, a retry is FOCUSED (asks only the still-missing fields);
+    without one it starts FRESH (a full call from the top). Takes a parsed doc so
+    the caller validates the schema once and shares it across the retry helpers."""
+    return doc.rep_call_reference_number_field in status_by_path
+
+
+def expand_to_groups(doc: FormSchemaDoc, paths: Collection[str]) -> list[str]:
+    """Grow *paths* so a field inside a group pulls in ALL collectable leaves of
+    that group (a partial group reads oddly on a call). For each group whose
+    subtree contains a wanted path, every collectable (ask/confirm) leaf under it
+    joins the set. Returns the union in document order; a path in no group passes
+    through unchanged."""
+    collectable = doc.collection_paths()  # ask/confirm leaves, document order
+    collectable_set = set(collectable)
+    wanted = set(paths)
+    result = set(wanted)
+    for group_path in doc.group_paths():
+        prefix = f"{group_path}."
+        if any(p == group_path or p.startswith(prefix) for p in wanted):
+            result.update(p for p in collectable if p.startswith(prefix))
+    ordered = [p for p in collectable if p in result]
+    ordered.extend(p for p in paths if p not in collectable_set)
+    return ordered

@@ -32,6 +32,91 @@ def test_mint_join_token_grants_room_join() -> None:
     assert claims["video"]["roomJoin"] is True
 
 
+def test_mint_join_token_carries_name_and_attributes() -> None:
+    gw = LiveKitGateway(url="ws://localhost:7880", api_key="devkey", api_secret="secret")
+    token = gw.mint_join_token(
+        room_name="call--t--c",
+        identity="supervisor-1",
+        can_publish=False,
+        name="supervisor@test.example",
+        attributes={"vera.mode": "listener"},
+    )
+
+    claims = jwt.decode(token, "secret", algorithms=["HS256"])
+    assert claims["name"] == "supervisor@test.example"
+    assert claims["attributes"] == {"vera.mode": "listener"}
+    assert claims["video"]["canPublish"] is False
+
+
+def test_mint_join_token_omits_name_and_attributes_by_default() -> None:
+    # Existing call sites (Voice Lab) pass neither — their tokens must not change.
+    gw = LiveKitGateway(url="ws://localhost:7880", api_key="devkey", api_secret="secret")
+    token = gw.mint_join_token(room_name="call--t--c", identity="caller-1")
+
+    claims = jwt.decode(token, "secret", algorithms=["HS256"])
+    assert "name" not in claims
+    assert "attributes" not in claims
+
+
+def test_room_participant_identities_returns_identities(monkeypatch: pytest.MonkeyPatch) -> None:
+    from livekit import api
+
+    class _FakeRoomService:
+        async def list_participants(
+            self, req: api.ListParticipantsRequest
+        ) -> api.ListParticipantsResponse:
+            assert req.room == "call--t--c"
+            return api.ListParticipantsResponse(
+                participants=[
+                    api.ParticipantInfo(identity="supervisor-1"),
+                    api.ParticipantInfo(identity="phone-callee"),
+                ]
+            )
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    assert asyncio.run(gw.room_participant_identities("call--t--c")) == [
+        "supervisor-1",
+        "phone-callee",
+    ]
+
+
+def test_room_participant_identities_not_found_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vanished room reports None — callers distinguish "gone" from "empty"."""
+    from livekit import api
+    from livekit.api.twirp_client import TwirpError
+
+    class _FakeRoomService:
+        async def list_participants(
+            self, req: api.ListParticipantsRequest
+        ) -> api.ListParticipantsResponse:
+            raise TwirpError(code="not_found", msg="room not found", status=404)
+
+    class _FakeLkApi:
+        room = _FakeRoomService()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+    import asyncio
+
+    assert asyncio.run(gw.room_participant_identities("call--t--c")) is None
+
+
 def test_build_livekit_gateway_raises_when_url_missing() -> None:
     settings = Settings(livekit_url=None)
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})
@@ -80,10 +165,8 @@ def test_set_room_metadata_serializes_json(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_set_room_metadata_tolerates_missing_room(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mirrors delete_room's not_found tolerance: a teardown race (crash after
-    delete_room but before ack, or a sweeper that already deleted the room) can
-    redeliver call.failed after the room is gone — set_room_metadata must be a
-    no-op instead of raising and permanently wedging the PEL entry."""
+    """A teardown race can redeliver call.failed after the room is gone, so a
+    not_found is a no-op (like delete_room) instead of wedging the PEL entry."""
     from livekit import api
     from livekit.api.twirp_client import TwirpError
 
@@ -202,12 +285,8 @@ def test_create_call_room_sets_room_lifetimes(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_default_agent_name_stays_vera_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unset → "vera-agent", so dev/prod (and the deployed worker) are unaffected.
-
-    Settings reads VERA_* env vars and the local .env — a dev box overriding
-    VERA_LIVEKIT_AGENT_NAME (e.g. "vera-agent-local") must not fail this test,
-    which asserts the *shipped* default.
-    """
+    """Unset → "vera-agent" (the shipped default). delenv so a dev box overriding
+    VERA_LIVEKIT_AGENT_NAME doesn't fail this test."""
     monkeypatch.delenv("VERA_LIVEKIT_AGENT_NAME", raising=False)
     settings = Settings(livekit_url="ws://x", _env_file=None)
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})

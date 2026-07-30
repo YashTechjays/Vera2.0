@@ -59,6 +59,7 @@ class DefaultExceptionCode(_ErrorCode):
     RATE_LIMIT_EXCEEDED = (429, "Rate limit exceeded.")
     INTERNAL_SERVER_ERROR = (500, "Internal server error.")
     BAD_GATEWAY = (502, "Upstream service error.")
+    SERVICE_UNAVAILABLE = (503, "Service temporarily unavailable.")
 
 
 class ExceptionCode(_ErrorCode):

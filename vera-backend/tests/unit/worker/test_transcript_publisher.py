@@ -9,10 +9,33 @@ from vera_core.transcript import (
     ROLE_USER,
     SOURCE_BOT,
     SOURCE_REP,
-    InMemoryTranscriptStore,
     TranscriptEvent,
-    TranscriptService,
+    TurnRole,
+    TurnSource,
 )
+
+
+class _RecordingSink:
+    """Collects the ordered turns the emitter publishes. The emitter's contract is the
+    `TurnPublisher` protocol, so these tests need no real stream service — only the
+    order/attribution of what reaches a sink."""
+
+    def __init__(self) -> None:
+        self.turns: list[TranscriptEvent] = []
+
+    async def publish_turn(
+        self,
+        room_name: str,
+        role: TurnRole,
+        text: str,
+        *,
+        ts: int,
+        source: TurnSource | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        self.turns.append(
+            TranscriptEvent.model_validate({"role": role, "source": source, "text": text, "ts": ts})
+        )
 
 
 class _UserEvent:
@@ -43,18 +66,16 @@ class _AgentStateEvent:
         self.new_state = new_state
 
 
-def _service() -> TranscriptService:
-    return TranscriptService(InMemoryTranscriptStore())
+def _service() -> _RecordingSink:
+    return _RecordingSink()
 
 
 async def _drain(
-    emitter: ReorderingEmitter, svc: TranscriptService, room: str
+    emitter: ReorderingEmitter, svc: _RecordingSink, _room: str
 ) -> list[TranscriptEvent]:
-    # aclose flushes any held turns and drains the ordered queue to the store; end() then lets
-    # collect() terminate.
+    # aclose flushes any held turns and drains the ordered queue to the sink.
     await emitter.aclose()
-    await svc.end(room)
-    return await svc.collect(room)
+    return svc.turns
 
 
 def _rt(events: list[TranscriptEvent]) -> list[tuple[str, str]]:

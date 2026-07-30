@@ -55,7 +55,7 @@ _DEDUCTIBLE_NOOPS = ["$0", "None", "No Deductible", "Unlimited", "No Limit"]
 _OOP_NOOPS = ["$0", "None", "Unlimited", "No Limit"]
 _NO_LIMIT = ["No Limit", "Unlimited"]
 
-_TREATMENTS: list[tuple[str, str, str, list[str], str]] = [
+_TREATMENTS: list[tuple[str, str, str | None, list[str], str]] = [
     # key, title, icd10, cpt codes, group ask
     (
         "intrauterine_insemination",
@@ -72,13 +72,6 @@ _TREATMENTS: list[tuple[str, str, str, list[str], str]] = [
         "Can you provide coverage and benefit details for in vitro fertilization, or IVF?",
     ),
     (
-        "egg_cryopreservation_elective",
-        "Egg Cryopreservation (Elective)",
-        "Z31.83",
-        ["89337"],
-        "Can you provide coverage and benefit details for elective egg cryopreservation?",
-    ),
-    (
         "embryo_cryopreservation",
         "Embryo Cryopreservation",
         "Z31.83",
@@ -86,18 +79,25 @@ _TREATMENTS: list[tuple[str, str, str, list[str], str]] = [
         "Can you provide coverage and benefit details for embryo cryopreservation?",
     ),
     (
+        "egg_cryopreservation_elective",
+        "Egg Cryopreservation Elective",
+        "Z31.83",
+        ["89337"],
+        "Can you provide coverage and benefit details for elective egg cryopreservation?",
+    ),
+    (
+        "egg_cryopreservation_cancer",
+        "Egg Cryopreservation Cancer",
+        None,
+        ["89337"],
+        "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?",
+    ),
+    (
         "frozen_embryo_transfer",
         "Frozen Embryo Transfer (FET)",
         "Z31.83",
         ["58974"],
         "Can you provide coverage and benefit details for frozen embryo transfer, or FET?",
-    ),
-    (
-        "egg_cryopreservation_cancer",
-        "Egg Cryopreservation (Cancer-Related)",
-        "Z31.83",
-        ["89337"],
-        "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?",
     ),
     (
         "embryo_biopsy",
@@ -160,7 +160,6 @@ def _context_sections() -> dict[str, Section]:
                     type="text",
                     title="Chart Number",
                     role="input",
-                    default="N/A",
                     description="Clinic-internal chart number. Display only; never part of the call.",
                 ),
                 "patient_name": Leaf(
@@ -178,7 +177,6 @@ def _context_sections() -> dict[str, Section]:
                     title="Patient Gender",
                     role="context",
                     values=["Female", "Male", "Other"],
-                    default="N/A",
                     required=True,
                 ),
                 "spouse_partner_name": Leaf(
@@ -265,7 +263,6 @@ def _context_sections() -> dict[str, Section]:
                     type="phone",
                     title="Callback Number",
                     role="context",
-                    default="N/A",
                     description="The callback phone number of your supervisor",
                 ),
             },
@@ -351,7 +348,7 @@ def _insurance_information() -> Section:
                 ),
             ),
             "plan_type": text_ask(
-                "Plan Type",
+                "Health Plan Type",
                 "What type of plan is this — PPO, HMO, EPO, or something else?",
                 required=True,
                 special_values=["PPO", "HMO", "EPO", "POS"],
@@ -377,11 +374,15 @@ def _insurance_information() -> Section:
                 "Group Number", "What is the group number?", required=True, default="N/A"
             ),
             "policy_situs": text_ask(
-                "Policy Situs",
+                "Home Plan / Policy Situs",
                 "What is the policy state or contract state?",
                 required=True,
                 default="N/A",
                 description="The state whose law governs the policy (contract state).",
+                hints=[
+                    "If the representative doesn't understand the question, clarify: "
+                    "In which state was this policy written?"
+                ],
             ),
         },
     )
@@ -475,19 +476,17 @@ def _infertility_treatment() -> Section:
             "Infertility Treatment Covered",
             "Is infertility treatment covered under this plan?",
             YES_NO,
-        )
+        ),
+        "ovulation_induction": Group(
+            type="group",
+            title="Ovulation Induction/Timed Intercourse (OI/TI)",
+            applicable_when=ref("infertility_covered"),
+            codes=Codes(icd10=["Z31.89"]),
+            prompt=ask("Can you provide coverage and benefit details for ovulation induction?"),
+            fields=oi_fields,
+        ),
     }
-    for key, title, icd10, codes, group_ask in _TREATMENTS[:1]:
-        fields[key] = treatment_group("infertility_treatment", key, title, icd10, codes, group_ask)
-    fields["ovulation_induction"] = Group(
-        type="group",
-        title="Ovulation Induction",
-        applicable_when=ref("infertility_covered"),
-        codes=Codes(icd10=["Z31.89"]),
-        prompt=ask("Can you provide coverage and benefit details for ovulation induction?"),
-        fields=oi_fields,
-    )
-    for key, title, icd10, codes, group_ask in _TREATMENTS[1:]:
+    for key, title, icd10, codes, group_ask in _TREATMENTS:
         fields[key] = treatment_group("infertility_treatment", key, title, icd10, codes, group_ask)
 
     alternatives = [
@@ -516,7 +515,7 @@ def _infertility_treatment() -> Section:
 
 
 def _diagnostic_testing() -> Section:
-    base = "sections.diagnostic_testing"
+    group_base = "sections.diagnostic_testing.labs_xray_ultrasound"
     panel_asks = {
         "covered": (
             "Are diagnostic labs, X-ray and ultrasound services covered under this plan? "
@@ -526,27 +525,37 @@ def _diagnostic_testing() -> Section:
         "coinsurance": "What is the coinsurance percentage for diagnostic testing?",
         "prior_auth": "Is prior authorization required for diagnostic testing? Please answer Yes, No, or N/A.",
     }
-    fields: dict[str, FormField] = {
-        "diagnostic_testing_covered": enum_ask(
-            "Diagnostic Testing Covered",
-            "Is diagnostic testing covered under this plan?",
-            YES_NO,
-        )
-    }
-    for c in _DIAG_CODES:
-        fields[f"cpt_{c}"] = cpt_group(
-            base, c, "plain", applicable_when=ref("diagnostic_testing_covered")
-        )
     return Section(
         title="Diagnostic Testing (Labs, X-ray & Ultrasound)",
         ui=Ui(layout="table"),
         codes=Codes(icd10=["Z31.41"], speak_cpt=True),
         ask_groups=[
-            AskGroup(fields=[f"{base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
+            AskGroup(fields=[f"{group_base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
             for sub, panel_ask in panel_asks.items()
         ],
-        alternatives=[cost_pair(f"{base}.cpt_{c}") for c in _DIAG_CODES],
-        fields=fields,
+        alternatives=[cost_pair(f"{group_base}.cpt_{c}") for c in _DIAG_CODES],
+        fields={
+            "diagnostic_testing_covered": enum_ask(
+                "Diagnostic Testing Covered",
+                "Is diagnostic testing covered under this plan?",
+                YES_NO,
+            ),
+            "labs_xray_ultrasound": Group(
+                type="group",
+                title="Labs, Xray/Ultrasound",
+                codes=Codes(icd10=["Z31.41"]),
+                prompt=ask(
+                    "Can you provide coverage and benefit details for diagnostic labs, "
+                    "X-ray and ultrasound services?"
+                ),
+                fields={
+                    f"cpt_{c}": cpt_group(
+                        group_base, c, "plain", applicable_when=ref("diagnostic_testing_covered")
+                    )
+                    for c in _DIAG_CODES
+                },
+            ),
+        },
     )
 
 
@@ -685,19 +694,6 @@ def _financial_sections() -> dict[str, Section]:
                         "Are there any additional notes regarding the lifetime maximum coverage?"
                     ),
                 ),
-                "lifetime_cycle_max": text_ask(
-                    "Lifetime Cycle Maximum",
-                    "What is the infertility lifetime cycle maximum for this patient?",
-                    type_="integer",
-                    required=True,
-                    special_values=["No Limit"],
-                ),
-                "cycles_used": text_ask(
-                    "Cycles Used to Date",
-                    "How many treatment cycles have been used to date?",
-                    type_="integer",
-                    required=True,
-                ),
             },
         ),
         "embryo_cryo_storage": Section(
@@ -778,6 +774,11 @@ def _admin_sections() -> dict[str, Section]:
                     required=True,
                     applicable_when=eq("sections.enrollment.enrollment_required", "Yes"),
                 ),
+                "center_of_excellence_required": enum_ask(
+                    "Center of Excellence Required",
+                    "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A.",
+                    YES_NO_NA,
+                ),
             },
         ),
         "authorization_department": Section(
@@ -804,11 +805,6 @@ def _admin_sections() -> dict[str, Section]:
                     type_="phone",
                     required=True,
                     applicable_when=ref("any_service_requires_prior_auth"),
-                ),
-                "center_of_excellence_required": enum_ask(
-                    "Center of Excellence Required",
-                    "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A.",
-                    YES_NO_NA,
                 ),
             },
         ),
@@ -960,12 +956,12 @@ def _patient_verification() -> Section:
         description=(
             "Outcome of the call-opening membership check. Recorded during the "
             "introduction task; a denial terminates the call via the "
-            "patient_not_on_plan flow rule."
+            "insurance_not_active flow rule."
         ),
         fields={
-            "patient_on_plan": enum_ask(
-                "Patient On Plan",
-                "Can you confirm the patient is on this plan?",
+            "is_insurance_active": enum_ask(
+                "Is Insurance Active",
+                "Can you confirm the patient's insurance is currently active?",
                 YES_NO,
             ),
         },
@@ -1042,6 +1038,7 @@ def build_ibv_standard() -> FormSchemaDoc:
                 "sections.insurance_reference_information.insurance_phone_number"
             ),
         ),
+        rep_call_reference_number_field="sections.insurance_representative.call_reference_number",
         stt_key_terms=[
             # treatments
             "intrauterine insemination",
@@ -1154,10 +1151,10 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "{{hospital_address}}, facility NPI {{hospital_npi}}, tax ID "
                     "{{hospital_tax_id}}, ordering provider Dr. {{doctor_name}} "
                     "with NPI {{doctor_npi}}, callback number {{callback_number}}. "
-                    "Record Patient On Plan as 'No' ONLY after those details have "
-                    "been provided and the representative still denies the patient "
-                    "is on the plan — then wrap up politely. After this task, never "
-                    "re-introduce yourself for the rest of the call."
+                    "Record Is Insurance Active as 'No' ONLY after those details "
+                    "have been provided and the representative still confirms the "
+                    "insurance is not active — then wrap up politely. After this "
+                    "task, never re-introduce yourself for the rest of the call."
                 ),
                 outro="Great, let me pull up my questions...",
                 sections=["patient_verification"],
@@ -1265,16 +1262,16 @@ def build_ibv_standard() -> FormSchemaDoc:
         ],
         flow_rules=[
             FlowRule(
-                rule_key="patient_not_on_plan",
-                when=eq("sections.patient_verification.patient_on_plan", "No"),
+                rule_key="insurance_not_active",
+                when=eq("sections.patient_verification.is_insurance_active", "No"),
                 action="terminate_call",
                 skip_to_task="wrap_up",
                 note=(
-                    "The representative denied the patient is on the plan even "
-                    "after the member ID, insurance provider and verification "
-                    "details were provided. Skip all remaining tasks, collect the "
-                    "representative name and call reference number, then end the "
-                    "call."
+                    "The representative confirmed the patient's insurance is not "
+                    "active even after the member ID, insurance provider and "
+                    "verification details were provided. Skip all remaining "
+                    "tasks, collect the representative name and call reference "
+                    "number, then end the call."
                 ),
             ),
             FlowRule(

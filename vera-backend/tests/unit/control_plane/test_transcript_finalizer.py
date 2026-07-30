@@ -49,7 +49,47 @@ def test_build_rows_maps_roles_to_sources_and_orders_seq() -> None:
     assert rows[0]["role"] == "user"
     assert rows[0]["message"] == "hi"
     assert rows[0]["spoke_at"] == datetime.fromtimestamp(1.0, tz=UTC)
+    assert rows[0]["speaker_user_id"] is None  # no user_id in the envelope
     assert rows[1]["source"] == TranscriptSource.BOT.value  # agent == Vera
+
+
+def test_build_rows_persists_the_stamped_speaker_user_id() -> None:
+    ref = _ref()
+    supervisor_id = uuid4()
+    events = [
+        CallStreamEvent(
+            type="transcript",
+            data={
+                "role": "coaching",
+                "source": "supervisor",
+                "text": "hi",
+                "user_id": str(supervisor_id),
+            },
+            ts=1000,
+        ),
+    ]
+    rows, skipped = _build_rows(ref, events)
+    assert skipped == 0
+    assert rows[0]["speaker_user_id"] == supervisor_id
+
+
+def test_build_rows_drops_a_malformed_speaker_user_id_rather_than_raising() -> None:
+    ref = _ref()
+    events = [
+        CallStreamEvent(
+            type="transcript",
+            data={
+                "role": "coaching",
+                "source": "supervisor",
+                "text": "hi",
+                "user_id": "not-a-uuid",
+            },
+            ts=1000,
+        ),
+    ]
+    rows, skipped = _build_rows(ref, events)
+    assert skipped == 0
+    assert rows[0]["speaker_user_id"] is None
 
 
 def test_build_rows_skips_non_transcript_envelopes_without_consuming_a_seq() -> None:

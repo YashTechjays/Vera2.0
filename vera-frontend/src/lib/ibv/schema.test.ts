@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import {
   allLeaves,
+  applicabilityReason,
   completionPercent,
   contradictionWarnings,
   fieldUsageOf,
@@ -92,6 +93,24 @@ describe("gate chaining (applicable_when)", () => {
   })
 })
 
+describe("applicabilityReason", () => {
+  it("collapses identically-rendered any-of branches to one clause", () => {
+    // The auth-department gate is an any-of over ~27 per-CPT prior_auth leaves,
+    // every one titled "Prior Authorization Required" — the tooltip must say it
+    // once, not 27 times.
+    const l = leaf("sections.authorization_department.auth_department_name")
+    const reason = applicabilityReason(schema, l.gates, {})
+    expect(reason).toBe('Only applicable when "Prior Authorization Required" is "Yes"')
+  })
+
+  it("keeps distinct clauses of a compound condition", () => {
+    const l = leaf("sections.male_partner_coverage.male_partner_covered")
+    const reason = applicabilityReason(schema, l.gates, { [COVERAGE]: "Family" })
+    expect(reason).toContain("Spouse Gender")
+    expect(reason).not.toContain(" or \"Spouse Gender\" is \"Male\" or ")
+  })
+})
+
 describe("isRequired", () => {
   it("handles static and conditional requiredness", () => {
     expect(
@@ -145,14 +164,19 @@ describe("getSectionTable", () => {
     )
   })
 
-  it("models diagnostic_testing: one row per leaf-only CPT group", () => {
+  it("models diagnostic_testing: nested CPT rows under one ICD-10-coded parent group", () => {
     const t = getSectionTable("diagnostic_testing", schema.sections.diagnostic_testing)!
-    expect(t.groups).toHaveLength(8)
+    expect(t.groups).toHaveLength(1)
     expect(t.extraColumns).toEqual([])
-    expect(t.groups[0].label).toBe("CPT 58340")
-    expect(t.groups[0].rows[0].path).toBe("sections.diagnostic_testing.cpt_58340")
+    expect(t.groups[0].label).toBe("Labs, Xray/Ultrasound")
+    expect(t.groups[0].icd10).toBe("Z31.41")
+    expect(t.groups[0].rows).toHaveLength(8)
+    expect(t.groups[0].rows[0].label).toBe("CPT 58340")
+    expect(t.groups[0].rows[0].path).toBe(
+      "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340"
+    )
     expect(t.groups[0].rows[0].cells.covered?.path).toBe(
-      "sections.diagnostic_testing.cpt_58340.covered"
+      "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"
     )
   })
 

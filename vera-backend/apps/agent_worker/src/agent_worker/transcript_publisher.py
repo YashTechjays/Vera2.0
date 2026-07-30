@@ -1,10 +1,9 @@
-"""Publish finalized, de-identified transcript turns via the TranscriptService — in true
+"""Publish finalized transcript turns via the TranscriptService — in true
 chronological order, even when the caller barges in over the agent.
 
-Taps AgentSession events on the de-identified side of the PHI wall: user turns are the
-redacted FINAL transcript (post stt_node); agent turns are the LLM's token-only output
-(pre tts_node hydration). Best-effort — a Redis failure logs and is swallowed, never
-breaking the call.
+Taps AgentSession events: user turns are the FINAL transcript (post stt_node);
+agent turns are the LLM's token-only output (pre tts_node). Best-effort — a
+Redis failure logs and is swallowed, never breaking the call.
 
 ## Why a reordering emitter (the barge-in problem)
 
@@ -57,8 +56,11 @@ logger = logging.getLogger("agent_worker")
 
 
 class TurnPublisher(Protocol):
-    """Anything that can receive ordered finalized turns (TranscriptService for the
-    voice-lab stream; CallStreamService for the real-call envelope stream)."""
+    """Anything that can receive ordered finalized turns: CallStreamService (the
+    real-call/voice-lab envelope stream) and CallHealthObserver (a fan-out analysis
+    sink); FanOutTurnPublisher wraps several behind one. `user_id` is the specific
+    supervisor who spoke/coached this turn, if known — only CallStreamService acts
+    on it; other sinks accept and ignore it."""
 
     async def publish_turn(
         self,
@@ -68,6 +70,7 @@ class TurnPublisher(Protocol):
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None: ...
 
 
@@ -88,10 +91,13 @@ class FanOutTurnPublisher:
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None:
         for sink in self._sinks:
             try:
-                await sink.publish_turn(room_name, role, text, ts=ts, source=source)
+                await sink.publish_turn(
+                    room_name, role, text, ts=ts, source=source, user_id=user_id
+                )
             except Exception as exc:  # best-effort; one sink's failure must not break the rest
                 # Exception content is unsafe here — redis pipeline errors embed the failed
                 # command incl. the turn text (PHI), so log only the exception type.

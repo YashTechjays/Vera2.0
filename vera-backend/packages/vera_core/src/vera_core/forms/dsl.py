@@ -29,6 +29,12 @@ KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # {{token}} placeholders in task-level text; token = a system_fields key or the
 # root-anchored path of a context-role leaf (2026-07-08 spec §4).
 PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
+# Reserved runtime tokens — exempt from placeholder-resolution validation and
+# handled by the call-plan fuse, not by field lookup: {{value}} is the agent's
+# recorded-value sentinel (kept verbatim in prompt text); {{current_year}} is
+# hydrated at fuse time. Every validator and the resolver consume THIS set so
+# they can never disagree about what counts as reserved.
+RESERVED_PLACEHOLDER_TOKENS: frozenset[str] = frozenset({"value", "current_year"})
 # A complete {{…}} pair whose innards did NOT parse as a token above — e.g.
 # "{{ member_id }}" (inner whitespace) or "{{patient-name}}" (bad chars). These
 # are operator typos that would otherwise reach the spoken prompt as literal
@@ -181,10 +187,11 @@ def parse_date_format(text: str, date_format: str) -> date | None:
     try:
         match = re.fullmatch(pattern, text)
     except re.error:
-        # A grammar-legal but degenerate date_format (e.g. "M/M/YYYY" — DATE_FORMAT_RE
-        # doesn't forbid a repeated token) builds a pattern with a duplicate named
-        # group, which re.compile rejects. Not this function's contract to raise on
-        # a malformed schema — treat it as "doesn't parse," same as any other mismatch.
+        # A degenerate date_format with a repeated token (e.g. "M/M/YYYY") builds a
+        # pattern with a duplicate named group, which re.compile rejects. `Validation`
+        # rejects such formats at schema-authoring time, but this function can still be
+        # called directly with an unchecked format — so treat it as "doesn't parse,"
+        # same as any other mismatch, rather than raising on a malformed schema.
         return None
     if match is None:
         return None
@@ -196,6 +203,28 @@ def parse_date_format(text: str, date_format: str) -> date | None:
         return date(int(year), int(month), int(day))
     except ValueError:
         return None
+
+
+def format_date(value: date, date_format: str) -> str:
+    """Render `value` in a leaf's declared display/entry `date_format` (e.g.
+    "M/D/YYYY" — see `Validation.date_format`) — the inverse of
+    `parse_date_format`. Used to normalize a date leaf's stored answer to one
+    consistent shape regardless of which format the submitter used (ISO from a
+    machine caller, or the declared format from a human editor)."""
+
+    def render_token(match: re.Match[str]) -> str:
+        token = match.group()
+        if token == "YYYY":
+            return f"{value.year:04d}"
+        if token == "MM":
+            return f"{value.month:02d}"
+        if token == "M":
+            return str(value.month)
+        if token == "DD":
+            return f"{value.day:02d}"
+        return str(value.day)  # token == "D"
+
+    return _DATE_TOKEN_RE.sub(render_token, date_format)
 
 
 class Validation(_Model):
@@ -211,11 +240,19 @@ class Validation(_Model):
                 re.compile(self.pattern)
             except re.error as exc:
                 raise ValueError(f"invalid pattern regex: {exc}") from exc
-        if self.date_format is not None and not DATE_FORMAT_RE.match(self.date_format):
-            raise ValueError(
-                "date_format must combine M/MM, D/DD, YYYY tokens with -/. separators "
-                "(no YY — a 2-digit year is ambiguous on a date field)"
-            )
+        if self.date_format is not None:
+            tokens = _DATE_TOKEN_RE.findall(self.date_format)
+            # Reduce each token to its kind via its first char (M/MM -> "M", D/DD -> "D",
+            # YYYY -> "Y") and require exactly one of each, rejecting a missing or
+            # repeated token.
+            token_kinds = sorted(token[0] for token in tokens)
+            if not DATE_FORMAT_RE.match(self.date_format) or token_kinds != ["D", "M", "Y"]:
+                raise ValueError(
+                    "date_format must contain exactly one M/MM, one D/DD and one YYYY "
+                    "token, joined by -/. separators (no YY — a 2-digit year is "
+                    "ambiguous on a date field; a missing or repeated token would "
+                    "silently drop part of every stored date)"
+                )
         return self
 
 
@@ -441,6 +478,11 @@ class FormSchemaDoc(_Model):
     # own `default` is still allowed to be absent from the payload (it counts as
     # filled either way).
     promoted_fields: PromotedFields
+    # Single root-anchored leaf path: where this insurance type's rep call reference
+    # number lives. The one generalized place retry/resume logic reads regardless of
+    # insurance type — empty/never-collected on a prior attempt means no valid retry
+    # state (treat as a fresh call).
+    rep_call_reference_number_field: str
     # Session-wide STT vocabulary, fed verbatim to deepgram.STTv2(keyterms=...)
     # at voice-session build; applies to every task. Static domain terms only.
     stt_key_terms: list[str] | None = None
@@ -472,6 +514,12 @@ class FormSchemaDoc(_Model):
     def group_paths(self) -> set[str]:
         """Root-anchored paths of every group node."""
         return {path for path, field in self._iter_fields() if isinstance(field, Group)}
+
+    def section_to_task(self) -> dict[str, str]:
+        """section key -> owning task_key. Collect sections appear exactly once
+        (validated below); context/ui_only sections are absent. The prompt
+        renderer and the call-plan compiler both route leaves through this map."""
+        return {s: t.task_key for t in self.tasks for s in t.sections}
 
     def collection_paths(self, section_keys: list[str] | None = None) -> list[str]:
         """Voice-agent collection targets: role in (ask, confirm), optionally per section."""
@@ -601,7 +649,11 @@ class FormSchemaDoc(_Model):
             for attr in ("intro", "outro", "prompt"):
                 text: str | None = getattr(task, attr)
                 for token in PLACEHOLDER_RE.findall(text or ""):
-                    if token not in (self.system_fields or {}) and token not in context_paths:
+                    if (
+                        token not in RESERVED_PLACEHOLDER_TOKENS
+                        and token not in (self.system_fields or {})
+                        and token not in context_paths
+                    ):
                         errors.append(
                             f"task {task.task_key}.{attr}: unknown placeholder "
                             f"{{{{{token}}}}} (not a system_fields key or context-leaf path)"
@@ -686,6 +738,17 @@ class FormSchemaDoc(_Model):
                     f"promoted_fields.{column}: {path!r} is not a system_fields target "
                     "(promoted fields must be guaranteed present at intake)"
                 )
+
+        # rep call reference number field — single root-anchored path naming which
+        # leaf holds the representative's call reference number. Only checked for
+        # leaf existence: unlike system_fields/promoted_fields this value is
+        # collected DURING the call, not known beforehand, so it deliberately does
+        # NOT need to be a system_fields target.
+        if self.rep_call_reference_number_field not in leaves:
+            errors.append(
+                "rep_call_reference_number_field: "
+                f"{self.rep_call_reference_number_field!r} does not resolve to a leaf"
+            )
 
         # stt key terms: bounded, unique, static vocabulary
         terms = self.stt_key_terms or []
