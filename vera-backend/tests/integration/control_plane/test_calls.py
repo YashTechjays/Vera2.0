@@ -163,6 +163,32 @@ async def test_list_calls_empty_then_populated(
 
 
 @pytest.mark.asyncio
+async def test_list_calls_surfaces_form_completion_pct(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The live list row carries the form's completion_pct so the monitoring progress
+    bar has a correct fallback before any answer streams this call (issue 5)."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        await session.execute(
+            update(PatientForm).where(PatientForm.id == seeded_form_id).values(completion_pct=78)
+        )
+
+    lst = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
+    assert lst.status_code == 200, lst.text
+    row = next(c for c in lst.json()["data"] if c["id"] == str(call_id))
+    assert row["completion_pct"] == 78
+
+
+@pytest.mark.asyncio
 async def test_join_token_returns_room_scoped_token(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

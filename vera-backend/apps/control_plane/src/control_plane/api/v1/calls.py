@@ -175,12 +175,19 @@ async def _intervener_lock_live(
     return await _holder_still_present(livekit, room_name, holder)
 
 
+def _pct(raw: float | None) -> float | None:
+    """The patient_form completion projection (a Numeric column, Decimal at runtime) as a
+    plain float, None-preserving."""
+    return float(raw) if raw is not None else None
+
+
 def _summary(
     call: Call,
     patient_name: str | None,
     caller_id: UUID,
     insurance_provider: str | None = None,
     insurance_type: str | None = None,
+    completion_pct: float | None = None,
 ) -> CallSummary:
     return CallSummary(
         id=call.id,
@@ -200,6 +207,7 @@ def _summary(
         health_flag=call.health_flag,
         health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
+        completion_pct=completion_pct,
     )
 
 
@@ -453,7 +461,7 @@ async def stream_call_events(
                     select(PatientForm.completion_pct).where(PatientForm.id == call.form_id)
                 )
             ).scalar_one_or_none()
-            completion_pct = float(completion_raw) if completion_raw is not None else None
+            completion_pct = _pct(completion_raw)
         db_events = [
             (
                 f"db-{row.seq}",
@@ -831,6 +839,7 @@ async def list_calls(
             PatientForm.patient_name,
             PatientForm.insurance_provider,
             FormSchema.insurance_type,
+            PatientForm.completion_pct,
         )
         .join(PatientForm, PatientForm.id == Call.form_id)
         .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
@@ -855,8 +864,8 @@ async def list_calls(
     )
     return ok(
         [
-            _summary(c, name, caller.user_id, provider, insurance_type)
-            for c, name, provider, insurance_type in rows
+            _summary(c, name, caller.user_id, provider, insurance_type, _pct(completion))
+            for c, name, provider, insurance_type, completion in rows
         ]
     )
 

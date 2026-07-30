@@ -208,6 +208,21 @@ def focus_call_plan(plan: CallPlan, paths: Collection[str]) -> CallPlan:
     return plan.model_copy(update={"tasks": tasks, "on_file_values": None})
 
 
+def bookend_paths(plan: CallPlan, reference_field: str) -> list[str]:
+    """Field paths a FOCUSED retry must always keep: the opening task's fields (so the
+    call still greets and gives the recording/identity disclosure) and the wrap-up
+    task's fields (rep name + call reference number). Every call must greet and log its
+    OWN reference — the schema's "always run last" contract, and the next retry's focus
+    gate reads that reference. The wrap-up task is the one holding *reference_field*."""
+    if not plan.tasks:
+        return []
+    keep = list(plan.tasks[0].fields)
+    wrapup = next((t for t in plan.tasks if any(f.path == reference_field for f in t.fields)), None)
+    if wrapup is not None:
+        keep.extend(wrapup.fields)
+    return [f.path for f in keep]
+
+
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # "Dr. Dr. Jane" → "Dr. Jane": a title on both the template ("Dr. {{doctor_name}}")

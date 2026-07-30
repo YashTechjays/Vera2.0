@@ -9,6 +9,7 @@ monkeypatched per-test via `_consumer()`, which routes queries through a
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -62,6 +63,10 @@ class _FakeLiveKit:
 class _FakeRedis:
     def __init__(self) -> None:
         self.acked: list[str] = []
+        # Close-ordering guard reads the group's pending set + individual entries.
+        # `pending`: redis-py xpending_range shape; `entries`: id -> fields for xrange.
+        self.pending: list[dict[str, object]] = []
+        self.entries: dict[str, dict[str, str]] = {}
         # Configured per-test to mimic redis-py's decoded XREADGROUP/XAUTOCLAIM shapes.
         self.xreadgroup_response: object = None
         self.xautoclaim_response: object = ("0-0", [], [])
@@ -77,6 +82,28 @@ class _FakeRedis:
     async def xack(self, stream: str, group: str, entry_id: str) -> int:
         self.acked.append(entry_id)
         return 1
+
+    async def xpending_range(
+        self, name: str, groupname: str, min: str, max: str, count: int, **kw: object
+    ) -> list[dict[str, object]]:
+        def key(mid: str) -> tuple[int, int]:
+            ms, _, seq = mid.partition("-")
+            return (int(ms), int(seq or 0))
+
+        lo = None if min == "-" else key(min)
+        hi = None if max == "+" else key(max)
+        out = [
+            p
+            for p in self.pending
+            if (lo is None or key(str(p["message_id"])) >= lo)
+            and (hi is None or key(str(p["message_id"])) <= hi)
+        ]
+        return out[:count]
+
+    async def xrange(
+        self, name: str, min: str = "-", max: str = "+", count: int | None = None
+    ) -> list[tuple[str, dict[str, str]]]:
+        return [(min, self.entries[min])] if min in self.entries else []
 
     async def xgroup_create(
         self, name: str, groupname: str, id: str = "0", mkstream: bool = False
@@ -1169,6 +1196,129 @@ async def test_dispatch_serializes_within_a_room_but_parallel_across(
     # within room A, a1 precedes a2 (stream order preserved)
     assert order.index("a1") < order.index("a2")
     assert set(order) == {"a1", "a2", "b1"}
+
+
+def _pending(message_id: str, times_delivered: int = 1) -> dict[str, object]:
+    return {
+        "message_id": message_id,
+        "consumer": "c",
+        "time_since_delivered": 0,
+        "times_delivered": times_delivered,
+    }
+
+
+def _appender(sink: list[str], label: str) -> Callable[[object], Awaitable[None]]:
+    async def _handler(event: object) -> None:
+        sink.append(label)
+
+    return _handler
+
+
+@pytest.mark.asyncio
+async def test_close_defers_while_earlier_same_room_entry_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The staggered race: an earlier same-room answer failed and is pending in a PRIOR
+    read window; call.ended (read in its own later window) must NOT resolve ahead of it —
+    else post-call resolution runs on a stale projection and re-dials a filled form."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+    room = _VALID_ROOM
+    answer = CallAnswerRecordedEvent(room_name=room, field_path="a", value="v", ts=1)
+    redis.entries["1-0"] = {"event": answer.model_dump_json()}
+    redis.pending = [_pending("1-0"), _pending("2-0")]
+
+    ran: list[str] = []
+    wired.consumer._handlers["call.ended"] = _appender(ran, "ended")
+    ended = CallEndedEvent(room_name=room, ts=2)
+    await wired.consumer._process("2-0", {"event": ended.model_dump_json()})
+
+    assert ran == []  # deferred — handler never ran
+    assert redis.acked == []  # left unacked → reclaimed after the answer
+
+
+@pytest.mark.asyncio
+async def test_close_proceeds_when_no_earlier_same_room_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+    redis.pending = [_pending("2-0")]  # only the close event itself is pending
+
+    ran: list[str] = []
+    wired.consumer._handlers["call.ended"] = _appender(ran, "ended")
+    ended = CallEndedEvent(room_name=_VALID_ROOM, ts=2)
+    await wired.consumer._process("2-0", {"event": ended.model_dump_json()})
+
+    assert ran == ["ended"]
+    assert redis.acked == ["2-0"]
+
+
+@pytest.mark.asyncio
+async def test_close_ignores_pending_entries_from_other_rooms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+    other = CallAnswerRecordedEvent(
+        room_name=f"call--{uuid4()}--{uuid4()}", field_path="a", value="v", ts=1
+    )
+    redis.entries["1-0"] = {"event": other.model_dump_json()}
+    redis.pending = [_pending("1-0"), _pending("2-0")]
+
+    ran: list[str] = []
+    wired.consumer._handlers["call.ended"] = _appender(ran, "ended")
+    ended = CallEndedEvent(room_name=_VALID_ROOM, ts=2)
+    await wired.consumer._process("2-0", {"event": ended.model_dump_json()})
+
+    assert ran == ["ended"]  # a different room's pending entry does not block this close
+    assert redis.acked == ["2-0"]
+
+
+@pytest.mark.asyncio
+async def test_close_fails_open_when_its_own_entry_is_not_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: if the close entry is not in the group's pending set (so its
+    delivery count can't be read and the cap could never trip), proceed rather than defer
+    a phantom forever — even though an earlier same-room entry is pending."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+    room = _VALID_ROOM
+    answer = CallAnswerRecordedEvent(room_name=room, field_path="a", value="v", ts=1)
+    redis.entries["1-0"] = {"event": answer.model_dump_json()}
+    redis.pending = [_pending("1-0")]  # predecessor pending; the close (2-0) is NOT
+
+    ran: list[str] = []
+    wired.consumer._handlers["call.ended"] = _appender(ran, "ended")
+    ended = CallEndedEvent(room_name=room, ts=2)
+    await wired.consumer._process("2-0", {"event": ended.model_dump_json()})
+
+    assert ran == ["ended"]  # fails open — proceeds instead of deferring indefinitely
+    assert redis.acked == ["2-0"]
+
+
+@pytest.mark.asyncio
+async def test_close_proceeds_after_max_deliveries_despite_pending_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poison predecessor must not wedge the room forever: once the close event has been
+    redelivered past the cap, it proceeds (logged) rather than deferring indefinitely."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+    room = _VALID_ROOM
+    answer = CallAnswerRecordedEvent(room_name=room, field_path="a", value="v", ts=1)
+    redis.entries["1-0"] = {"event": answer.model_dump_json()}
+    # predecessor still pending, and the close event has been redelivered 4x (> cap 3).
+    redis.pending = [_pending("1-0", times_delivered=9), _pending("2-0", times_delivered=4)]
+
+    ran: list[str] = []
+    wired.consumer._handlers["call.ended"] = _appender(ran, "ended")
+    ended = CallEndedEvent(room_name=room, ts=2)
+    await wired.consumer._process("2-0", {"event": ended.model_dump_json()})
+
+    assert ran == ["ended"]  # bounded wait — proceeds despite the pending predecessor
+    assert redis.acked == ["2-0"]
 
 
 # ---------------------------------------------------------------------------
