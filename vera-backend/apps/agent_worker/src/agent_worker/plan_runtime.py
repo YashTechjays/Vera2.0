@@ -179,9 +179,11 @@ class PlanTaskAgent(Agent):
             # A str is a tool result, so the plan parks here. Returning `self` would
             # re-fire on_enter and speak the intro again.
             return "A human supervisor has taken over this call. Stay silent."
-        if self._task.outro:
+        outro = self._task.outro
+        self._controller.note_task_outro(outro)
+        if outro:
             # Exit speech first; LiveKit drains queued speech through the swap.
-            self.session.say(self._task.outro)
+            self.session.say(outro)
         successor = await self._controller.advance_from(self._task_index)
         # Carry the conversation into the successor — LiveKit doesn't for a
         # tool-returned agent, so without this it re-greets and re-asks.
@@ -229,6 +231,13 @@ class WrapUpAgent(VeraAgent):
         self._controller.note_wrap_up_entered()  # the cursor still records where we parked
         if takeover_engaged(self.session):
             logger.info("wrap-up entered under supervisor takeover; skipping the goodbye")
+            return
+        if self._controller.signed_off:
+            # The closing task's outro already said goodbye, so there is nothing left to say and
+            # nothing to decide. Hanging up here rather than asking the LLM to do it silently is
+            # what makes the single sign-off deterministic: the same instruction was obeyed in two
+            # of three eval scenarios and ignored in the third, which spoke a second goodbye.
+            self.close_call()
             return
         self.session.generate_reply(instructions=_WRAP_UP_DIRECTIVE)
 
@@ -319,6 +328,7 @@ class PlanRunController:
         # a PlanTaskAgent and its GapTaskAgent share one.
         self._boundaries: dict[Agent, frozenset[str]] = {}
         self._opened = False  # has any task agent spoken the call's opening line yet
+        self._signed_off = False  # did the task that JUST finished speak a closing line?
         # The call's opening (greeting + recording/identity disclosure). Pinned: it leads EVERY
         # carry set while the rest of the window stays one task deep, or a long walk hands the
         # closer a context in which VERA never introduced herself.
@@ -450,6 +460,20 @@ class PlanRunController:
         opening = (self.greeting or intro) if not self._opened else intro
         self._opened = True
         return opening
+
+    @property
+    def signed_off(self) -> bool:
+        """Whether the last task to finish already spoke a closing line."""
+        return self._signed_off
+
+    def note_task_outro(self, outro: str | None) -> None:
+        """Record whether the task now finishing had an outro to speak.
+
+        ASSIGNED, never accumulated: every task speaks an outro, so a sticky flag would be left
+        set by an earlier task and would silence wrap-up on a schema whose closing task authors
+        none (`disease_only`'s does not). A terminate directive never reaches here, so that path
+        keeps the initial False and still gets a spoken goodbye."""
+        self._signed_off = bool(outro)
 
     def note_opening_spoken(self, items: Sequence[ChatItem]) -> None:
         """Pin the items the call's opening line produced, by identity — called by the agent that

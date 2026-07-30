@@ -52,8 +52,14 @@ class VeraAgent(Agent):
             "This hangs up the call for all participants."
         ),
     )
-    async def _end_call(self) -> str:
-        """Drain pending TTS audio then shut down the session."""
+    async def _end_call(self) -> str | None:
+        """Drain pending TTS audio then shut down the session.
+
+        Returns None on success ON PURPOSE: a tool that produces output sets
+        `reply_required`, and LiveKit then schedules that follow-up turn with `force=True`,
+        which bypasses the drain — so a returned string is spoken to the rep as one last
+        line ("I have successfully concluded the call."). No output, no extra turn. The
+        takeover branch still returns text, because there the reply is the point."""
         if takeover_engaged(self.session):
             # Reachable via a tool call already in flight when engage() interrupted us.
             logger.info("end_call refused: supervisor has taken over the call")
@@ -61,8 +67,12 @@ class VeraAgent(Agent):
                 "This call has been taken over by a human supervisor and will not be "
                 "ended. Do not speak and do not call any more tools."
             )
+        self.close_call()
+        return None
+
+    def close_call(self) -> None:
+        """Hang up, letting queued speech (a closing outro) finish playing first."""
         self.session.shutdown(drain=True)
-        return "Call ended."
 
 
 class VoiceLabAgent(VeraAgent):

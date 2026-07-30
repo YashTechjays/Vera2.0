@@ -15,6 +15,7 @@ from agent_worker.directives import ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState
 from agent_worker.plan_runtime import (
+    _WRAP_UP_DIRECTIVE,
     WRAP_UP_TASK_KEY,
     GapTaskAgent,
     PlanRunController,
@@ -447,15 +448,106 @@ class TestWrapUp:
         assert state.cursor_writes == [(ROOM, WRAP_UP_TASK_KEY)]
         mock_session.generate_reply.assert_called_once()
 
+    @staticmethod
+    def _directive(mock_session: MagicMock) -> str:
+        return cast(str, mock_session.generate_reply.call_args.kwargs["instructions"])
+
+    async def _enter_wrap_up(self, controller: PlanRunController) -> MagicMock:
+        """Finish the closing task the way the chain does, then enter wrap-up."""
+        closing = controller.agents[-1]
+        with _session_patch(closing, MagicMock()):
+            successor = cast(Agent, await _tool(closing, "task_complete")())
+        assert successor is controller.wrap_up_agent
+        mock_session = MagicMock()
+        with _session_patch(controller.wrap_up_agent, mock_session):
+            await controller.wrap_up_agent.on_enter()
+        return mock_session
+
     @pytest.mark.asyncio
-    async def test_wrap_up_end_call_shuts_down(self) -> None:
+    async def test_wrap_up_hangs_up_itself_after_the_closing_outro(self) -> None:
+        # The outro IS the goodbye, spoken verbatim just before the swap, so wrap-up must not
+        # produce a turn at all — asking the LLM to close silently was obeyed in only two of
+        # three eval scenarios, and the third spoke a second goodbye.
+        plan = _plan()
+        plan.tasks[-1] = plan.tasks[-1].model_copy(update={"outro": "Have a wonderful day!"})
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        mock_session = await self._enter_wrap_up(controller)
+        mock_session.generate_reply.assert_not_called()
+        mock_session.shutdown.assert_called_once_with(drain=True)
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_says_goodbye_when_the_closing_task_has_no_outro(self) -> None:
+        # An outro is authored per-schema (`disease_only`'s wrap_up has none), so silencing
+        # wrap-up unconditionally would hang up with no closing line at all.
+        controller, _ = _controller()  # `_plan`'s last task authors no outro
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        mock_session = await self._enter_wrap_up(controller)
+        assert self._directive(mock_session) == _WRAP_UP_DIRECTIVE
+        mock_session.shutdown.assert_not_called()  # the goodbye has to be spoken first
+
+    @pytest.mark.asyncio
+    async def test_an_earlier_outro_does_not_silence_the_close(self) -> None:
+        # Every task speaks an outro, so the flag must be ASSIGNED per task, not accumulated:
+        # `_plan`'s intro_task has one and its closing task does not.
+        controller, _ = _controller()
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        opener = controller.agents[0]
+        with _session_patch(opener, MagicMock()):
+            await _tool(opener, "task_complete")()
+        assert controller.signed_off, "the opener's outro was not recorded"
+        assert self._directive(await self._enter_wrap_up(controller)) == _WRAP_UP_DIRECTIVE
+
+    @pytest.mark.asyncio
+    async def test_a_terminate_directive_still_gets_a_spoken_goodbye(self) -> None:
+        # `apply_directive_now` swaps straight here, so no outro ever played — an inactive-policy
+        # call must not hang up wordlessly.
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _attach_ordered_session(controller)
+        await controller.apply_directive_now(Terminate(rule_key="insurance_not_active"))
+        assert not controller.signed_off
+        mock_session = MagicMock()
+        with _session_patch(controller.wrap_up_agent, mock_session):
+            await controller.wrap_up_agent.on_enter()
+        assert self._directive(mock_session) == _WRAP_UP_DIRECTIVE
+        mock_session.shutdown.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_stays_silent_under_takeover(self) -> None:
+        controller, _ = _controller()
+        mock_session = MagicMock()
+        with _session_patch(controller.wrap_up_agent, mock_session):
+            mock_session.userdata.engaged = True
+            await controller.wrap_up_agent.on_enter()
+        mock_session.generate_reply.assert_not_called()
+        mock_session.shutdown.assert_not_called()  # a supervisor's call is theirs to end
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_end_call_shuts_down_and_returns_nothing(self) -> None:
+        # None on purpose: tool OUTPUT sets reply_required, and LiveKit schedules that follow-up
+        # with force=True, bypassing the drain — so a returned string is spoken to the rep as one
+        # last line ("I have successfully concluded the call.").
         controller, _ = _controller()
         agent = controller.wrap_up_agent
         mock_session = MagicMock()
         with _session_patch(agent, mock_session):
             result = await _tool(agent, "end_call")()
-        assert result == "Call ended."
+        assert result is None
         mock_session.shutdown.assert_called_once_with(drain=True)
+
+    @pytest.mark.asyncio
+    async def test_end_call_under_takeover_refuses_in_words(self) -> None:
+        # The one case where a spoken reply IS wanted: the return text tells the model to stop.
+        controller, _ = _controller()
+        agent = controller.wrap_up_agent
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            mock_session.userdata.engaged = True
+            result = await _tool(agent, "end_call")()
+        assert isinstance(result, str)
+        assert "supervisor" in result
+        mock_session.shutdown.assert_not_called()
 
 
 def _attach_ordered_session(controller: PlanRunController) -> tuple[MagicMock, list[Any]]:
