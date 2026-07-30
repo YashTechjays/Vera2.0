@@ -1674,3 +1674,40 @@ async def test_call_history_transcript_available_gated_by_visibility(
     by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
     assert by_id[str(visible)]["transcript_available"] is True
     assert by_id[str(hidden)]["transcript_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_call_history_ownerless_terminal_call_does_not_500(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An ownerless (initiated_by_id NULL — owner account deleted, or
+    dispatcher-initiated), unpublished, terminal call makes `call_authz.visible_to`
+    evaluate to SQL NULL (NULL OR FALSE OR FALSE), not FALSE. Selected as a plain
+    column that must land in a non-optional bool, that NULL must not crash the
+    whole page — the row is simply not visible."""
+    ownerless = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=None,
+        status="completed",
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        session.add(
+            Transcript(
+                tenant_id=rbac_world.tenant_id,
+                call_id=ownerless,
+                seq=0,
+                source=TranscriptSource.BOT.value,
+                role="assistant",
+                message="Hello, this is Vera.",
+            )
+        )
+
+    resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
+    assert by_id[str(ownerless)]["transcript_available"] is False
