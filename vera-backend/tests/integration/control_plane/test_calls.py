@@ -1619,3 +1619,58 @@ async def test_call_history_reports_transcript_available(
     by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
     assert by_id[str(with_tx)]["transcript_available"] is True
     assert by_id[str(without_tx)]["transcript_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_call_history_transcript_available_gated_by_visibility(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A stored Transcript alone isn't enough: the row must also pass the same
+    owner-or-published visibility check `/calls/{id}/events` enforces, otherwise
+    'View transcript' is advertised for a call whose events the caller can't fetch."""
+    visible = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="completed",
+    )
+    # A real, different app_user (FK-satisfying) — not the admin caller — and unpublished,
+    # so it's terminal + owned-by-someone-else: hidden per `call_authz.visible_to`.
+    hidden = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.listener_id,
+        status="completed",
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        session.add_all(
+            [
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=visible,
+                    seq=0,
+                    source=TranscriptSource.BOT.value,
+                    role="assistant",
+                    message="Hello, this is Vera.",
+                ),
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=hidden,
+                    seq=0,
+                    source=TranscriptSource.BOT.value,
+                    role="assistant",
+                    message="Hello, this is Vera.",
+                ),
+            ]
+        )
+
+    resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
+    assert by_id[str(visible)]["transcript_available"] is True
+    assert by_id[str(hidden)]["transcript_available"] is False

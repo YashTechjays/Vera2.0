@@ -997,6 +997,7 @@ async def list_call_history(
                     PatientForm.insurance_provider,
                     has_recording.label("has_recording"),
                     has_transcript.label("has_transcript"),
+                    _visible_to(caller.user_id).label("caller_visible"),
                     func.count().over().label("total"),
                 )
                 .join(PatientForm, PatientForm.id == Call.form_id)
@@ -1060,7 +1061,7 @@ async def list_call_history(
                 user_id=caller.user_id,
                 can_play=can_play,
             ),
-            transcript_available=r.has_transcript,
+            transcript_available=r.has_transcript and r.caller_visible,
         )
         for r in rows
     ]
