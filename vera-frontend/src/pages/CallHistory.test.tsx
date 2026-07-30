@@ -31,6 +31,7 @@ function render(c: CallHistoryRow, canPlay: boolean, playerOpen = false): string
           playerOpen={playerOpen}
           onOpenForm={noop}
           onTogglePlayer={noop}
+          onViewTranscript={noop}
         />
       </tbody>
     </table>,
@@ -65,5 +66,13 @@ describe("CallRow", () => {
     const html = render(row({ recording_available: true }), true, true)
     expect(html).toContain("Hide recording")
     expect(html).toContain('aria-label="Call recording"')
+  })
+
+  it("shows the View transcript control when a transcript is available", () => {
+    expect(render(row({ transcript_available: true }), true)).toContain("View transcript")
+  })
+
+  it("hides the View transcript control when no transcript is available", () => {
+    expect(render(row({ transcript_available: false }), true)).not.toContain("View transcript")
   })
 })
