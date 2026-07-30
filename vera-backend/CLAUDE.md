@@ -79,6 +79,33 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   Generate once: `python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"`.
   In production, set `VERA_KMS_KEY_NAME` to the Cloud KMS key resource path instead (see `adr/devops-todo.md`).
 - `just api` / `just worker` — run the control plane / agent worker.
+- **Call-flow eval harness** (`apps/agent_worker/tests/evals/`) — replays a whole call without
+  placing one: the real `build_agent` entrypoint drives IVR navigator → real compiled CallPlan → gap
+  pass → wrap-up, a second Gemini plays the payer rep, and an evaluator LLM grades the transcript
+  across 11 dimensions. Use it to check a change to handoffs, prompts, the rule engine or the gap
+  pass end to end; see `README.md` → "Eval harness" and
+  `docs/superpowers/plans/2026-07-30-call-flow-eval-findings-remediation.md` for what it has found.
+  ```bash
+  VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
+  ```
+  `-m evals` is **required**: `addopts` carries `-m 'not evals'`, so omitting it runs only the 20
+  LLM-free tests and NO simulations, which looks like a clean pass — verify a real run by the
+  `===== <scenario>: N tasks … =====` banner per scenario. `-s` or the transcript and scorecard are
+  swallowed; `-rs` or skip reasons are hidden — exactly how an unseeded DB looks like "nothing to
+  run". Drop
+  `VERA_EVALS_FULL` for a ~3-minute focused loop. Needs Vertex ADC **and** a seeded local Postgres
+  (`just up && just migrate && just seed`) — the plan is read from the published `schema_version`
+  row; a missing prerequisite prints `===== EVALS SKIPPED: … =====`.
+  - **Never add the evals to `just check`.** They cost live LLM calls and LLM-driven runs vary
+    between runs; the `evals` marker keeps them out deliberately.
+  - The evaluator's pure parts (parsing, citation checks, brief rendering) live in
+    `test_judge_parsing.py`, which is **not** `evals`-marked and DOES run in the gate. Put new pure
+    helpers' tests there, not behind the marker.
+  - **Do not overclaim from a green run.** No STT (text mode has no audio), no real DTMF
+    (`press_keypad` is mocked), and extraction settles between turns so rules fire earlier and more
+    reliably than on a real call. A scenario reporting `0 answers extracted` proves nothing — the
+    Observer contributed nothing, so no rule could fire, yet most dimensions still read `pass`. A
+    live call is still required before shipping voice-path changes.
 - Code style: PEP 695 type params (`class Foo[T]`, `def f[T]`) — ruff rejects `Generic[T]`/`TypeVar`.
 - Async runtime: **`asyncio` is the single async runtime** — the stack is asyncio-locked (livekit-agents,
   SQLAlchemy async, `redis.asyncio`, `pytest-asyncio`). `anyio` stays **transitive-only** (pulled by

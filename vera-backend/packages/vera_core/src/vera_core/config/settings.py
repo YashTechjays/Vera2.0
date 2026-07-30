@@ -181,7 +181,7 @@ class Settings(BaseSettings):
     # --- eval harness call evaluator (tests only) ----------------------------
     # The judge LLM that grades a simulated call from its transcript. Out-of-pipeline, so it goes
     # through vera_core.llm.ResilientLLM like every non-cascade call.
-    evals_judge_model: str = "google:gemini-3.5-flash"  # VERA_EVALS_JUDGE_MODEL
+    evals_judge_model: str = "google:gemini-3.6-flash"  # VERA_EVALS_JUDGE_MODEL
 
     # --- observer answer extraction (agent worker) ---------------------------
     observer_extract_primary_model: str = "google:gemini-3.5-flash"
