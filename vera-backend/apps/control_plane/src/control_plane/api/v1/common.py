@@ -44,8 +44,9 @@ from vera_core.audit import AuditRecord, AuditSink, AuthAuditSink
 from vera_core.config import Settings
 from vera_core.config.kms import KeyManagementService
 from vera_core.events import PostCallJobBus
-from vera_core.models import Permission, RolePermission, UserRole
+from vera_core.models import Permission, RolePermission, SchemaVersion, UserRole
 from vera_core.models.audit_log import ActorType, AuditEvent
+from vera_core.models.enums import VersionStatus
 from vera_core.plan_store import CallPlanService
 
 if TYPE_CHECKING:
@@ -152,3 +153,16 @@ def build_role_grant(
         granted_by=granted_by,
         granted_at=func.now(),
     )
+
+
+async def published_schema_version(session: AsyncSession, schema_id: UUID) -> SchemaVersion | None:
+    """The form family's single published version, or None. At most one exists —
+    the `uq_schema_version_published_per_schema` partial unique index."""
+    return (
+        await session.execute(
+            select(SchemaVersion).where(
+                SchemaVersion.schema_id == schema_id,
+                SchemaVersion.status == VersionStatus.PUBLISHED,
+            )
+        )
+    ).scalar_one_or_none()

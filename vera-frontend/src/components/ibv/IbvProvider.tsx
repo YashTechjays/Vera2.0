@@ -8,8 +8,23 @@ import {
   type ReactNode,
 } from "react"
 
-import { isoToDateFormat, validateAll, type ValidationErrors } from "@/lib/ibv/validation"
-import { allLeaves, isApplicable, isRequired, parseSchema } from "@/lib/ibv/schema"
+import { toast } from "sonner"
+
+import {
+  isoToDateFormat,
+  missingCreateLeaves,
+  validateAll,
+  validateCreate,
+  type ValidationErrors,
+} from "@/lib/ibv/validation"
+import {
+  allLeaves,
+  createRequiredPaths,
+  isApplicable,
+  isRequired,
+  leafByPath,
+  parseSchema,
+} from "@/lib/ibv/schema"
 import {
   activeDisputeValue,
   applyAllFlags,
@@ -22,18 +37,21 @@ import {
   type DisputeMap,
 } from "@/lib/ibv/disputes"
 import { canApplyLiveAnswer } from "@/lib/ibv/liveAnswers"
-import type { FormSchema, FormValues } from "@/lib/ibv/types"
+import type { FormSchema, FormValues, LeafField } from "@/lib/ibv/types"
 import type { LiveDispute } from "@/lib/api/callEvents"
-import { ApiError } from "@/lib/api/client"
+import { ApiError, apiErrorFieldPaths, randomId } from "@/lib/api/client"
 import {
+  createPatientForm,
   getPatientForm,
   getSchemaVersion,
   listInsuranceProviders,
   resolveDisputes,
   updatePatientFormStatus,
 } from "@/lib/patient-forms/api"
+import { applicableValues, valuesToIntakePayload } from "@/lib/patient-forms/intake"
 import type {
   FieldProvenance,
+  IntakeSchemaOption,
   PatientFormDetail,
   PatientFormStatus,
   ProviderOption,
@@ -42,7 +60,7 @@ import { valueToInput } from "@/lib/patient-forms/display"
 import { matchProvider } from "@/lib/patient-forms/providers"
 
 type SaveState = "idle" | "saving" | "saved"
-type Mode = "mock" | "api"
+type Mode = "mock" | "api" | "create"
 
 type IbvContextValue = {
   /** The form-schema document the open form is pinned to (fetched by its
@@ -119,6 +137,25 @@ type IbvContextValue = {
    *  (Live Monitoring) that render the form inline and apply live answers. */
   loadFormById: (formId: string) => void
   closeForm: () => void
+  /** In-app create flow (Data Management → Add patient form). */
+  createModalOpen: boolean
+  /** Open the create modal at the schema-picker step (also the Back action). */
+  openCreate: () => void
+  closeCreate: () => void
+  /** Bind the picked family: load its published schema, seed leaf defaults. */
+  beginCreate: (option: IntakeSchemaOption) => Promise<void>
+  /** The picked family, or null while still on the picker step. */
+  createSelection: IntakeSchemaOption | null
+  createSubmitting: boolean
+  /** Modal-level create failure (stale published version, network) — a banner. */
+  createError: string | null
+  /** Submit the create form. Resolves to the first field path still blocking the
+   *  submit (client- or server-rejected) so the caller can scroll to it, or null
+   *  once the form is created. */
+  submitCreate: () => Promise<string | null>
+  /** Whether the field at `path` is required in the CURRENT mode: `system_fields`
+   *  in create mode, the leaf's own (possibly conditional) `required` elsewhere. */
+  isPathRequired: (path: string, field: LeafField) => boolean
 }
 
 const IbvContext = createContext<IbvContextValue | null>(null)
@@ -133,6 +170,30 @@ async function loadSchema(versionId: string): Promise<FormSchema> {
   const schema = parseSchema(detail.document)
   schemaCache.set(versionId, schema)
   return schema
+}
+
+/** Up to three offending field titles, so the banner stays one readable line. */
+function describeBlockedSubmit(titles: string[]): string {
+  if (titles.length === 0) return "Fix the highlighted fields before submitting."
+  const shown = titles.slice(0, 3).join(", ")
+  const rest = titles.length - 3
+  return rest > 0
+    ? `Fill the required fields before submitting: ${shown}, and ${rest} more.`
+    : `Fill the required fields before submitting: ${shown}.`
+}
+
+/** The earliest of `paths` in schema document order — the one to scroll to. */
+function firstInDocumentOrder(schema: FormSchema, paths: string[]): string | null {
+  const wanted = new Set(paths)
+  return allLeaves(schema).find((leaf) => wanted.has(leaf.path))?.path ?? null
+}
+
+/** `map` without `path`, same identity when the key is already absent. */
+function omitPath<T>(map: Record<string, T>, path: string): Record<string, T> {
+  if (!(path in map)) return map
+  const next = { ...map }
+  delete next[path]
+  return next
 }
 
 /** Date leaves store ISO but render in the schema's declared date_format. Map each
@@ -222,10 +283,37 @@ export function IbvProvider({
   const [ivrNavigation, setIvrNavigation] = useState(true)
   const [providers, setProviders] = useState<ProviderOption[]>([])
   const [providerId, setProviderId] = useState<string>("")
+  const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [createSelection, setCreateSelection] = useState<IntakeSchemaOption | null>(null)
+  const [createAttempted, setCreateAttempted] = useState(false)
+  const [createSubmitting, setCreateSubmitting] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
+  // Paths the backend itself rejected (its 422 `data.fields`), so the renderer
+  // outlines them even when the client's own rules considered them fine.
+  const [createServerErrors, setCreateServerErrors] = useState<ValidationErrors>({})
+  // Held across retries of one submit attempt; cleared on success and on any edit.
+  const createIdempotencyKeyRef = useRef<string | null>(null)
 
-  const errors = useMemo(
-    () => (schema ? validateAll(schema, values) : {}),
-    [schema, values],
+  const errors: ValidationErrors = useMemo(() => {
+    if (!schema) return {}
+    // Create mode: requiredness comes from system_fields; the required errors
+    // only show once a submit was attempted (format errors always show live).
+    if (mode === "create")
+      return {
+        ...createServerErrors,
+        ...validateCreate(schema, values, { includeRequired: createAttempted }),
+      }
+    return validateAll(schema, values)
+  }, [schema, values, mode, createAttempted, createServerErrors])
+
+  const isPathRequired = useCallback(
+    (path: string, field: LeafField) => {
+      if (!schema) return false
+      // createRequiredPaths is WeakMap-cached per schema, so this stays a Set lookup.
+      if (mode === "create") return createRequiredPaths(schema).has(path)
+      return isRequired(schema, field, values)
+    },
+    [mode, schema, values],
   )
 
   // Date-leaf path → declared date_format. Derived from `schema` (never stored) so it
@@ -347,11 +435,120 @@ export function IbvProvider({
     setProvenance({})
   }, [])
 
+  // Create path: step 1 (picker) has no schema; beginCreate loads the published
+  // document and seeds declared defaults so what the user sees is what submits.
+  const openCreate = useCallback(() => {
+    setMode("create")
+    setFormId(null)
+    setError(null)
+    setLoading(false)
+    setStatus(null)
+    setStatusError(null)
+    setInsuranceType(null)
+    // Provenance is keyed by schema-relative path, so a previously-open form's map
+    // would otherwise paint its badges onto the empty create form.
+    setProvenance({})
+    setIvrNavigation(true)
+    setProviders([])
+    setProviderId("")
+    setSchema(null)
+    setCreateSelection(null)
+    setCreateAttempted(false)
+    setCreateError(null)
+    setCreateServerErrors({})
+    createIdempotencyKeyRef.current = null
+    seed({}, {}, null)
+    setCreateModalOpen(true)
+  }, [seed])
+
+  const closeCreate = useCallback(() => setCreateModalOpen(false), [])
+
+  const beginCreate = useCallback(
+    async (option: IntakeSchemaOption) => {
+      setCreateError(null)
+      setLoading(true)
+      try {
+        const loaded = await loadSchema(option.published_version_id)
+        const defaults: FormValues = {}
+        for (const leaf of allLeaves(loaded)) {
+          if (leaf.field.default !== undefined) defaults[leaf.path] = leaf.field.default
+        }
+        seed(defaults, {}, null)
+        setSchema(loaded)
+        setInsuranceType(option.insurance_type)
+        setCreateSelection(option)
+      } catch (err) {
+        // ApiError and the parseSchema dsl_version guard both carry a
+        // human-readable, non-PHI message.
+        setCreateError(
+          err instanceof Error ? err.message : "Could not load this form schema.",
+        )
+      } finally {
+        setLoading(false)
+      }
+    },
+    [seed],
+  )
+
+  const submitCreate = useCallback(async () => {
+    if (!schema || !createSelection) return null
+    setCreateAttempted(true)
+    setCreateServerErrors((prev) => (Object.keys(prev).length === 0 ? prev : {}))
+    const blocking = missingCreateLeaves(schema, values)
+    if (blocking.length > 0) {
+      setCreateError(describeBlockedSubmit(blocking.map((leaf) => leaf.field.title)))
+      return blocking[0].path
+    }
+    // A format error on a filled field blocks too, but has no title list to name.
+    const invalid = Object.keys(validateCreate(schema, values))
+    if (invalid.length > 0) {
+      setCreateError("Fix the highlighted fields before submitting.")
+      return firstInDocumentOrder(schema, invalid)
+    }
+    setCreateError(null)
+    setCreateSubmitting(true)
+    // One key per payload, reused while THIS attempt is retried (setValue clears it),
+    // so a retry after an ambiguous failure cannot land a second form.
+    createIdempotencyKeyRef.current ??= randomId()
+    try {
+      await createPatientForm(
+        createSelection.schema_id,
+        createSelection.published_version_id,
+        valuesToIntakePayload(applicableValues(schema, values)),
+        createIdempotencyKeyRef.current,
+      )
+      createIdempotencyKeyRef.current = null
+      setCreateModalOpen(false)
+      toast.success("Patient form created.")
+      setSavedTick((t) => t + 1) // the worklist refetches so the new row shows
+      return null
+    } catch (err) {
+      // e.g. 409 "no published version" / "a newer version has been published"
+      // (demoted or promoted mid-flow), or the backend's authoritative 422.
+      setCreateError(
+        err instanceof ApiError ? err.message : "Could not create the patient form.",
+      )
+      const byPath = leafByPath(schema)
+      const rejected = apiErrorFieldPaths(err).filter((p) => byPath.has(p))
+      if (rejected.length === 0) return null
+      setCreateServerErrors(
+        Object.fromEntries(rejected.map((p) => [p, "Rejected by the server."])),
+      )
+      return firstInDocumentOrder(schema, rejected)
+    } finally {
+      setCreateSubmitting(false)
+    }
+  }, [schema, createSelection, values])
+
   const setValue = useCallback((path: string, value: string) => {
     editedPathsRef.current.add(path) // a manual edit — live AI answers must not overwrite it
     setValues((prev) => ({ ...prev, [path]: value }))
     setDirty(true)
     setSaveState("idle")
+    // The server's verdict on this path is stale the moment the user retypes it,
+    // and a fresh payload deserves a fresh idempotency key.
+    setCreateServerErrors((prev) => omitPath(prev, path))
+    createIdempotencyKeyRef.current = null
   }, [])
 
   const applyLiveAnswer = useCallback(
@@ -376,18 +573,8 @@ export function IbvProvider({
       if (dispute === undefined) return // frame carried no dispute info — leave disputes as-is
       if (dispute === null) {
         // Backend computed "not disputed" — drop any dispute (and its flag) for the field.
-        setDisputes((prev) => {
-          if (!(path in prev)) return prev
-          const next = { ...prev }
-          delete next[path]
-          return next
-        })
-        setFlagsState((prev) => {
-          if (!(path in prev)) return prev
-          const next = { ...prev }
-          delete next[path]
-          return next
-        })
+        setDisputes((prev) => omitPath(prev, path))
+        setFlagsState((prev) => omitPath(prev, path))
         return
       }
       // Set the dispute in the same shape adaptDetail builds, so FieldRow renders it
@@ -587,6 +774,15 @@ export function IbvProvider({
     openLoadedForm,
     loadFormById,
     closeForm,
+    createModalOpen,
+    openCreate,
+    closeCreate,
+    beginCreate,
+    createSelection,
+    createSubmitting,
+    createError,
+    submitCreate,
+    isPathRequired,
   }
 
   return <IbvContext.Provider value={value}>{children}</IbvContext.Provider>

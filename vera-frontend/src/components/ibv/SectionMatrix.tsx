@@ -123,7 +123,11 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
     // h-px is the table-cell "fill height" trick: the cell collapses to its real
     // (possibly row-spanned) height, and the h-full child then stretches to it,
     // so the input covers the whole cell with no top/bottom background strip.
-    <td className="h-px border border-ibv-input-border p-0" rowSpan={rowSpan}>
+    <td
+      className="h-px border border-ibv-input-border p-0"
+      rowSpan={rowSpan}
+      data-field-path={path}
+    >
       <div className="relative h-full">
         <FieldRenderer
           field={field}
