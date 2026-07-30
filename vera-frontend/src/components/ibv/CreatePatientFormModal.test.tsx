@@ -23,6 +23,11 @@ vi.mock("@/lib/patient-forms/api", () => ({
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn() } }))
 
+// These mount the real 204-leaf IBV document and drive it through the provider, so
+// they cost ~0.5s each locally and ~5.5s on a loaded CI runner — over vitest's 5s
+// unit-test default, which failed the pipeline on build 82b7c1f5.
+vi.setConfig({ testTimeout: 30_000 })
+
 const mockedList = vi.mocked(listIntakeSchemas)
 const mockedVersion = vi.mocked(getSchemaVersion)
 const mockedCreate = vi.mocked(createPatientForm)
@@ -71,7 +76,7 @@ async function reachFormStep(user: ReturnType<typeof userEvent.setup>) {
 
 /** Seed every create-required leaf through its input. `fireEvent.change`, not
  *  `user.type`: this is state setup, not a typing test, and 16 fields
- *  keystroke-by-keystroke exceeds the per-test budget. */
+ *  keystroke-by-keystroke costs several times more. */
 function fillRequired() {
   for (const path of createRequiredPaths(parseSchema(rawSchema))) {
     const value = SAMPLE_VALUES[path]
