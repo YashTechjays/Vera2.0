@@ -15,6 +15,7 @@ const row = (over: Partial<CallHistoryRow> = {}): CallHistoryRow => ({
   member_id: "POL-9",
   insurance_provider: "UHC",
   recording_available: false,
+  transcript_available: false,
   ...over,
 })
 

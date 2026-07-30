@@ -84,6 +84,8 @@ export type CallHistoryRow = {
   /** True only when this caller may actually play the recording (AVAILABLE, visible,
    *  and holds recordings:read) — matches the per-form timeline's gate. */
   recording_available: boolean
+  /** True when a stored transcript exists for this call — gates the "View transcript" trigger. */
+  transcript_available: boolean
 }
 
 export type PaginatedCalls = {
