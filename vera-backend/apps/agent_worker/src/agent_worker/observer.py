@@ -256,8 +256,12 @@ class TaskObserver:
         arrived since the last pass (so a turn finalized just before the handoff is still
         extracted, without a redundant LLM call when nothing is new)."""
         self._closed = True
+        # Discard each batch BEFORE awaiting it: `add_done_callback` runs via call_soon, so an
+        # already-finished pass stays in the set and a membership loop would spin forever.
         while self._passes:
-            await asyncio.gather(*list(self._passes), return_exceptions=True)
+            passes = list(self._passes)
+            self._passes.difference_update(passes)
+            await asyncio.gather(*passes, return_exceptions=True)
         try:
             await self._one_pass()
         except Exception as exc:
@@ -330,8 +334,13 @@ class ObserverManager:
         self._seq = 0
         self._active_index: int | None = None
         self._active: TaskObserver | None = None
+        # The task we just left, still taking turns for one more rep turn (see `_rotate`).
+        self._retiring: TaskObserver | None = None
         self._closing: set[asyncio.Task[None]] = set()
         self._tail_task: asyncio.Task[None] | None = None
+        # A retiring Observer's pass runs concurrently with the active one's, and `_record`
+        # read-modify-writes `_answers` across awaits.
+        self._record_lock = asyncio.Lock()
 
     def start(self) -> None:
         """Begin tailing the transcript stream in the background."""
@@ -371,20 +380,30 @@ class ObserverManager:
         index = self._controller.active_task_index
         if index != self._active_index:
             self._rotate(index)
+        turn = _Turn(
+            role=str(event.data.get("role", "")),
+            text=str(event.data.get("text", "")),
+            source=source,
+            ts=event.ts,
+            seq=seq,
+        )
         if self._active is not None:
-            self._active.feed(
-                _Turn(
-                    role=str(event.data.get("role", "")),
-                    text=str(event.data.get("text", "")),
-                    source=source,
-                    ts=event.ts,
-                    seq=seq,
-                )
-            )
+            self._active.feed(turn)
+        if self._retiring is not None:
+            # The grace turn: only the outgoing task's Observer has that field on its
+            # whitelist AND in its extractor prompt.
+            self._retiring.feed(turn)
+            if source == SOURCE_REP:
+                self._close_retiring()  # had its grace turn
 
     def _rotate(self, index: int | None) -> None:
         if self._active is not None:
-            self._schedule_close(self._active)  # background final drain, non-blocking
+            # Retire rather than close: the turn that triggered this rotation may itself be
+            # the answer to the outgoing task's final question (VERA asks and calls
+            # `task_complete` in one turn), since the cursor read in `ingest` is a "now" value
+            # about an arbitrarily stale turn. Bounded at one.
+            self._close_retiring()
+            self._retiring = self._active
         self._active_index = index
         if index is None:
             self._active = None
@@ -397,12 +416,21 @@ class ObserverManager:
             record=self._record,
         )
 
+    def _close_retiring(self) -> None:
+        if self._retiring is not None:
+            self._schedule_close(self._retiring)
+            self._retiring = None
+
     def _schedule_close(self, observer: TaskObserver) -> None:
         task = asyncio.create_task(observer.aclose())
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
 
     async def _record(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
+        async with self._record_lock:
+            await self._record_locked(answer, evidence_seq)
+
+    async def _record_locked(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
         if self._answers.get(answer.field_path) == answer.value:
             # Unchanged — do not re-write or re-emit. INTENTIONALLY covers the intake
             # prefill seed too: a rep merely confirming a prefilled value leaves no
@@ -479,8 +507,11 @@ class ObserverManager:
                 self._tail_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._tail_task
-        self._rotate(None)  # close the active Observer with a final drain pass
+        self._rotate(None)  # retires the active Observer
+        self._close_retiring()  # final drain pass for whatever is left
         while self._closing:
-            await asyncio.gather(*list(self._closing), return_exceptions=True)
+            closing = list(self._closing)
+            self._closing.difference_update(closing)  # same call_soon race as TaskObserver.aclose
+            await asyncio.gather(*closing, return_exceptions=True)
         if cancelled:
             raise asyncio.CancelledError
