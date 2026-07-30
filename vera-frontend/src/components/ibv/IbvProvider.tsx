@@ -38,7 +38,7 @@ import {
   resolveDisputes,
   updatePatientFormStatus,
 } from "@/lib/patient-forms/api"
-import { valuesToIntakePayload } from "@/lib/patient-forms/intake"
+import { applicableValues, valuesToIntakePayload } from "@/lib/patient-forms/intake"
 import type {
   FieldProvenance,
   IntakeSchemaOption,
@@ -440,7 +440,10 @@ export function IbvProvider({
     setCreateError(null)
     setCreateSubmitting(true)
     try {
-      await createPatientForm(createSelection.schema_id, valuesToIntakePayload(values))
+      await createPatientForm(
+        createSelection.schema_id,
+        valuesToIntakePayload(applicableValues(schema, values)),
+      )
       setCreateModalOpen(false)
       setSavedTick((t) => t + 1) // worklist refetches; the new row is the feedback
     } catch (err) {

@@ -3,9 +3,30 @@
 // the nested-by-section intake_payload POST /patient-forms:create expects.
 // Empty values are omitted — the backend treats blank as "not provided".
 
-import type { FormValues } from "@/lib/ibv/types"
+import { allLeaves, isApplicable } from "@/lib/ibv/schema"
+import type { FormSchema, FormValues } from "@/lib/ibv/types"
 
 const SECTIONS_PREFIX = "sections."
+
+/**
+ * The subset of `values` the form actually collected: leaves whose gates hold.
+ * A gated-off leaf still carries the default `beginCreate` seeded, and its input
+ * is disabled — so the user cannot clear it — but the backend validates every
+ * submitted leaf, and e.g. a date leaf defaulting to "N/A" would 422. Mirrors
+ * validateCreate, which skips the same leaves.
+ */
+export function applicableValues(
+  schema: FormSchema,
+  values: FormValues,
+): FormValues {
+  const applicable: FormValues = {}
+  for (const leaf of allLeaves(schema)) {
+    if (isApplicable(schema, leaf.gates, values)) {
+      applicable[leaf.path] = values[leaf.path] ?? ""
+    }
+  }
+  return applicable
+}
 
 export function valuesToIntakePayload(values: FormValues): Record<string, unknown> {
   const payload: Record<string, unknown> = {}
