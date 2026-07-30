@@ -120,10 +120,13 @@ class Settings(BaseSettings):
     password_reset_rate_limit: int = 3
     password_reset_rate_limit_window_seconds: int = 15 * 60
 
-    # --- email (invites) ---------------------------------------------------
-    # Local dev uses the msztolcman/sendria SMTP sandbox (docker-compose): SMTP on
-    # 1025, captured mail viewable at http://localhost:1080. Production points these
-    # at the real relay. No auth/TLS knobs here yet — added with the prod relay.
+    # --- email (invites + password resets) ----------------------------------
+    # Deployed environments send via the Twilio Email API, authenticated with the
+    # same Twilio account as outbound SIP (auth token via SecretProvider, never a
+    # setting). Setting the account SID selects it; unset falls back to the local
+    # msztolcman/sendria SMTP sandbox (docker-compose: SMTP 1025, captured mail at
+    # http://localhost:1080). `email_from` must be a Twilio-verified sender.
+    twilio_account_sid: str | None = None
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "no-reply@vera.local"

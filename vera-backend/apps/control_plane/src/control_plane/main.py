@@ -17,7 +17,7 @@ from control_plane.auth.rbac import PermissionResolver
 from control_plane.auth.session import RedisSessionStore, SessionStore, SessionVerifier
 from control_plane.call_summary import RedisSummaryCache, SummaryCache
 from control_plane.dispatch import drain_pending
-from control_plane.email import EmailSender, SmtpEmailSender
+from control_plane.email import EmailSender, build_email_sender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
@@ -214,9 +214,7 @@ def create_app(
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)
-        app.state.email_sender = email_sender or SmtpEmailSender(
-            host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from
-        )
+        app.state.email_sender = email_sender or build_email_sender(settings, app.state.secrets)
         app.state.invitation_store = invitation_store or RedisInvitationStore(_redis())
 
         # Both stream consumers need a real LiveKit gateway (to tear rooms down) and are
