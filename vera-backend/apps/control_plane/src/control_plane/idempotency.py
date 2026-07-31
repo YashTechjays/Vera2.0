@@ -19,9 +19,15 @@ Usage inside a mutating route::
     await claim_or_conflict(store, tenant_id, key, settings.idempotency_lock_ttl_seconds)
     # ... create the resource; a UNIQUE violation from a late retry maps to a
     #     duplicate response at the route (the durable backstop) ...
+
+`claim_or_conflict` keeps the lock for the whole TTL even when the request then fails,
+which locks the caller out of their own corrected resubmit — see `idempotency_guard`.
 """
 
+import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Protocol
 from uuid import UUID
 
@@ -29,6 +35,8 @@ from fastapi import Header
 from redis.asyncio import Redis
 
 from control_plane.exceptions import CustomAPIException, ExceptionCode
+
+logger = logging.getLogger(__name__)
 
 IDEM_NS = "idem"
 _LOCKED = "1"
@@ -48,6 +56,10 @@ class IdempotencyStore(Protocol):
         now owns the operation; False if a request with this key is in flight."""
         ...
 
+    async def release(self, tenant_id: UUID, user_id: UUID, key: str) -> None:
+        """Drop a lock this caller claimed."""
+        ...
+
 
 class InMemoryIdempotencyStore:
     """Dev/tests. Monotonic-clock TTL; locks vanish on restart."""
@@ -64,6 +76,9 @@ class InMemoryIdempotencyStore:
         self._locks[k] = now + ttl_seconds
         return True
 
+    async def release(self, tenant_id: UUID, user_id: UUID, key: str) -> None:
+        self._locks.pop(_key(tenant_id, user_id, key), None)
+
 
 class RedisIdempotencyStore:
     """Production. `SET NX EX` is the atomic claim; Redis expiry releases the lock."""
@@ -77,6 +92,9 @@ class RedisIdempotencyStore:
         )
         return bool(claimed)
 
+    async def release(self, tenant_id: UUID, user_id: UUID, key: str) -> None:
+        await self._redis.delete(_key(tenant_id, user_id, key))
+
 
 async def claim_or_conflict(
     store: IdempotencyStore, tenant_id: UUID, user_id: UUID, key: str, ttl_seconds: int
@@ -84,6 +102,30 @@ async def claim_or_conflict(
     """Take the in-flight lock, or reject the request as a concurrent duplicate (409)."""
     if not await store.claim(tenant_id, user_id, key, ttl_seconds):
         raise CustomAPIException(ExceptionCode.IDEMPOTENCY_CONFLICT)
+
+
+@asynccontextmanager
+async def idempotency_guard(
+    store: IdempotencyStore, tenant_id: UUID, user_id: UUID, key: str, ttl_seconds: int
+) -> AsyncIterator[None]:
+    """`claim_or_conflict` that frees the key again if the body raises.
+
+    ONLY for a body whose every effect is inside the request transaction: release
+    means "the body raised", which stands in for "nothing was created". A body that
+    also writes Redis, sends mail, or dispatches work breaks that equivalence — its
+    retry would repeat the side effect — so those keep the bare `claim_or_conflict`.
+    """
+    await claim_or_conflict(store, tenant_id, user_id, key, ttl_seconds)
+    try:
+        yield
+    except BaseException:
+        # Best-effort: the TTL is the backstop, so a failed release must never
+        # replace the caller's error with a Redis one. Type name only (PHI rule).
+        try:
+            await store.release(tenant_id, user_id, key)
+        except Exception as exc:
+            logger.warning("idempotency release failed: %s", type(exc).__name__)
+        raise
 
 
 def require_idempotency_key(
