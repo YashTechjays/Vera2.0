@@ -185,14 +185,18 @@ async def invite_user(
             await email_sender.send(
                 EmailMessage(
                     to=email,
-                    subject="You're invited to Vera",
+                    subject="You're invited to Vera Techsolutions",
                     body=(
                         f"Hello{(' ' + body.name) if body.name else ''},\n\n"
-                        "You've been invited to Vera. Set your password using the link below "
-                        f"(valid for {settings.invite_ttl_seconds // 3600} hours):\n\n"
+                        "You've been invited to join Vera Techsolutions, the platform your "
+                        "team uses to run AI-assisted insurance benefit verification.\n\n"
+                        "Click below to set your password and get started. This link is "
+                        f"valid for {settings.invite_ttl_seconds // 3600} hours.\n\n"
                         f"{invite_url}\n\n"
-                        "If you didn't expect this, you can ignore this email."
+                        "If you weren't expecting this, you can safely ignore this email."
                     ),
+                    action_url=invite_url,
+                    action_label="Set your password",
                 )
             )
             email_sent = True
@@ -346,14 +350,18 @@ async def resend_invitation(
         await email_sender.send(
             EmailMessage(
                 to=user.email,
-                subject="You're invited to Vera",
+                subject="You're invited to Vera Techsolutions",
                 body=(
                     f"Hello{(' ' + user.name) if user.name else ''},\n\n"
-                    "Here is a fresh link to set your password "
-                    f"(valid for {settings.invite_ttl_seconds // 3600} hours):\n\n"
+                    "Your invitation has been refreshed so you can finish setting up your "
+                    "Vera Techsolutions account.\n\n"
+                    "Click below to set your password. This link is valid for "
+                    f"{settings.invite_ttl_seconds // 3600} hours.\n\n"
                     f"{invite_url}\n\n"
-                    "If you didn't expect this, you can ignore this email."
+                    "If you weren't expecting this, you can safely ignore this email."
                 ),
+                action_url=invite_url,
+                action_label="Set your password",
             )
         )
         email_sent = True

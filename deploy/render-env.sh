@@ -36,9 +36,8 @@ chmod 600 "$tmp"
   # bounded by tenant.max_retries. Control-plane-only; the worker ignores it.
   echo "VERA_FORM_AUTO_RETRY_ENABLED=true"
   # Outbound email sender identity for the Twilio Email API (credentials come from
-  # secrets.map). MUST be replaced with the Twilio-verified sender before the first
-  # email-sending deploy — Twilio rejects sends from an unverified address.
-  echo "VERA_EMAIL_FROM=CHANGE-ME@verified-sender.invalid"
+  # secrets.map). veratechsolutions.ai is domain-authenticated in Twilio (em7583.*).
+  echo "VERA_EMAIL_FROM=no-reply@veratechsolutions.ai"
 } >> "$tmp"
 
 while IFS= read -r line; do

@@ -944,13 +944,17 @@ async def _send_password_reset_email(
         await email_sender.send(
             EmailMessage(
                 to=to,
-                subject="Reset your Vera password",
+                subject="Reset your Vera Techsolutions password",
                 body=(
-                    "A password reset was requested for your Vera account. Open this "
-                    f"link to set a new password (valid for {ttl_seconds // 60} minutes):\n\n"
+                    "A password reset was requested for your Vera Techsolutions account.\n\n"
+                    "Click below to set a new password. This link is valid for "
+                    f"{ttl_seconds // 60} minutes.\n\n"
                     f"{reset_url}\n\n"
-                    "If you didn't request this, you can ignore this email."
+                    "If you didn't request this, you can safely ignore this email — "
+                    "your password won't change."
                 ),
+                action_url=reset_url,
+                action_label="Reset password",
             )
         )
     except Exception:

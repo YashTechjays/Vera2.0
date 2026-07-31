@@ -18,6 +18,13 @@ from control_plane.email import (
 from vera_core.config import EnvSecretProvider, Settings
 
 _MESSAGE = EmailMessage(to="va@example.com", subject="Hello", body="Body text.")
+_MESSAGE_WITH_ACTION = EmailMessage(
+    to="va@example.com",
+    subject="Hello",
+    body="Hi there.\n\nhttps://vera.example/action\n\nIgnore this if unexpected.",
+    action_url="https://vera.example/action",
+    action_label="Do the thing",
+)
 _FROM = "no-reply@vera.local"
 
 
@@ -38,10 +45,23 @@ async def test_twilio_posts_the_documented_payload() -> None:
     assert post.call_args.args[0] == TWILIO_EMAIL_ENDPOINT
     assert post.call_args.kwargs["auth"] == ("AC123", "token-abc")
     assert post.call_args.kwargs["json"] == {
-        "from": {"address": _FROM},
+        "from": {"address": _FROM, "name": "Vera Techsolutions"},
         "to": [{"address": "va@example.com"}],
-        "content": {"subject": "Hello", "text": "Body text."},
+        "content": {"subject": "Hello", "text": "Body text.", "html": "Body text."},
     }
+
+
+async def test_twilio_renders_a_button_when_an_action_is_given() -> None:
+    post = _post_mock(202)
+    with patch("control_plane.email.httpx.AsyncClient.post", post):
+        await _twilio_sender().send(_MESSAGE_WITH_ACTION)
+    html_body = post.call_args.kwargs["json"]["content"]["html"]
+    assert 'href="https://vera.example/action"' in html_body
+    assert "Do the thing</a>" in html_body
+    assert "Hi there." in html_body
+    assert "Ignore this if unexpected." in html_body
+    # The bare URL paragraph is replaced by the button, not duplicated as text.
+    assert html_body.count("https://vera.example/action") == 1
 
 
 async def test_twilio_rejection_raises_with_status_only() -> None:
@@ -55,16 +75,18 @@ async def test_twilio_rejection_raises_with_status_only() -> None:
     assert "Body text." not in str(excinfo.value)
 
 
-async def test_smtp_sends_plain_to_the_sandbox() -> None:
+async def test_smtp_sends_plain_and_html_to_the_sandbox() -> None:
     sender = SmtpEmailSender(host="localhost", port=1025, sender=_FROM)
     with patch("control_plane.email.aiosmtplib.send", new_callable=AsyncMock) as send:
-        await sender.send(_MESSAGE)
+        await sender.send(_MESSAGE_WITH_ACTION)
     assert send.call_args.kwargs == {"hostname": "localhost", "port": 1025}
     mime = send.call_args.args[0]
     assert mime["From"] == _FROM
     assert mime["To"] == "va@example.com"
     assert mime["Subject"] == "Hello"
-    assert mime.get_content().strip() == "Body text."
+    assert mime.get_body(("plain",)).get_content().strip() == _MESSAGE_WITH_ACTION.body
+    html_body = mime.get_body(("html",)).get_content()
+    assert 'href="https://vera.example/action"' in html_body
 
 
 def _settings(**overrides: Any) -> Settings:

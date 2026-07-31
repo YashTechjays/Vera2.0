@@ -7,6 +7,7 @@ on the same Twilio account as outbound SIP; local dev delivers to the `sendria`
 SMTP sandbox (docker-compose: SMTP 1025, web UI http://localhost:1080).
 """
 
+import html
 from dataclasses import dataclass
 from email.message import EmailMessage as _MimeMessage
 from typing import Protocol
@@ -29,6 +30,7 @@ __all__ = [
 
 TWILIO_EMAIL_ENDPOINT = "https://comms.twilio.com/v1/Emails"
 _SEND_TIMEOUT_SECONDS = 10.0
+_SENDER_NAME = "Vera Techsolutions"
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,47 @@ class EmailMessage:
     to: str
     subject: str
     body: str
+    # Both set: the HTML part becomes a card with a button (the plain part stays `body`).
+    action_url: str | None = None
+    action_label: str | None = None
+
+
+_PAGE_STYLE = (
+    "background:#f4f4f5;padding:32px 16px;"
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
+)
+_CARD_STYLE = "max-width:480px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px;"
+_HEADING_STYLE = "margin:0 0 24px;font-size:20px;font-weight:600;color:#18181b;"
+_TEXT_STYLE = "margin:0 0 16px;font-size:15px;line-height:1.6;color:#18181b;"
+_BUTTON_STYLE = (
+    "display:inline-block;background:#18181b;color:#ffffff;text-decoration:none;"
+    "padding:12px 24px;border-radius:8px;font-size:14px;font-weight:600;"
+)
+_NOTE_STYLE = "margin:24px 0 0;font-size:13px;line-height:1.5;color:#71717a;"
+
+
+def _render_html(message: EmailMessage) -> str:
+    """Render `body` as a single-column card: intro paragraphs, an action button, a footer note."""
+    if not message.action_url or not message.action_label:
+        return html.escape(message.body).replace("\n", "<br>")
+
+    stripped = (p.strip() for p in message.body.split("\n\n"))
+    # The paragraph that is just the bare URL is dropped — the button replaces it.
+    *intro, footer = [p for p in stripped if p and p != message.action_url]
+    intro_html = "".join(f'<p style="{_TEXT_STYLE}">{html.escape(p)}</p>' for p in intro)
+    url = html.escape(message.action_url)
+    label = html.escape(message.action_label)
+    return (
+        f'<div style="{_PAGE_STYLE}">'
+        f'<div style="{_CARD_STYLE}">'
+        f'<p style="{_HEADING_STYLE}">Vera Techsolutions</p>'
+        f"{intro_html}"
+        '<p style="margin:24px 0;text-align:center;">'
+        f'<a href="{url}" style="{_BUTTON_STYLE}">{label}</a>'
+        "</p>"
+        f'<p style="{_NOTE_STYLE}">{html.escape(footer)}</p>'
+        "</div></div>"
+    )
 
 
 class EmailSender(Protocol):
@@ -56,10 +99,15 @@ class TwilioEmailSender:
         self._sender = sender
 
     async def send(self, message: EmailMessage) -> None:
+        # Twilio 400s the send unless both from.name and content.html are present.
         payload = {
-            "from": {"address": self._sender},
+            "from": {"address": self._sender, "name": _SENDER_NAME},
             "to": [{"address": message.to}],
-            "content": {"subject": message.subject, "text": message.body},
+            "content": {
+                "subject": message.subject,
+                "text": message.body,
+                "html": _render_html(message),
+            },
         }
         async with httpx.AsyncClient(timeout=_SEND_TIMEOUT_SECONDS) as client:
             response = await client.post(TWILIO_EMAIL_ENDPOINT, json=payload, auth=self._auth)
@@ -82,6 +130,7 @@ class SmtpEmailSender:
         mime["To"] = message.to
         mime["Subject"] = message.subject
         mime.set_content(message.body)
+        mime.add_alternative(_render_html(message), subtype="html")
         await aiosmtplib.send(mime, hostname=self._host, port=self._port)
 
 
