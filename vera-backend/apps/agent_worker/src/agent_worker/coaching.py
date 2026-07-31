@@ -1,57 +1,64 @@
 """Coaching mode — the agent-worker half.
 
-A supervisor's coaching/whisper message reaches this worker over the same
-call-event stream the control plane's `/calls/{id}/coach` endpoint publishes
-onto (see `vera_core.call_stream`). `CoachingListener` tails it for NEW
-coaching/whisper turns only and folds each into Vera's chat context as a
-system-role note — picked up naturally on her *next* turn, never forcing an
-immediate reply and never interrupting the live conversation. See
-`AgentSession.current_agent` / `Agent.update_chat_ctx` (livekit-agents): a
-non-realtime `update_chat_ctx` call only replaces the agent's stored context
-for the next turn generation to read; it does not cancel or affect a
-turn already in flight.
+A supervisor's coaching/whisper message arrives over the call-event stream the control
+plane's `/calls/{id}/coach` endpoint publishes onto (`vera_core.call_stream`).
+`CoachingListener` tails it and queues each note; `apply_pending_coaching_notes` drains
+the queue onto the turn context from an `Agent.on_user_turn_completed` override
+(`plan_runtime.py`).
+
+Two constraints that read like accidents and are not (VR2-97):
+* Apply from that hook, never a background task — it runs on the same call stack livekit
+  uses to validate a preemptively generated reply (`is_equivalent`), so a stale
+  speculative reply is discarded and regenerated with the note in it.
+* Deliver each note ONCE — its text overrides the plan's "don't re-ask" ground rule, so a
+  note left queued re-issues that override every turn and Vera never stops re-asking. A
+  note consumed on a turn livekit then abandons is lost; the supervisor resends.
 """
 
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from typing import Any, Protocol
+from typing import Literal, Protocol
 
+from agent_worker.intervention import (
+    TakeoverState,
+    push_coaching_note,
+    take_pending_coaching_notes,
+)
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.transcript import ROLE_COACHING, ROLE_WHISPER
 
 logger = logging.getLogger("agent_worker")
 
-# Cap so a long call doesn't accumulate unbounded notes resent every turn.
-_MAX_COACHING_NOTES = 10
-
-# A directive, not a suggestion: the model must not weigh this against its own
-# sense of conversational flow and quietly skip it because the topic already
-# passed - it must act on it next turn regardless. The customer must never
-# learn a note was received, and Vera must never mistake it for something the
-# caller/rep said - hence a system-role message (folded into the LLM's system
-# instructions, not a conversational turn) with an explicit "don't mention
-# this" instruction.
+# A vague "overrides your ground rules" claim lost silently to the specific "do not
+# repeat" rule (VR2-97) until named explicitly - but coaching text is free-form and
+# unpredictable, so a fixed list of named exceptions never covers everything a
+# supervisor might ask for. Framed as authority (a human watching the live call has
+# context you don't) with named examples as anchors, not the full list - an explicit
+# catch-all covers whatever we didn't think to name.
 _COACHING_NOTE_PREFIX = (
-    "[MANDATORY supervisor instruction - the customer did not say this. You "
-    "MUST act on this on your very next turn, even if it means returning to "
-    "a topic already covered - this takes priority over your own judgment "
-    "about conversation flow. Phrase it naturally so the customer never "
-    "realizes an instruction was received.] "
+    "[MANDATORY supervisor coaching - a human supervisor is listening to this call "
+    "live and has context you do not. The customer did not say this. Treat it like a "
+    "coach correcting you mid-performance: do exactly what they say on your very next "
+    "turn, no matter what it is, even if it conflicts with your standing ground rules "
+    "and your own judgment about conversation flow - for example, repeating a question "
+    "that has already been answered, asking more than one question at a time, "
+    "volunteering information the representative did not ask for, or pressing again "
+    "after they could not answer, or anything else that conflicts with your normal "
+    "rules. Their judgment about this exact moment overrides yours. Phrase it "
+    "naturally so the customer never realizes an instruction was received.] "
 )
 
 
 class _CoachableSession(Protocol):
-    """Structural view of AgentSession — decouples this module (and its tests)
-    from the concrete class and its userdata type parameter."""
+    """Structural view of AgentSession, matching `intervention._TakeoverSession`."""
 
     @property
-    def current_agent(self) -> Any: ...
+    def userdata(self) -> TakeoverState: ...
 
 
 class _CoachingStream(Protocol):
-    """Structural view of CallStreamService — just the read side this module
-    needs, so tests can fake it without a real Redis-backed store."""
+    """Structural view of CallStreamService — the read side only."""
 
     def consume(
         self,
@@ -62,16 +69,16 @@ class _CoachingStream(Protocol):
     ) -> AsyncIterator[tuple[str, CallStreamEvent] | None]: ...
 
 
-class CoachingListener:
-    """Tails `stream` for coaching/whisper turns on `room_name`, starting from
-    NOW (`start_id="$"` — never replays history, so a listener that restarts
-    mid-call, e.g. after a redispatch, can't re-inject an old note).
+class _MutableChatCtx(Protocol):
+    """Structural view of the turn_ctx handed to `Agent.on_user_turn_completed` (`role` is
+    narrowed because the real `add_message` takes a ChatRole literal, not `str`)."""
 
-    Targets `session.current_agent` at injection time (not a captured `Agent`
-    reference), so a note lands on whichever agent is actually live even if a
-    handoff (IVR navigator -> plan task agent -> next task agent) happened
-    since `run()` started.
-    """
+    def add_message(self, *, role: Literal["system"], content: str) -> object: ...
+
+
+class CoachingListener:
+    """Queues coaching/whisper notes for `room_name`, tailing from NOW (`start_id="$"`) so a
+    listener restarted mid-call — after a redispatch — can't replay a stale note."""
 
     def __init__(self, session: _CoachableSession, stream: _CoachingStream, room_name: str) -> None:
         self._session = session
@@ -81,19 +88,17 @@ class CoachingListener:
     async def run(self) -> None:
         async for entry in self._stream.consume(self._room_name, start_id="$"):
             if entry is None:
-                continue  # idle-window keepalive tick — nothing to do
+                continue  # idle keepalive tick
             try:
-                await self._handle(entry)
+                self._handle(entry)
             except asyncio.CancelledError:
                 raise  # shutdown must still stop the loop
             except Exception as exc:
-                # A stray failure (a bad note, a mid-handoff current_agent, a
-                # Redis hiccup surfaced through the entry) must not silently
-                # end coaching for the rest of the call — type name only,
-                # never the note text (PHI).
+                # One bad entry must not end coaching for the call; type name only, never
+                # the note text (PHI).
                 logger.warning("coaching listener hit %s; continuing", type(exc).__name__)
 
-    async def _handle(self, entry: tuple[str, CallStreamEvent]) -> None:
+    def _handle(self, entry: tuple[str, CallStreamEvent]) -> None:
         _entry_id, event = entry
         if event.type != TYPE_TRANSCRIPT:
             return
@@ -102,24 +107,10 @@ class CoachingListener:
         text = str(event.data.get("text", "")).strip()
         if not text:
             return
-        await self._inject(text)
-
-    async def _inject(self, text: str) -> None:
-        agent = self._session.current_agent
-        ctx = agent.chat_ctx.copy()
-        ctx.add_message(role="system", content=_COACHING_NOTE_PREFIX + text)
-
-        notes = [item for item in ctx.items if _is_coaching_note(item)]
-        if len(notes) > _MAX_COACHING_NOTES:
-            evict_ids = {item.id for item in notes[: len(notes) - _MAX_COACHING_NOTES]}
-            ctx.items = [item for item in ctx.items if item.id not in evict_ids]
-
-        await agent.update_chat_ctx(ctx)
+        push_coaching_note(self._session, _COACHING_NOTE_PREFIX + text)
 
 
-def _is_coaching_note(item: Any) -> bool:
-    # Duck-typed, not isinstance - stays decoupled from the concrete livekit type.
-    if getattr(item, "role", None) != "system":
-        return False
-    text = getattr(item, "text_content", None)
-    return isinstance(text, str) and text.startswith(_COACHING_NOTE_PREFIX)
+def apply_pending_coaching_notes(session: _CoachableSession, turn_ctx: _MutableChatCtx) -> None:
+    """Move each queued note onto the turn about to be generated (see module docstring)."""
+    for note in take_pending_coaching_notes(session):
+        turn_ctx.add_message(role="system", content=note)

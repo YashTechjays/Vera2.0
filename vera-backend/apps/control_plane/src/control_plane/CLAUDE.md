@@ -50,9 +50,15 @@ path. Do not write `if identity.tenant_id is None:` to mean "is a platform opera
 - PHI: `message`/`description` are developer-authored, non-PHI; handlers never echo raw exception
   text or submitted input (validation errors expose field paths only). Read the correlation id
   with `current_request_id(request)`, not the raw header.
-- Mutating ingress: gate with `Depends(require_idempotency_key)` + `claim_or_conflict(...)` (Redis
-  in-flight lock); durable de-dup is a UNIQUE constraint on the resource, not Redis
-  (`idempotency.py`, ADR vera2-database-design §707).
+- Mutating ingress: gate with `Depends(require_idempotency_key)` + the Redis in-flight lock;
+  durable de-dup is a UNIQUE constraint on the resource, not Redis (`idempotency.py`, ADR
+  vera2-database-design §707). Which lock helper depends on what the body does:
+  - **body entirely inside the request transaction** → `async with idempotency_guard(...)`.
+    It frees the key when the body raises, so a rejected submit (404/409/422) does not lock
+    the caller out of their own corrected resubmit for the rest of the TTL.
+  - **body with effects outside the transaction** (writes Redis, sends mail, dispatches work
+    — e.g. `users.py::invite_user`) → the bare `claim_or_conflict(...)`, and say why in a
+    comment. Releasing there would let a retry repeat the side effect.
 
 ## Identifiers in URLs
 

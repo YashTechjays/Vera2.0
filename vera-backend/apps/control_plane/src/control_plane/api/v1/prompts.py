@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from control_plane.api.v1.common import published_schema_version
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import platform_require
 from control_plane.deps import platform_scoped_session
@@ -116,24 +117,13 @@ async def _require_version(
     return version
 
 
-async def _published_schema_version(session: AsyncSession, schema_id: UUID) -> SchemaVersion | None:
-    return (
-        await session.execute(
-            select(SchemaVersion).where(
-                SchemaVersion.schema_id == schema_id,
-                SchemaVersion.status == VersionStatus.PUBLISHED,
-            )
-        )
-    ).scalar_one_or_none()
-
-
 async def _require_published_schema(
     session: AsyncSession, prompt_id: UUID, *, when_missing: str
 ) -> tuple[Prompt, SchemaVersion]:
     """The prompt plus its currently-published schema version. 404 if the prompt is
     unknown; 409 (with `when_missing`) if the schema has no published version yet."""
     prompt = await _require_prompt(session, prompt_id)
-    schema_version = await _published_schema_version(session, prompt.schema_id)
+    schema_version = await published_schema_version(session, prompt.schema_id)
     if schema_version is None:
         raise ConflictError(message=when_missing)
     return prompt, schema_version
@@ -339,7 +329,7 @@ async def preview_prompt(
                 "and cannot be rendered"
             ) from exc
     else:
-        schema_version = await _published_schema_version(session, prompt.schema_id)
+        schema_version = await published_schema_version(session, prompt.schema_id)
         if schema_version is None:
             raise ConflictError(message="no published schema to render against")
         prompt_doc = None

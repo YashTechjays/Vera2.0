@@ -24,7 +24,7 @@ from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
 from vera_core.models import AuditLog, Call, InterventionEvent, PatientForm, Transcript
 from vera_core.models.authoring import FormSchema, SchemaVersion
-from vera_core.models.enums import CallStatus, InsuranceType
+from vera_core.models.enums import CallStatus, InsuranceType, TranscriptSource
 from vera_core.observability.correlation import parse_room_name, room_name_for_call
 
 
@@ -1577,3 +1577,137 @@ async def test_listen_token_carries_listener_mode(
     assert minted.can_publish is False
     assert minted.name == "supervisor@test.example"
     assert minted.attributes == {"vera.mode": "listener"}
+
+
+@pytest.mark.asyncio
+async def test_call_history_reports_transcript_available(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A call with a stored Transcript row reports transcript_available=True; one with
+    none reports False (gates the row's 'View transcript' trigger)."""
+    with_tx = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="completed",
+    )
+    without_tx = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="completed",
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        session.add(
+            Transcript(
+                tenant_id=rbac_world.tenant_id,
+                call_id=with_tx,
+                seq=0,
+                source=TranscriptSource.BOT.value,
+                role="assistant",
+                message="Hello, this is Vera.",
+            )
+        )
+
+    resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
+    assert by_id[str(with_tx)]["transcript_available"] is True
+    assert by_id[str(without_tx)]["transcript_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_call_history_transcript_available_gated_by_visibility(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A stored Transcript alone isn't enough: the row must also pass the same
+    owner-or-published visibility check `/calls/{id}/events` enforces, otherwise
+    'View transcript' is advertised for a call whose events the caller can't fetch."""
+    visible = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="completed",
+    )
+    # A real, different app_user (FK-satisfying) — not the admin caller — and unpublished,
+    # so it's terminal + owned-by-someone-else: hidden per `call_authz.visible_to`.
+    hidden = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.listener_id,
+        status="completed",
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        session.add_all(
+            [
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=visible,
+                    seq=0,
+                    source=TranscriptSource.BOT.value,
+                    role="assistant",
+                    message="Hello, this is Vera.",
+                ),
+                Transcript(
+                    tenant_id=rbac_world.tenant_id,
+                    call_id=hidden,
+                    seq=0,
+                    source=TranscriptSource.BOT.value,
+                    role="assistant",
+                    message="Hello, this is Vera.",
+                ),
+            ]
+        )
+
+    resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
+    assert by_id[str(visible)]["transcript_available"] is True
+    assert by_id[str(hidden)]["transcript_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_call_history_ownerless_terminal_call_does_not_500(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An ownerless (initiated_by_id NULL — owner account deleted, or
+    dispatcher-initiated), unpublished, terminal call makes `call_authz.visible_to`
+    evaluate to SQL NULL (NULL OR FALSE OR FALSE), not FALSE. Selected as a plain
+    column that must land in a non-optional bool, that NULL must not crash the
+    whole page — the row is simply not visible."""
+    ownerless = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=None,
+        status="completed",
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+        session.add(
+            Transcript(
+                tenant_id=rbac_world.tenant_id,
+                call_id=ownerless,
+                seq=0,
+                source=TranscriptSource.BOT.value,
+                role="assistant",
+                message="Hello, this is Vera.",
+            )
+        )
+
+    resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
+    assert by_id[str(ownerless)]["transcript_available"] is False

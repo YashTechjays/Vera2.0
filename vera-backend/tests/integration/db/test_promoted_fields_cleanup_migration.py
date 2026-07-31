@@ -35,6 +35,10 @@ from vera_core.models.enums import (
 INSURANCE_TYPE = InsuranceType.INFERTILITY_TREATMENT.value
 TENANT_SLUG = "promoted-cleanup-mig-test"
 
+# Pinned, not `now()`: the migration's cutoff is the fixed date 2026-07-31, so a
+# wall-clock default stops being pre-cutoff the day it arrives (it did).
+PRE_CUTOFF = datetime(2026, 7, 1, tzinfo=UTC)
+
 # Random-hex prefix is minted at `just makemigration` time — glob, don't hardcode.
 MIGRATION_FILE = next(
     (Path(__file__).resolve().parents[3] / "migrations" / "versions").glob(
@@ -160,8 +164,8 @@ async def cleanup_world(
             session.add(row)
             return row
 
-        stale = form("blockless")  # created now (< cutoff) → DELETED
-        stale_incomplete = form("incomplete")  # partial block → DELETED
+        stale = form("blockless", created_at=PRE_CUTOFF)  # → DELETED
+        stale_incomplete = form("incomplete", created_at=PRE_CUTOFF)  # partial → DELETED
         survivor_complete = form("complete")  # full block → survives
         survivor_v1 = form("v1")  # not dsl 2.x → survives
         # Matches the predicate but post-dates the 2026-07-31 cutoff → survives.

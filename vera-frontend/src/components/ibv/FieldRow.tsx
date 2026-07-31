@@ -5,7 +5,7 @@ import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
 import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
 import { confidenceHighlightClass } from "@/lib/ibv/disputes"
-import { applicabilityReason, fieldUsageOf, isApplicable, isRequired } from "@/lib/ibv/schema"
+import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
 import { USAGE_META } from "./usageMeta"
 import {
   Tooltip,
@@ -72,6 +72,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
     applyDispute,
     swapDispute,
     provenanceFor,
+    isPathRequired,
   } = useIbv()
 
   const value = values[path] ?? ""
@@ -79,7 +80,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
   const prov = provenanceFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
-  const required = schema !== null && applicable && isRequired(schema, field, values)
+  const required = applicable && isPathRequired(path, field)
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   const invalidReason = errors[path]
@@ -94,7 +95,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
   const disputeGutter = compact ? "50px" : "150px"
 
   return (
-    <div className="flex min-h-[26px]">
+    <div className="flex min-h-[26px]" data-field-path={path}>
       <div
         className={cn(
           "flex w-[210px] min-w-[210px] shrink-0 items-center gap-1 border-r border-b border-ibv-label-border bg-white px-1.5 py-1 text-left font-ibv text-[13.3px] font-semibold text-ibv-label-border",

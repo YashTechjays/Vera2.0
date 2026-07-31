@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest"
 
 import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
-import { parseSchema } from "./schema"
-import { isoToDateFormat, validateAll, validateSection } from "./validation"
+import { allLeaves, createRequiredPaths, parseSchema } from "./schema"
+import {
+  isoToDateFormat,
+  missingCreateLeaves,
+  validateAll,
+  validateCreate,
+  validateSection,
+} from "./validation"
+import type { FormSchema, FormValues } from "./types"
 
 const schema = parseSchema(rawSchema)
 
@@ -123,5 +130,96 @@ describe("validateSection", () => {
     expect(
       Object.keys(errors).every((p) => p.startsWith("sections.insurance_information."))
     ).toBe(true)
+  })
+})
+
+// Minimal v2 document for validateCreate: one system field without a default (required at create),
+// one with a default (exempt), and a voice-required leaf (NOT required at create).
+const createSchema = {
+  dsl_version: "2.1",
+  name: "Test Form",
+  sections: {
+    patient_information: {
+      title: "Patient Information",
+      fields: {
+        patient_name: { type: "text", title: "Patient Name" },
+        patient_gender: {
+          type: "enum",
+          title: "Gender",
+          values: ["Female", "Male"],
+          default: "N/A",
+        },
+        health_plan: {
+          type: "text",
+          title: "Health Plan",
+          required: true,
+          validation: { pattern: "^[A-Z].*$" },
+        },
+      },
+    },
+  },
+  system_fields: {
+    patient_name: "sections.patient_information.patient_name",
+    patient_gender: "sections.patient_information.patient_gender",
+  },
+} as unknown as FormSchema
+
+const CREATE_NAME = "sections.patient_information.patient_name"
+const CREATE_GENDER = "sections.patient_information.patient_gender"
+const CREATE_PLAN = "sections.patient_information.health_plan"
+
+describe("validateCreate", () => {
+  it("requires system_fields targets without a default; ignores voice-required leaves", () => {
+    const errors = validateCreate(createSchema, {})
+    expect(errors[CREATE_NAME]).toBe("Patient Name is required")
+    expect(errors[CREATE_GENDER]).toBeUndefined() // default counts as filled
+    expect(errors[CREATE_PLAN]).toBeUndefined() // leaf `required` = voice collection, not intake
+  })
+
+  it("clears the required error once the system field is filled", () => {
+    expect(validateCreate(createSchema, { [CREATE_NAME]: "Jane" })).toEqual({})
+  })
+
+  it("still format-checks any filled field", () => {
+    const errors = validateCreate(createSchema, { [CREATE_NAME]: "Jane", [CREATE_PLAN]: "bad" })
+    expect(errors[CREATE_PLAN]).toBe("Health Plan is invalid")
+  })
+
+  it("returns format errors only when includeRequired is false", () => {
+    const errors = validateCreate(createSchema, { [CREATE_PLAN]: "bad" }, { includeRequired: false })
+    expect(errors[CREATE_PLAN]).toBe("Health Plan is invalid")
+    expect(errors[CREATE_NAME]).toBeUndefined()
+  })
+})
+
+describe("createRequiredPaths", () => {
+  it("is system_fields minus defaulted targets, NOT the leaves' own required", () => {
+    expect(createRequiredPaths(createSchema)).toEqual(new Set([CREATE_NAME]))
+  })
+
+  it("marks a different set than the voice-collection `required` on the real schema", () => {
+    const required = createRequiredPaths(schema)
+    // The reference sections hold half the create-required fields...
+    expect(required).toContain("sections.hospital_information.hospital_address")
+    expect(required).toContain("sections.provider_reference_information.npi")
+    // ...while a voice-required leaf that is not a system field is NOT create-required.
+    const voiceOnly = allLeaves(schema).filter(
+      (l) => l.field.required === true && !required.has(l.path),
+    )
+    expect(voiceOnly.length).toBeGreaterThan(100)
+  })
+})
+
+const titlesOf = (s: FormSchema, v: FormValues) =>
+  missingCreateLeaves(s, v).map((l) => l.field.title)
+
+describe("missingCreateLeaves", () => {
+  it("names the blank required fields in document order", () => {
+    expect(titlesOf(createSchema, {})).toEqual(["Patient Name"])
+    expect(titlesOf(createSchema, { [CREATE_NAME]: "Jane" })).toEqual([])
+  })
+
+  it("reports every unfilled required field of the real schema", () => {
+    expect(missingCreateLeaves(schema, {})).toHaveLength(createRequiredPaths(schema).size)
   })
 })
