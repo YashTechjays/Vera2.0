@@ -185,18 +185,33 @@ async def test_judge_chunks_large_batches_to_bound_enum_size(
     assert all(len(_enum_of(c)) <= 2 for c in stub.generate_calls)
 
 
-async def test_judge_salvages_partials_when_one_chunk_fails(
+async def test_judge_raises_when_a_chunk_error_leaves_coverage_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A single chunk's failure must not discard the verdicts other chunks already
-    produced — the loop degrades gracefully instead of losing everything."""
+    """A chunk that keeps failing so some fields never get a verdict must raise
+    (→ LLM_ERROR review), never return partial — a silently-unjudged required field
+    reads as unsatisfied and redials the payer for data already collected."""
     monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
     extracted = [_ef("a"), _ef("b"), _ef("c")]
-    # chunk 1 (a,b) succeeds; chunk 2 (c) fails every attempt.
-    responses: list[_Queued] = [[_vd("a"), _vd("b")], *([RuntimeError("boom")] * 5)]
+    # chunk 1 (a,b) succeeds; chunk 2 (c) fails every attempt → 'c' never covered.
+    responses: list[_Queued] = [[_vd("a"), _vd("b")], *([RuntimeError("boom")] * 4)]
+    stub = _StubJudgeClient(responses)
+    with pytest.raises(RuntimeError, match="boom"):
+        await stub.judge(extracted=extracted, turns=[])
+
+
+async def test_judge_recovers_when_a_transient_chunk_error_clears_on_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chunk that errors once but succeeds on a later attempt yields full coverage
+    and must NOT raise — the error is incidental once every field is judged."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
+    extracted = [_ef("a"), _ef("b"), _ef("c")]
+    # attempt 1: chunk (a,b) ok, chunk (c) errors; attempt 2: chunk (c) succeeds.
+    responses: list[_Queued] = [[_vd("a"), _vd("b")], RuntimeError("blip"), [_vd("c")]]
     stub = _StubJudgeClient(responses)
     out = await stub.judge(extracted=extracted, turns=[])
-    assert sorted(v.field_path for v in out) == ["a", "b"]
+    assert sorted(v.field_path for v in out) == ["a", "b", "c"]
 
 
 async def test_judge_raises_when_every_call_fails(monkeypatch: pytest.MonkeyPatch) -> None:

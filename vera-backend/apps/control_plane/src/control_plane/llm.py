@@ -184,8 +184,10 @@ class VertexLLMClient(LLMClient):
                         progressed = True
             if not progressed:  # a whole failed/empty attempt — don't spin the rest
                 break
-        # A total wipe caused by errors must surface as an exception so the caller
-        # routes to LLM_ERROR review, not silently redial the payer on "nothing supported".
-        if not by_path and last_error is not None:
+        # An error that left ANY field unjudged must surface so the caller routes to
+        # LLM_ERROR review — otherwise those fields look unsatisfied and the payer is
+        # redialed for data a transient error merely failed to score. A retry that
+        # recovered full coverage clears this (nothing left uncovered).
+        if last_error is not None and any(ef.field_path not in by_path for ef in extracted):
             raise last_error
         return [by_path[ef.field_path] for ef in extracted if ef.field_path in by_path]
