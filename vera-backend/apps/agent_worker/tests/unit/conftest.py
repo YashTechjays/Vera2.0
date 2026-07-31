@@ -3,22 +3,26 @@
 from collections.abc import Iterator
 
 import pytest
-from livekit.agents import Agent
+from livekit.agents import Agent, llm
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from vera_core.observability.otel_testing import install_test_tracer_provider
 
 
-def chat_ctx_texts(agent: Agent) -> list[str]:
-    """The plain-string message contents of an agent's chat_ctx, in order — the
-    turns a handoff must carry forward (used to assert history is preserved)."""
+def ctx_texts(ctx: llm.ChatContext) -> list[str]:
+    """The plain-string message contents of a chat context, in order."""
     return [
         content
-        for item in agent.chat_ctx.items
+        for item in ctx.items
         if item.type == "message"
         for content in item.content
         if isinstance(content, str)
     ]
+
+
+def chat_ctx_texts(agent: Agent) -> list[str]:
+    """An agent's own context texts — the turns a handoff must carry forward."""
+    return ctx_texts(agent.chat_ctx)
 
 
 def pytest_configure(config: pytest.Config) -> None:

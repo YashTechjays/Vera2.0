@@ -1,9 +1,12 @@
 """A supervisor takeover silences the agent permanently — it never resumes."""
 
 from agent_worker.intervention import (
+    _MAX_COACHING_NOTES,
     AgentTakeoverController,
     TakeoverState,
     intervener_present,
+    push_coaching_note,
+    take_pending_coaching_notes,
     takeover_engaged,
 )
 
@@ -88,3 +91,31 @@ def test_on_engage_fires_once() -> None:
     ctl.engage()
     ctl.engage()
     assert calls == [1]
+
+
+def test_pushed_notes_are_taken_in_order() -> None:
+    session = _FakeSession()
+    push_coaching_note(session, "note one")
+    push_coaching_note(session, "note two")
+
+    assert take_pending_coaching_notes(session) == ["note one", "note two"]
+
+
+def test_taking_notes_drains_the_queue() -> None:
+    """A note is one-shot: taken once, then gone, so it can't re-issue itself (VR2-97)."""
+    session = _FakeSession()
+    push_coaching_note(session, "note one")
+
+    assert take_pending_coaching_notes(session) == ["note one"]
+    assert take_pending_coaching_notes(session) == []
+
+
+def test_push_coaching_note_evicts_the_oldest_past_the_cap() -> None:
+    """Past the cap the oldest note is dropped, not the newest."""
+    session = _FakeSession()
+    overflow = 2
+    notes = [f"note {i}" for i in range(_MAX_COACHING_NOTES + overflow)]
+    for note in notes:
+        push_coaching_note(session, note)
+
+    assert take_pending_coaching_notes(session) == notes[overflow:]
