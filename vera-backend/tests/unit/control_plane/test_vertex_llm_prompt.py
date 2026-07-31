@@ -2,6 +2,7 @@ from typing import Any, cast
 
 import pytest
 
+from control_plane import llm as llm_mod
 from control_plane.llm import (
     _JUDGE_MAX_ATTEMPTS,
     VertexLLMClient,
@@ -23,18 +24,25 @@ def _vd(path: str) -> dict[str, Any]:
     return {"field_path": path, "supported": True, "confidence": 90, "evidence": "ok"}
 
 
-class _StubJudgeClient(VertexLLMClient):
-    """VertexLLMClient with the Gemini call stubbed — each _generate returns the
-    next queued response and records the (prompt, schema) it was called with."""
+# Each queued item is either a response list OR an Exception to raise on that _generate call.
+_Queued = list[dict[str, Any]] | Exception
 
-    def __init__(self, responses: list[list[dict[str, Any]]]) -> None:
+
+class _StubJudgeClient(VertexLLMClient):
+    """VertexLLMClient with the Gemini call stubbed — each _generate returns (or
+    raises) the next queued item and records the (prompt, schema) it saw."""
+
+    def __init__(self, responses: list[_Queued]) -> None:
         self._responses = list(responses)
         self._model = "fake-model"
         self.generate_calls: list[tuple[str, dict[str, Any]]] = []
 
     async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
         self.generate_calls.append((prompt, schema))
-        return self._responses.pop(0) if self._responses else []
+        item: _Queued = self._responses.pop(0) if self._responses else []
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 def _enum_of(call: tuple[str, dict[str, Any]]) -> list[str]:
@@ -137,12 +145,22 @@ async def test_judge_enum_constrains_field_path_to_pending_paths() -> None:
     assert field_path_schema["format"] == "enum"
 
 
-async def test_judge_stops_after_max_attempts_when_a_field_never_returns() -> None:
-    """A field the model never returns must not loop forever: bail after the cap
-    and return the verdicts gathered so far."""
-    stub = _StubJudgeClient([[_vd("a")]] * (_JUDGE_MAX_ATTEMPTS + 5))
+async def test_judge_stops_when_an_attempt_makes_no_progress() -> None:
+    """Once a re-judge of the still-missing paths yields no new verdict, bail —
+    retrying the same paths again won't help."""
+    stub = _StubJudgeClient([[_vd("a")], []])  # 'b' never comes back
     out = await stub.judge(extracted=[_ef("a"), _ef("b")], turns=[])
     assert [v.field_path for v in out] == ["a"]
+    assert len(stub.generate_calls) == 2
+
+
+async def test_judge_is_bounded_by_max_attempts() -> None:
+    """Even when every attempt makes SOME progress, the loop never exceeds the cap;
+    a field still missing at the cap is returned as partial coverage."""
+    extracted = [_ef("a"), _ef("b"), _ef("c"), _ef("d")]
+    stub = _StubJudgeClient([[_vd("a")], [_vd("b")], [_vd("c")], [_vd("d")]])
+    out = await stub.judge(extracted=extracted, turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b", "c"]  # 'd' unreached at the cap
     assert len(stub.generate_calls) == _JUDGE_MAX_ATTEMPTS
 
 
@@ -151,6 +169,52 @@ async def test_judge_returns_empty_without_calling_llm_when_nothing_extracted() 
     out = await stub.judge(extracted=[], turns=[])
     assert out == []
     assert stub.generate_calls == []
+
+
+async def test_judge_chunks_large_batches_to_bound_enum_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch larger than the chunk size is split across calls, each enum-capped —
+    a 180-value enum can 400 on Vertex and sink the whole form to review."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
+    extracted = [_ef("a"), _ef("b"), _ef("c")]
+    stub = _StubJudgeClient([[_vd("a"), _vd("b")], [_vd("c")]])
+    out = await stub.judge(extracted=extracted, turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b", "c"]
+    assert len(stub.generate_calls) == 2  # two chunks, one attempt
+    assert all(len(_enum_of(c)) <= 2 for c in stub.generate_calls)
+
+
+async def test_judge_salvages_partials_when_one_chunk_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single chunk's failure must not discard the verdicts other chunks already
+    produced — the loop degrades gracefully instead of losing everything."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
+    extracted = [_ef("a"), _ef("b"), _ef("c")]
+    # chunk 1 (a,b) succeeds; chunk 2 (c) fails every attempt.
+    responses: list[_Queued] = [[_vd("a"), _vd("b")], *([RuntimeError("boom")] * 5)]
+    stub = _StubJudgeClient(responses)
+    out = await stub.judge(extracted=extracted, turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b"]
+
+
+async def test_judge_raises_when_every_call_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A total wipe caused by errors must surface as an exception so the caller
+    routes to LLM_ERROR review — never silently return [] and let the payer be redialed."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
+    stub = _StubJudgeClient([RuntimeError("boom")] * 6)
+    with pytest.raises(RuntimeError, match="boom"):
+        await stub.judge(extracted=[_ef("a"), _ef("b")], turns=[])
+
+
+async def test_judge_ignores_verdicts_outside_the_asked_chunk() -> None:
+    """A verdict for a path not in the chunk (an unenforced-enum rewording) is
+    dropped, never overwriting or masquerading as coverage."""
+    extracted = [_ef("a"), _ef("b")]
+    stub = _StubJudgeClient([[_vd("a"), _vd("zzz.bogus"), _vd("b")]])
+    out = await stub.judge(extracted=extracted, turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b"]
 
 
 def test_loads_response_parses_valid_json() -> None:
