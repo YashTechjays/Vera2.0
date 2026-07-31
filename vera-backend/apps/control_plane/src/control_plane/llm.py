@@ -54,7 +54,8 @@ def build_judge_prompt(extracted: list[ExtractedField], turns: list[TranscriptTu
     ]
     return (
         "For each extracted field, decide whether the transcript SUPPORTS the value. "
-        "Return supported (bool), 0-100 confidence, and a short evidence quote.\n\n"
+        "Return exactly one entry for EVERY extracted field_path — never omit any — "
+        "with supported (bool), 0-100 confidence, and a short evidence quote.\n\n"
         f"extracted:\n{json.dumps(items)}\n\ntranscript:\n{_turns_block(turns)}"
     )
 
@@ -84,19 +85,29 @@ _EXTRACT_SCHEMA: dict[str, Any] = {
         "required": ["field_path", "value", "confidence", "evidence_seq"],
     },
 }
-_JUDGE_SCHEMA: dict[str, Any] = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "field_path": {"type": "string"},
-            "supported": {"type": "boolean"},
-            "confidence": {"type": "integer"},
-            "evidence": {"type": "string"},
+# Gemini drops or rewords items from a large free-form-keyed array (it truncates
+# the tail on the 40+-field infertility forms), leaving those answers with no
+# verdict → no FieldEvaluation → read as unsatisfied → re-asked on retry and the
+# payer re-dialed. Constraining field_path to an enum of the exact asked paths
+# makes a reworded verdict impossible, and judge() re-runs on the still-missing
+# subset (a smaller batch the model does return in full) up to this many passes.
+_JUDGE_MAX_ATTEMPTS = 3
+
+
+def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "field_path": {"type": "string", "enum": field_paths},
+                "supported": {"type": "boolean"},
+                "confidence": {"type": "integer"},
+                "evidence": {"type": "string"},
+            },
+            "required": ["field_path", "supported", "confidence", "evidence"],
         },
-        "required": ["field_path", "supported", "confidence", "evidence"],
-    },
-}
+    }
 
 
 class VertexLLMClient(LLMClient):
@@ -137,5 +148,15 @@ class VertexLLMClient(LLMClient):
     ) -> list[JudgeVerdict]:
         if not extracted:
             return []
-        data = await self._generate(build_judge_prompt(extracted, turns), _JUDGE_SCHEMA)
-        return parse_judge_response(data)
+        by_path: dict[str, JudgeVerdict] = {}
+        for _ in range(_JUDGE_MAX_ATTEMPTS):
+            pending = [ef for ef in extracted if ef.field_path not in by_path]
+            if not pending:
+                break
+            data = await self._generate(
+                build_judge_prompt(pending, turns),
+                _judge_schema([ef.field_path for ef in pending]),
+            )
+            for v in parse_judge_response(data):
+                by_path[v.field_path] = v
+        return [by_path[ef.field_path] for ef in extracted if ef.field_path in by_path]

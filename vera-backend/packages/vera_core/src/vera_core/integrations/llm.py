@@ -44,7 +44,12 @@ class LLMClient(Protocol):
 
     async def judge(
         self, *, extracted: list[ExtractedField], turns: list[TranscriptTurn]
-    ) -> list[JudgeVerdict]: ...
+    ) -> list[JudgeVerdict]:
+        """Return one verdict per extracted field (best-effort). A dropped verdict
+        strands its answer with no FieldEvaluation, so downstream reads it as
+        unsatisfied and re-asks it — an implementation MUST push coverage as close
+        to complete as it can, not fire one lossy batch."""
+        ...
 
 
 class FakeLLMClient:
