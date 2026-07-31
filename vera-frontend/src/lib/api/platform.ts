@@ -25,10 +25,20 @@ export type CreateElevationInput = {
   duration_minutes: number
 }
 
+/** A deactivated tenant's slug stops resolving at login, so its users cannot sign in. */
+export type TenantStatus = "active" | "deactivated"
+
+/** What `listTenants` may ask for. "all" is what the management table needs; the
+ *  elevation picker relies on the active-only default and must never pass this. */
+export type TenantListStatus = TenantStatus | "all"
+
 export type TenantSummary = {
   id: string
   name: string
   slug: string
+  status: TenantStatus
+  region: string | null
+  created_at: string
   /** AI form-filling (observer) master switch for this tenant. `null` means the API did
    *  not disclose it — the caller lacks `platform:tenants:manage` — not that it is off. */
   observer_enabled: boolean | null
@@ -40,10 +50,150 @@ export type TenantSummary = {
   retry_fill_threshold: number | null
 }
 
-/** Active tenants the operator can elevate into (the tenant picker source) and manage
- *  on the Platform Settings screen. */
-export function listTenants() {
-  return apiRequest<TenantSummary[]>("/platform/tenants")
+/** Full settings for one tenant. Nothing is withheld here — the detail route requires
+ *  `platform:tenants:manage`, unlike the list which also serves the elevation picker. */
+export type TenantDetail = {
+  id: string
+  name: string
+  slug: string
+  status: TenantStatus
+  region: string | null
+  created_at: string
+  observer_enabled: boolean
+  auto_retry_enabled: boolean
+  retry_fill_threshold: number
+  max_agents_per_va: number
+  max_concurrent_calls: number
+  max_retries: number
+  queue_expiry_hours: number
+  recording_retention_days: number | null
+}
+
+/** `slug` is immutable after creation — it is part of the tenant's login URL. */
+export type CreateTenantInput = {
+  name: string
+  slug: string
+  region?: string
+}
+
+/** Every editable setting. `slug` and `status` are deliberately absent: the slug is
+ *  immutable, and status changes go through deactivate/reactivate. */
+export type UpdateTenantInput = Partial<{
+  name: string
+  region: string | null
+  observer_enabled: boolean
+  auto_retry_enabled: boolean
+  retry_fill_threshold: number
+  max_agents_per_va: number
+  max_concurrent_calls: number
+  max_retries: number
+  queue_expiry_hours: number
+  recording_retention_days: number | null
+}>
+
+/** Tenants for the elevation picker, the Platform Settings screen, and the Tenants
+ *  admin table. Defaults to ACTIVE ONLY — pass `status` to widen, which requires
+ *  `platform:tenants:manage` (the picker must keep the default so a switched-off
+ *  client can never be elevated into). */
+export function listTenants(params?: { status?: TenantListStatus }) {
+  const query = params?.status ? `?status=${params.status}` : ""
+  return apiRequest<TenantSummary[]>(`/platform/tenants${query}`)
+}
+
+function tenantPath(tenantId: string, suffix = ""): string {
+  return `/platform/tenants/${encodeURIComponent(tenantId)}${suffix}`
+}
+
+/** Create a client organisation. Does NOT invite anyone — use `inviteTenantUser` after.
+ *  409 if the slug is taken. Requires `platform:tenants:manage`. */
+export function createTenant(input: CreateTenantInput) {
+  return apiRequest<TenantDetail>("/platform/tenants", {
+    method: "POST",
+    body: input,
+    headers: { "Idempotency-Key": randomId() },
+  })
+}
+
+export function getTenant(tenantId: string) {
+  return apiRequest<TenantDetail>(tenantPath(tenantId))
+}
+
+/** Omitted fields stay unchanged. Requires `platform:tenants:manage`. */
+export function updateTenant(tenantId: string, patch: UpdateTenantInput) {
+  return apiRequest<TenantDetail>(tenantPath(tenantId), {
+    method: "PATCH",
+    body: patch,
+    headers: { "Idempotency-Key": randomId() },
+  })
+}
+
+/** Blocks NEW logins for this tenant's users; sessions already open run to expiry. */
+export function deactivateTenant(tenantId: string) {
+  return apiRequest<TenantDetail>(tenantPath(tenantId, "/deactivate"), {
+    method: "POST",
+    headers: { "Idempotency-Key": randomId() },
+  })
+}
+
+export function reactivateTenant(tenantId: string) {
+  return apiRequest<TenantDetail>(tenantPath(tenantId, "/reactivate"), {
+    method: "POST",
+    headers: { "Idempotency-Key": randomId() },
+  })
+}
+
+export type TenantUser = {
+  id: string
+  email: string
+  name: string
+  status: string
+  roles: string[]
+}
+
+export type InviteTenantUserInput = {
+  email: string
+  name: string
+  roleIds: string[]
+  sendEmail: boolean
+}
+
+export type InviteTenantUserResult = {
+  user_id: string
+  email: string
+  invite_url: string
+  email_sent: boolean
+}
+
+export type TenantRole = {
+  id: string
+  name: string
+  is_system: boolean
+}
+
+/** Roles assignable inside one tenant: the GLOBAL system roles only, minus the
+ *  platform-tier ones. A tenant's own custom roles are unreachable from the platform
+ *  plane (their RLS needs a tenant context) — the tenant's Users screen assigns those. */
+export function listTenantRoles(tenantId: string) {
+  return apiRequest<TenantRole[]>(tenantPath(tenantId, "/roles"))
+}
+
+export function listTenantUsers(tenantId: string) {
+  return apiRequest<TenantUser[]>(tenantPath(tenantId, "/users"))
+}
+
+/** Invite a user INTO a tenant from the platform plane — no elevation grant needed.
+ *  Requires `platform:tenants:manage`. */
+export function inviteTenantUser(tenantId: string, input: InviteTenantUserInput) {
+  return apiRequest<InviteTenantUserResult>(tenantPath(tenantId, "/users/invitations"), {
+    method: "POST",
+    body: {
+      email: input.email,
+      name: input.name,
+      role_ids: input.roleIds,
+      send_email: input.sendEmail,
+    },
+    headers: { "Idempotency-Key": randomId() },
+  })
 }
 
 export type TenantObserver = {
@@ -54,14 +204,11 @@ export type TenantObserver = {
 /** Toggle a tenant's AI form-filling (observer) feature. Requires
  *  `platform:tenants:manage`. */
 export function setTenantObserverEnabled(tenantId: string, enabled: boolean) {
-  return apiRequest<TenantObserver>(
-    `/platform/tenants/${encodeURIComponent(tenantId)}/observer`,
-    {
-      method: "POST",
-      body: { enabled },
-      headers: { "Idempotency-Key": randomId() },
-    },
-  )
+  return apiRequest<TenantObserver>(tenantPath(tenantId, "/observer"), {
+    method: "POST",
+    body: { enabled },
+    headers: { "Idempotency-Key": randomId() },
+  })
 }
 
 export type TenantRetryConfig = {
@@ -76,14 +223,11 @@ export function setTenantRetryConfig(
   tenantId: string,
   patch: { auto_retry_enabled?: boolean; retry_fill_threshold?: number },
 ) {
-  return apiRequest<TenantRetryConfig>(
-    `/platform/tenants/${encodeURIComponent(tenantId)}/retry-config`,
-    {
-      method: "POST",
-      body: patch,
-      headers: { "Idempotency-Key": randomId() },
-    },
-  )
+  return apiRequest<TenantRetryConfig>(tenantPath(tenantId, "/retry-config"), {
+    method: "POST",
+    body: patch,
+    headers: { "Idempotency-Key": randomId() },
+  })
 }
 
 /** All active (un-ended, un-expired) grants. */

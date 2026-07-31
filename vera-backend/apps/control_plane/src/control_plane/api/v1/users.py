@@ -28,6 +28,7 @@ from control_plane.api.v1.common import (
     TenantSession,
     build_role_grant,
     roles_grant_platform_permission,
+    send_invite_email,
 )
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.invitations import INVITE_NS, InviteData
@@ -181,23 +182,14 @@ async def invite_user(
 
     email_sent = False
     if body.send_email:
-        try:
-            await email_sender.send(
-                EmailMessage(
-                    to=email,
-                    subject="You're invited to Vera",
-                    body=(
-                        f"Hello{(' ' + body.name) if body.name else ''},\n\n"
-                        "You've been invited to Vera. Set your password using the link below "
-                        f"(valid for {settings.invite_ttl_seconds // 3600} hours):\n\n"
-                        f"{invite_url}\n\n"
-                        "If you didn't expect this, you can ignore this email."
-                    ),
-                )
-            )
-            email_sent = True
-        except Exception:
-            logger.warning("invitation email to %s could not be sent", email, exc_info=True)
+        email_sent = await send_invite_email(
+            email_sender,
+            logger,
+            to=email,
+            name=body.name,
+            invite_url=invite_url,
+            ttl_seconds=settings.invite_ttl_seconds,
+        )
 
     await emit_auth_event(
         audit,

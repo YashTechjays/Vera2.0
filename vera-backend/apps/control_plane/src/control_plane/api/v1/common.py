@@ -11,6 +11,7 @@ home — so adding a field or changing the contract is one edit, not many.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
@@ -38,7 +39,7 @@ from control_plane.deps import (
     self_scoped_session,
     tenant_scoped_session,
 )
-from control_plane.email import EmailSender
+from control_plane.email import EmailMessage, EmailSender
 from control_plane.request_context import current_request_id
 from vera_core.audit import AuditRecord, AuditSink, AuthAuditSink
 from vera_core.config import Settings
@@ -137,6 +138,39 @@ async def roles_grant_platform_permission(session: AsyncSession, role_ids: Itera
     `assign_role` and `invite_user` to block granting a platform-tier role at the
     tenant level."""
     return bool(await platform_tier_role_ids(session, role_ids))
+
+
+async def send_invite_email(
+    email_sender: EmailSender,
+    logger: logging.Logger,
+    *,
+    to: str,
+    name: str,
+    invite_url: str,
+    ttl_seconds: int,
+) -> bool:
+    """Send the invite email, shared by the tenant-admin `invite_user` and the platform
+    `invite_tenant_user`. Returns whether it went out; a delivery failure is swallowed,
+    never raised, because the invited user row already exists and the caller still gets
+    a copyable `invite_url` back."""
+    try:
+        await email_sender.send(
+            EmailMessage(
+                to=to,
+                subject="You're invited to Vera",
+                body=(
+                    f"Hello{(' ' + name) if name else ''},\n\n"
+                    "You've been invited to Vera. Set your password using the link below "
+                    f"(valid for {ttl_seconds // 3600} hours):\n\n"
+                    f"{invite_url}\n\n"
+                    "If you didn't expect this, you can ignore this email."
+                ),
+            )
+        )
+    except Exception:
+        logger.warning("invitation email to %s could not be sent", to, exc_info=True)
+        return False
+    return True
 
 
 def build_role_grant(
