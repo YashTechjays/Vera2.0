@@ -100,7 +100,8 @@ def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
         "items": {
             "type": "object",
             "properties": {
-                "field_path": {"type": "string", "enum": field_paths},
+                # Gemini enforces an enum only with format "enum"; `enum` alone is advisory.
+                "field_path": {"type": "string", "format": "enum", "enum": field_paths},
                 "supported": {"type": "boolean"},
                 "confidence": {"type": "integer"},
                 "evidence": {"type": "string"},

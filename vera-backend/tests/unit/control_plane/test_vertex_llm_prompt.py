@@ -132,6 +132,9 @@ async def test_judge_enum_constrains_field_path_to_pending_paths() -> None:
     await stub.judge(extracted=extracted, turns=[])
     assert _enum_of(stub.generate_calls[0]) == ["a", "b", "c"]
     assert _enum_of(stub.generate_calls[1]) == ["b", "c"]
+    # Vertex only enforces the enum when format is "enum" (google-genai contract).
+    field_path_schema = stub.generate_calls[0][1]["items"]["properties"]["field_path"]
+    assert field_path_schema["format"] == "enum"
 
 
 async def test_judge_stops_after_max_attempts_when_a_field_never_returns() -> None:
