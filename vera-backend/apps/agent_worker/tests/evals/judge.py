@@ -45,7 +45,11 @@ DIMENSIONS: dict[str, str] = {
     "tool_calls": (
         "Was every tool call correct? task_complete only once the task was genuinely done; "
         "press_keypad only for digits the menu actually offered and never invented; end_call only "
-        "at the very end; gap_complete only after the follow-up questions were re-asked."
+        "at the very end; gap_complete only after the follow-up questions were re-asked. "
+        "A TOOL line carries VERA's own stated reason in parentheses. Judge the reason too: "
+        "one that the transcript contradicts, or that does not justify the call it was given "
+        "for, is a FAIL even when the call itself looks defensible. A TOOL line with no reason "
+        "is a defect in the harness, not in the call — ignore it."
     ),
     "ivr_navigation": (
         "Did VERA work the phone menu correctly, and hand off to the plan ONLY when a live human "

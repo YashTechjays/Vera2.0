@@ -51,7 +51,7 @@ class TestHandoff:
         mock_session = MagicMock()
         mock_session.interrupt = AsyncMock()
         with _session_patch(navigator, mock_session), tracer.start_as_current_span("probe"):
-            handoff = await navigator.transfer_to_verification()
+            handoff = await navigator.transfer_to_verification("a named human greeted the caller")
         assert handoff is verifier
         spans = [s for s in otel_spans.get_finished_spans() if s.name == "probe"]
         assert spans, "probe span not found in finished spans"

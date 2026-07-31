@@ -5,6 +5,7 @@ rendering is what the evaluator LLM reads and cites line numbers from, so an ord
 silently mis-grades every run — which is exactly what happened before `Turn.events` existed.
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,6 +17,7 @@ class _Item:
     role: str = "assistant"
     text_content: str | None = None
     name: str = ""
+    arguments: str = "{}"  # livekit ships a function call's args as a JSON string
 
 
 @dataclass
@@ -43,8 +45,12 @@ def _said(text: str) -> _Event:
     return _Event("message", _Item(text_content=text))
 
 
-def _called(name: str) -> _Event:
-    return _Event("function_call", _Item(name=name))
+def _called(name: str, arguments: str = "{}") -> _Event:
+    return _Event("function_call", _Item(name=name, arguments=arguments))
+
+
+def _called_because(name: str, reason: str) -> _Event:
+    return _called(name, json.dumps({"reason": reason}))
 
 
 def _handed_off() -> _Event:
@@ -101,6 +107,46 @@ class TestEventOrder:
         # renumber every later line the judge cites.
         turn = collect("Hi.", _Result([_Event("message", _Item(text_content=None))]))
         assert turn.events == [TurnEvent("vera", "")]
+
+
+class TestToolReasons:
+    """Every tool takes a required `reason`. It is the only record of WHY the model acted, and it
+    reaches the judge solely through this rendering — so a swallowed reason is a silent loss of
+    the evidence the `tool_calls` dimension now grades on."""
+
+    def test_the_reason_renders_beside_the_tool_name(self) -> None:
+        turn = collect(
+            "That's everything on my end.",
+            _Result([_called_because("task_complete", "the rep answered every question")]),
+        )
+        assert turn.lines()[-1] == "TOOL : task_complete (the rep answered every question)"
+
+    def test_a_call_without_a_reason_renders_as_before(self) -> None:
+        # Belt-and-braces: the schema requires `reason`, but a model that omits it must still
+        # produce a usable transcript rather than a KeyError mid-run.
+        assert collect("Ok.", _Result([_called("end_call")])).lines()[-1] == "TOOL : end_call"
+
+    def test_malformed_arguments_degrade_to_the_bare_tool_line(self) -> None:
+        # A truncated tool-call stream is a provider-side flake; losing the whole eval run to it
+        # would cost far more than losing one reason.
+        for arguments in ('{"reason": ', "not json at all", '["reason"]'):
+            turn = collect("Go on.", _Result([_called("give_up", arguments)]))
+            assert turn.lines()[-1] == "TOOL : give_up"
+
+    def test_a_blank_reason_is_not_rendered_as_empty_parentheses(self) -> None:
+        turn = collect("Hi.", _Result([_called_because("gap_complete", "   ")]))
+        assert turn.lines()[-1] == "TOOL : gap_complete"
+
+    def test_other_arguments_do_not_leak_into_the_line(self) -> None:
+        # press_keypad's `digits` can be a member ID; only `reason` is ever transcribed.
+        event = _called("press_keypad", json.dumps({"digits": "12345", "reason": "provider gate"}))
+        turn = collect("Menu.", _Result([event]))
+        assert turn.lines()[-1] == "TOOL : press_keypad (provider gate)"
+
+    def test_the_tools_projection_still_returns_bare_names(self) -> None:
+        # Assertions across the eval suite match on tool name; the reason must not break them.
+        turn = collect("Sure.", _Result([_called_because("press_keypad", "the menu offered 1")]))
+        assert turn.tools == ["press_keypad"]
 
 
 class TestUnknownEvents:

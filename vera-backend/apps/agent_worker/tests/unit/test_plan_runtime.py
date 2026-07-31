@@ -2,7 +2,9 @@
 skip-scan on applicable_when, wrap-up, and the agent-owned cursor write."""
 
 import asyncio
+import functools
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -90,8 +92,11 @@ def _controller(
     return controller, state
 
 
-def _tool(agent: Agent, name: str) -> FunctionTool:
-    return next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+def _tool(agent: Agent, name: str) -> Callable[[], Awaitable[Any]]:
+    """The named tool, pre-bound with a `reason` — every tool requires one, and no test here
+    cares what it says (the reason is transcript evidence, and nothing in the runtime reads it)."""
+    tool = next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+    return functools.partial(tool, reason="the task's questions are all answered")
 
 
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:

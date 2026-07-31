@@ -40,6 +40,7 @@ from agent_worker.prompt import (
     CLOSING_DISCIPLINE,
     HANDOFF_DISCIPLINE,
     SCOPE_DISCIPLINE,
+    TOOL_REASON_ARG,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
@@ -215,10 +216,11 @@ class PlanTaskAgent(Agent):
             "question in the current task has been answered or the representative "
             "has confirmed they cannot answer what remains. Never call it to skip "
             "questions that are still answerable, and never in the same turn as a "
-            "question — the representative's answer must arrive first."
+            "question — the representative's answer must arrive first. " + TOOL_REASON_ARG
         ),
     )
-    async def _task_complete(self) -> Agent | str:
+    async def _task_complete(self, reason: str) -> Agent | str:
+        # `reason` is unused here on purpose — see VeraAgent._end_call.
         if takeover_engaged(self.session):
             # A str is a tool result, so the plan parks here. Returning `self` would
             # re-fire on_enter and speak the intro again.
@@ -326,10 +328,11 @@ class GapTaskAgent(Agent):
             "Finish re-asking the outstanding questions and move on. Call this once "
             "you have re-asked every question you were given — whether or not the "
             "representative could answer them — and never in the same turn as a "
-            "question, since their answer must arrive first."
+            "question, since their answer must arrive first. " + TOOL_REASON_ARG
         ),
     )
-    async def _gap_complete(self) -> Agent | str:
+    async def _gap_complete(self, reason: str) -> Agent | str:
+        # `reason` is unused here on purpose — see VeraAgent._end_call.
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
         successor = await self._controller.advance_gap_from(self._task_index)

@@ -29,6 +29,12 @@ Cartesia Sonic 3.5 sounds natural from plain prose, so keep writing plain senten
 Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature and will be read aloud). Never speak a tag name out loud. Never wrap a tool call in a tag."""
 
 
+# Appended to every function tool's description. The reason is read by the eval harness and
+# the evaluator LLM; it is deliberately kept out of logs and spans, so the no-PHI sentence is
+# belt-and-braces rather than the thing that keeps it compliant.
+TOOL_REASON_ARG = """Pass `reason`: one short sentence on why you are calling this tool now, in the third person (e.g. "the representative confirmed no coverage questions remain"). State the call-state reason only — never the member's name, ID, date of birth, or any clinical detail."""
+
+
 HANDOFF_DISCIPLINE = """HANDOFF DISCIPLINE
 Never ask a question and finish the task in the same turn. If you ask something, that turn ends with the question — wait for the representative's answer, and only call task_complete (or gap_complete) on a later turn, once nothing on the list is still awaiting a reply. Completing while an answer is still owed to you cuts the representative off and loses what they say next."""
 

@@ -204,7 +204,8 @@ async def _run_call(scenario: Scenario) -> CallRun:
         rep_llm,
         AgentSession(userdata=TakeoverState(), llm=vera_llm) as session,
     ):
-        with mock_tools(IvrNavigatorAgent, {"press_keypad": lambda digits: "Sent the tones."}):
+        mocked = {"press_keypad": lambda digits, reason: "Sent the tones."}
+        with mock_tools(IvrNavigatorAgent, mocked):
             await session.start(make_entry_agent(controller))
             for machine_turn in [*IVR_TURNS, HUMAN_PICKUP]:
                 turn = collect(machine_turn, await session.run(user_input=machine_turn))

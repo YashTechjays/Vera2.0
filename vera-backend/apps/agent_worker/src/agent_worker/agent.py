@@ -28,7 +28,11 @@ from livekit.agents import Agent, llm
 from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_agent import IvrNavigatorAgent
 from agent_worker.ivr_prompt import parse_agent_context, parse_ivr_playbook
-from agent_worker.prompt import build_voice_lab_instructions, resolve_voice_lab_greeting
+from agent_worker.prompt import (
+    TOOL_REASON_ARG,
+    build_voice_lab_instructions,
+    resolve_voice_lab_greeting,
+)
 from vera_core.schemas import PersonaTweak
 
 if TYPE_CHECKING:
@@ -49,11 +53,15 @@ class VeraAgent(Agent):
         description=(
             "End the phone call. Call this tool IMMEDIATELY after you say your "
             "closing line (e.g. 'thanks so much for your help, have a good one'). "
-            "This hangs up the call for all participants."
+            "This hangs up the call for all participants. " + TOOL_REASON_ARG
         ),
     )
-    async def _end_call(self) -> str | None:
+    async def _end_call(self, reason: str) -> str | None:
         """Drain pending TTS audio then shut down the session.
+
+        `reason` is unused here on purpose: it exists so the model's justification lands on the
+        tool-call item, which the eval harness renders. It is never logged (it is model-authored
+        text about live call state, so it is treated as PHI-bearing).
 
         Returns None on success ON PURPOSE: a tool that produces output sets
         `reply_required`, and LiveKit then schedules that follow-up turn with `force=True`,

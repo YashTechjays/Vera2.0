@@ -12,6 +12,7 @@ import pytest
 from conftest import chat_ctx_texts
 from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
+from livekit.agents.llm.utils import build_legacy_openai_schema
 from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
@@ -26,7 +27,8 @@ from agent_worker.ivr_agent import (
     ivr_turn_handling,
 )
 from agent_worker.ivr_prompt import SILENCE_TOKEN
-from agent_worker.plan_runtime import PlanRunController, PlanTaskAgent
+from agent_worker.plan_runtime import GapTaskAgent, PlanRunController, PlanTaskAgent
+from agent_worker.prompt import TOOL_REASON_ARG
 from vera_core.forms.call_plan import CallPlan, PlanSession, PlanTask
 from vera_core.schemas import PersonaTweak
 
@@ -51,8 +53,8 @@ def _plan_controller() -> PlanRunController:
 async def _press(agent: IvrNavigatorAgent, digits: str) -> str:
     """Call the press_keypad tool. The @function_tool descriptor binds the method at
     runtime, but its type stub doesn't model that, so cast to the real call signature."""
-    call = cast("Callable[[str], Awaitable[str]]", agent.press_keypad)
-    return await call(digits)
+    call = cast("Callable[[str, str], Awaitable[str]]", agent.press_keypad)
+    return await call(digits, "the menu asked for a selection")
 
 
 class _FakeParticipant:
@@ -158,6 +160,34 @@ def test_vera_agent_carries_only_the_end_call_tool() -> None:
     assert agent.instructions == "do things"
 
 
+def test_every_tool_requires_a_reason() -> None:
+    """The reason is how a run explains itself — the eval transcript renders it and the judge's
+    `tool_calls` dimension grades it. A default on the parameter would make it optional in the
+    schema the model sees, and it would go missing exactly on the calls worth explaining."""
+    controller = _plan_controller()
+    # A one-task plan builds no gap agent (the closing task is never gap-swept), so name it.
+    agents: list[Agent] = [
+        VeraAgent(instructions="x"),
+        _navigator(),
+        *controller.agents,
+        GapTaskAgent(controller, 0),
+    ]
+    tools = [t for a in agents for t in a.tools if isinstance(t, FunctionTool)]
+    for tool in tools:
+        schema = build_legacy_openai_schema(tool, internally_tagged=True)
+        params = cast(dict[str, Any], schema["parameters"])
+        assert "reason" in params["required"], f"{tool.info.name} does not require a reason"
+        assert TOOL_REASON_ARG in (schema["description"] or ""), tool.info.name
+    assert {t.info.name for t in tools} == {
+        "end_call",
+        "task_complete",
+        "gap_complete",
+        "press_keypad",
+        "transfer_to_verification",
+        "give_up",
+    }
+
+
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
     agent = _navigator()
     # navigator carries the generic eligibility/benefits instructions
@@ -186,7 +216,7 @@ async def test_give_up_ends_the_call() -> None:
         t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "give_up"
     )
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
-        result = await give_up_tool()
+        result = await give_up_tool(reason="the menu looped past the full escalation ladder")
     assert result == "Ending the call."  # the tool signals the model the call is over
     mock_session.shutdown.assert_called_once_with(drain=True)
 
@@ -556,8 +586,8 @@ async def test_ivr_hands_off_to_the_first_plan_task_when_a_plan_is_active() -> N
     controller = _plan_controller()
     agent = build_agent({"enable_ivr_navigation": True}, controller=controller)
     assert isinstance(agent, IvrNavigatorAgent)
-    call = cast("Callable[[], Awaitable[Agent]]", agent.transfer_to_verification)
-    handoff = await call()
+    call = cast("Callable[[str], Awaitable[Agent]]", agent.transfer_to_verification)
+    handoff = await call("a named human greeted the caller")
     assert isinstance(handoff, PlanTaskAgent)
     assert handoff is controller.agents[0]
 
@@ -569,6 +599,6 @@ async def test_ivr_handoff_carries_the_navigation_conversation() -> None:
     controller = _plan_controller()
     nav = build_agent({"enable_ivr_navigation": True}, controller=controller)
     nav._chat_ctx.add_message(role="assistant", content="The member ID is POL-661522.")
-    call = cast("Callable[[], Awaitable[Agent]]", nav.transfer_to_verification)
-    handoff = await call()
+    call = cast("Callable[[str], Awaitable[Agent]]", nav.transfer_to_verification)
+    handoff = await call("a named human greeted the caller")
     assert "The member ID is POL-661522." in chat_ctx_texts(handoff)

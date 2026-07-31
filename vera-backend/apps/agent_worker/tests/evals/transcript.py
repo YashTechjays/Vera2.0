@@ -5,6 +5,7 @@ cites line numbers from it, and a human debugging a run reads the same lines. Ke
 the marked eval module also lets it be tested in `just check` — no LLM, no database.
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -16,12 +17,14 @@ class TurnEvent:
     kind: Literal["vera", "tool", "handoff"]
     text: str = ""  # what VERA said, or the tool name
     handoff: tuple[str, str] | None = None  # set only when kind == "handoff"
+    reason: str = ""  # the model's stated why, for kind == "tool"
 
     def render(self) -> str:
         if self.handoff is not None:
             return ">>>> HANDOFF {} -> {}".format(*self.handoff)
         speaker = "VERA" if self.kind == "vera" else "TOOL"
-        return f"{speaker} : {self.text}"
+        why = f" ({self.reason})" if self.reason else ""
+        return f"{speaker} : {self.text}{why}"
 
 
 @dataclass
@@ -53,12 +56,27 @@ class Turn:
         return [f"REP  : {self.rep}", *(e.render() for e in self.events)]
 
 
+def _reason_of(arguments: Any) -> str:
+    """The model's stated reason for a tool call, from the call item's JSON arguments.
+
+    Every tool takes a required `reason`, but a transcript is worth more than a stack trace:
+    a malformed or missing one degrades to an unexplained TOOL line rather than losing the run."""
+    try:
+        parsed = json.loads(arguments)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("reason") or "").strip()
+
+
 def _as_event(ev: Any) -> TurnEvent | None:
     """One `RunResult` event as a TurnEvent, or None for the kinds we do not transcribe."""
     if ev.type == "message" and ev.item.role == "assistant":
         return TurnEvent("vera", ev.item.text_content or "")
     if ev.type == "function_call":
-        return TurnEvent("tool", ev.item.name)
+        reason = _reason_of(getattr(ev.item, "arguments", None))
+        return TurnEvent("tool", ev.item.name, reason=reason)
     if ev.type == "agent_handoff":
         names = (type(ev.old_agent).__name__, type(ev.new_agent).__name__)
         return TurnEvent("handoff", handoff=names)
