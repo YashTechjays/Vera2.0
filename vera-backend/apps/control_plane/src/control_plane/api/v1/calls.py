@@ -13,7 +13,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -92,8 +92,9 @@ from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     PARTICIPANT_MODE_INTERVENER,
     PARTICIPANT_MODE_LISTENER,
-    SUPERVISOR_IDENTITY_PREFIX,
     room_name_for_call,
+    supervisor_identity,
+    supervisor_user_id,
 )
 from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
 from vera_core.services.call_visibility import recording_playable
@@ -139,21 +140,16 @@ def _sse_response(frames: AsyncIterator[str]) -> StreamingResponse:
     )
 
 
-def _supervisor_identity(user_id: UUID) -> str:
-    """LiveKit participant identity for a VA listening in on a call. Uses the
-    shared observer prefix so the worker never treats a supervisor as the call's
-    speaker (see vera_core.observability.correlation.is_observer_identity)."""
-    return f"{SUPERVISOR_IDENTITY_PREFIX}{user_id}"
-
-
 async def _holder_still_present(livekit: LiveKit, room_name: str, holder: UUID) -> bool:
-    """Is the lock holder still in the room? On timeout, assume yes (don't steal)."""
+    """Is the lock holder still in the room? On timeout, assume yes (don't steal).
+    Matches on the user id parsed out of each identity, since the holder may be
+    watching from any of their sessions (identities are session-scoped)."""
     try:
         async with asyncio.timeout(_PRESENCE_PROBE_TIMEOUT):
             identities = (await livekit.room_participant_identities(room_name)) or []
     except TimeoutError:
         return True
-    return _supervisor_identity(holder) in identities
+    return any(supervisor_user_id(identity) == holder for identity in identities)
 
 
 # A just-minted intervene token belongs to a user not yet connected to LiveKit, so
@@ -327,7 +323,7 @@ async def join_token(
             detail=detail,
         )
     )
-    identity = _supervisor_identity(caller.user_id)
+    identity = supervisor_identity(caller.user_id, caller.session_id or uuid4())
     # Watch-only tokens are server-side mute; only ?intervene=true may publish.
     token = livekit.mint_join_token(
         room_name=room_name,

@@ -29,6 +29,26 @@ def _data() -> SessionData:
     )
 
 
+def test_each_session_gets_its_own_id() -> None:
+    """Two logins by one user are distinct sessions — the id is what keeps their
+    LiveKit participant identities from colliding."""
+    assert _data().session_id != _data().session_id
+
+
+def test_session_id_survives_the_store_round_trip() -> None:
+    data = _data()
+    assert SessionData.from_json(data.to_json()).session_id == data.session_id
+
+
+def test_legacy_session_without_session_id_gets_one() -> None:
+    """Sessions minted before this field exists still live in Redis; they must
+    verify, with a synthesized id rather than a KeyError."""
+    legacy = json.loads(_data().to_json())
+    del legacy["session_id"]
+
+    assert SessionData.from_json(json.dumps(legacy)).session_id is not None
+
+
 async def test_mint_session_sets_both_keys() -> None:
     store = InMemorySessionStore()
     token = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)

@@ -36,6 +36,9 @@ class VerifiedIdentity:
     # `tenant_context` derives the operating tenant from the verified session UUID,
     # not this field. None for a platform operator or a slug-less session.
     tenant_slug: str | None = None
+    # This login's non-secret handle (SessionData.session_id) — what tells one user's
+    # concurrent browsers apart. None only outside the session verifier (tests).
+    session_id: UUID | None = None
     claims: dict[str, Any] = field(default_factory=dict)
 
 

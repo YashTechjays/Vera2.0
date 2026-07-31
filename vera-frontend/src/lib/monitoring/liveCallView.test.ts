@@ -77,6 +77,12 @@ describe("participantMode", () => {
     expect(participantMode({ identity: "caller-x" })).toBe("listener")
   })
 
+  it("reads a session-suffixed supervisor identity (two browsers, one account)", () => {
+    // Backend mints supervisor-<user id>~<session id> so LiveKit doesn't evict one
+    // browser when the same account joins from another (see correlation.py).
+    expect(participantMode({ identity: "supervisor-u1~s2" })).toBe("listener")
+  })
+
   it("falls back to agent for unrecognized identities (kind-less agent worker)", () => {
     expect(participantMode({ identity: "vera-agent-abc" })).toBe("agent")
   })
