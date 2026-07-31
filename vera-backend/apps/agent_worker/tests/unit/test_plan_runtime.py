@@ -7,12 +7,12 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from conftest import chat_ctx_texts
+from conftest import chat_ctx_texts, ctx_texts
 from livekit.agents import Agent
-from livekit.agents.llm import FunctionTool
+from livekit.agents.llm import ChatMessage, FunctionTool
 
 from agent_worker.directives import ReAsk, SkipToTask, Terminate
-from agent_worker.intervention import TakeoverState
+from agent_worker.intervention import TakeoverState, push_coaching_note
 from agent_worker.plan_runtime import (
     WRAP_UP_TASK_KEY,
     GapTaskAgent,
@@ -1034,6 +1034,55 @@ async def _walk(controller: PlanRunController, upto: int) -> Agent:
         with _session_patch(agent, MagicMock()):
             current = cast(Agent, await _tool(agent, "task_complete")())
     return current
+
+
+async def _turn_ctx_after_user_turn(agent: Agent, *, pending_note: str | None = None) -> Any:
+    """Run `agent`'s user-turn hook with `pending_note` queued, returning the turn context."""
+    mock_session = MagicMock()
+    with _session_patch(agent, mock_session):
+        if pending_note is not None:
+            push_coaching_note(mock_session, pending_note)
+        turn_ctx = agent.chat_ctx.copy()
+        await agent.on_user_turn_completed(
+            turn_ctx, new_message=ChatMessage(role="user", content=["hi"])
+        )
+    return turn_ctx
+
+
+class TestCoachingNotes:
+    """One test per agent class, because each carries its own `on_user_turn_completed`
+    override; the apply logic itself is tested in test_coaching.py."""
+
+    @pytest.mark.asyncio
+    async def test_plan_task_agent_applies_pending_notes(self) -> None:
+        controller, _ = _controller()
+        turn_ctx = await _turn_ctx_after_user_turn(
+            controller.agents[0], pending_note="coached note"
+        )
+        assert "coached note" in ctx_texts(turn_ctx)
+
+    @pytest.mark.asyncio
+    async def test_gap_task_agent_applies_pending_notes(self) -> None:
+        controller, _ = _controller()
+        turn_ctx = await _turn_ctx_after_user_turn(
+            GapTaskAgent(controller, 0), pending_note="coached note"
+        )
+        assert "coached note" in ctx_texts(turn_ctx)
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_agent_applies_pending_notes(self) -> None:
+        controller, _ = _controller()
+        turn_ctx = await _turn_ctx_after_user_turn(
+            controller.wrap_up_agent, pending_note="coached note"
+        )
+        assert "coached note" in ctx_texts(turn_ctx)
+
+    @pytest.mark.asyncio
+    async def test_no_pending_notes_is_a_noop(self) -> None:
+        controller, _ = _controller()
+        agent = controller.agents[0]
+        turn_ctx = await _turn_ctx_after_user_turn(agent)
+        assert len(turn_ctx.items) == len(agent.chat_ctx.items)
 
 
 class TestPreviousTaskWindow:
