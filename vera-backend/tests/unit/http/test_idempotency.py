@@ -5,14 +5,22 @@ Redis is only a short concurrent-duplicate lock; durable de-dup of late retries 
 a UNIQUE constraint on the resource, not tested here.
 """
 
+import asyncio
+
 import httpx
 import pytest
 from fastapi import Depends, FastAPI
 
-from control_plane.exceptions import CustomAPIException, ExceptionCode, register_exception_handlers
+from control_plane.exceptions import (
+    CustomAPIException,
+    DefaultExceptionCode,
+    ExceptionCode,
+    register_exception_handlers,
+)
 from control_plane.idempotency import (
     InMemoryIdempotencyStore,
     claim_or_conflict,
+    idempotency_guard,
     require_idempotency_key,
 )
 from vera_core.db import uuid7
@@ -65,6 +73,42 @@ async def test_claim_or_conflict_raises_on_contention() -> None:
     with pytest.raises(CustomAPIException) as exc:
         await claim_or_conflict(store, tenant, user, key, _TTL)
     assert exc.value.code is ExceptionCode.IDEMPOTENCY_CONFLICT
+
+
+async def test_guard_releases_the_lock_when_the_body_raises() -> None:
+    """A rejected request created nothing, so its key stays immediately reusable."""
+    store = InMemoryIdempotencyStore()
+    tenant, user, key = uuid7(), uuid7(), "idem-4"
+
+    with pytest.raises(CustomAPIException):
+        async with idempotency_guard(store, tenant, user, key, _TTL):
+            raise CustomAPIException(DefaultExceptionCode.VALIDATION_ERROR)
+
+    assert await store.claim(tenant, user, key, _TTL) is True
+
+
+async def test_guard_holds_the_lock_when_the_body_succeeds() -> None:
+    """The success path is what the lock is for — a duplicate retry still 409s."""
+    store = InMemoryIdempotencyStore()
+    tenant, user, key = uuid7(), uuid7(), "idem-5"
+
+    async with idempotency_guard(store, tenant, user, key, _TTL):
+        pass
+
+    assert await store.claim(tenant, user, key, _TTL) is False
+
+
+async def test_guard_releases_on_cancellation() -> None:
+    """Cancellation (client disconnect) created nothing either — hence the
+    `BaseException` catch, which `Exception` would miss."""
+    store = InMemoryIdempotencyStore()
+    tenant, user, key = uuid7(), uuid7(), "idem-6"
+
+    with pytest.raises(asyncio.CancelledError):
+        async with idempotency_guard(store, tenant, user, key, _TTL):
+            raise asyncio.CancelledError
+
+    assert await store.claim(tenant, user, key, _TTL) is True
 
 
 def _build_app() -> FastAPI:

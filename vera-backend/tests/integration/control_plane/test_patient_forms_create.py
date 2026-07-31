@@ -251,6 +251,34 @@ async def test_create_replayed_idempotency_key_is_rejected(
     assert count == 1
 
 
+async def test_create_frees_the_key_when_the_request_created_nothing(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    ibv_schema: tuple[UUID, UUID],
+    cleanup_forms: None,
+) -> None:
+    """A rejected submit creates no form, so its key must not block the corrected
+    resubmit — the 422 comes from inside `_create_patient_form`, past the claim."""
+    schema_id, _ = ibv_schema
+    headers = _create_headers(rbac_world.admin_token)
+    rejected = await client.post(
+        "/api/v1/patient-forms:create",
+        json={
+            "schema_id": str(schema_id),
+            "intake_payload": {"patient_information": {"patient_name": "Jane Doe"}},
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 422, rejected.text
+
+    corrected = await client.post(
+        "/api/v1/patient-forms:create",
+        json={"schema_id": str(schema_id), "intake_payload": INTAKE_PAYLOAD},
+        headers=headers,  # same Idempotency-Key — this is the user's retry
+    )
+    assert corrected.status_code == 200, corrected.text
+
+
 async def test_create_stale_published_version_returns_409(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

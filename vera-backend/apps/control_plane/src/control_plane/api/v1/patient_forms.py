@@ -50,7 +50,7 @@ from control_plane.exceptions import (
     ExceptionCode,
     NotFoundError,
 )
-from control_plane.idempotency import claim_or_conflict, require_idempotency_key
+from control_plane.idempotency import idempotency_guard, require_idempotency_key
 from control_plane.queueability import ensure_queueable, ensure_va_capacity
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
@@ -389,35 +389,37 @@ async def create_patient_form(
     published version, so an in-app form can never be created against a draft."""
     response.headers["Cache-Control"] = "no-store"
     # `patient_form` has no natural key, so this lock is the only duplicate guard.
-    await claim_or_conflict(
+    # Guarded, not a bare claim: a rejected submit creates nothing, and holding its
+    # key would 409 the user's own corrected resubmit for the rest of the TTL.
+    async with idempotency_guard(
         get_idempotency_store(request),
         tenant_id,
         caller.user_id,
         idempotency_key,
         settings.idempotency_lock_ttl_seconds,
-    )
-    form_schema = (
-        await session.execute(select(FormSchema).where(FormSchema.id == body.schema_id))
-    ).scalar_one_or_none()
-    if form_schema is None:
-        raise NotFoundError(message="unknown form schema")
-    version = await published_schema_version(session, body.schema_id)
-    if version is None:
-        # E.g. demoted between the picker fetch and this submit.
-        raise ConflictError(message="this form schema has no published version")
-    if body.published_version_id is not None and body.published_version_id != version.id:
-        raise ConflictError(
-            message="a newer version of this form schema has been published — "
-            "reopen the form to continue"
-        )
+    ):
+        form_schema = (
+            await session.execute(select(FormSchema).where(FormSchema.id == body.schema_id))
+        ).scalar_one_or_none()
+        if form_schema is None:
+            raise NotFoundError(message="unknown form schema")
+        version = await published_schema_version(session, body.schema_id)
+        if version is None:
+            # E.g. demoted between the picker fetch and this submit.
+            raise ConflictError(message="this form schema has no published version")
+        if body.published_version_id is not None and body.published_version_id != version.id:
+            raise ConflictError(
+                message="a newer version of this form schema has been published — "
+                "reopen the form to continue"
+            )
 
-    created = await _create_patient_form(
-        session,
-        tenant_id=tenant_id,
-        version=version,
-        form_schema=form_schema,
-        intake_payload=body.intake_payload,
-    )
+        created = await _create_patient_form(
+            session,
+            tenant_id=tenant_id,
+            version=version,
+            form_schema=form_schema,
+            intake_payload=body.intake_payload,
+        )
 
     # PHI write by a session user — same FORM_INTAKE event as the sheet path,
     # attributed to the user. Field names/counts/ids only, never values.
