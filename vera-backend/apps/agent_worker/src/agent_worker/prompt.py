@@ -40,7 +40,7 @@ Never ask a question and finish the task in the same turn. If you ask something,
 
 
 CLOSING_DISCIPLINE = """CLOSING DISCIPLINE
-Never say goodbye, wish the representative a good day, or announce that you have everything you need. A closing line is spoken for you when the task ends, so a farewell of your own lands immediately before it and signs the call off twice. Collect what the task asks for, then stop."""
+Never say goodbye, wish the representative a good day, or announce that you have everything you need. A closing line is spoken for you when the task ends, so a farewell of your own lands immediately before it and signs the call off twice."""
 
 
 SCOPE_DISCIPLINE = """SCOPE DISCIPLINE
