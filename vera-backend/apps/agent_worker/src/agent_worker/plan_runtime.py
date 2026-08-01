@@ -24,6 +24,7 @@ never double-swap the active agent.
 
 import asyncio
 import logging
+from collections import Counter
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -84,11 +85,22 @@ def _gap_block(title: str) -> str:
     )
 
 
+def _owning_segment(path: str) -> str:
+    """The segment that owns the leaf, e.g. `...labs.cpt_58340.covered` → `cpt_58340`."""
+    parts = path.split(".")
+    return parts[-2] if len(parts) > 1 else path
+
+
 def _field_lines(fields: list[PlanFieldDescriptor]) -> str:
     """Questions as a bulleted list, naming the expected values where the schema fixes them."""
+    # Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title list
+    # would read "- Covered" four times and name nothing the agent could ask about.
+    title_counts = Counter(field.title for field in fields)
     lines: list[str] = []
     for field in fields:
         line = f"- {field.title}"
+        if title_counts[field.title] > 1:
+            line += f" ({_owning_segment(field.path)})"
         if field.values:
             line += f" (expected one of: {', '.join(field.values)})"
         lines.append(line)
@@ -182,6 +194,7 @@ class PlanTaskAgent(Agent):
         self._task_block = f"# Current task: {self._task.title}\n{self._task.prompt}"
         # Spent once per task: a premature task_complete is refused, a second one is honoured.
         self._completion_refused = False
+        self._rep_turns = 0
         super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
 
     def _build_instructions(self, gating: str = "") -> str:
@@ -261,6 +274,7 @@ class PlanTaskAgent(Agent):
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
+        self._rep_turns += 1
 
     @llm.function_tool(
         name="task_complete",
@@ -307,6 +321,11 @@ class PlanTaskAgent(Agent):
         remains the backstop."""
         outstanding = self._controller.gap_fields(self._task_index)
         if not outstanding or self._completion_refused:
+            return None
+        # The Observer extracts in a detached pass, so the answer to the task's last question is
+        # never on file yet here; judge by turns instead, since N questions cannot have been asked
+        # in fewer than N exchanges. Coarse until answers carry the asking task's index.
+        if self._rep_turns >= len(outstanding):
             return None
         self._completion_refused = True
         logger.info(

@@ -24,6 +24,7 @@ from agent_worker.plan_runtime import (
     PlanRunController,
     PlanTaskAgent,
     WrapUpAgent,
+    _field_lines,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, RequiredWhen
@@ -97,6 +98,13 @@ def _tool(agent: Agent, name: str) -> Callable[[], Awaitable[Any]]:
     cares what it says (the reason is transcript evidence, and nothing in the runtime reads it)."""
     tool = next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
     return functools.partial(tool, reason="the task's questions are all answered")
+
+
+async def _rep_turn(agent: PlanTaskAgent, said: str = "Pat") -> None:
+    """One completed rep turn, as the session would deliver it."""
+    await agent.on_user_turn_completed(
+        agent.chat_ctx.copy(), new_message=ChatMessage(role="user", content=[said])
+    )
 
 
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
@@ -928,6 +936,29 @@ class TestPrematureCompletion:
             assert isinstance(await _tool(agent, "task_complete")(), Agent)
 
     @pytest.mark.asyncio
+    async def test_a_task_that_walked_its_questions_is_not_refused(self) -> None:
+        """A task that took at least as many turns as it has open questions is trusted, because
+        the answer to its last question is never extracted yet when `task_complete` fires."""
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        with _session_patch(agent, MagicMock()):
+            await _rep_turn(agent)
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_a_task_is_still_refused_when_it_asked_less_than_it_owes(self) -> None:
+        # The case the guard exists for: one exchange cannot have answered two open questions.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "No"})  # opens oon_note too
+        agent = controller.agents[2]
+        with _session_patch(agent, MagicMock()):
+            await _rep_turn(agent)
+            result = cast(str, await _tool(agent, "task_complete")())
+        assert "Deductible" in result
+        assert "OON note" in result
+
+    @pytest.mark.asyncio
     async def test_takeover_still_wins_over_the_guard(self) -> None:
         # Under takeover nothing may be spoken, so the refusal must not preempt that check.
         controller, _ = _controller(_gap_plan())
@@ -937,6 +968,24 @@ class TestPrematureCompletion:
             session.userdata.engaged = True
             result = cast(str, await _tool(agent, "task_complete")())
         assert "supervisor" in result
+
+
+class TestFieldLines:
+    """Every CPT code's field is titled "Covered", so a bare-title list names nothing askable."""
+
+    def test_duplicated_titles_are_qualified_by_their_owning_path_segment(self) -> None:
+        lines = _field_lines(
+            [
+                _field("sections.diag.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
+                _field("sections.diag.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
+            ]
+        )
+        assert "- Covered (cpt_58340) (expected one of: Yes, No)" in lines
+        assert "- Covered (cpt_82670) (expected one of: Yes, No)" in lines
+
+    def test_a_unique_title_is_left_alone(self) -> None:
+        lines = _field_lines([_field("sections.intro.rep_name", "Representative name")])
+        assert lines == "- Representative name"
 
 
 class TestGapDetection:
