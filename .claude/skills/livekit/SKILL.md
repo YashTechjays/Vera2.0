@@ -66,9 +66,18 @@ state. Canonical form: `call--<tenant_uuid>--<call_uuid>`.
   (`resolve_thinking_attrs`): `thinking_level="low"` on Gemini 3, `thinking_budget=0` before it —
   pairing the wrong one raises inside the plugin on the first live turn. Latency wins:
   preemptive_generation (fed by Flux eager EOT) + minimal thinking. Keep `EnglishModel` turn
-  detection — dropping it falls back to dumb VAD-silence detection. (1.6.x deprecates that
-  plugin in favour of `livekit.agents.inference.TurnDetector`, which is Cloud-only and
-  therefore off-limits here — see the bright lines. Deprecated, not removed.)
+  detection — dropping it falls back to dumb VAD-silence detection.
+- **`livekit.plugins.turn_detector` is deprecated** (1.6.x) in favour of
+  `livekit.agents.inference.TurnDetector`. Unlike the rest of `inference.*`, that one has a
+  local path and so is NOT automatically off-limits: `version="v1"` calls the LiveKit
+  inference gateway (needs `LIVEKIT_INFERENCE_URL` + api key/secret — off-box, forbidden),
+  while `version="v1-mini"` runs in-process through the native `livekit-local-inference`
+  wheel (`inference/eot/transports.py::_LocalTransport`). Left unset, the version resolves to
+  `v1` only when hosted on Cloud or in `dev`/`console` mode, else `v1-mini` — so a
+  self-hosted `start` worker defaults to the local model. Deprecated, not removed, so no
+  rush; when it is time to migrate, pin `version="v1-mini"` EXPLICITLY rather than relying on
+  that default, and get the boundary call confirmed in review — do not read this note as
+  clearance.
 - **`livekit-agents` must stay `>=1.6.4`.** Below that, an agent handoff desynchronizes the STT
   stream's clock from the audio anchor, so a turn where VAD saw no speech energy gets its
   end-of-turn wait set from a future-dated timestamp — unbounded, never clamped by `max_delay`.
