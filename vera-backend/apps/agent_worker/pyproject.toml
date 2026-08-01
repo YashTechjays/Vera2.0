@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Vera agent worker — LiveKit Agents worker, dispatched to rooms by agent_name"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "livekit-agents[deepgram,google,cartesia,silero,turn-detector]>=1.5.17",
+    "livekit-agents[deepgram,google,cartesia,silero,turn-detector]>=1.6.4",
     "redis>=5.2",
     "vera-core",
 ]

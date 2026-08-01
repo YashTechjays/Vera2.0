@@ -102,7 +102,7 @@ class LiveKitGateway:
         try:
             yield lk
         finally:
-            await lk.aclose()  # type: ignore[no-untyped-call]  # livekit-api missing return annotation
+            await lk.aclose()
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
