@@ -34,12 +34,13 @@ value ("no region set" / "no retention limit") — those two each get their own 
 
 Two things this migration also has to fix before `platform_create_tenant` can work at all:
 
-- `max_agents_per_va`, `max_retries`, `queue_expiry_hours` and `persona_tweak` are NOT NULL
-  but had **no database default** — their defaults lived only as SQLAlchemy Python-side
-  `default=`, which `create_all` does not translate into DDL. Their siblings
-  (`retry_fill_threshold`, `max_concurrent_calls`, `observer_enabled`, `auto_retry_enabled`)
-  already carry server defaults, so this just makes the four consistent and lets an INSERT
-  that names only the identity columns succeed. Adding a DEFAULT never rewrites existing rows.
+- `max_agents_per_va`, `max_retries`, `queue_expiry_hours`, `persona_tweak`,
+  `observer_enabled` and `auto_retry_enabled` are all NOT NULL but had **no database
+  default** — their defaults lived only as SQLAlchemy Python-side `default=`, which
+  `create_all` does not translate into DDL. `retry_fill_threshold` and
+  `max_concurrent_calls` are the only siblings that already carry server defaults; this
+  migration brings the other six in line so an INSERT naming only the identity columns
+  succeeds. Adding a DEFAULT never rewrites existing rows.
 - `id` has no server default either, and the project's ids are **UUIDv7** (ADR-0002) minted
   by `vera_core.db.uuid7`. `gen_random_uuid()` would emit a v4 and break that ordering, so
   the caller passes the id in rather than the function generating one.
@@ -224,12 +225,14 @@ _UPDATE_COLUMNS = (
 )
 
 # NOT NULL columns whose default existed only as a SQLAlchemy Python-side `default=`.
-# Values mirror models/tenant.py exactly; keep the two in step.
+# Values mirror models/tenant.py exactly; keep the six in step.
 _MISSING_SERVER_DEFAULTS = (
     ("max_agents_per_va", "3"),
     ("max_retries", "5"),
     ("queue_expiry_hours", "48"),
     ("persona_tweak", "'{}'::jsonb"),
+    ("observer_enabled", "true"),
+    ("auto_retry_enabled", "true"),
 )
 
 _FUNCTIONS = (

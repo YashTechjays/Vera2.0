@@ -45,6 +45,7 @@ from control_plane.auth.rbac import platform_require
 from control_plane.auth.tenant_slug import is_valid_slug, normalize_slug
 from control_plane.deps import client_ip, get_idempotency_store, platform_scoped_session
 from control_plane.exceptions import (
+    BadRequestError,
     ConflictError,
     CustomAPIException,
     CustomAPIResponse,
@@ -74,6 +75,12 @@ TENANTS_MANAGE = "platform:tenants:manage"
 
 TenantStatus = Literal["active", "deactivated"]
 TenantListStatus = Literal["active", "deactivated", "all"]
+
+
+def _conflict_or_raise(exc: IntegrityError, message: str) -> CustomAPIException:
+    if getattr(exc.orig, "sqlstate", None) == "23505":  # unique_violation
+        return CustomAPIException(DefaultExceptionCode.CONFLICT, message=message)
+    return BadRequestError(message="request rejected")
 
 
 class TenantSummary(BaseModel):
@@ -268,7 +275,7 @@ async def create_tenant(
             session, tenant_id=tenant_id, name=body.name, slug=slug, region=body.region
         )
     except IntegrityError as exc:
-        raise ConflictError(message="a tenant with that slug already exists") from exc
+        raise _conflict_or_raise(exc, "a tenant with that slug already exists") from exc
 
     tenant = await _load_tenant(session, tenant_id)
     await emit_auth_event(
