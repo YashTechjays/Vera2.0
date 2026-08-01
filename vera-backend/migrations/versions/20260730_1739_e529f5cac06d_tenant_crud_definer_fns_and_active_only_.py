@@ -59,7 +59,7 @@ depends_on: str | Sequence[str] | None = None
 DEFINER_ROLE = "vera_definer_owner"
 _APP_ROLE = os.environ.get("VERA_APP_DB_ROLE") or "CURRENT_USER"
 
-_CREATE_SIG = "platform_create_tenant(uuid, text, text, text)"
+_CREATE_SIG = "platform_create_tenant(uuid, text, text, text, uuid)"
 _UPDATE_SIG = (
     "platform_update_tenant(uuid, text, text, boolean, boolean, boolean, numeric,"
     " integer, integer, integer, integer, integer, boolean)"
@@ -67,15 +67,21 @@ _UPDATE_SIG = (
 _STATUS_SIG = "platform_set_tenant_status(uuid, text)"
 _RESOLVE_SIG = "resolve_tenant_by_slug(text)"
 
-# The caller supplies the UUIDv7 id (ADR-0002). Every other column falls to its server
-# default. A duplicate slug surfaces as the tenant slug unique violation, which the router
-# maps to 409 — that constraint is the durable de-dup, not a pre-check here.
+# The caller supplies both UUIDv7 ids (ADR-0002). Every other tenant column falls to its
+# server default. A duplicate slug surfaces as the tenant slug unique violation, which the
+# router maps to 409 — that constraint is the durable de-dup, not a pre-check here.
+#
+# A tenant with no enabled login provider can never be signed into, so creation also opens
+# a default password provider — enabled, no enforced MFA (a super admin can tighten that
+# later the same way an existing tenant's provider is edited). Not optional / not a second
+# step: an operator invited into a brand-new tenant must be able to log in immediately.
 _CREATE_TENANT = """
 CREATE OR REPLACE FUNCTION platform_create_tenant(
     p_id uuid,
     p_name text,
     p_slug text,
-    p_region text
+    p_region text,
+    p_sso_provider_id uuid
 ) RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -88,6 +94,9 @@ BEGIN
 
     INSERT INTO tenant (id, name, slug, status, region)
     VALUES (p_id, p_name, p_slug, 'active', p_region);
+
+    INSERT INTO sso_provider (id, tenant_id, provider_type, display_name, enabled, enforce_mfa)
+    VALUES (p_sso_provider_id, p_id, 'password', 'Password', true, false);
 END;
 $$
 """
@@ -208,6 +217,16 @@ $$
 # Only what platform_create_tenant names in its INSERT.
 _INSERT_COLUMNS = ("id", "name", "slug", "status", "region")
 
+# The default password provider platform_create_tenant opens alongside the tenant row.
+_SSO_PROVIDER_INSERT_COLUMNS = (
+    "id",
+    "tenant_id",
+    "provider_type",
+    "display_name",
+    "enabled",
+    "enforce_mfa",
+)
+
 # Only what platform_update_tenant / platform_set_tenant_status assign. `slug` is absent
 # on purpose: its immutability is enforced by the grant, not just by the SQL text.
 _UPDATE_COLUMNS = (
@@ -251,6 +270,10 @@ def upgrade() -> None:
     op.execute(f"GRANT SELECT (id, status, deleted_at) ON tenant TO {DEFINER_ROLE}")
     op.execute(f"GRANT INSERT ({', '.join(_INSERT_COLUMNS)}) ON tenant TO {DEFINER_ROLE}")
     op.execute(f"GRANT UPDATE ({', '.join(_UPDATE_COLUMNS)}) ON tenant TO {DEFINER_ROLE}")
+    op.execute(
+        f"GRANT INSERT ({', '.join(_SSO_PROVIDER_INSERT_COLUMNS)}) "
+        f"ON sso_provider TO {DEFINER_ROLE}"
+    )
 
     for body, signature in _FUNCTIONS:
         op.execute(body)
@@ -270,6 +293,10 @@ def downgrade() -> None:
         op.execute(f"REVOKE EXECUTE ON FUNCTION {signature} FROM {_APP_ROLE}")
         op.execute(f"DROP FUNCTION IF EXISTS {signature}")
 
+    op.execute(
+        f"REVOKE INSERT ({', '.join(_SSO_PROVIDER_INSERT_COLUMNS)}) "
+        f"ON sso_provider FROM {DEFINER_ROLE}"
+    )
     op.execute(f"REVOKE UPDATE ({', '.join(_UPDATE_COLUMNS)}) ON tenant FROM {DEFINER_ROLE}")
     op.execute(f"REVOKE INSERT ({', '.join(_INSERT_COLUMNS)}) ON tenant FROM {DEFINER_ROLE}")
     op.execute(f"REVOKE SELECT (id, status, deleted_at) ON tenant FROM {DEFINER_ROLE}")

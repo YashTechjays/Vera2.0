@@ -824,7 +824,10 @@ async def accept_invitation(
             )
         provider_row = (
             await session.execute(
-                select(SsoProvider).where(SsoProvider.provider_type == ProviderKind.PASSWORD.value)
+                select(SsoProvider).where(
+                    SsoProvider.tenant_id == tenant_id,
+                    SsoProvider.provider_type == ProviderKind.PASSWORD.value,
+                )
             )
         ).scalar_one_or_none()
         enforce_mfa = provider_row.enforce_mfa if provider_row is not None else False

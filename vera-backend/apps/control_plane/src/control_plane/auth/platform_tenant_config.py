@@ -11,19 +11,29 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vera_core.db import uuid7
+
 
 async def create_tenant(
     session: AsyncSession, *, tenant_id: UUID, name: str, slug: str, region: str | None
 ) -> None:
-    """Insert a new tenant via the platform definer function. `tenant_id` is minted by
-    the caller (UUIDv7, ADR-0002) — the function does not generate one. Raises
+    """Insert a new tenant via the platform definer function, plus its default enabled
+    password login provider — a tenant with no provider can never be signed into.
+    `tenant_id` is minted by the caller (UUIDv7, ADR-0002); the function does not
+    generate one, and neither does this helper's own sso_provider id. Raises
     IntegrityError on a duplicate slug; the router maps that to 409."""
     await session.execute(
         text(
             "SELECT platform_create_tenant("
             "CAST(:tenant_id AS uuid), CAST(:name AS text), CAST(:slug AS text),"
-            " CAST(:region AS text))"
-        ).bindparams(tenant_id=tenant_id, name=name, slug=slug, region=region)
+            " CAST(:region AS text), CAST(:sso_provider_id AS uuid))"
+        ).bindparams(
+            tenant_id=tenant_id,
+            name=name,
+            slug=slug,
+            region=region,
+            sso_provider_id=uuid7(),
+        )
     )
 
 
