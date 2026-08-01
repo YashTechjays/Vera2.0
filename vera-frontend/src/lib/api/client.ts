@@ -43,6 +43,7 @@ type Envelope<T> = {
 // re-exported here so existing `from "@/lib/api/client"` imports keep working.
 export {
   ApiError,
+  apiErrorFieldPaths,
   apiErrorHttpStatus,
   apiErrorMessage,
   serializeApiError,
@@ -141,6 +142,7 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
       res.status,
       envelope?.error_code ?? null,
       envelope?.message ?? `Request failed (${res.status}).`,
+      envelope?.data,
     )
   }
 

@@ -565,6 +565,7 @@ class FormSchemaDoc(_Model):
 
         # fields, roles, gating
         immediate_confirms: list[tuple[str, ConfirmInTask, tuple[Condition, ...]]] = []
+        gated_leaf_paths: set[str] = set()  # leaf has applicable_when on itself or an ancestor
 
         def walk_fields(
             prefix: str,
@@ -585,6 +586,8 @@ class FormSchemaDoc(_Model):
                 if isinstance(field, Group):
                     walk_fields(path, field.fields, section, field_chain)
                     continue
+                if field_chain:
+                    gated_leaf_paths.add(path)
                 if (
                     field.role in COLLECTED_ROLES
                     and section.role != "collect"
@@ -724,6 +727,15 @@ class FormSchemaDoc(_Model):
             check_key(f"system_fields {handle}", handle)
             if path not in leaves:
                 errors.append(f"system_fields.{handle}: {path!r} does not resolve to a leaf")
+            elif path in gated_leaf_paths and leaves[path].default is None:
+                # `required_intake_fields` demands every default-less system_fields
+                # target at creation REGARDLESS of applicability, while the renderer
+                # disables a gated-off input and omits it from the payload — so a
+                # gated target is unsatisfiable whenever its gate is off.
+                errors.append(
+                    f"system_fields.{handle}: {path!r} is behind an applicable_when gate "
+                    "but has no default (a required-at-intake field must always be fillable)"
+                )
 
         # promoted fields — patient_form columns re-derived from the current answer at
         # dispute-resolve time too (not just intake). Column names are enforced by the

@@ -104,6 +104,40 @@ export function isApplicable(
   return gates.every((g) => evaluateCondition(g, values, schema.shared_conditions))
 }
 
+const _leafByPathBySchema = new WeakMap<FormSchema, Map<string, FlatLeaf>>()
+
+/** Leaves indexed by root-anchored path, for lookup by a path known up front. */
+export function leafByPath(schema: FormSchema): Map<string, FlatLeaf> {
+  let byPath = _leafByPathBySchema.get(schema)
+  if (!byPath) {
+    byPath = new Map(allLeaves(schema).map((l) => [l.path, l]))
+    _leafByPathBySchema.set(schema, byPath)
+  }
+  return byPath
+}
+
+const _createRequiredBySchema = new WeakMap<FormSchema, Set<string>>()
+
+/**
+ * The paths a new patient form cannot be created without: the schema's
+ * `system_fields` targets whose leaf declares no `default` — the frontend mirror
+ * of the backend's `required_intake_fields`. Deliberately NOT a leaf's own
+ * `required`, which governs voice collection during the call.
+ */
+export function createRequiredPaths(schema: FormSchema): Set<string> {
+  let required = _createRequiredBySchema.get(schema)
+  if (!required) {
+    const byPath = leafByPath(schema)
+    required = new Set(
+      [...systemFieldPaths(schema)].filter(
+        (path) => byPath.get(path)?.field.default === undefined,
+      ),
+    )
+    _createRequiredBySchema.set(schema, required)
+  }
+  return required
+}
+
 const _titlesBySchema = new WeakMap<FormSchema, Map<string, string>>()
 
 /** The title of the leaf at `path`, for describing a gate in human terms. */

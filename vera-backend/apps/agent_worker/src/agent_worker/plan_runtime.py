@@ -31,6 +31,7 @@ from livekit.agents.llm import ChatItem
 from opentelemetry import trace
 
 from agent_worker.agent import VeraAgent
+from agent_worker.coaching import apply_pending_coaching_notes
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState, takeover_engaged
@@ -153,6 +154,11 @@ class PlanTaskAgent(Agent):
             # first. Every later swap leads proactively so it never lands in silence.
             self.session.generate_reply(instructions=_OPENING_DIRECTIVE)
 
+    async def on_user_turn_completed(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        apply_pending_coaching_notes(self.session, turn_ctx)
+
     @llm.function_tool(
         name="task_complete",
         description=(
@@ -220,6 +226,11 @@ class WrapUpAgent(VeraAgent):
             return
         self.session.generate_reply(instructions=_WRAP_UP_DIRECTIVE)
 
+    async def on_user_turn_completed(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        apply_pending_coaching_notes(self.session, turn_ctx)
+
 
 class GapTaskAgent(Agent):
     """End-of-call gap pass for ONE task: re-asks that task's still-missing
@@ -254,6 +265,11 @@ class GapTaskAgent(Agent):
             self.session.update_agent(successor)
             return
         self.session.generate_reply(instructions=_gap_reask_instruction(fields))
+
+    async def on_user_turn_completed(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        apply_pending_coaching_notes(self.session, turn_ctx)
 
     @llm.function_tool(
         name="gap_complete",

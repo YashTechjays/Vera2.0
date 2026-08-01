@@ -42,8 +42,9 @@ def _data() -> SessionData:
 
 async def test_session_store_put_get_roundtrip(redis: Redis) -> None:
     store = RedisSessionStore(redis)
-    token = await store.put(SESSION_NS, _data(), 60)
-    assert await store.get(SESSION_NS, token) == _data()
+    data = _data()  # each SessionData carries its own session_id — compare the same one
+    token = await store.put(SESSION_NS, data, 60)
+    assert await store.get(SESSION_NS, token) == data
 
 
 async def test_session_store_delete(redis: Redis) -> None:
@@ -66,8 +67,9 @@ async def test_session_store_miss_returns_none(redis: Redis) -> None:
 
 async def test_mint_session_sets_both_keys(redis: Redis) -> None:
     store = RedisSessionStore(redis)
-    token = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
-    assert await store.get(SESSION_NS, token) == _data()
+    data = _data()
+    token = await store.mint_session(data, idle_ttl=10, abs_ttl=100)
+    assert await store.get(SESSION_NS, token) == data
     assert await redis.ttl(_key(SESSION_NS, token)) > 0
     assert await redis.ttl(_key(SESSION_ABS_NS, token)) > 0
 

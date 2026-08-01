@@ -1,4 +1,4 @@
-import { allLeaves, isApplicable, isRequired } from "./schema"
+import { allLeaves, createRequiredPaths, isApplicable, isRequired } from "./schema"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -138,5 +138,41 @@ export function validateSection(
   const prefix = `sections.${sectionKey}.`
   return Object.fromEntries(
     Object.entries(validateAll(schema, values)).filter(([p]) => p.startsWith(prefix))
+  )
+}
+
+/**
+ * Create-mode validation (new patient form): requiredness comes from the
+ * schema's `system_fields` block — the backend's `required_intake_fields` rule
+ * (targets without a declared default), NOT a leaf's own `required`, which
+ * governs voice collection. Filled fields still get the pattern / date-format /
+ * range checks. Backend parity: `missing_required` ignores applicability for
+ * system fields, so the required pass here does too. `includeRequired: false`
+ * yields format errors only (shown live before the first submit attempt).
+ */
+export function validateCreate(
+  schema: FormSchema,
+  values: FormValues,
+  { includeRequired = true }: { includeRequired?: boolean } = {},
+): ValidationErrors {
+  const errors: ValidationErrors = {}
+  for (const leaf of allLeaves(schema)) {
+    if (!isApplicable(schema, leaf.gates, values)) continue
+    if ((values[leaf.path] ?? "").trim() === "") continue
+    const message = validateLeaf(schema, leaf, values)
+    if (message) errors[leaf.path] = message
+  }
+  if (!includeRequired) return errors
+  for (const leaf of missingCreateLeaves(schema, values)) {
+    errors[leaf.path] = `${leaf.field.title} is required`
+  }
+  return errors
+}
+
+/** The create-required leaves still blank, in document order. */
+export function missingCreateLeaves(schema: FormSchema, values: FormValues): FlatLeaf[] {
+  const required = createRequiredPaths(schema)
+  return allLeaves(schema).filter(
+    (leaf) => required.has(leaf.path) && (values[leaf.path] ?? "").trim() === "",
   )
 }

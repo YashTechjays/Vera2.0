@@ -189,6 +189,29 @@ class TestDocumentValidation:
         with pytest.raises(ValidationError, match="inapplicable_value"):
             FormSchemaDoc.model_validate(doc)
 
+    def test_gated_system_field_without_default_rejected(self) -> None:
+        # `required_intake_fields` demands it regardless of applicability, so a gated
+        # target is unfillable whenever its gate is off — both create paths would 422.
+        doc = minimal_doc(
+            system_fields={
+                "plan_type": "sections.basics.plan_type",
+                "notes": "sections.basics.notes",
+            }
+        )
+        with pytest.raises(ValidationError, match="applicable_when gate"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_gated_system_field_with_default_accepted(self) -> None:
+        # A default exempts the target from intake requiredness, so gating is safe.
+        doc = minimal_doc(
+            system_fields={
+                "plan_type": "sections.basics.plan_type",
+                "notes": "sections.basics.notes",
+            }
+        )
+        doc["sections"]["basics"]["fields"]["notes"]["default"] = "N/A"
+        FormSchemaDoc.model_validate(doc)
+
     def test_collect_section_must_be_tasked(self) -> None:
         doc = minimal_doc(tasks=[])
         with pytest.raises(ValidationError, match="not assigned to any task"):

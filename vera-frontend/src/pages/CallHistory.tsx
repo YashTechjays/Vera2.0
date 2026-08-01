@@ -20,6 +20,7 @@ import { useIbv } from "@/components/ibv/IbvProvider"
 import { RecordingPlayer } from "@/components/ibv/RecordingPlayer"
 import { listCallHistory, type CallHistoryRow } from "@/lib/api/calls"
 import { formatDateTime, modeBadgeClass, statusLabel } from "@/lib/patient-forms/display"
+import { TranscriptDialog, type TranscriptDialogCall } from "@/components/monitoring/TranscriptDialog"
 
 const PAGE_SIZE = 20
 const COLUMN_COUNT = 6
@@ -73,6 +74,7 @@ export function CallHistory() {
   const [error, setError] = useState<string | null>(null)
   // One player at a time: opening another row's player collapses (and silences) the prior one.
   const [openPlayerId, setOpenPlayerId] = useState<string | null>(null)
+  const [transcriptCall, setTranscriptCall] = useState<TranscriptDialogCall | null>(null)
 
   useEffect(() => {
     if (!canRead) return
@@ -210,6 +212,13 @@ export function CallHistory() {
                 playerOpen={openPlayerId === c.id}
                 onOpenForm={() => openFormById(c.form_id)}
                 onTogglePlayer={() => setOpenPlayerId((id) => (id === c.id ? null : c.id))}
+                onViewTranscript={() =>
+                  setTranscriptCall({
+                    id: c.id,
+                    patient_name: c.patient_name,
+                    created_at: c.created_at,
+                  })
+                }
               />
             ))}
           </TableBody>
@@ -247,6 +256,13 @@ export function CallHistory() {
           </div>
         </div>
       </Card>
+
+      <TranscriptDialog
+        call={transcriptCall}
+        onOpenChange={(open) => {
+          if (!open) setTranscriptCall(null)
+        }}
+      />
     </div>
   )
 }
@@ -260,12 +276,14 @@ export function CallRow({
   playerOpen,
   onOpenForm,
   onTogglePlayer,
+  onViewTranscript,
 }: {
   call: CallHistoryRow
   canPlay: boolean
   playerOpen: boolean
   onOpenForm: () => void
   onTogglePlayer: () => void
+  onViewTranscript: () => void
 }) {
   return (
     <>
@@ -305,6 +323,18 @@ export function CallRow({
                 }}
               >
                 {playerOpen ? "Hide recording" : "Play recording"}
+              </button>
+            )}
+            {c.transcript_available && (
+              <button
+                type="button"
+                className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onViewTranscript()
+                }}
+              >
+                View transcript
               </button>
             )}
           </div>

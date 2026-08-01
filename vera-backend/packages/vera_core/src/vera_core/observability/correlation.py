@@ -27,6 +27,8 @@ PARTICIPANT_MODE_INTERVENER = "intervener"
 
 _OBSERVER_PREFIXES = (MONITOR_IDENTITY_PREFIX, SUPERVISOR_IDENTITY_PREFIX)
 
+_SESSION_SEP = "~"  # supervisor identity: user id ~ session id
+
 
 def is_observer_identity(identity: str) -> bool:
     """True for a participant that observes the call (monitor, supervisor) rather
@@ -35,14 +37,22 @@ def is_observer_identity(identity: str) -> bool:
     return identity.startswith(_OBSERVER_PREFIXES)
 
 
+def supervisor_identity(user_id: UUID, session_id: UUID) -> str:
+    """LiveKit participant identity for a supervisor watching a call — one per browser
+    session, because LiveKit allows a single participant per identity and force-
+    disconnects the incumbent when a duplicate joins (a per-user identity made one
+    supervisor's second browser evict their first). Stable within a session, so that
+    browser's own reconnect still evicts its stale participant."""
+    return f"{SUPERVISOR_IDENTITY_PREFIX}{user_id}{_SESSION_SEP}{session_id}"
+
+
 def supervisor_user_id(identity: str) -> UUID | None:
-    """The user id embedded in a supervisor-{uuid} identity (see
-    control_plane.api.v1.calls._supervisor_identity), or None if *identity*
-    isn't a supervisor's, or is malformed."""
+    """The user id from an identity built by supervisor_identity, or None if *identity*
+    isn't a supervisor's, or is malformed. Session-less identities still parse."""
     if not identity.startswith(SUPERVISOR_IDENTITY_PREFIX):
         return None
     try:
-        return UUID(identity[len(SUPERVISOR_IDENTITY_PREFIX) :])
+        return UUID(identity[len(SUPERVISOR_IDENTITY_PREFIX) :].split(_SESSION_SEP, 1)[0])
     except ValueError:
         return None
 
