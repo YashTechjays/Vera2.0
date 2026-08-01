@@ -8,6 +8,7 @@ SMTP sandbox (docker-compose: SMTP 1025, web UI http://localhost:1080).
 """
 
 import html
+import logging
 from dataclasses import dataclass
 from email.message import EmailMessage as _MimeMessage
 from typing import Protocol
@@ -15,8 +16,10 @@ from typing import Protocol
 import aiosmtplib
 import httpx
 
-from vera_core.config import SecretProvider
+from vera_core.config import SecretNotFoundError, SecretProvider
 from vera_core.config.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "EmailDeliveryError",
@@ -112,8 +115,20 @@ class TwilioEmailSender:
         async with httpx.AsyncClient(timeout=_SEND_TIMEOUT_SECONDS) as client:
             response = await client.post(TWILIO_EMAIL_ENDPOINT, json=payload, auth=self._auth)
         # Status only — never Twilio's response body or the payload, which holds a live token.
-        if not response.is_success:
-            raise EmailDeliveryError(f"twilio email rejected the send: HTTP {response.status_code}")
+        if response.is_success:
+            return
+        if response.status_code in (401, 403):
+            # Auth/config failure, not a per-message bounce — every send will fail
+            # identically until the SID/token/sender is fixed. Every caller catches
+            # EmailDeliveryError and logs a per-message warning (by design, so a
+            # requester is never told a send failed) — that alone would leave a full
+            # outage invisible, so this case also gets its own loud, alertable line.
+            logger.error(
+                "Twilio email auth/config failure (HTTP %s) — every send will fail "
+                "until the account SID, token, or sender identity is fixed",
+                response.status_code,
+            )
+        raise EmailDeliveryError(f"twilio email rejected the send: HTTP {response.status_code}")
 
 
 class SmtpEmailSender:
@@ -145,13 +160,28 @@ class InMemoryEmailSender:
 
 
 def build_email_sender(settings: Settings, secrets: SecretProvider) -> EmailSender:
-    """Factory: TwilioEmailSender when `twilio_account_sid` is set, else SmtpEmailSender."""
-    if settings.twilio_account_sid is not None:
-        return TwilioEmailSender(
-            account_sid=settings.twilio_account_sid,
-            auth_token=secrets.get("TWILIO_AUTH_TOKEN"),
-            sender=settings.email_from,
-        )
+    """Factory: TwilioEmailSender when `twilio_account_sid` is set, else SmtpEmailSender.
+
+    Falsy (not just missing) SID falls through to SMTP too — pydantic-settings assigns
+    "" for `VERA_TWILIO_ACCOUNT_SID=` with no `env_ignore_empty`, and an empty SID is
+    not a usable one. And the token lookup is never allowed to take the whole app down:
+    a resolvable SID with an unresolvable token (secret rotation lag) degrades to SMTP
+    with a loud warning instead of crashing the lifespan.
+    """
+    if settings.twilio_account_sid:
+        try:
+            auth_token = secrets.get("TWILIO_AUTH_TOKEN")
+        except SecretNotFoundError:
+            logger.warning(
+                "VERA_TWILIO_ACCOUNT_SID is set but TWILIO_AUTH_TOKEN did not resolve; "
+                "falling back to the SMTP sender instead of failing app startup"
+            )
+        else:
+            return TwilioEmailSender(
+                account_sid=settings.twilio_account_sid,
+                auth_token=auth_token,
+                sender=settings.email_from,
+            )
     return SmtpEmailSender(
         host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from
     )

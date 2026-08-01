@@ -279,7 +279,10 @@ async def _load_password_creds(
             .join(AppUser, AppUser.id == UserIdentity.app_user_id)
             .where(
                 UserIdentity.provider_type == ProviderKind.PASSWORD.value,
-                UserIdentity.email == email,
+                # Case-insensitive: emails are stored verbatim (no citext, no
+                # lowercasing at invite/accept), so a stored address with any
+                # uppercase must still match however the caller typed it.
+                func.lower(UserIdentity.email) == email.lower(),
                 *([AppUser.account_type == account_type] if account_type is not None else []),
             )
         )
@@ -396,7 +399,7 @@ async def login(
         tenant_slug=normalize_slug(tenant_slug),
     )
     if creds.mfa_enabled:
-        challenge = await store.put(MFA_NS, base, settings.mfa_challenge_ttl_seconds)
+        challenge = await store.mint_mfa_challenge(MFA_NS, base, settings.mfa_challenge_ttl_seconds)
         await _audit(
             audit, tenant_id=tenant_id, event=AuthEvent.MFA_CHALLENGE, ip=ip, user_id=creds.user_id
         )
@@ -412,7 +415,9 @@ async def login(
             if ident is None:
                 raise _unauthorized()
             provisioning_uri = await mfa.enroll(kms, identity=ident, account_email=creds.email)
-        enrollment = await store.put(MFA_ENROLL_NS, base, settings.mfa_challenge_ttl_seconds)
+        enrollment = await store.mint_mfa_challenge(
+            MFA_ENROLL_NS, base, settings.mfa_challenge_ttl_seconds
+        )
         await _audit(
             audit, tenant_id=tenant_id, event=AuthEvent.MFA_CHALLENGE, ip=ip, user_id=creds.user_id
         )
@@ -824,6 +829,11 @@ async def accept_invitation(
     if len(body.password.encode()) > MAX_PASSWORD_BYTES:
         raise BadRequestError(message="password too long")
 
+    # Consume atomically right before the DB work: a second accept racing this one
+    # for the same token gets None here and 401s instead of also completing.
+    if await invites.get_and_delete(INVITE_NS, body.token) is None:
+        raise _unauthorized()
+
     provisioning_uri: str | None = None
     enforce_mfa = False
     async with tenant_session(sessionmaker, tenant_id) as session:
@@ -859,7 +869,6 @@ async def accept_invitation(
         else:
             user.status = "active"
 
-    await invites.delete(INVITE_NS, body.token)
     await _audit(
         audit,
         tenant_id=tenant_id,
@@ -1102,6 +1111,11 @@ async def confirm_password_reset(
     if len(body.password.encode()) > MAX_PASSWORD_BYTES:
         raise BadRequestError(message="password too long")
 
+    # Consume atomically right before the DB work: a second confirm racing this one
+    # for the same token gets None here and 401s instead of also completing.
+    if await invites.get_and_delete(PASSWORD_RESET_NS, body.token) is None:
+        raise _unauthorized()
+
     async with tenant_session(sessionmaker, tenant_id) as session:
         status = (
             await session.execute(select(AppUser.status).where(AppUser.id == reset.app_user_id))
@@ -1113,13 +1127,25 @@ async def confirm_password_reset(
             raise _unauthorized()  # request never mints for identity-less users
         ident.hashed_password = hash_password(body.password)
 
-    await invites.delete(PASSWORD_RESET_NS, body.token)
-    await store.delete_all_for_user(reset.app_user_id)
+    # The password change already committed above — that's the durable, security-
+    # critical part. A Redis hiccup revoking sessions must not turn a successful
+    # reset into a 500 (or silently drop the audit row); log it and note it in the
+    # audit event instead, and still report success to the caller.
+    revoke_failed = False
+    try:
+        await store.delete_all_for_user(reset.app_user_id)
+    except Exception:
+        revoke_failed = True
+        logger.warning(
+            "password reset for %s: session revoke failed", reset.app_user_id, exc_info=True
+        )
+
     await _audit(
         audit,
         tenant_id=tenant_id,
         event=AuthEvent.PASSWORD_RESET_COMPLETED,
         ip=client_ip(request),
         user_id=reset.app_user_id,
+        reason="session_revoke_failed" if revoke_failed else None,
     )
     return ok(None)

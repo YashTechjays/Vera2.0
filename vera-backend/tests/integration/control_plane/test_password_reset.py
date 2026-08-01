@@ -187,6 +187,17 @@ async def _login(
     )
 
 
+async def test_request_matches_a_differently_cased_email(
+    reset_world: tuple[httpx.AsyncClient, ResetWorld],
+) -> None:
+    # The stored email is lowercase (fixture); typing it back in a different case
+    # must still find the account, not silently land on the ineligible branch.
+    client, world = reset_world
+    resp = await _request_reset(client, world, world.email.upper())
+    assert resp.status_code == 200
+    assert world.email_sender.sent, "no reset email was sent for a differently-cased email"
+
+
 async def test_happy_path_resets_password_and_link_is_single_use(
     reset_world: tuple[httpx.AsyncClient, ResetWorld],
 ) -> None:

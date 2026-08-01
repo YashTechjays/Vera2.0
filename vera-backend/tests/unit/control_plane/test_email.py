@@ -75,6 +75,28 @@ async def test_twilio_rejection_raises_with_status_only() -> None:
     assert "Body text." not in str(excinfo.value)
 
 
+async def test_twilio_auth_failure_logs_loudly(caplog: pytest.LogCaptureFixture) -> None:
+    # 401/403 means every future send will fail identically until the SID/token/
+    # sender is fixed — that must be loud, not indistinguishable from a one-off bounce.
+    post = _post_mock(401)
+    with caplog.at_level("ERROR", logger="control_plane.email"):
+        with patch("control_plane.email.httpx.AsyncClient.post", post):
+            with pytest.raises(EmailDeliveryError):
+                await _twilio_sender().send(_MESSAGE)
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+async def test_twilio_transient_failure_does_not_log_the_auth_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    post = _post_mock(500)
+    with caplog.at_level("ERROR", logger="control_plane.email"):
+        with patch("control_plane.email.httpx.AsyncClient.post", post):
+            with pytest.raises(EmailDeliveryError):
+                await _twilio_sender().send(_MESSAGE)
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
 async def test_smtp_sends_plain_and_html_to_the_sandbox() -> None:
     sender = SmtpEmailSender(host="localhost", port=1025, sender=_FROM)
     with patch("control_plane.email.aiosmtplib.send", new_callable=AsyncMock) as send:
@@ -98,7 +120,9 @@ def _settings(**overrides: Any) -> Settings:
     )
 
 
-def test_build_selects_smtp_without_a_twilio_account() -> None:
+def test_build_selects_smtp_without_a_twilio_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A real Twilio SID configured in the dev shell must not leak into this "unset" case.
+    monkeypatch.delenv("VERA_TWILIO_ACCOUNT_SID", raising=False)
     sender = build_email_sender(_settings(), EnvSecretProvider())
     assert isinstance(sender, SmtpEmailSender)
 
@@ -109,3 +133,21 @@ def test_build_selects_twilio_and_reads_the_token_from_secrets(
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "token-abc")
     sender = build_email_sender(_settings(twilio_account_sid="AC123"), EnvSecretProvider())
     assert isinstance(sender, TwilioEmailSender)
+
+
+def test_build_selects_smtp_when_the_sid_is_an_empty_string() -> None:
+    # pydantic-settings assigns "" for VERA_TWILIO_ACCOUNT_SID= with no
+    # env_ignore_empty — a falsy SID must not select Twilio.
+    sender = build_email_sender(_settings(twilio_account_sid=""), EnvSecretProvider())
+    assert isinstance(sender, SmtpEmailSender)
+
+
+def test_build_degrades_to_smtp_when_the_token_secret_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # SID present, token unresolvable (e.g. secret rotation lag) must not crash the
+    # caller — that caller is app startup, so this can't raise. A real token set in
+    # the dev shell must not leak into this "unresolvable" case.
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    sender = build_email_sender(_settings(twilio_account_sid="AC123"), EnvSecretProvider())
+    assert isinstance(sender, SmtpEmailSender)
