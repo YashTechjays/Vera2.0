@@ -27,6 +27,7 @@ from vera_core.db import uuid7
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.call_plan import compile_call_plan as real_compile_call_plan
 from vera_core.forms.prompting import FACTORY_SESSION
+from vera_core.forms.review import FieldStatus
 from vera_core.models import (
     Call,
     CallEvent,
@@ -627,6 +628,49 @@ class TestCallPlanStaging:
         assert plan.prompt_version_id == pv.id
         assert plan.session.persona == "P."  # operator document, not factory
         assert session.calls_added()[0].prompt_version_id == pv.id
+
+    async def test_focused_retry_includes_conditional_fields_when_gate_is_answered(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A focused retry must still ask conditional fields whose gate parent is
+        answered: the dispatcher passes real values so eq-gates evaluate, instead of a
+        sentinel that reads every value-gate as unmatched and drops its dependents
+        (issue 6)."""
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id, retry_count=1)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        ref = "sections.insurance_representative.call_reference_number"
+        gate = "sections.pharmacy_benefit_manager.pbm_exists"
+
+        async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
+            # Reference captured → the retry is FOCUSED; the PBM gate is answered.
+            return {
+                ref: FieldStatus(source="ai_call", ai_supported=True, ai_confidence=96),
+                gate: FieldStatus(source="ai_call", ai_supported=None, ai_confidence=85),
+            }
+
+        async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
+            return {ref: "ABC-123", gate: "Yes"}
+
+        monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
+        monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        _room, plan = plans.puts[0]
+        staged = {f.path for t in plan.tasks for f in t.fields}
+        assert "sections.pharmacy_benefit_manager.pbm_name" in staged
+        assert "sections.pharmacy_benefit_manager.pbm_phone" in staged
 
     async def test_no_published_prompt_version_falls_back_to_factory_session(
         self, _stub_credentials: dict[str, dict[str, Any] | None]

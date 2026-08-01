@@ -78,10 +78,10 @@ class EvalDeps:
     recording: Any = None
     plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
-    # Mirrors settings.form_auto_retry_enabled — a DEPLOYMENT-WIDE flag (there
-    # is no per-tenant knob today): when off, the eval never auto-redials a
-    # payer (same gate the fallback resolver applies). Default False: safe when
-    # a caller forgets to wire it.
+    # Mirrors settings.form_auto_retry_enabled — the DEPLOYMENT-WIDE kill-switch;
+    # ANDed with tenant.auto_retry_enabled at the decision site, so either one
+    # off means the eval never auto-redials a payer (same gate the fallback
+    # resolver applies). Default False: safe when a caller forgets to wire it.
     auto_retry_enabled: bool = False
 
 
@@ -498,10 +498,12 @@ async def evaluate_call(
                 reviewed=unsatisfied,
                 reason=ReviewReason.USER_ENDED,
             )
-        if deps.auto_retry_enabled:
+        if tenant.allows_auto_retry(deps.auto_retry_enabled):
             return await _finish(
                 FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry"
             )
+        # Covers either gate being off: the deployment kill-switch, the tenant's
+        # own auto_retry_enabled, or both.
         return await _finish(
             FormStatus.EXCEPTION_REVIEW,
             written=len(kept),

@@ -34,6 +34,10 @@ class CallSummary(BaseModel):
     # the health tooltip. Disclosure is audited alongside patient_name.
     health_reason: str | None = None
     health_analyzed_at: datetime | None = None
+    # Form completion 0-100 (the patient_form projection); None = never projected. Gives
+    # the live monitoring progress bar a correct fallback before any answer streams this
+    # call — e.g. a late retry whose answers are all already on file.
+    completion_pct: float | None = None
 
 
 class CallStats(BaseModel):

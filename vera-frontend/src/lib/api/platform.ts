@@ -32,6 +32,12 @@ export type TenantSummary = {
   /** AI form-filling (observer) master switch for this tenant. `null` means the API did
    *  not disclose it — the caller lacks `platform:tenants:manage` — not that it is off. */
   observer_enabled: boolean | null
+  /** Auto-retry master switch for this tenant. `null` means the API did not disclose it —
+   *  the caller lacks `platform:tenants:manage` — not that it is off. */
+  auto_retry_enabled: boolean | null
+  /** Fill-rate threshold (0–1) below which a bot-ended call is auto-retried. `null` means
+   *  the API did not disclose it — the caller lacks `platform:tenants:manage`. */
+  retry_fill_threshold: number | null
 }
 
 /** Active tenants the operator can elevate into (the tenant picker source) and manage
@@ -53,6 +59,28 @@ export function setTenantObserverEnabled(tenantId: string, enabled: boolean) {
     {
       method: "POST",
       body: { enabled },
+      headers: { "Idempotency-Key": randomId() },
+    },
+  )
+}
+
+export type TenantRetryConfig = {
+  tenant_id: string
+  auto_retry_enabled: boolean
+  retry_fill_threshold: number
+}
+
+/** Set a tenant's auto-retry flag and/or fill threshold (0–1). Requires
+ *  `platform:tenants:manage`. Omitted fields stay unchanged. */
+export function setTenantRetryConfig(
+  tenantId: string,
+  patch: { auto_retry_enabled?: boolean; retry_fill_threshold?: number },
+) {
+  return apiRequest<TenantRetryConfig>(
+    `/platform/tenants/${encodeURIComponent(tenantId)}/retry-config`,
+    {
+      method: "POST",
+      body: patch,
       headers: { "Idempotency-Key": randomId() },
     },
   )

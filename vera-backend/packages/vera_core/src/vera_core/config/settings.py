@@ -187,6 +187,11 @@ class Settings(BaseSettings):
     # calls and must be free to change independently of what the live cascade uses.
     voice_llm_default_model: str = "gemini-2.5-flash"  # VERA_VOICE_LLM_DEFAULT_MODEL
 
+    # --- eval harness call evaluator (tests only) ----------------------------
+    # The judge LLM that grades a simulated call from its transcript. Out-of-pipeline, so it goes
+    # through vera_core.llm.ResilientLLM like every non-cascade call.
+    evals_judge_model: str = "google:gemini-3.6-flash"  # VERA_EVALS_JUDGE_MODEL
+
     # --- observer answer extraction (agent worker) ---------------------------
     observer_extract_primary_model: str = "google:gemini-3.5-flash"
     observer_extract_fallback_models: list[str] = ["openai:gpt-5.4-mini"]
@@ -241,6 +246,12 @@ class Settings(BaseSettings):
     # unanswered in the tasks the call actually visited. False = go straight to the
     # closing task (the pre-gap-pass behavior).
     gap_pass_enabled: bool = True  # VERA_GAP_PASS_ENABLED
+
+    # --- handoff context window (agent worker) ------------------------------
+    # Carry only the previous task's own turns into the next task agent — the window is one
+    # task deep. False falls back to the cumulative behavior, where every handoff forwards the
+    # whole call so far and the prompt grows linearly to wrap-up.
+    previous_task_context_only: bool = True  # VERA_PREVIOUS_TASK_CONTEXT_ONLY
 
     # --- IVR navigator ------------------------------------------------------
     # Endpointing delays for the IVR-navigator turn handling (agent_worker

@@ -35,6 +35,9 @@ export type CallSummary = {
   health_reason: string | null
   /** ISO-8601 time of the latest assessment; drives the staleness gray-out. */
   health_analyzed_at: string | null
+  /** Form completion 0-100; null = never projected. Drives the live progress bar's
+   *  fallback when no answer has streamed yet this call (e.g. a late retry). */
+  completion_pct: number | null
 }
 
 /** LiveKit join details for a call room. */
@@ -81,6 +84,8 @@ export type CallHistoryRow = {
   /** True only when this caller may actually play the recording (AVAILABLE, visible,
    *  and holds recordings:read) — matches the per-form timeline's gate. */
   recording_available: boolean
+  /** True when a stored transcript exists for this call — gates the "View transcript" trigger. */
+  transcript_available: boolean
 }
 
 export type PaginatedCalls = {

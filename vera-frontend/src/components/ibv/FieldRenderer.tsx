@@ -38,7 +38,7 @@ const CELL_LOOK_NO_R = "border-b border-ibv-input-border bg-ibv-input-bg"
 // No borders — the matrix <td> (collapsed) owns every edge.
 const CELL_LOOK_NONE = "bg-ibv-input-bg"
 const DISABLED_LOOK = "cursor-not-allowed opacity-60"
-const INVALID_LOOK = "shadow-[inset_0_0_0_2px_rgba(239,68,68,0.45)]"
+export const INVALID_LOOK = "shadow-[inset_0_0_0_2px_rgba(239,68,68,0.45)]"
 
 /** Base cell look when no dispute highlight overrides it. */
 function baseLook(borderless?: boolean, noRightBorder?: boolean): string {

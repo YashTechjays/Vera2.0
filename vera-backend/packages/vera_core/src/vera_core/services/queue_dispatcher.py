@@ -24,7 +24,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
-from vera_core.forms.call_plan import CallPlan, PrefillFuser, compile_call_plan, focus_call_plan
+from vera_core.forms.call_plan import (
+    CallPlan,
+    PrefillFuser,
+    bookend_paths,
+    compile_call_plan,
+    focus_call_plan,
+)
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
@@ -378,12 +384,22 @@ async def try_dispatch(
             doc = FormSchemaDoc.model_validate(version.schema_json)
             status_by_path = await load_field_status(session, form.id)
             if has_call_reference(status_by_path, doc):
+                plan, plan_prompt_version_id = staged_plan
+                # Pass the form's real values so eq/in gates evaluate exactly — without
+                # them a sentinel reads every value-gate as unmatched and silently drops
+                # its still-missing dependents from the retry (issue 6).
+                values = await current_values_by_path(session, form.id)
                 retryable = retryable_required_paths(
-                    status_by_path, version.schema_json, floor=retry_floor
+                    status_by_path, version.schema_json, floor=retry_floor, values=values
                 )
                 focus = expand_to_groups(doc, retryable)
+                # Always keep the greeting + wrap-up tasks: a focused retry must still
+                # open with a greeting and capture its OWN rep name + call reference
+                # number (dropping those tasks was QA issues 3 and 4, and a retry that
+                # never logs a reference breaks the next retry's focus gate).
+                bookends = bookend_paths(plan, doc.rep_call_reference_number_field)
+                focus = [*focus, *bookends]  # focus_call_plan matches a path set — dupes are inert
                 if focus:
-                    plan, plan_prompt_version_id = staged_plan
                     staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
 
         # 4c. Create the call + room — wrap in try/except so one failure does not

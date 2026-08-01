@@ -79,6 +79,21 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   Generate once: `python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"`.
   In production, set `VERA_KMS_KEY_NAME` to the Cloud KMS key resource path instead (see `adr/devops-todo.md`).
 - `just api` / `just worker` — run the control plane / agent worker.
+- **Call-flow eval harness** (`apps/agent_worker/tests/evals/`) — replays a whole call end to end
+  (real entrypoint, real compiled CallPlan, a second Gemini as the rep) and an evaluator LLM grades
+  the transcript. Use it for changes to handoffs, prompts, the rule engine or the gap pass. Needs
+  Vertex ADC + a seeded Postgres; details in `README.md` → "Eval harness".
+  ```bash
+  VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
+  ```
+  - `-m evals` is **required** — without it you get the 20 LLM-free tests and NO simulations, which
+    looks like a clean pass. Confirm a real run by the `===== <scenario>: … =====` banners.
+  - **Never add the evals to `just check`**: live LLM cost, and runs vary. The pure parts
+    (`test_judge_parsing.py`) are unmarked and already run in the gate — put new pure helpers' tests
+    there, not behind the marker.
+  - **Do not overclaim from a green run.** No STT, no real DTMF, and extraction settles between turns
+    so rules fire more reliably than on a real call; a scenario reporting `0 answers extracted`
+    proves nothing. A live call is still required before shipping voice-path changes.
 - Code style: PEP 695 type params (`class Foo[T]`, `def f[T]`) — ruff rejects `Generic[T]`/`TypeVar`.
 - Async runtime: **`asyncio` is the single async runtime** — the stack is asyncio-locked (livekit-agents,
   SQLAlchemy async, `redis.asyncio`, `pytest-asyncio`). `anyio` stays **transitive-only** (pulled by

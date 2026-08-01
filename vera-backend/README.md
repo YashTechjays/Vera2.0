@@ -46,6 +46,32 @@ just langfuse-down       # stop it and free the RAM
 Leaving it running balloons the Docker VM until the kernel OOM-kills ClickHouse. The worker
 degrades gracefully (drops spans) when it's down.
 
+### Eval harness (call-flow simulation) — opt-in
+
+`apps/agent_worker/tests/evals/` replays a whole call without placing one — real entrypoint, real
+compiled CallPlan, a second Gemini as the payer rep — then an evaluator LLM grades the transcript and
+prints a scorecard. Live Gemini calls, so the `evals` marker keeps them out of `just check`.
+
+Needs Vertex ADC (`gcloud auth application-default login`) and a seeded Postgres
+(`just up && just migrate && just seed`) — the plan comes from the published `schema_version` row.
+
+```bash
+# full: 3 scenarios over all 7 tasks / 182 fields (~12 min). Drop VERA_EVALS_FULL for a ~3-min
+# focused loop; add -k inactive for one scenario; VERA_EVALS_JUDGE_STRICT=1 to gate on the verdict.
+VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
+```
+
+- **`-m evals` is required.** Without it you get the 20 LLM-free tests and **no simulations** — which
+  looks like a clean pass. A real run prints a `===== <scenario>: … =====` banner per scenario.
+- `-s` or the transcript and scorecard are swallowed; `-rs` or skip reasons are hidden (an unseeded DB
+  otherwise looks like "nothing to run").
+- Check `N answers extracted` per scenario: **0 means the Observer contributed nothing**, so no rule
+  could fire, yet most dimensions still read `pass`.
+
+No STT, no real DTMF (`press_keypad` is mocked), and extraction settles between turns so rules fire
+more reliably than on a real call. It shortens the loop; it does not replace a live call. Defects
+found so far: `docs/superpowers/plans/2026-07-30-call-flow-eval-findings-remediation.md`.
+
 ### Seeding a dev login
 
 `just seed` (run after `just migrate`) is idempotent. It provisions the global

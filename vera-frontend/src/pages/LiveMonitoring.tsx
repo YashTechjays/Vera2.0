@@ -33,15 +33,15 @@ import {
   type CallStats,
   type CallSummary,
 } from "@/lib/api/calls"
-import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
+import { categoryOf, toLiveCall } from "@/lib/monitoring/liveCall"
 import { elapsed } from "@/lib/monitoring/liveTimer"
 import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
 import { humanizeSegment } from "@/lib/patient-forms/display"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
 import { shortCallRef, type OpenCallNavState } from "@/lib/notifications/store"
-import type { CallCategory, LiveCall } from "@/lib/mock-data"
+import type { CallCategory } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
@@ -52,14 +52,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "critical", label: "Critical" },
   { key: "completed", label: "Completed" },
 ]
-
-function categoryOf(status: string): CallCategory {
-  const s = status.toLowerCase()
-  if (s === "critical") return "critical"
-  if (isTerminalCallStatus(s)) return "completed"
-  if (s === "waiting" || s === "ivr") return "processing"
-  return "active"
-}
 
 const rowTint: Record<CallCategory, string> = {
   critical: "bg-red-50",
@@ -78,29 +70,6 @@ const badgeStyle: Record<CallCategory, string> = {
   active: "bg-emerald-100 text-emerald-700",
   processing: "bg-amber-100 text-amber-800",
   completed: "bg-emerald-100 text-emerald-700",
-}
-/** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
- *  (confidence, form %) are placeholders. */
-function toLiveCall(c: CallSummary, now: number): LiveCall {
-  return {
-    id: c.id,
-    patient: c.patient_name || "—",
-    type: "Patient",
-    agent: "—",
-    duration: elapsed(c.started_at, now),
-    status: c.status,
-    category: categoryOf(c.status),
-    visible: c.published,
-    action: c.is_owner ? "view" : "intervene",
-    insurance: c.insurance_provider || "—",
-    confidence: 0,
-    formProgress: 0,
-    formId: c.form_id,
-    callTime: elapsed(c.started_at, now),
-    startedAt: c.started_at,
-    healthScore: c.health_score,
-    isOwner: c.is_owner,
-  }
 }
 
 function CallIndicator({ category }: { category: CallCategory }) {

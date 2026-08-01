@@ -7,7 +7,8 @@ then decides the lifecycle's next system transition:
 
 - completion below the tenant's ``retry_fill_threshold`` and retries remaining
   → auto-requeue (``AI_PROCESSING → IN_QUEUE``, consuming the retry budget) —
-  feature-gated behind ``auto_retry_enabled`` (default OFF) until a post-call
+  feature-gated behind the deployment kill-switch (``settings.form_auto_retry_enabled``,
+  default OFF) AND the tenant's own ``auto_retry_enabled``, until a post-call
   form-filling mechanism exists, since today nothing raises ``completion_pct``
   between calls and a retry would redial to no benefit. NEVER taken for a
   user-ended (CANCELED) call — the supervisor who ended it does not want the
@@ -57,9 +58,10 @@ async def resolve_ai_processing(
     """Resolve *ref*'s form out of AI_PROCESSING. Returns True when the form was
     auto-requeued for a retry call (a dispatch pass should follow either way —
     leaving AI_PROCESSING frees a concurrency slot). The low-completion
-    auto-retry edge only runs when *auto_retry_enabled* (settings
-    ``form_auto_retry_enabled``, default off) — otherwise every form goes to
-    EXCEPTION_REVIEW."""
+    auto-retry edge only runs when feature-gated behind the deployment
+    kill-switch (*auto_retry_enabled*, settings ``form_auto_retry_enabled``,
+    default off) AND the tenant's own ``auto_retry_enabled`` — otherwise every
+    form goes to EXCEPTION_REVIEW."""
     async with tenant_session(sessionmaker, ref.tenant_id) as session:
         call = (
             await session.execute(select(Call).where(Call.id == ref.call_id))
@@ -92,7 +94,7 @@ async def resolve_ai_processing(
         )
         # completion_pct is 0-100; retry_fill_threshold is a 0-1 fraction.
         low_fill = float(form.completion_pct) < float(tenant.retry_fill_threshold) * 100
-        if auto_retry_enabled and low_fill and not user_ended:
+        if tenant.allows_auto_retry(auto_retry_enabled) and low_fill and not user_ended:
             # Auto-retry while retries remain; fall through to human review when exhausted.
             with contextlib.suppress(InvalidTransitionError):
                 sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)

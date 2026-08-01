@@ -2,10 +2,20 @@ import { useEffect, useState } from "react"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
+import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { ApiError } from "@/lib/api/client"
-import { listTenants, setTenantObserverEnabled, type TenantSummary } from "@/lib/api/platform"
+import {
+  listTenants,
+  setTenantObserverEnabled,
+  setTenantRetryConfig,
+  type TenantSummary,
+} from "@/lib/api/platform"
 import { usePermission } from "@/lib/auth/permissions"
+
+function retryThresholdPercent(tenant: TenantSummary): number {
+  return Math.round((tenant.retry_fill_threshold ?? 0) * 100)
+}
 
 export function PlatformSettings() {
   // Gate on the permission that actually governs this screen, matching the nav entry in
@@ -14,7 +24,16 @@ export function PlatformSettings() {
   const mayManage = usePermission("platform:tenants:manage")
   const [tenants, setTenants] = useState<TenantSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [savingId, setSavingId] = useState<string | null>(null)
+  // In-flight state per (tenant, control), keyed `${tenantId}:${control}` — a single
+  // shared id would be cleared by whichever request finishes first when two rows are
+  // toggled in quick succession, re-enabling a control whose request is still in flight.
+  const [saving, setSaving] = useState<Record<string, boolean>>({})
+  // Per-row draft for the threshold input, keyed by tenant id — lets typing update the
+  // field without committing until blur/Enter, independent of the loaded tenant value.
+  const [thresholdDrafts, setThresholdDrafts] = useState<Record<string, string>>({})
+
+  const setSavingKey = (key: string, on: boolean) =>
+    setSaving((prev) => ({ ...prev, [key]: on }))
 
   // Initial load. setState only in the async callbacks, with a cancelled flag to
   // avoid a post-unmount update (mirrors PlatformOperators).
@@ -44,22 +63,80 @@ export function PlatformSettings() {
     )
   }
 
-  async function onToggle(tenant: TenantSummary, next: boolean) {
+  // Shared optimistic-toggle shape for both boolean switches: flip the field in place,
+  // call the API, revert on failure. `field` narrows to the boolean-typed columns only.
+  async function toggleField(
+    field: "observer_enabled" | "auto_retry_enabled",
+    tenant: TenantSummary,
+    next: boolean,
+    call: () => Promise<unknown>,
+  ) {
+    const key = `${tenant.id}:${field}`
     setError(null)
-    setSavingId(tenant.id)
-    // Optimistic: flip in place, revert on failure.
-    setTenants((prev) =>
-      prev?.map((t) => (t.id === tenant.id ? { ...t, observer_enabled: next } : t)) ?? prev,
-    )
+    setSavingKey(key, true)
+    setTenants((prev) => prev?.map((t) => (t.id === tenant.id ? { ...t, [field]: next } : t)) ?? prev)
     try {
-      await setTenantObserverEnabled(tenant.id, next)
+      await call()
     } catch (err) {
-      setTenants((prev) =>
-        prev?.map((t) => (t.id === tenant.id ? { ...t, observer_enabled: !next } : t)) ?? prev,
-      )
+      setTenants((prev) => prev?.map((t) => (t.id === tenant.id ? { ...t, [field]: !next } : t)) ?? prev)
       setError(err instanceof ApiError ? err.message : "Could not update the tenant.")
     } finally {
-      setSavingId(null)
+      setSavingKey(key, false)
+    }
+  }
+
+  async function onToggle(tenant: TenantSummary, next: boolean) {
+    await toggleField("observer_enabled", tenant, next, () =>
+      setTenantObserverEnabled(tenant.id, next),
+    )
+  }
+
+  async function onToggleRetry(tenant: TenantSummary, next: boolean) {
+    await toggleField("auto_retry_enabled", tenant, next, () =>
+      setTenantRetryConfig(tenant.id, { auto_retry_enabled: next }),
+    )
+  }
+
+  async function commitThreshold(tenant: TenantSummary) {
+    const draft = thresholdDrafts[tenant.id]
+    if (draft === undefined) return
+    if (draft.trim() === "") {
+      // An emptied field parses to 0 via Number(""), which would silently commit a
+      // 0% threshold — drop the draft instead so the input falls back to the server value.
+      setThresholdDrafts((prev) => {
+        const rest = { ...prev }
+        delete rest[tenant.id]
+        return rest
+      })
+      return
+    }
+    const parsed = Number(draft)
+    if (!Number.isFinite(parsed) || parsed === retryThresholdPercent(tenant)) return
+    // Field-level guard: number inputs don't block typed out-of-range values, and the
+    // backend 422's envelope message is a generic "Validation error." — say what's wrong.
+    if (parsed < 0 || parsed > 100) {
+      setError("Retry threshold must be between 0 and 100.")
+      return
+    }
+    setError(null)
+    const key = `${tenant.id}:threshold`
+    setSavingKey(key, true)
+    try {
+      const result = await setTenantRetryConfig(tenant.id, { retry_fill_threshold: parsed / 100 })
+      setTenants((prev) =>
+        prev?.map((t) =>
+          t.id === tenant.id ? { ...t, retry_fill_threshold: result.retry_fill_threshold } : t,
+        ) ?? prev,
+      )
+      setThresholdDrafts((prev) => {
+        const rest = { ...prev }
+        delete rest[tenant.id]
+        return rest
+      })
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not update the tenant.")
+    } finally {
+      setSavingKey(key, false)
     }
   }
 
@@ -71,7 +148,8 @@ export function PlatformSettings() {
           Toggle AI form filling per tenant. When off, the agent still runs the call but
           stops extracting answers to auto-fill forms — completion is left to manual review.
           Conditional questions then follow the intake prefill rather than the
-          representative&rsquo;s live answers.
+          representative&rsquo;s live answers. Auto-retry redials a form whose fill
+          percentage falls below the threshold after a bot-ended call.
         </p>
       </div>
 
@@ -84,19 +162,21 @@ export function PlatformSettings() {
               <TableHead>Tenant</TableHead>
               <TableHead>Slug</TableHead>
               <TableHead className="text-right">AI form filling</TableHead>
+              <TableHead className="text-right">Auto retry</TableHead>
+              <TableHead className="text-right">Retry threshold %</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {tenants === null && (
               <TableRow>
-                <TableCell colSpan={3} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
                   Loading…
                 </TableCell>
               </TableRow>
             )}
             {tenants?.length === 0 && (
               <TableRow>
-                <TableCell colSpan={3} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
                   No active tenants.
                 </TableCell>
               </TableRow>
@@ -111,9 +191,38 @@ export function PlatformSettings() {
                       reaches here. */}
                   <Switch
                     checked={t.observer_enabled ?? false}
-                    disabled={savingId === t.id}
+                    disabled={saving[`${t.id}:observer_enabled`]}
                     onCheckedChange={(v) => void onToggle(t, v)}
                     aria-label={`AI form filling for ${t.name}`}
+                  />
+                </TableCell>
+                <TableCell className="text-right">
+                  {/* `?? false` only satisfies the tri-state wire type: the page is gated
+                      on the same permission that controls disclosure, so null never
+                      reaches here. */}
+                  <Switch
+                    checked={t.auto_retry_enabled ?? false}
+                    disabled={saving[`${t.id}:auto_retry_enabled`]}
+                    onCheckedChange={(v) => void onToggleRetry(t, v)}
+                    aria-label={`Auto retry for ${t.name}`}
+                  />
+                </TableCell>
+                <TableCell className="text-right">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    className="ml-auto w-20"
+                    value={thresholdDrafts[t.id] ?? String(retryThresholdPercent(t))}
+                    disabled={saving[`${t.id}:threshold`]}
+                    onChange={(e) =>
+                      setThresholdDrafts((prev) => ({ ...prev, [t.id]: e.target.value }))
+                    }
+                    onBlur={() => void commitThreshold(t)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.currentTarget.blur()
+                    }}
+                    aria-label={`Retry threshold for ${t.name}`}
                   />
                 </TableCell>
               </TableRow>

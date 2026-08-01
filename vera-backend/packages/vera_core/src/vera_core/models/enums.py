@@ -268,6 +268,8 @@ class AuthEvent(enum.StrEnum):
     # Self-service password reset; meta never holds the token or URL.
     PASSWORD_RESET_REQUESTED = "password_reset_requested"
     PASSWORD_RESET_COMPLETED = "password_reset_completed"
+    # Platform operator changed a tenant's auto-retry config (flag/threshold values, no PHI).
+    TENANT_RETRY_CONFIG_UPDATED = "tenant_retry_config_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:
