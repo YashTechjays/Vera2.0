@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Annotated
+
+from pydantic import Field
 
 from vera_core.schemas import PersonaTweak
 
@@ -29,10 +32,12 @@ Cartesia Sonic 3.5 sounds natural from plain prose, so keep writing plain senten
 Do not use any other tags (no emotion tags — they are not a Sonic 3.5 feature and will be read aloud). Never speak a tag name out loud. Never wrap a tool call in a tag."""
 
 
-# Appended to every function tool's description. The reason is read by the eval harness and
-# the evaluator LLM; it is deliberately kept out of logs and spans, so the no-PHI sentence is
-# belt-and-braces rather than the thing that keeps it compliant.
-TOOL_REASON_ARG = """Pass `reason`: one short sentence on why you are calling this tool now, in the third person (e.g. "the representative confirmed no coverage questions remain"). State the call-state reason only — never the member's name, ID, date of birth, or any clinical detail."""
+# The description of the `reason` argument every function tool takes. The reason is read by the
+# eval harness and the evaluator LLM; 
+TOOL_REASON_ARG = """One short sentence on why you are calling this tool now, in the third person (e.g. "the representative confirmed no coverage questions remain"). State the call-state reason only — never the member's name, ID, date of birth, or any clinical detail."""
+
+# The `reason` parameter every function tool declares. A tool's docstring and its parameters'
+ToolReason = Annotated[str, Field(description=TOOL_REASON_ARG)]
 
 
 HANDOFF_DISCIPLINE = """HANDOFF DISCIPLINE
@@ -40,7 +45,7 @@ Never ask a question and finish the task in the same turn. If you ask something,
 
 
 CLOSING_DISCIPLINE = """CLOSING DISCIPLINE
-Never say goodbye, wish the representative a good day, or announce that you have everything you need. A closing line is spoken for you when the task ends, so a farewell of your own lands immediately before it and signs the call off twice. Collect what the task asks for, then stop."""
+Never say goodbye, wish the representative a good day, or announce that you have everything you need. A closing line is spoken for you when the task ends, so a farewell of your own lands immediately before it and signs the call off twice."""
 
 
 SCOPE_DISCIPLINE = """SCOPE DISCIPLINE

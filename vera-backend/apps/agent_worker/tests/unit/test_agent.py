@@ -163,7 +163,9 @@ def test_vera_agent_carries_only_the_end_call_tool() -> None:
 def test_every_tool_requires_a_reason() -> None:
     """The reason is how a run explains itself — the eval transcript renders it and the judge's
     `tool_calls` dimension grades it. A default on the parameter would make it optional in the
-    schema the model sees, and it would go missing exactly on the calls worth explaining."""
+    schema the model sees, and it would go missing exactly on the calls worth explaining. The
+    guidance rides on the `reason` property, not the tool description, so the model reads it
+    against the argument it is filling in."""
     controller = _plan_controller()
     # A one-task plan builds no gap agent (the closing task is never gap-swept), so name it.
     agents: list[Agent] = [
@@ -177,7 +179,9 @@ def test_every_tool_requires_a_reason() -> None:
         schema = build_legacy_openai_schema(tool, internally_tagged=True)
         params = cast(dict[str, Any], schema["parameters"])
         assert "reason" in params["required"], f"{tool.info.name} does not require a reason"
-        assert TOOL_REASON_ARG in (schema["description"] or ""), tool.info.name
+        assert TOOL_REASON_ARG in params["properties"]["reason"]["description"], tool.info.name
+        # The purpose now comes from the docstring; an empty one means the model flies blind.
+        assert (schema["description"] or "").strip(), tool.info.name
     assert {t.info.name for t in tools} == {
         "end_call",
         "task_complete",
@@ -186,6 +190,22 @@ def test_every_tool_requires_a_reason() -> None:
         "transfer_to_verification",
         "give_up",
     }
+
+
+def test_press_keypad_digits_carry_no_schema_constraint() -> None:
+    """A `pattern`/`min_length` on `digits` would look like a tightening, but LiveKit's arg
+    validator logs the raw arguments and echoes the rejected value back to the model — so a
+    hallucinated member ID would land in a log precisely when the guard fires. The alphabet
+    rule stays prose in the description; `send_dtmf` rejects bad input PHI-safely instead."""
+    tool = next(
+        t
+        for t in _navigator().tools
+        if isinstance(t, FunctionTool) and t.info.name == "press_keypad"
+    )
+    schema = build_legacy_openai_schema(tool, internally_tagged=True)
+    digits = cast(dict[str, Any], schema["parameters"])["properties"]["digits"]
+    assert "pattern" not in digits and "minLength" not in digits
+    assert "0-9, * and #" in digits["description"]
 
 
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:

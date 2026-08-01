@@ -178,7 +178,7 @@ class Settings(BaseSettings):
     # calls and must be free to change independently of what the live cascade uses.
     voice_llm_default_model: str = "gemini-2.5-flash"  # VERA_VOICE_LLM_DEFAULT_MODEL
 
-    # Log each tool call's model-authored `reason` verbatim (agent_worker/tool_log.py). 
+    # Log each tool call's model-authored `reason` verbatim (agent_worker/tool_log.py).
     log_tool_reasons: bool = False  # VERA_LOG_TOOL_REASONS
 
     # --- eval harness call evaluator (tests only) ----------------------------
