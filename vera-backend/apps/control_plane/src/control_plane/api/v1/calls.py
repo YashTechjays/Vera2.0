@@ -13,7 +13,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -59,6 +59,7 @@ from control_plane.exceptions import (
     DefaultExceptionCode,
     NotFoundError,
 )
+from control_plane.livekit_gateway import RoomParticipant
 from control_plane.post_call import resolve_ai_processing
 from control_plane.recording_storage import SigningUnavailable, parse_gcs_uri
 from control_plane.request_context import current_request_id
@@ -140,16 +141,39 @@ def _sse_response(frames: AsyncIterator[str]) -> StreamingResponse:
     )
 
 
-async def _holder_still_present(livekit: LiveKit, room_name: str, holder: UUID) -> bool:
-    """Is the lock holder still in the room? On timeout, assume yes (don't steal).
-    Matches on the user id parsed out of each identity, since the holder may be
-    watching from any of their sessions (identities are session-scoped)."""
+async def _room_presence(livekit: LiveKit, room_name: str) -> list[RoomParticipant] | None:
+    """Who is in the room; None when the probe timed out. Both callers read None as
+    "assume the worst" — neither steals a lock nor hands out a second mic on a guess."""
     try:
         async with asyncio.timeout(_PRESENCE_PROBE_TIMEOUT):
-            identities = (await livekit.room_participant_identities(room_name)) or []
+            return (await livekit.room_participants(room_name)) or []
     except TimeoutError:
-        return True
-    return any(supervisor_user_id(identity) == holder for identity in identities)
+        return None
+
+
+async def _holder_still_present(livekit: LiveKit, room_name: str, holder: UUID) -> bool:
+    """Is the lock holder still in the room? Matches on the user id parsed out of each
+    identity, since the holder may be watching from any of their sessions."""
+    participants = await _room_presence(livekit, room_name)
+    if participants is None:
+        return True  # don't steal a lock we couldn't verify is stale
+    return any(supervisor_user_id(p.identity) == holder for p in participants)
+
+
+async def _another_window_holds_the_mic(
+    livekit: LiveKit, room_name: str, own_identity: str
+) -> bool:
+    """Is a different browser session of this same supervisor already publishing?
+    Session-scoped identities mean LiveKit no longer evicts the first window, so
+    without this both would hold a live mic."""
+    participants = await _room_presence(livekit, room_name)
+    if participants is None:
+        return True  # a refused intervene is retryable and visible; two live mics are neither
+    holder = supervisor_user_id(own_identity)
+    return any(
+        p.can_publish and p.identity != own_identity and supervisor_user_id(p.identity) == holder
+        for p in participants
+    )
 
 
 # A just-minted intervene token belongs to a user not yet connected to LiveKit, so
@@ -269,6 +293,7 @@ async def join_token(
     if _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")  # 404 not 403: don't reveal a private call
     room_name = room_name_for_call(tenant_id, call.id)
+    identity = supervisor_identity(caller.user_id, caller.session_id)
     stolen_from: UUID | None = None
     if intervene:
         # Checked AFTER the visibility 404s so a private call never turns into a 403.
@@ -278,7 +303,12 @@ async def join_token(
 
         holder = call.intervener_user_id
         if holder == caller.user_id:
-            # The holder reconnecting (tab refresh/crash) — refresh the claim only.
+            # The holder reconnecting (tab refresh/crash) — refresh the claim. The
+            # user-scoped lock can't tell that from their second window, so ask the room.
+            if await _another_window_holds_the_mic(livekit, room_name, identity):
+                raise ConflictError(
+                    message="you are already intervening on this call in another window"
+                )
             call.intervener_claimed_at = func.now()
         else:
             if holder is not None:
@@ -323,7 +353,6 @@ async def join_token(
             detail=detail,
         )
     )
-    identity = supervisor_identity(caller.user_id, caller.session_id or uuid4())
     # Watch-only tokens are server-side mute; only ?intervene=true may publish.
     token = livekit.mint_join_token(
         room_name=room_name,

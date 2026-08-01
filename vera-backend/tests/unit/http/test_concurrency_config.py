@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -41,6 +41,7 @@ _FAKE_IDENTITY = VerifiedIdentity(
     email="admin@example.com",
     tenant_id=_TENANT_ID,
     account_type=AccountType.TENANT,
+    session_id=uuid4(),
 )
 
 

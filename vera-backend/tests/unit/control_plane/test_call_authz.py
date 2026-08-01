@@ -27,6 +27,7 @@ def _caller(user_id: UUID | None = None) -> VerifiedIdentity:
         email="a@example.com",
         tenant_id=uuid4(),
         account_type=AccountType.TENANT,
+        session_id=uuid4(),
     )
 
 

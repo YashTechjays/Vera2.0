@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import FastAPI
@@ -55,6 +55,7 @@ _OWNER_IDENTITY = VerifiedIdentity(
     email="owner@example.com",
     tenant_id=_TENANT_ID,
     account_type=AccountType.TENANT,
+    session_id=uuid4(),
 )
 _OTHER_IDENTITY = VerifiedIdentity(
     user_id=_OTHER_USER_ID,
@@ -62,6 +63,7 @@ _OTHER_IDENTITY = VerifiedIdentity(
     email="other@example.com",
     tenant_id=_TENANT_ID,
     account_type=AccountType.TENANT,
+    session_id=uuid4(),
 )
 
 _GCS_URI = "gs://test-bucket/tenants/t1/calls/c1.mp4"
