@@ -4,7 +4,7 @@ requires a live server so it is not tested here (covered by import + mypy)."""
 import jwt
 import pytest
 
-from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
+from control_plane.livekit_gateway import LiveKitGateway, RoomParticipant, build_livekit_gateway
 from vera_core.config import SecretNotFoundError
 from vera_core.config.settings import Settings
 
@@ -58,7 +58,8 @@ def test_mint_join_token_omits_name_and_attributes_by_default() -> None:
     assert "attributes" not in claims
 
 
-def test_room_participant_identities_returns_identities(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_room_participants_carry_the_publish_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The intervene guard reads can_publish to find the window holding the mic."""
     from livekit import api
 
     class _FakeRoomService:
@@ -68,8 +69,11 @@ def test_room_participant_identities_returns_identities(monkeypatch: pytest.Monk
             assert req.room == "call--t--c"
             return api.ListParticipantsResponse(
                 participants=[
-                    api.ParticipantInfo(identity="supervisor-1"),
-                    api.ParticipantInfo(identity="phone-callee"),
+                    api.ParticipantInfo(
+                        identity="supervisor-1",
+                        permission=api.ParticipantPermission(can_publish=True),
+                    ),
+                    api.ParticipantInfo(identity="supervisor-2"),
                 ]
             )
 
@@ -84,13 +88,13 @@ def test_room_participant_identities_returns_identities(monkeypatch: pytest.Monk
 
     import asyncio
 
-    assert asyncio.run(gw.room_participant_identities("call--t--c")) == [
-        "supervisor-1",
-        "phone-callee",
+    assert asyncio.run(gw.room_participants("call--t--c")) == [
+        RoomParticipant("supervisor-1", True),
+        RoomParticipant("supervisor-2", False),
     ]
 
 
-def test_room_participant_identities_not_found_returns_none(
+def test_room_participants_not_found_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A vanished room reports None — callers distinguish "gone" from "empty"."""
@@ -114,7 +118,7 @@ def test_room_participant_identities_not_found_returns_none(
 
     import asyncio
 
-    assert asyncio.run(gw.room_participant_identities("call--t--c")) is None
+    assert asyncio.run(gw.room_participants("call--t--c")) is None
 
 
 def test_build_livekit_gateway_raises_when_url_missing() -> None:

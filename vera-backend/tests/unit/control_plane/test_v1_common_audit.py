@@ -4,7 +4,7 @@ endpoint (patient_forms, calls). Exercised without a database via SpyAudit.
 """
 
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -30,6 +30,7 @@ def _caller() -> VerifiedIdentity:
         email="a@example.com",
         tenant_id=TENANT,
         account_type=AccountType.TENANT,
+        session_id=uuid4(),
     )
 
 

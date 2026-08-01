@@ -20,7 +20,12 @@ from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import InMemorySessionStore, SessionData
 from control_plane.dispatch import drain_pending
 from control_plane.email import InMemoryEmailSender
-from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
+from control_plane.livekit_gateway import (
+    LiveKitGateway,
+    LiveKitUnavailable,
+    OutboundDialError,
+    RoomParticipant,
+)
 from control_plane.main import create_app
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.call_stream import CallStreamEvent, CallStreamService
@@ -86,11 +91,11 @@ class FakeLiveKit(LiveKitGateway):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
-        # room -> current participant identities; rooms absent from the map are
-        # "gone" (room_participant_identities returns None), mirroring LiveKit.
-        self.participants: dict[str, list[str]] = {}
+        # room -> current participants; rooms absent from the map are "gone"
+        # (room_participants returns None), mirroring LiveKit.
+        self.participants: dict[str, list[RoomParticipant]] = {}
 
-    async def room_participant_identities(self, room_name: str) -> list[str] | None:
+    async def room_participants(self, room_name: str) -> list[RoomParticipant] | None:
         return self.participants.get(room_name)
 
     async def create_call_room(

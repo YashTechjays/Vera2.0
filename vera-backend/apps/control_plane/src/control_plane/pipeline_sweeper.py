@@ -197,10 +197,10 @@ class PipelineSweeper:
             live_rooms = await self._livekit.existing_rooms(candidate_rooms)
             observer_only: set[str] = set()
             for room_name in sorted(live_rooms):
-                identities = await self._livekit.room_participant_identities(room_name)
-                if identities is None:
+                participants = await self._livekit.room_participants(room_name)
+                if participants is None:
                     live_rooms.discard(room_name)  # vanished between the two probes
-                elif all(is_observer_identity(i) for i in identities):
+                elif all(is_observer_identity(p.identity) for p in participants):
                     # empty, or only supervisors/monitors — nothing can progress
                     observer_only.add(room_name)
             to_close, newly_gone = rooms_to_close(

@@ -197,7 +197,9 @@ export function LiveCallModal({
   useEffect(() => {
     if (endedCallId) onCallEnded?.(endedCallId)
   }, [endedCallId, onCallEnded])
-  const closeAllowed = shouldAllowClose(mode, callEnded, false)
+  // A tab that lost its seat holds a dead panel — don't close-lock an intervener into it.
+  const replaced = roomStatus?.phase === "replaced"
+  const closeAllowed = shouldAllowClose(mode, callEnded, false, replaced)
   const intervene = interveneButtonState(canIntervene, roomStatus)
   const endCallState = endCallButtonState(call?.isOwner ?? false, mode === "intervene", roomStatus)
   const canCoach = coachingPanelVisible(canIntervene, call?.isOwner ?? false, callEnded)
@@ -213,7 +215,7 @@ export function LiveCallModal({
 
   // Reset to listen-only on close; Radix routes Esc/overlay-click here too, so an intervener can't escape until the call ends.
   function handleOpenChange(next: boolean) {
-    if (!shouldAllowClose(mode, callEnded, next)) return
+    if (!shouldAllowClose(mode, callEnded, next, replaced)) return
     if (!next) {
       setMode("listen")
       setRoomStatus(null)

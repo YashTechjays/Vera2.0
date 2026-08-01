@@ -13,10 +13,13 @@ from control_plane.api.v1.calls import (
     _INTERVENE_CONNECT_GRACE,
     _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S,
 )
+from control_plane.auth.session import InMemorySessionStore
+from control_plane.livekit_gateway import RoomParticipant
 from tests.integration.control_plane.conftest import (
     FakeLiveKit,
     RBACWorld,
     _MemCallStreamStore,
+    _mint,
     seed_call,
 )
 from vera_core.call_stream import CallStreamService
@@ -25,7 +28,22 @@ from vera_core.db.rls import tenant_session
 from vera_core.models import AuditLog, Call, InterventionEvent, PatientForm, Transcript
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import CallStatus, InsuranceType, TranscriptSource
-from vera_core.observability.correlation import parse_room_name, room_name_for_call
+from vera_core.observability.correlation import (
+    parse_room_name,
+    room_name_for_call,
+    supervisor_identity,
+    supervisor_user_id,
+)
+
+
+async def _second_browser(store: InMemorySessionStore, rbac_world: RBACWorld) -> str:
+    """A second live session token for the supervisor — their other browser."""
+    return await _mint(
+        store,
+        user_id=rbac_world.supervisor_id,
+        tenant_id=rbac_world.tenant_id,
+        email="supervisor@test.example",
+    )
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -1505,8 +1523,11 @@ async def test_stale_check_respects_present_holder(
     )
     await admin_session.commit()
     room_name = room_name_for_call(rbac_world.tenant_id, call_id)
-    # The holder is still connected — an old claim is not a stale claim.
-    fake_livekit.participants[room_name] = [f"supervisor-{rbac_world.supervisor_id}"]
+    # The holder is still connected — an old claim is not a stale claim. Their identity
+    # carries a session suffix, so presence matches on the parsed user id, not the string.
+    fake_livekit.participants[room_name] = [
+        RoomParticipant(supervisor_identity(rbac_world.supervisor_id, uuid7()))
+    ]
 
     refused = await client.get(
         f"/api/v1/calls/{call_id}/join-token?intervene=true",
@@ -1577,6 +1598,104 @@ async def test_listen_token_carries_listener_mode(
     assert minted.can_publish is False
     assert minted.name == "supervisor@test.example"
     assert minted.attributes == {"vera.mode": "listener"}
+
+
+@pytest.mark.asyncio
+async def test_two_sessions_of_one_supervisor_get_distinct_identities(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_livekit: FakeLiveKit,
+    session_store: InMemorySessionStore,
+) -> None:
+    """VR2: one supervisor monitoring the same call from two browsers. Identical
+    participant identities made LiveKit evict whichever session was already in the
+    room ("could not establish pc connection" on the one still negotiating), so the
+    identity must be scoped to the session, not the user."""
+    call_id = await _seed_published_active_call(admin_sessionmaker, rbac_world, seeded_form_id)
+    second_browser = await _second_browser(session_store, rbac_world)
+
+    identities = []
+    for token in (rbac_world.supervisor_token, second_browser):
+        joined = await client.get(f"/api/v1/calls/{call_id}/join-token", headers=_auth(token))
+        assert joined.status_code == 200, joined.text
+        identities.append(fake_livekit.minted[-1].identity)
+
+    assert identities[0] != identities[1]
+    # Both still resolve to the one supervisor — transcript attribution and the
+    # intervener presence probe read the user id back out of the identity.
+    assert {supervisor_user_id(i) for i in identities} == {rbac_world.supervisor_id}
+
+
+@pytest.mark.asyncio
+async def test_join_token_identity_is_stable_across_reconnects(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_livekit: FakeLiveKit,
+) -> None:
+    """One browser refetching its token (tab refresh, Reconnect) keeps its identity,
+    so LiveKit's duplicate-identity eviction still reaps that browser's own ghost."""
+    call_id = await _seed_published_active_call(admin_sessionmaker, rbac_world, seeded_form_id)
+
+    identities = []
+    for _ in range(2):
+        joined = await client.get(
+            f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+        )
+        assert joined.status_code == 200, joined.text
+        identities.append(fake_livekit.minted[-1].identity)
+
+    assert identities[0] == identities[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_window", "expected"),
+    [
+        pytest.param(True, 409, id="first-window-holds-the-mic"),
+        pytest.param(False, 200, id="first-window-only-listens"),
+        pytest.param(None, 200, id="first-window-gone"),
+    ],
+)
+async def test_only_one_window_of_a_supervisor_may_hold_the_mic(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    fake_livekit: FakeLiveKit,
+    session_store: InMemorySessionStore,
+    first_window: bool | None,
+    expected: int,
+) -> None:
+    """The user-scoped lock reads a supervisor's second browser as the holder
+    reconnecting, and session-scoped identities mean LiveKit no longer evicts the
+    first one — so only a window that is actually publishing may block the other.
+    `first_window` is its can_publish, or None once it has left the room."""
+    call_id = await _seed_published_active_call(admin_sessionmaker, rbac_world, seeded_form_id)
+    first = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true",
+        headers=_auth(rbac_world.supervisor_token),
+    )
+    assert first.status_code == 200, first.text
+    fake_livekit.participants[room_name_for_call(rbac_world.tenant_id, call_id)] = (
+        []
+        if first_window is None
+        else [RoomParticipant(fake_livekit.minted[-1].identity, first_window)]
+    )
+    second_browser = await _second_browser(session_store, rbac_world)
+
+    joined = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?intervene=true", headers=_auth(second_browser)
+    )
+
+    assert joined.status_code == expected, joined.text
+    if expected == 200:
+        assert fake_livekit.minted[-1].can_publish
+    else:
+        assert "another window" in joined.json()["message"]
 
 
 @pytest.mark.asyncio
