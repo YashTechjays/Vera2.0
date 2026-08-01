@@ -44,7 +44,6 @@ from agent_worker.prompt import (
     SCOPE_DISCIPLINE,
     TOOL_REASON_ARG,
 )
-from agent_worker.tool_log import log_tool_reason
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.plan_store import PlanRunStateService
@@ -287,8 +286,6 @@ class PlanTaskAgent(Agent):
         ),
     )
     async def _task_complete(self, reason: str) -> Agent | str:
-        # Logged before the guards below, so a REFUSED handoff still says why it was attempted.
-        log_tool_reason("task_complete", reason)
         if takeover_engaged(self.session):
             # A str is a tool result, so the plan parks here. Returning `self` would
             # re-fire on_enter and speak the intro again.
@@ -445,7 +442,6 @@ class GapTaskAgent(Agent):
         ),
     )
     async def _gap_complete(self, reason: str) -> Agent | str:
-        log_tool_reason("gap_complete", reason)
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
         successor = await self._controller.advance_gap_from(self._task_index)

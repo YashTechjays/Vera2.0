@@ -33,7 +33,6 @@ from agent_worker.prompt import (
     build_voice_lab_instructions,
     resolve_voice_lab_greeting,
 )
-from agent_worker.tool_log import log_tool_reason
 from vera_core.schemas import PersonaTweak
 
 if TYPE_CHECKING:
@@ -60,11 +59,9 @@ class VeraAgent(Agent):
     async def _end_call(self, reason: str) -> str | None:
         """Drain pending TTS audio then shut down the session.
 
-        `reason` drives nothing here — it lands on the tool-call item for the eval harness, and
-        goes to the log through `log_tool_reason`, which prints it verbatim only under
-        VERA_LOG_TOOL_REASONS (it is model-authored text about live call state, so it is treated
-        as PHI-bearing and production sees its length alone)."""
-        log_tool_reason("end_call", reason)
+        `reason` drives nothing here — it lands on the tool-call item, which is where the eval
+        harness reads it. It is deliberately never logged: Gemini writes it about live call
+        state, so it can carry a member name or a clinical detail."""
         if takeover_engaged(self.session):
             # Reachable via a tool call already in flight when engage() interrupted us.
             logger.info("end_call refused: supervisor has taken over the call")

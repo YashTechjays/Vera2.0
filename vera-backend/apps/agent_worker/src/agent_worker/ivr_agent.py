@@ -28,7 +28,6 @@ from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
 from agent_worker.prompt import TOOL_REASON_ARG
-from agent_worker.tool_log import log_tool_reason
 from vera_core.config.settings import get_settings
 from vera_core.schemas import IvrPlaybookConfig
 
@@ -221,8 +220,7 @@ class IvrNavigatorAgent(Agent):
         )
     )
     async def give_up(self, reason: str) -> str:
-        """Hang up on a loop (`reason` logged via the PHI gate — see VeraAgent._end_call)."""
-        log_tool_reason("give_up", reason)
+        """Hang up on a loop (`reason` is transcript evidence only — see VeraAgent._end_call)."""
         self._end_navigation("gave up on an unresolvable IVR loop")
         return "Ending the call."
 
@@ -235,8 +233,7 @@ class IvrNavigatorAgent(Agent):
         )
     )
     async def transfer_to_verification(self, reason: str) -> Agent:
-        """Hand off to the plan (`reason` logged via the PHI gate — see VeraAgent._end_call)."""
-        log_tool_reason("transfer_to_verification", reason)
+        """Hand off to the plan (`reason` is transcript evidence only — see VeraAgent._end_call)."""
         verifier = self._make_verification_agent()
         # Carry the IVR conversation (incl. the member ID already spoken) into the
         # plan agent so it doesn't re-ask what the navigator already established.
@@ -262,8 +259,7 @@ class IvrNavigatorAgent(Agent):
         )
     )
     async def press_keypad(self, digits: str, reason: str) -> str:
-        """Send DTMF tones (`reason` logged via the PHI gate — see VeraAgent._end_call)."""
-        log_tool_reason("press_keypad", reason)
+        """Send DTMF tones (`reason` is transcript evidence only — see VeraAgent._end_call)."""
         # Log the count only — a DTMF sequence can be a member ID/NPI (PHI), and the
         # return string feeds the LLM/traces, so neither echoes the raw digits.
         count = len(digits.strip())

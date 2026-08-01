@@ -222,15 +222,12 @@ async def test_give_up_ends_the_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_every_tool_reports_its_reason_to_the_log_seam(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Each tool must reach `log_tool_reason`; the seam itself decides what is safe to print.
-
-    Without this a tool could quietly stop reporting and `test_tool_log.py` would still pass —
-    it covers the seam, not who calls it. Asserted through the log rather than a patched name,
-    because each module binds `log_tool_reason` at import and a patch would miss them."""
-    caplog.set_level(logging.INFO, logger="agent_worker")
+async def test_no_tool_puts_its_reason_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """The `reason` is Gemini-authored prose about live call state, so it can carry a member
+    name or a clinical detail — it reaches the tool-call item for the eval harness and must go
+    nowhere near a log. Asserted over real invocations rather than by grepping for a helper,
+    so a tool that starts logging it again is caught however it does so."""
+    caplog.set_level(logging.DEBUG, logger="agent_worker")
     controller = _plan_controller()
 
     async def _invoke(agent: Agent, name: str, **kwargs: Any) -> None:
@@ -242,21 +239,13 @@ async def test_every_tool_reports_its_reason_to_the_log_seam(
     await _invoke(controller.agents[0], "task_complete")
     await _invoke(GapTaskAgent(controller, 0), "gap_complete")
     await _invoke(_navigator(), "give_up")
-    # No digits: the reason is logged before the tool bails out, which is the point.
     await _invoke(_navigator(), "press_keypad", digits="")
     await _invoke(_navigator(), "transfer_to_verification")
 
-    # Default flag: the tool is named, the model's sentence is not.
-    for name in (
-        "end_call",
-        "task_complete",
-        "gap_complete",
-        "give_up",
-        "press_keypad",
-        "transfer_to_verification",
-    ):
-        assert f"tool {name}: reason len=" in caplog.text
-        assert f"because of {name}" not in caplog.text
+    # Not a bare "reason" search: the handoff lines legitimately log a FIXED internal label
+    # (`reason=task_complete`, `reason=ivr_live_human`), which is metadata, not model text.
+    assert "because of" not in caplog.text
+    assert "reason len=" not in caplog.text  # nor the shape the removed seam used to emit
 
 
 @pytest.mark.asyncio
