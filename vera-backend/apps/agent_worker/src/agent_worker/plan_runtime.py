@@ -41,7 +41,7 @@ from agent_worker.prompt import (
     CLOSING_DISCIPLINE,
     HANDOFF_DISCIPLINE,
     SCOPE_DISCIPLINE,
-    ToolReason,
+    TOOL_REASON_ARG,
 )
 from agent_worker.tool_log import log_tool_reason
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
@@ -262,15 +262,17 @@ class PlanTaskAgent(Agent):
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
 
-    @llm.function_tool(name="task_complete")
-    async def _task_complete(self, reason: ToolReason) -> Agent | str:
-        """Move on to the next task of the call.
-
-        Call this ONLY when every question in the current task has been answered or the
-        representative has confirmed they cannot answer what remains. Never call it to skip
-        questions that are still answerable, and never in the same turn as a question — the
-        representative's answer must arrive first.
-        """
+    @llm.function_tool(
+        name="task_complete",
+        description=(
+            "Move on to the next task of the call. Call this ONLY when every "
+            "question in the current task has been answered or the representative "
+            "has confirmed they cannot answer what remains. Never call it to skip "
+            "questions that are still answerable, and never in the same turn as a "
+            "question — the representative's answer must arrive first. " + TOOL_REASON_ARG
+        ),
+    )
+    async def _task_complete(self, reason: str) -> Agent | str:
         # Logged before the guards below, so a REFUSED handoff still says why it was attempted.
         log_tool_reason("task_complete", reason)
         if takeover_engaged(self.session):
@@ -414,14 +416,16 @@ class GapTaskAgent(Agent):
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
 
-    @llm.function_tool(name="gap_complete")
-    async def _gap_complete(self, reason: ToolReason) -> Agent | str:
-        """Finish re-asking the outstanding questions and move on.
-
-        Call this once you have re-asked every question you were given — whether or not the
-        representative could answer them — and never in the same turn as a question, since
-        their answer must arrive first.
-        """
+    @llm.function_tool(
+        name="gap_complete",
+        description=(
+            "Finish re-asking the outstanding questions and move on. Call this once "
+            "you have re-asked every question you were given — whether or not the "
+            "representative could answer them — and never in the same turn as a "
+            "question, since their answer must arrive first. " + TOOL_REASON_ARG
+        ),
+    )
+    async def _gap_complete(self, reason: str) -> Agent | str:
         log_tool_reason("gap_complete", reason)
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."

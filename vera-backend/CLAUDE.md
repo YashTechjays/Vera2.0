@@ -95,15 +95,6 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
     so rules fire more reliably than on a real call; a scenario reporting `0 answers extracted`
     proves nothing. A live call is still required before shipping voice-path changes.
 - Code style: PEP 695 type params (`class Foo[T]`, `def f[T]`) — ruff rejects `Generic[T]`/`TypeVar`.
-- **A `@function_tool` method's docstring and its params' `Field(description=...)` are prompt
-  text**, not developer notes: LiveKit sends the docstring as the tool description and each
-  `Annotated[..., Field(description=...)]` as that argument's description. So the repo's
-  one-sentence-docstring / no-comments defaults do NOT apply to them — write them for the model,
-  at whatever length it needs, and never set `description=` on the decorator (it silently
-  shadows the docstring). Every tool takes `reason: ToolReason` (`agent_worker/prompt.py`).
-  Do **not** add pydantic constraints (`pattern`, `min_length`, …) to a tool argument that can
-  carry PHI: LiveKit's arg validator logs the raw arguments and echoes the rejected value back
-  to the model, so the guard leaks exactly the value it fired on — validate in the body instead.
 - Async runtime: **`asyncio` is the single async runtime** — the stack is asyncio-locked (livekit-agents,
   SQLAlchemy async, `redis.asyncio`, `pytest-asyncio`). `anyio` stays **transitive-only** (pulled by
   starlette/httpx/SDKs); never add it to a `pyproject.toml` `dependencies`, never `import anyio`. For

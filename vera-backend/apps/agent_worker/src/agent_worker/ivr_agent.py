@@ -10,7 +10,6 @@ human default at the handoff.
 import logging
 import re
 from collections.abc import AsyncIterable, AsyncIterator, Callable
-from typing import Annotated
 
 from livekit import rtc
 from livekit.agents import (
@@ -23,13 +22,12 @@ from livekit.agents import (
     llm,
 )
 from opentelemetry import trace
-from pydantic import Field
 
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
-from agent_worker.prompt import ToolReason
+from agent_worker.prompt import TOOL_REASON_ARG
 from agent_worker.tool_log import log_tool_reason
 from vera_core.config.settings import get_settings
 from vera_core.schemas import IvrPlaybookConfig
@@ -214,26 +212,30 @@ class IvrNavigatorAgent(Agent):
         self._end_navigation(f"turn cap reached ({_IVR_MAX_TURNS} IVR turns, no human)")
         raise StopResponse
 
-    @function_tool()
-    async def give_up(self, reason: ToolReason) -> str:
-        """Give up and end the call cleanly.
-
-        Call this ONLY after the full escalation ladder (rep_keyword → press 0 → "Agent")
-        has been tried and the SAME menu keeps looping with no progress — a self-service
-        menu that never routes to a human.
-        """
+    @function_tool(
+        description=(
+            "Give up and end the call. Call this ONLY after the full escalation ladder "
+            '(rep_keyword → press 0 → "Agent") has been tried and the SAME menu keeps looping '
+            "with no progress — a self-service menu that never routes to a human. Ends the call "
+            "cleanly. " + TOOL_REASON_ARG
+        )
+    )
+    async def give_up(self, reason: str) -> str:
+        """Hang up on a loop (`reason` logged via the PHI gate — see VeraAgent._end_call)."""
         log_tool_reason("give_up", reason)
         self._end_navigation("gave up on an unresolvable IVR loop")
         return "Ending the call."
 
-    @function_tool()
-    async def transfer_to_verification(self, reason: ToolReason) -> Agent:
-        """Hand the call to the verification agent.
-
-        Call this ONLY when a live human representative has clearly greeted you — a personal
-        name paired with an open request for your info (e.g. "Hi, this is Martha, who am I
-        speaking with?").
-        """
+    @function_tool(
+        description=(
+            "Hand the call to the verification agent. Call this ONLY when a live human "
+            "representative has clearly greeted you — a personal name paired with an open "
+            'request for your info (e.g. "Hi, this is Martha, who am I speaking with?"). '
+            + TOOL_REASON_ARG
+        )
+    )
+    async def transfer_to_verification(self, reason: str) -> Agent:
+        """Hand off to the plan (`reason` logged via the PHI gate — see VeraAgent._end_call)."""
         log_tool_reason("transfer_to_verification", reason)
         verifier = self._make_verification_agent()
         # Carry the IVR conversation (incl. the member ID already spoken) into the
@@ -252,30 +254,15 @@ class IvrNavigatorAgent(Agent):
         logger.info("handoff: %s -> %s (reason=ivr_live_human)", IVR_NAVIGATOR_ID, verifier.id)
         return verifier
 
-    @function_tool()
-    async def press_keypad(
-        self,
-        # Deliberately no pattern/min_length constraint: LiveKit rejects a schema violation
-        # before the body runs, and its validator logs the raw arguments and echoes the
-        # offending value back to the model — the one thing this tool must never do with a
-        # sequence that can be a member ID. The alphabet rule stays prose; send_dtmf enforces
-        # it below, PHI-safely.
-        digits: Annotated[
-            str,
-            Field(
-                description=(
-                    "The keypad sequence to send, e.g. '1' or '4#'. Only 0-9, * and #. "
-                    "Never invent an account, member, or ID number — use only digits the "
-                    "IVR explicitly offered."
-                )
-            ),
-        ],
-        reason: ToolReason,
-    ) -> str:
-        """Press keypad digits on the phone menu (sends DTMF tones).
-
-        Use ONLY when the IVR offered a numeric option (e.g. "press 1 for eligibility").
-        """
+    @function_tool(
+        description=(
+            "Press keypad digits on the phone menu (sends DTMF tones). Use ONLY for digits the "
+            'IVR actually offered (e.g. "press 1 for eligibility"); never invent an account, '
+            "member, or ID number. `digits` may contain 0-9, * or #. " + TOOL_REASON_ARG
+        )
+    )
+    async def press_keypad(self, digits: str, reason: str) -> str:
+        """Send DTMF tones (`reason` logged via the PHI gate — see VeraAgent._end_call)."""
         log_tool_reason("press_keypad", reason)
         # Log the count only — a DTMF sequence can be a member ID/NPI (PHI), and the
         # return string feeds the LLM/traces, so neither echoes the raw digits.

@@ -29,7 +29,7 @@ from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_agent import IvrNavigatorAgent
 from agent_worker.ivr_prompt import parse_agent_context, parse_ivr_playbook
 from agent_worker.prompt import (
-    ToolReason,
+    TOOL_REASON_ARG,
     build_voice_lab_instructions,
     resolve_voice_lab_greeting,
 )
@@ -49,17 +49,21 @@ class VeraAgent(Agent):
     the call by tool call (the plan runtime's WrapUpAgent). The monolithic Vera
     persona / greeting is gone — plan agents supply their own instructions."""
 
-    @llm.function_tool(name="end_call")
-    async def _end_call(self, reason: ToolReason) -> str | None:
-        """End the phone call.
+    @llm.function_tool(
+        name="end_call",
+        description=(
+            "End the phone call. Call this tool IMMEDIATELY after you say your "
+            "closing line (e.g. 'thanks so much for your help, have a good one'). "
+            "This hangs up the call for all participants. " + TOOL_REASON_ARG
+        ),
+    )
+    async def _end_call(self, reason: str) -> str | None:
+        """Drain pending TTS audio then shut down the session.
 
-        Call this tool IMMEDIATELY after you say your closing line (e.g. "thanks so much
-        for your help, have a good one"). This hangs up the call for all participants.
-        """
-        # `reason` drives nothing here — it lands on the tool-call item for the eval harness, and
-        # goes to the log through `log_tool_reason`, which prints it verbatim only under
-        # VERA_LOG_TOOL_REASONS (it is model-authored text about live call state, so it is
-        # treated as PHI-bearing and production sees its length alone).
+        `reason` drives nothing here — it lands on the tool-call item for the eval harness, and
+        goes to the log through `log_tool_reason`, which prints it verbatim only under
+        VERA_LOG_TOOL_REASONS (it is model-authored text about live call state, so it is treated
+        as PHI-bearing and production sees its length alone)."""
         log_tool_reason("end_call", reason)
         if takeover_engaged(self.session):
             # Reachable via a tool call already in flight when engage() interrupted us.
