@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from transcript import TurnEvent, collect
+from transcript import TurnEvent, collect, tail
 
 
 @dataclass
@@ -18,6 +18,8 @@ class _Item:
     text_content: str | None = None
     name: str = ""
     arguments: str = "{}"  # livekit ships a function call's args as a JSON string
+    output: str | None = None  # a function_call_output item's result
+    call_id: str = ""
 
 
 @dataclass
@@ -45,12 +47,16 @@ def _said(text: str) -> _Event:
     return _Event("message", _Item(text_content=text))
 
 
-def _called(name: str, arguments: str = "{}") -> _Event:
-    return _Event("function_call", _Item(name=name, arguments=arguments))
+def _called(name: str, arguments: str = "{}", call_id: str = "") -> _Event:
+    return _Event("function_call", _Item(name=name, arguments=arguments, call_id=call_id))
 
 
 def _called_because(name: str, reason: str) -> _Event:
     return _called(name, json.dumps({"reason": reason}))
+
+
+def _returned(output: str | None) -> _Event:
+    return _Event("function_call_output", _Item(output=output))
 
 
 def _handed_off() -> _Event:
@@ -147,6 +153,108 @@ class TestToolReasons:
         # Assertions across the eval suite match on tool name; the reason must not break them.
         turn = collect("Sure.", _Result([_called_because("press_keypad", "the menu offered 1")]))
         assert turn.tools == ["press_keypad"]
+
+
+class TestToolResults:
+    """A tool that answers in words is refusing, not handing off — the premature-completion
+    guard and the takeover latch both do that. Unrecorded, a refusal reads as a handoff that
+    inexplicably never happened."""
+
+    def test_a_refusal_renders_under_its_tool_call(self) -> None:
+        turn = collect(
+            "That's all from me.",
+            _Result(
+                [
+                    _called_because("task_complete", "the rep has nothing more"),
+                    _returned("Not yet — these required questions have no answer on file:"),
+                ]
+            ),
+        )
+        assert turn.lines()[1:] == [
+            "TOOL : task_complete (the rep has nothing more)",
+            "  <- Not yet — these required questions have no answer on file:",
+        ]
+
+    def test_a_tool_that_answers_nothing_adds_no_line(self) -> None:
+        # end_call returns None on success on purpose; a blank result line would be noise.
+        turn = collect("Ok.", _Result([_called("end_call"), _returned(None)]))
+        assert turn.lines() == ["REP  : Ok.", "TOOL : end_call"]
+
+
+@dataclass
+class _Call:
+    """Stands in for a livekit FunctionCall off the `function_tools_executed` event."""
+
+    name: str
+    call_id: str
+    arguments: str = "{}"
+
+
+def _tail_call(name: str, call_id: str, reason: str) -> _Call:
+    return _Call(name, call_id, json.dumps({"reason": reason}))
+
+
+class TestTail:
+    """How the call ended, which no RunResult can see: the wrap-up agent acts out of band from
+    `on_enter`, after the last driven turn, so its tool call lands in no run window."""
+
+    def test_a_call_the_model_ended_shows_end_call_and_its_reason(self) -> None:
+        block = tail(
+            [],
+            [_tail_call("end_call", "c1", "the rep had nothing further")],
+            "user_initiated",
+            hung_up_in_code=False,
+        )
+        assert block is not None
+        assert block.lines() == [
+            "TOOL : end_call (the rep had nothing further)",
+            ">>>> CALL ENDED (user_initiated) — the model ended the call",
+        ]
+
+    def test_a_deterministic_hangup_says_there_was_no_end_call(self) -> None:
+        # The default eval plan: the closing task's outro already signed off, so WrapUpAgent
+        # hangs up in code and the LLM is never asked. Absent end_call is correct here, and the
+        # line has to say so or it reads as a missing tool call.
+        block = tail([], [], "user_initiated", hung_up_in_code=True)
+        assert block is not None
+        assert block.lines() == [
+            ">>>> CALL ENDED (user_initiated) — hung up in code after the closing outro; "
+            "no end_call"
+        ]
+
+    def test_a_session_closed_by_the_harness_is_not_reported_as_a_hangup(self) -> None:
+        block = tail([], [], "job_shutdown", hung_up_in_code=False)
+        assert block is not None
+        assert "the call did not end itself" in block.lines()[-1]
+
+    def test_no_close_means_no_ending_line(self) -> None:
+        # A run that merely stopped must never read as a call that ended cleanly.
+        assert tail([], [_tail_call("end_call", "c1", "x")], "", hung_up_in_code=False) is None
+
+    def test_a_tool_call_already_transcribed_is_not_repeated(self) -> None:
+        driven = collect("Ok.", _Result([_called("task_complete", call_id="c1")]))
+        block = tail(
+            [driven], [_Call("task_complete", "c1")], "user_initiated", hung_up_in_code=True
+        )
+        assert block is not None
+        assert block.tools == []
+
+    def test_only_the_calls_the_run_windows_missed_are_appended(self) -> None:
+        driven = collect("Ok.", _Result([_called("task_complete", call_id="c1")]))
+        block = tail(
+            [driven],
+            [_Call("task_complete", "c1"), _tail_call("end_call", "c2", "wrapping up")],
+            "user_initiated",
+            hung_up_in_code=False,
+        )
+        assert block is not None
+        assert block.tools == ["end_call"]
+
+    def test_the_tail_contributes_no_rep_line(self) -> None:
+        # It is nobody's turn — a "REP  : " line here would be a sentence the rep never said.
+        block = tail([], [], "user_initiated", hung_up_in_code=True)
+        assert block is not None
+        assert not any(line.startswith("REP") for line in block.lines())
 
 
 class TestUnknownEvents:

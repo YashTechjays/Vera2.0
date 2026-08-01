@@ -43,6 +43,7 @@ from agent_worker.prompt import (
     SCOPE_DISCIPLINE,
     TOOL_REASON_ARG,
 )
+from agent_worker.tool_log import log_tool_reason
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.plan_store import PlanRunStateService
@@ -83,20 +84,49 @@ def _gap_block(title: str) -> str:
     )
 
 
-def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
-    """Live re-ask directive listing the still-missing required fields."""
+def _field_lines(fields: list[PlanFieldDescriptor]) -> str:
+    """Questions as a bulleted list, naming the expected values where the schema fixes them."""
     lines: list[str] = []
     for field in fields:
         line = f"- {field.title}"
         if field.values:
             line += f" (expected one of: {', '.join(field.values)})"
         lines.append(line)
-    listed = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
+    """Live re-ask directive listing the still-missing required fields."""
     return (
         "I have a couple of quick follow-up questions. Re-ask the representative for these "
         "still-missing required details, briefly and naturally — do not imply the call is "
-        f"ending:\n{listed}"
+        f"ending:\n{_field_lines(fields)}"
     )
+
+
+def _gating_block(
+    applicable: list[PlanFieldDescriptor], excluded: list[PlanFieldDescriptor]
+) -> str:
+    """This call's narrowed question list, or "" when the gates exclude nothing.
+
+    Leads with what DOES apply. An exclusions-only list was read as "the whole task is
+    excluded" — the financial task announced itself and completed in the same turn, claiming
+    every question was gated out while its deductible fields were still open. A positive
+    enumeration cannot be over-generalized into an empty task.
+    """
+    if not excluded:
+        return ""
+    sections: list[str] = []
+    if applicable:
+        sections.append(
+            "# Questions that apply on THIS call — ask every one of them\n"
+            f"{_field_lines(applicable)}"
+        )
+    sections.append(
+        "# Excluded by the plan's gates — do NOT ask these, whatever the task list says\n"
+        f"{_field_lines(excluded)}"
+    )
+    return "\n\n".join(sections)
 
 
 def _is_message(item: ChatItem, role: str) -> bool:
@@ -104,7 +134,9 @@ def _is_message(item: ChatItem, role: str) -> bool:
     return item.type == "message" and item.role == role
 
 
-def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
+def _instructions(
+    plan: CallPlan, task_block: str, *, extra_instructions: str | None, gating: str = ""
+) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
     the scope-discipline guardrail + the Cartesia TTS markup guide — fused once, at
@@ -128,6 +160,10 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
     if extra_instructions:
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
+    if gating:
+        # Directly after the task list it narrows, and inside the instructions rather than a
+        # per-reply directive — the latter lives for one inference only (see _apply_gating).
+        parts.append(gating)
     parts.append(SCOPE_DISCIPLINE)
     parts.append(HANDOFF_DISCIPLINE)
     parts.append(CLOSING_DISCIPLINE)
@@ -143,13 +179,18 @@ class PlanTaskAgent(Agent):
         self._controller = controller
         self._task_index = task_index
         self._task = controller.plan.tasks[task_index]
-        super().__init__(
-            instructions=_instructions(
-                controller.plan,
-                f"# Current task: {self._task.title}\n{self._task.prompt}",
-                extra_instructions=controller.extra_instructions,
-            ),
-            id=self._task.task_key,
+        self._task_block = f"# Current task: {self._task.title}\n{self._task.prompt}"
+        # Spent once per task: a premature task_complete is refused, a second one is honoured.
+        self._completion_refused = False
+        super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
+
+    def _build_instructions(self, gating: str = "") -> str:
+        """This task's full instruction text, narrowed by `gating` when the gates exclude some."""
+        return _instructions(
+            self._controller.plan,
+            self._task_block,
+            extra_instructions=self._controller.extra_instructions,
+            gating=gating,
         )
 
     async def on_enter(self) -> None:
@@ -159,6 +200,7 @@ class PlanTaskAgent(Agent):
             return
         if await self._skip_when_nothing_applies():
             return
+        await self._apply_gating()
         # Read before opening_line — that call flips `opened` as a side effect.
         is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
@@ -172,7 +214,7 @@ class PlanTaskAgent(Agent):
         if not is_opening_turn:
             # The call's opening turn belongs to the rep — they answer the greeting
             # first. Every later swap leads proactively so it never lands in silence.
-            self.session.generate_reply(instructions=self._opening_directive())
+            self.session.generate_reply(instructions=_OPENING_DIRECTIVE)
 
     async def _skip_when_nothing_applies(self) -> bool:
         """Hand straight on, silently, when the gates exclude every question in this task.
@@ -195,20 +237,25 @@ class PlanTaskAgent(Agent):
         self.session.update_agent(successor)
         return True
 
-    def _opening_directive(self) -> str:
-        """The lead-in, naming any question the gates exclude on this call.
+    async def _apply_gating(self) -> None:
+        """Narrow this task's question list against the live answers, in the INSTRUCTIONS.
 
         `SCOPE_DISCIPLINE` tells the agent its task list is "the complete set of questions for
         this call", which is what makes a gated-out question look mandatory; this is the only
-        place that list gets narrowed against live answers."""
-        excluded = self._controller.inapplicable_fields(self._task_index)
-        if not excluded:
-            return _OPENING_DIRECTIVE
-        titles = ", ".join(field.title for field in excluded)
-        return (
-            f"{_OPENING_DIRECTIVE}\n\nThese questions do NOT apply on this call and must not be "
-            f"asked, whatever the task list says: {titles}."
+        place that list gets narrowed. It has to live in the instructions: a `generate_reply`
+        directive is stapled to a COPY of the chat context and discarded after that one
+        inference, so from the task's second turn on the agent could no longer see it and asked
+        the excluded questions anyway.
+
+        Rebuilt from `_task_block` rather than appended to the current instructions, so a
+        re-entry (a ReAsk directive) re-narrows against fresher answers instead of stacking."""
+        gating = _gating_block(
+            self._controller.applicable_fields(self._task_index),
+            self._controller.inapplicable_fields(self._task_index),
         )
+        if not gating:
+            return
+        await self.update_instructions(self._build_instructions(gating))
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
@@ -226,11 +273,14 @@ class PlanTaskAgent(Agent):
         ),
     )
     async def _task_complete(self, reason: str) -> Agent | str:
-        # `reason` is unused here on purpose — see VeraAgent._end_call.
+        # Logged before the guards below, so a REFUSED handoff still says why it was attempted.
+        log_tool_reason("task_complete", reason)
         if takeover_engaged(self.session):
             # A str is a tool result, so the plan parks here. Returning `self` would
             # re-fire on_enter and speak the intro again.
             return "A human supervisor has taken over this call. Stay silent."
+        if (refusal := self._refuse_premature_completion()) is not None:
+            return refusal
         outro = self._task.outro
         self._controller.note_task_outro(outro)
         if outro:
@@ -242,6 +292,34 @@ class PlanTaskAgent(Agent):
         await self._controller.prepare_successor(self, successor)
         self._tag_task_complete_handoff(successor)
         return successor
+
+    def _refuse_premature_completion(self) -> str | None:
+        """Send the agent back for this task's still-open required questions, ONCE.
+
+        The deterministic half of the gating fix: the prompt can only make a correct handoff
+        likely, and the financial task skipped itself on a lighter model despite it. A tool that
+        returns output sets LiveKit's `reply_required`, so the refusal buys a forced follow-up
+        turn in which the question actually gets asked (see VeraAgent._end_call).
+
+        Refuses at most once per task BY DESIGN. A rep who cannot answer never empties
+        `gap_fields`, so an unconditional guard would refuse every completion for the rest of
+        the call and strand the plan on this task. One retry, then the end-of-call gap pass
+        remains the backstop."""
+        outstanding = self._controller.gap_fields(self._task_index)
+        if not outstanding or self._completion_refused:
+            return None
+        self._completion_refused = True
+        logger.info(
+            "task %s: completion refused, %d required question(s) still open",
+            self._task.task_key,
+            len(outstanding),
+        )
+        return (
+            "Not yet — these required questions of the current task have no answer on file. "
+            "Ask the representative for them now (one at a time), and call task_complete once "
+            f"they are answered or the representative says they cannot answer:\n"
+            f"{_field_lines(outstanding)}"
+        )
 
     def _tag_task_complete_handoff(self, successor: Agent) -> None:
         try:
@@ -348,7 +426,7 @@ class GapTaskAgent(Agent):
         ),
     )
     async def _gap_complete(self, reason: str) -> Agent | str:
-        # `reason` is unused here on purpose — see VeraAgent._end_call.
+        log_tool_reason("gap_complete", reason)
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
         successor = await self._controller.advance_gap_from(self._task_index)

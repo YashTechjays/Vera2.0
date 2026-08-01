@@ -824,6 +824,121 @@ def _gap_plan() -> CallPlan:
 _CLOSER = 3  # index of closing_task in _gap_plan()
 
 
+class TestGating:
+    """`coverage_task` is the shape that failed on a live eval: one applicable question
+    (deductible) plus one the gates exclude (oon_note, gated on in_network == "No")."""
+
+    async def _enter(self, controller: PlanRunController, index: int) -> Agent:
+        agent = controller.agents[index]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_gating_lands_in_the_instructions_not_a_one_shot_directive(self) -> None:
+        # The defect: the list was a generate_reply directive, which LiveKit staples to a COPY
+        # of the chat ctx and discards — so from turn 2 the agent asked the excluded question.
+        # Instructions persist for every turn of the task, which is the whole fix.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await self._enter(controller, 2)
+        assert "OON note" in agent.instructions
+        assert "Deductible" in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_applicable_questions_are_named_before_the_excluded_ones(self) -> None:
+        # An exclusions-only list read as "the whole task is excluded" and the task completed
+        # itself immediately. Leading with what DOES apply is what prevents that reading.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await self._enter(controller, 2)
+        assert agent.instructions.index("Deductible") < agent.instructions.index("OON note")
+        assert "apply on THIS call" in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_a_task_with_nothing_excluded_keeps_its_original_instructions(self) -> None:
+        # No gates in play → no narrowing text at all, so the common case is untouched.
+        controller, _ = _controller(_gap_plan())
+        before = controller.agents[0].instructions
+        agent = await self._enter(controller, 0)
+        assert agent.instructions == before
+
+    @pytest.mark.asyncio
+    async def test_re_entry_re_narrows_instead_of_stacking(self) -> None:
+        # A ReAsk directive re-enters the task; the block must be rebuilt against fresher
+        # answers, not appended again.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await self._enter(controller, 2)
+        once = agent.instructions
+        await self._enter(controller, 2)
+        assert agent.instructions == once
+
+
+class TestPrematureCompletion:
+    @pytest.mark.asyncio
+    async def test_task_complete_is_refused_while_required_questions_are_open(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        with _session_patch(agent, MagicMock()):
+            result = await _tool(agent, "task_complete")()
+        # A str parks the plan on this task; an Agent would have advanced it.
+        assert isinstance(result, str)
+        assert "Representative name" in result
+        assert controller.agents[0] is agent  # cursor did not move on
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_names_every_open_question(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = controller.agents[2]
+        with _session_patch(agent, MagicMock()):
+            result = cast(str, await _tool(agent, "task_complete")())
+        assert "Deductible" in result
+        assert "OON note" not in result  # inapplicable, so never outstanding
+
+    @pytest.mark.asyncio
+    async def test_a_second_task_complete_advances_even_with_questions_still_open(self) -> None:
+        # THE no-deadlock property. A rep who cannot answer never empties gap_fields, so an
+        # unconditional guard would refuse every completion and strand the call on this task.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            assert isinstance(await _tool(agent, "task_complete")(), str)
+            second = await _tool(agent, "task_complete")()
+        assert isinstance(second, Agent)
+        assert second is not agent
+
+    @pytest.mark.asyncio
+    async def test_a_complete_task_is_never_refused(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_another_tasks_open_questions_do_not_block_this_one(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})  # task 0 satisfied
+        agent = controller.agents[0]  # task 2's deductible is still open, and irrelevant here
+        with _session_patch(agent, MagicMock()):
+            assert isinstance(await _tool(agent, "task_complete")(), Agent)
+
+    @pytest.mark.asyncio
+    async def test_takeover_still_wins_over_the_guard(self) -> None:
+        # Under takeover nothing may be spoken, so the refusal must not preempt that check.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        session = MagicMock()
+        with _session_patch(agent, session):
+            session.userdata.engaged = True
+            result = cast(str, await _tool(agent, "task_complete")())
+        assert "supervisor" in result
+
+
 class TestGapDetection:
     def test_gap_fields_is_required_applicable_and_unanswered(self) -> None:
         controller, _ = _controller(_gap_plan())
@@ -1140,8 +1255,21 @@ async def _walk(controller: PlanRunController, upto: int) -> Agent:
         controller.note_task_entered(index)  # on_enter's job; the walk drives tools directly
         agent._chat_ctx.add_message(role="user", content=f"turn-from-task{index}")
         with _session_patch(agent, MagicMock()):
-            current = cast(Agent, await _tool(agent, "task_complete")())
+            current = await _insist_complete(agent)
     return current
+
+
+async def _insist_complete(agent: Agent) -> Agent:
+    """`task_complete`, retried through one refusal.
+
+    These walks leave required questions unanswered on purpose — that is what gives the gap
+    pass something to sweep — so the premature-completion guard refuses the first call. It
+    refuses only once, and the walk is asserting the handoff chain, not the guard."""
+    result = await _tool(agent, "task_complete")()
+    if isinstance(result, str):
+        result = await _tool(agent, "task_complete")()
+    assert isinstance(result, Agent), result
+    return result
 
 
 async def _turn_ctx_after_user_turn(agent: Agent, *, pending_note: str | None = None) -> Any:
@@ -1547,7 +1675,7 @@ class TestGatedOutTask:
         controller.opening_line("Hello rep.")
         basics = controller.agents[0]
         with _session_patch(basics, MagicMock()):
-            await _tool(basics, "task_complete")()
+            await _insist_complete(basics)
         assert controller.signed_off, "the first task's outro was not recorded"
         with _session_patch(controller.agents[1], MagicMock()):
             await controller.agents[1].on_enter()
@@ -1591,20 +1719,19 @@ class TestGatedOutTask:
         mock_session.update_agent.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_a_partly_gated_task_names_the_exclusions_in_its_lead(self) -> None:
+    async def test_a_partly_gated_task_excludes_only_the_gated_question(self) -> None:
         # The other half of the same defect: the task runs, but the model must be told which of
-        # its listed questions are out of scope this call.
+        # its listed questions are out of scope this call — and only those. See TestGating for
+        # why this lives in the instructions rather than the per-reply lead.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})  # gates out `oon_note`
         controller.opening_line("Hello rep.")
         coverage = controller.agents[2]
-        mock_session = MagicMock()
-        with _session_patch(coverage, mock_session):
+        with _session_patch(coverage, MagicMock()):
             await coverage.on_enter()
-        directive = mock_session.generate_reply.call_args.kwargs["instructions"]
-        assert "OON note" in directive
-        assert "do NOT apply" in directive
-        assert "Deductible" not in directive  # the applicable one is not excluded
+        excluded_section = coverage.instructions.split("do NOT ask these")[1]
+        assert "OON note" in excluded_section
+        assert "Deductible" not in excluded_section  # the applicable one is not excluded
 
     @pytest.mark.asyncio
     async def test_an_ungated_task_keeps_the_plain_lead(self) -> None:

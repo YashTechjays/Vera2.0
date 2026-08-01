@@ -33,6 +33,7 @@ from agent_worker.prompt import (
     build_voice_lab_instructions,
     resolve_voice_lab_greeting,
 )
+from agent_worker.tool_log import log_tool_reason
 from vera_core.schemas import PersonaTweak
 
 if TYPE_CHECKING:
@@ -59,15 +60,11 @@ class VeraAgent(Agent):
     async def _end_call(self, reason: str) -> str | None:
         """Drain pending TTS audio then shut down the session.
 
-        `reason` is unused here on purpose: it exists so the model's justification lands on the
-        tool-call item, which the eval harness renders. It is never logged (it is model-authored
-        text about live call state, so it is treated as PHI-bearing).
-
-        Returns None on success ON PURPOSE: a tool that produces output sets
-        `reply_required`, and LiveKit then schedules that follow-up turn with `force=True`,
-        which bypasses the drain — so a returned string is spoken to the rep as one last
-        line ("I have successfully concluded the call."). No output, no extra turn. The
-        takeover branch still returns text, because there the reply is the point."""
+        `reason` drives nothing here — it lands on the tool-call item for the eval harness, and
+        goes to the log through `log_tool_reason`, which prints it verbatim only under
+        VERA_LOG_TOOL_REASONS (it is model-authored text about live call state, so it is treated
+        as PHI-bearing and production sees its length alone)."""
+        log_tool_reason("end_call", reason)
         if takeover_engaged(self.session):
             # Reachable via a tool call already in flight when engage() interrupted us.
             logger.info("end_call refused: supervisor has taken over the call")

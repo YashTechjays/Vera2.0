@@ -222,6 +222,44 @@ async def test_give_up_ends_the_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_every_tool_reports_its_reason_to_the_log_seam(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each tool must reach `log_tool_reason`; the seam itself decides what is safe to print.
+
+    Without this a tool could quietly stop reporting and `test_tool_log.py` would still pass —
+    it covers the seam, not who calls it. Asserted through the log rather than a patched name,
+    because each module binds `log_tool_reason` at import and a patch would miss them."""
+    caplog.set_level(logging.INFO, logger="agent_worker")
+    controller = _plan_controller()
+
+    async def _invoke(agent: Agent, name: str, **kwargs: Any) -> None:
+        tool = next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+        with patch.object(type(agent), "session", new=property(lambda self: _mock_session())):
+            await tool(reason=f"because of {name}", **kwargs)
+
+    await _invoke(VeraAgent(instructions="x"), "end_call")
+    await _invoke(controller.agents[0], "task_complete")
+    await _invoke(GapTaskAgent(controller, 0), "gap_complete")
+    await _invoke(_navigator(), "give_up")
+    # No digits: the reason is logged before the tool bails out, which is the point.
+    await _invoke(_navigator(), "press_keypad", digits="")
+    await _invoke(_navigator(), "transfer_to_verification")
+
+    # Default flag: the tool is named, the model's sentence is not.
+    for name in (
+        "end_call",
+        "task_complete",
+        "gap_complete",
+        "give_up",
+        "press_keypad",
+        "transfer_to_verification",
+    ):
+        assert f"tool {name}: reason len=" in caplog.text
+        assert f"because of {name}" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_turn_cap_grants_one_grace_turn_before_ending() -> None:
     # The cap is deterministic, but the turn that first trips it gets a grace turn: if a live
     # rep answers exactly then, the model still gets to generate and hand off instead of being

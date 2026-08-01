@@ -54,7 +54,7 @@ from rep import (
     MANDATE_CONTRADICTION_FACTS,
     SimulatedRep,
 )
-from transcript import Turn, collect, echo
+from transcript import Turn, collect, echo, tail
 
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import IvrNavigatorAgent
@@ -122,10 +122,15 @@ class CallRun:
     plan: list[Turn]
     landed: Any
     hit_cap: bool
+    ended_in_ivr: bool = False  # the navigator hung up before a human answered
+    # How the call ended, plus any tool call the run windows missed. Kept OUT of `plan`: it is
+    # nobody's turn, and `plan[-1]` is asserted on as the last thing the rep actually said.
+    tail: Turn | None = None
 
     @property
     def turns(self) -> list[Turn]:
-        return [*self.ivr, *self.plan]
+        closing = [self.tail] if self.tail is not None else []
+        return [*self.ivr, *self.plan, *closing]
 
     def handoffs(self) -> list[tuple[str, str]]:
         return [h for turn in self.turns for h in turn.handoffs]
@@ -194,6 +199,7 @@ async def _run_call(scenario: Scenario) -> CallRun:
     ivr: list[Turn] = []
     plan: list[Turn] = []
     hit_cap = False
+    ended_in_ivr = False
     seq = 0
 
     # userdata MUST be set at construction, exactly as `cascade.py:build_session` does: every
@@ -204,16 +210,32 @@ async def _run_call(scenario: Scenario) -> CallRun:
         rep_llm,
         AgentSession(userdata=TakeoverState(), llm=vera_llm) as session,
     ):
+        # Session-scoped, so they see the wrap-up agent's tool call and the hangup itself —
+        # both of which happen after the last driven turn, where no RunResult is listening.
+        executed: list[Any] = []
+        closed: list[str] = []
+        session.on("function_tools_executed", lambda ev: executed.extend(ev.function_calls))
+        session.on("close", lambda ev: closed.append(ev.reason.value))
         mocked = {"press_keypad": lambda digits, reason: "Sent the tones."}
         with mock_tools(IvrNavigatorAgent, mocked):
             await session.start(make_entry_agent(controller))
             for machine_turn in [*IVR_TURNS, HUMAN_PICKUP]:
-                turn = collect(machine_turn, await session.run(user_input=machine_turn))
+                try:
+                    result = await session.run(user_input=machine_turn)
+                except RuntimeError:
+                    # `give_up` hung up on the menu, so the session is closing and every later
+                    # turn would raise the same way. Without this the traceback points into
+                    # LiveKit's generate_reply and the module-scoped fixture takes every test
+                    # that depends on it down with it — the navigator's decision reads as a
+                    # harness crash.
+                    ended_in_ivr = True
+                    break
+                turn = collect(machine_turn, result)
                 ivr.append(turn)
                 echo("IVR", turn)
 
-        hit_cap = True
-        for _ in range(_MAX_PLAN_TURNS):
+        hit_cap = not ended_in_ivr
+        for _ in range(0 if ended_in_ivr else _MAX_PLAN_TURNS):
             if isinstance(session.current_agent, WrapUpAgent):
                 hit_cap = False
                 break
@@ -237,6 +259,22 @@ async def _run_call(scenario: Scenario) -> CallRun:
     # Never let a truncated walk read as a completed call.
     if hit_cap:
         print(f"===== WARNING: hit the {_MAX_PLAN_TURNS}-turn cap =====", flush=True)
+    if ended_in_ivr:
+        # The plan never ran, so every plan-side assertion below is about a call that never
+        # happened. Say so once, loudly, instead of leaving each test to fail on its own terms.
+        print(
+            f"===== WARNING: the navigator ended the call after {len(ivr)} IVR turn(s), before "
+            "reaching a human — no plan turns ran =====",
+            flush=True,
+        )
+    call_tail = tail(
+        [*ivr, *plan],
+        executed,
+        closed[0] if closed else "",
+        hung_up_in_code=controller.signed_off,
+    )
+    if call_tail is not None:
+        echo("PLAN", call_tail)
     print(
         f"===== landed on {type(landed).__name__}; "
         f"{len(run_state.recorded)} answers extracted =====",
@@ -250,6 +288,8 @@ async def _run_call(scenario: Scenario) -> CallRun:
         plan=plan,
         landed=landed,
         hit_cap=hit_cap,
+        ended_in_ivr=ended_in_ivr,
+        tail=call_tail,
         report=None,
     )
     # Grade the call from its transcript. A judge failure must never take the run down with it —
@@ -312,6 +352,9 @@ async def test_no_handoff_while_the_machine_is_talking(call: CallRun) -> None:
 
 
 async def test_human_pickup_hands_off_into_the_plan(call: CallRun) -> None:
+    # Checked first: when the navigator gives up mid-menu no plan turn ever runs, and every
+    # plan-side test below then fails on its own confusing terms.
+    assert not call.ended_in_ivr, "the navigator hung up before a human answered"
     assert call.ivr[-1].handoffs == [("IvrNavigatorAgent", "PlanTaskAgent")]
 
 
