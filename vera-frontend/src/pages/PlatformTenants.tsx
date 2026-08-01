@@ -61,9 +61,22 @@ export function PlatformTenants() {
     }
   }, [])
 
+  // Initial load. setState only in the async callbacks (not synchronously in the
+  // effect body), with a cancelled flag to avoid a post-unmount update.
   useEffect(() => {
-    if (isSuperAdmin) void load()
-  }, [isSuperAdmin, load])
+    if (!isSuperAdmin) return
+    let cancelled = false
+    listTenants({ status: "all" })
+      .then((t) => {
+        if (!cancelled) setTenants(t)
+      })
+      .catch((err) => {
+        if (!cancelled) setError(apiErrorMessage(err, "Could not load tenants."))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isSuperAdmin])
 
   useEffect(() => {
     if (!notice) return
