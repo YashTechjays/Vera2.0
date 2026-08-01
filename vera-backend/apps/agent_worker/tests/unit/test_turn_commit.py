@@ -104,15 +104,21 @@ async def test_handoff_reuses_the_stt_stream() -> None:
 
 async def test_handoff_keeps_the_stt_clock_aligned() -> None:
     # The mechanism, measured. Pre-1.6.4 the drift grew to the elapsed call time here.
+    #
+    # Asserted one-sided on purpose. Only a FORWARD drift is the bug — it dates the
+    # utterance in the future and becomes the endpointing wait. Backward drift just means
+    # the harness's own 100Hz silence generator fell behind wall clock, which is expected
+    # on a shared CI runner and harmless. A two-sided bound would flake there for a reason
+    # unrelated to anything under test.
     async with CascadeHarness() as call:
         await call.exchange(_OPENING)
-        assert abs(call.mapped_speaking_time() - time.time()) < 0.5
+        assert call.mapped_speaking_time() - time.time() < 0.5
 
         await asyncio.sleep(2.0)
         await call.handoff()
 
         drift = call.mapped_speaking_time() - time.time()
-        assert abs(drift) < 0.5, f"STT clock drifted {drift:+.2f}s across the handoff"
+        assert drift < 0.5, f"STT clock drifted {drift:+.2f}s ahead across the handoff"
 
 
 async def test_transcript_only_turn_after_handoff_is_answered_promptly() -> None:

@@ -43,7 +43,10 @@ from livekit.agents.voice import io
 from agent_worker.cascade import cascade_session_kwargs
 
 _SAMPLE_RATE = 16000
-_FRAME_SAMPLES = 160
+# 20ms frames, as a WebRTC/SIP leg delivers. Deliberately not 10ms: the input pump sleeps
+# once per frame, and halving its rate halves the chance of the loop falling behind wall
+# clock on a shared CI runner, which would skew every timing assertion in the suite.
+_FRAME_SAMPLES = 320
 _FRAME_INTERVAL = _FRAME_SAMPLES / _SAMPLE_RATE
 _REPLY_FRAMES = 200
 # Comfortably inside the cascade's 0.3s endpointing min_delay, so a scripted event lands
