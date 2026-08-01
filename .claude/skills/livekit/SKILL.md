@@ -59,10 +59,24 @@ state. Canonical form: `call--<tenant_uuid>--<call_uuid>`.
   `session.start(agent=VeraAgent(...), room=ctx.room)`. VAD is built once in `prewarm` and
   stashed in `proc.userdata`.
 - **Session config** (`cascade.py`): STT `deepgram.STTv2(model="flux-general-en", eager_eot...)`,
-  LLM `google.LLM(model="gemini-2.5-flash", vertexai=True, thinking_budget=0)`, TTS
-  `cartesia.TTS(model="sonic-3.5", ...)`, local `silero.VAD`, turn detection `EnglishModel()`.
-  Latency wins: preemptive_generation (fed by Flux eager EOT) + `thinking_budget=0`. Keep
-  `EnglishModel` turn detection — dropping it falls back to dumb VAD-silence detection.
+  LLM `google.LLM(model=<resolved>, vertexai=True, location="global", thinking_config=...)`,
+  TTS `cartesia.TTS(model="sonic-3.5", ...)`, local `silero.VAD`, turn detection `EnglishModel()`.
+  The model is NOT hardcoded — `resolve_llm_model` takes the runtime override else
+  `Settings.voice_llm_default_model`. Thinking is whichever key that model's family accepts
+  (`resolve_thinking_attrs`): `thinking_level="low"` on Gemini 3, `thinking_budget=0` before it —
+  pairing the wrong one raises inside the plugin on the first live turn. Latency wins:
+  preemptive_generation (fed by Flux eager EOT) + minimal thinking. Keep `EnglishModel` turn
+  detection — dropping it falls back to dumb VAD-silence detection. (1.6.x deprecates that
+  plugin in favour of `livekit.agents.inference.TurnDetector`, which is Cloud-only and
+  therefore off-limits here — see the bright lines. Deprecated, not removed.)
+- **`livekit-agents` must stay `>=1.6.4`.** Below that, an agent handoff desynchronizes the STT
+  stream's clock from the audio anchor, so a turn where VAD saw no speech energy gets its
+  end-of-turn wait set from a future-dated timestamp — unbounded, never clamped by `max_delay`.
+  The reply is generated and parked before TTS, and the caller hears dead air until they speak
+  again (dev trace `863ba65ac918521c0518aeceea1d3d0b`: 67s of it in one call). Full mechanism
+  and the regression tests are in `apps/agent_worker/tests/unit/test_turn_commit.py`; the
+  harness beside it (`cascade_harness.py`) is the only way to exercise the turn-commit state
+  machine, since the evals have no STT and `session.run()` bypasses `AudioRecognition`.
 - **All turn handling goes in the single `turn_handling` block** (endpointing,
   preemptive_generation, turn_detection, interruption). It's mutually exclusive with the
   deprecated flat `AgentSession` kwargs — split them and the omitted pieces are silently dropped.

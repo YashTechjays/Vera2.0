@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Vera agent worker — LiveKit Agents worker, dispatched to rooms by agent_name"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    # >=1.6.4 is a correctness floor, not housekeeping: below it a handoff desynchronizes the
+    # STT clock from the audio anchor and a quiet turn's reply is generated but never spoken
+    # (tests/unit/test_turn_commit.py). Do not relax it.
     "livekit-agents[deepgram,google,cartesia,silero,turn-detector]>=1.6.4",
     "redis>=5.2",
     "vera-core",
