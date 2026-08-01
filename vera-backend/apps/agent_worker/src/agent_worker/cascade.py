@@ -34,6 +34,11 @@ from vera_core.services.model_config import (
 
 logger = logging.getLogger("agent_worker")
 
+# Pinned, never the floating "sonic-3.5" alias Cartesia moves without notice: the readback
+# workaround and its removal test are verified against exactly this snapshot, so unpinning and
+# deleting agent_worker.cartesia_workaround are one change.
+_CARTESIA_TTS_MODEL = "sonic-3.5-2026-05-04"
+
 _VAD_SILENCE_DURATION = 0.4
 
 
@@ -140,7 +145,7 @@ def build_session(
             location="global",
             thinking_config=resolve_thinking_config(model, thinking_override),
         ),
-        tts=cartesia.TTS(model="sonic-3.5", emotion=["confident"]),
+        tts=cartesia.TTS(model=_CARTESIA_TTS_MODEL, emotion=["confident"]),
         vad=vad if vad is not None else _build_vad(),
         **cascade_session_kwargs(turn_detector=EnglishModel()),
     )

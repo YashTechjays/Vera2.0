@@ -32,3 +32,9 @@ This is not optional for Vera 2.0 — treat it as part of "done."
 
 > Note: this is a model-followed workflow rule (a hook can't launch an agent), so it
 > lives here in `CLAUDE.md` rather than as a `settings.json` hook.
+
+## Git remote: Bitbucket, not GitHub
+
+`origin` is a Bitbucket remote (`git remote -v`), so `gh` cannot create PRs here — push the branch
+and open the PR from the URL git prints on push. Branches track `origin/dev`, so **always push with
+an explicit refspec** (`git push origin HEAD:refs/heads/<branch>`) — a bare `git push` targets dev.
