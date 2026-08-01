@@ -2,6 +2,8 @@
 Flash by default. Consumes only the de-identified transcript — no raw PHI."""
 
 import json
+import logging
+from itertools import batched
 from typing import Any
 
 from google import genai
@@ -9,6 +11,8 @@ from google.genai import types
 
 from vera_core.forms.review import is_blank_answer
 from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
+
+logger = logging.getLogger("control_plane.llm")
 
 
 def _turns_block(turns: list[TranscriptTurn]) -> str:
@@ -54,7 +58,8 @@ def build_judge_prompt(extracted: list[ExtractedField], turns: list[TranscriptTu
     ]
     return (
         "For each extracted field, decide whether the transcript SUPPORTS the value. "
-        "Return supported (bool), 0-100 confidence, and a short evidence quote.\n\n"
+        "Return exactly one entry for EVERY extracted field_path — never omit any — "
+        "with supported (bool), 0-100 confidence, and a short evidence quote.\n\n"
         f"extracted:\n{json.dumps(items)}\n\ntranscript:\n{_turns_block(turns)}"
     )
 
@@ -84,19 +89,34 @@ _EXTRACT_SCHEMA: dict[str, Any] = {
         "required": ["field_path", "value", "confidence", "evidence_seq"],
     },
 }
-_JUDGE_SCHEMA: dict[str, Any] = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "field_path": {"type": "string"},
-            "supported": {"type": "boolean"},
-            "confidence": {"type": "integer"},
-            "evidence": {"type": "string"},
+# Gemini drops or rewords items from a large free-form-keyed array (it truncates
+# the tail on the 40+-field infertility forms), leaving those answers with no
+# verdict → no FieldEvaluation → read as unsatisfied → re-asked on retry and the
+# payer re-dialed. Constraining field_path to an enum of the exact asked paths
+# makes a reworded verdict impossible, and judge() re-runs on the still-missing
+# subset (a smaller batch the model does return in full) up to this many passes.
+_JUDGE_MAX_ATTEMPTS = 3
+# A full infertility form judges ~180 paths; a 180-value enum can exceed Vertex's
+# schema limit and 400 the whole call. Chunk to bound the enum AND the batch the
+# model must return in full (smaller batches drop fewer items).
+_JUDGE_CHUNK_SIZE = 50
+
+
+def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                # Gemini enforces an enum only with format "enum"; `enum` alone is advisory.
+                "field_path": {"type": "string", "format": "enum", "enum": field_paths},
+                "supported": {"type": "boolean"},
+                "confidence": {"type": "integer"},
+                "evidence": {"type": "string"},
+            },
+            "required": ["field_path", "supported", "confidence", "evidence"],
         },
-        "required": ["field_path", "supported", "confidence", "evidence"],
-    },
-}
+    }
 
 
 class VertexLLMClient(LLMClient):
@@ -137,5 +157,37 @@ class VertexLLMClient(LLMClient):
     ) -> list[JudgeVerdict]:
         if not extracted:
             return []
-        data = await self._generate(build_judge_prompt(extracted, turns), _JUDGE_SCHEMA)
-        return parse_judge_response(data)
+        by_path: dict[str, JudgeVerdict] = {}
+        last_error: Exception | None = None
+        for _ in range(_JUDGE_MAX_ATTEMPTS):
+            pending = [ef for ef in extracted if ef.field_path not in by_path]
+            if not pending:
+                break
+            progressed = False
+            for chunk in batched(pending, _JUDGE_CHUNK_SIZE):
+                chunk_paths = [ef.field_path for ef in chunk]
+                try:
+                    data = await self._generate(
+                        build_judge_prompt(list(chunk), turns), _judge_schema(chunk_paths)
+                    )
+                except Exception as exc:  # salvage the other chunks / prior attempts
+                    last_error = exc
+                    logger.warning(
+                        "judge: chunk of %d field(s) failed (%s) — salvaging remaining verdicts",
+                        len(chunk),
+                        type(exc).__name__,
+                    )
+                    continue
+                for v in parse_judge_response(data):
+                    if v.field_path in chunk_paths:  # ignore reworded/stray paths
+                        by_path[v.field_path] = v
+                        progressed = True
+            if not progressed:  # a whole failed/empty attempt — don't spin the rest
+                break
+        # An error that left ANY field unjudged must surface so the caller routes to
+        # LLM_ERROR review — otherwise those fields look unsatisfied and the payer is
+        # redialed for data a transient error merely failed to score. A retry that
+        # recovered full coverage clears this (nothing left uncovered).
+        if last_error is not None and any(ef.field_path not in by_path for ef in extracted):
+            raise last_error
+        return [by_path[ef.field_path] for ef in extracted if ef.field_path in by_path]
