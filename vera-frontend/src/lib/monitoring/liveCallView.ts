@@ -1,17 +1,23 @@
 // Pure view logic for the live-call panel — no LiveKit imports, so it unit-tests without a browser.
 
-export type ConnectionPhase = "connecting" | "live" | "reconnecting" | "ended"
+export type ConnectionPhase = "connecting" | "live" | "reconnecting" | "ended" | "replaced"
 
 export const CONNECTION_PHASE_LABEL: Record<ConnectionPhase, string> = {
   connecting: "Connecting…",
   live: "Live",
   reconnecting: "Reconnecting…",
   ended: "Call ended",
+  replaced: "Moved to another tab",
 }
 
 /** Map a raw connection state to a display phase; `everConnected` latches on first connect so a
- *  later disconnect reads as "ended", not "connecting". */
-export function connectionPhase(state: string, everConnected: boolean): ConnectionPhase {
+ *  later disconnect reads as "ended", not "connecting". `replaced` is a LiveKit
+ *  duplicate-identity eviction — the call is still running, this window just lost the seat. */
+export function connectionPhase(
+  state: string,
+  everConnected: boolean,
+  replaced = false,
+): ConnectionPhase {
   switch (state) {
     case "connected":
       return "live"
@@ -19,6 +25,7 @@ export function connectionPhase(state: string, everConnected: boolean): Connecti
     case "signalReconnecting":
       return "reconnecting"
     default:
+      if (replaced) return "replaced"
       return everConnected ? "ended" : "connecting"
   }
 }
@@ -99,14 +106,16 @@ export function isWaitingForCall(state: string, participants: ParticipantLike[])
 
 export type LiveCallMode = "listen" | "intervene"
 
-/** Radix routes every close path (X, Esc, overlay) here; an intervener can't leave until the call ends. */
+/** Radix routes every close path (X, Esc, overlay) here; an intervener can't leave until the call
+ *  ends — unless another tab took the seat, which leaves this one holding a dead panel. */
 export function shouldAllowClose(
   mode: LiveCallMode,
   callEnded: boolean,
   requestedOpen: boolean,
+  replaced = false,
 ): boolean {
   if (requestedOpen) return true
-  return mode !== "intervene" || callEnded
+  return mode !== "intervene" || callEnded || replaced
 }
 
 export type EndCallButtonState = {

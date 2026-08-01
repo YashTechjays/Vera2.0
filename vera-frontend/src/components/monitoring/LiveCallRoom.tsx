@@ -9,7 +9,13 @@ import {
   useParticipants,
   useTrackToggle,
 } from "@livekit/components-react"
-import { ConnectionState, ParticipantKind, Track, type Participant } from "livekit-client"
+import {
+  ConnectionState,
+  DisconnectReason,
+  ParticipantKind,
+  Track,
+  type Participant,
+} from "livekit-client"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -43,6 +49,7 @@ const PHASE_ICON_CLASS: Record<ConnectionPhase, string> = {
   live: "text-emerald-600",
   reconnecting: "text-amber-600",
   ended: "text-muted-foreground",
+  replaced: "text-amber-600",
 }
 
 const MODE_BADGE_CLASS: Record<ParticipantMode, string> = {
@@ -145,16 +152,41 @@ function MicToggle({ canSpeak }: { canSpeak: boolean }) {
   )
 }
 
+/** This window is off the call but the call isn't over. `action` is offered only when
+ *  rejoining can't take the seat from another window of ours — see the replaced case. */
+function RoomNotice({
+  message,
+  action,
+  onAction,
+}: {
+  message: string
+  action?: string
+  onAction?: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
+      <span>{message}</span>
+      {action && onAction && (
+        <button onClick={onAction} className="font-medium underline">
+          {action}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function RoomView({
   microphone,
   onStatus,
   ended,
   onReconnect,
+  replaced,
 }: {
   microphone: boolean
   onStatus?: (status: RoomStatus) => void
   ended: boolean
   onReconnect: () => void
+  replaced: boolean
 }) {
   const state = useConnectionState()
   const participants = useParticipants()
@@ -165,7 +197,7 @@ function RoomView({
   if (state === ConnectionState.Connected && !everConnected) setEverConnected(true)
 
   const likes = participants.map(toParticipantLike)
-  const phase = connectionPhase(state, everConnected)
+  const phase = connectionPhase(state, everConnected, replaced)
   const otherIntervener = otherIntervenerPresent(likes)
   const supervisorLabel = intervenerLabel(likes)
   const takeoverLive = microphone || otherIntervener
@@ -190,12 +222,16 @@ function RoomView({
         </div>
       </div>
       {connectionLost && (
-        <div className="flex items-center justify-between gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
-          <span>Connection lost — the call may still be live.</span>
-          <button onClick={onReconnect} className="font-medium underline">
-            Reconnect
-          </button>
-        </div>
+        <RoomNotice
+          message="Connection lost — the call may still be live."
+          action="Reconnect"
+          onAction={onReconnect}
+        />
+      )}
+      {/* No rejoin here: rejoining reclaims the identity, evicting the other tab, which
+          is then offered the same button — the seat ping-pongs. Send them there instead. */}
+      {phase === "replaced" && (
+        <RoomNotice message="You opened this call in another tab — continue there." />
       )}
       {isWaitingForCall(state, likes) && (
         <p className="text-muted-foreground">Waiting for the call…</p>
@@ -258,6 +294,11 @@ export function LiveCallRoom({
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [reconnectNonce, setReconnectNonce] = useState(0)
+  // Another window of ours claimed this identity and LiveKit evicted us. Latched, and it
+  // gates `connect` — reconnecting would re-present the identity and evict THEM, who would
+  // reconnect in turn: the seat ping-pongs and the roster flickers with it. Whichever layer
+  // wants to retry (SDK leave-action, an effect re-run), this is where it stops.
+  const [replaced, setReplaced] = useState(false)
 
   useEffect(() => {
     if (ended) return
@@ -308,22 +349,32 @@ export function LiveCallRoom({
   const reconnect = () => {
     setError(null)
     setJoin(null)
+    setReplaced(false)
     setReconnectNonce((n) => n + 1)
   }
   return (
     <LiveKitRoom
       serverUrl={join.url}
       token={join.token}
-      connect
+      connect={!replaced}
       audio={microphone}
       video={false}
+      onDisconnected={(reason) => {
+        if (reason === DisconnectReason.DUPLICATE_IDENTITY) setReplaced(true)
+      }}
       onMediaDeviceFailure={() => handleRoomError(new Error("microphone unavailable"))}
       onError={handleRoomError}
       // !h-auto: .lk-room-container's height:100% would collapse the transcript below.
       className="flex !h-auto flex-col"
     >
       <LiveActivityBeacon />
-      <RoomView microphone={microphone} onStatus={onStatus} ended={ended} onReconnect={reconnect} />
+      <RoomView
+        microphone={microphone}
+        onStatus={onStatus}
+        ended={ended}
+        onReconnect={reconnect}
+        replaced={replaced}
+      />
     </LiveKitRoom>
   )
 }

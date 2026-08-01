@@ -40,11 +40,24 @@ describe("connectionPhase", () => {
     expect(connectionPhase("disconnected", true)).toBe("ended")
   })
 
+  it("reads a duplicate-identity eviction as another tab, not the call ending", () => {
+    // Two tabs share a session, so they mint the same identity and LiveKit kicks the
+    // incumbent. Reporting that as "Call ended" describes a call that is still running.
+    expect(connectionPhase("disconnected", true, true)).toBe("replaced")
+    expect(connectionPhase("disconnected", false, true)).toBe("replaced")
+  })
+
+  it("keeps a live connection live even after an earlier eviction was recovered", () => {
+    expect(connectionPhase("connected", true, true)).toBe("live")
+  })
+
   it("has a label for every phase", () => {
     expect(CONNECTION_PHASE_LABEL.connecting).toBe("Connecting…")
     expect(CONNECTION_PHASE_LABEL.live).toBe("Live")
     expect(CONNECTION_PHASE_LABEL.reconnecting).toBe("Reconnecting…")
     expect(CONNECTION_PHASE_LABEL.ended).toBe("Call ended")
+    // A state, like its siblings — "Open in another tab" reads as a command.
+    expect(CONNECTION_PHASE_LABEL.replaced).toBe("Moved to another tab")
   })
 })
 
@@ -177,6 +190,12 @@ describe("shouldAllowClose", () => {
 
   it("lets listeners close freely", () => {
     expect(shouldAllowClose("listen", false, false)).toBe(true)
+  })
+
+  it("releases the close-lock when another tab took the seat", () => {
+    // The panel is dead — its participant was evicted — so holding the intervener
+    // in it traps them in a modal that can no longer reach the call.
+    expect(shouldAllowClose("intervene", false, false, true)).toBe(true)
   })
 })
 
