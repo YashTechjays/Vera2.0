@@ -43,10 +43,13 @@ def test_session_data_json_roundtrip() -> None:
 
 async def test_verify_returns_identity_for_full_session() -> None:
     store = InMemorySessionStore()
-    token = await store.put(SESSION_NS, _data(), 60)
+    data = _data()
+    token = await store.put(SESSION_NS, data, 60)
 
     identity = await SessionVerifier(store).verify(token)
 
+    # session_id rides along so per-session work (the LiveKit participant identity)
+    # can tell two browsers on one account apart.
     assert identity == VerifiedIdentity(
         user_id=USER,
         subject="a@example.com",
@@ -54,6 +57,7 @@ async def test_verify_returns_identity_for_full_session() -> None:
         tenant_id=TENANT,
         account_type=AccountType.TENANT,
         tenant_slug="acme",
+        session_id=data.session_id,
     )
 
 

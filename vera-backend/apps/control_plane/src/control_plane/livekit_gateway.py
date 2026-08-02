@@ -69,6 +69,14 @@ class ActiveEgress(NamedTuple):
     started_at_ms: int | None
 
 
+class RoomParticipant(NamedTuple):
+    """A participant currently in a room. `can_publish` is the grant LiveKit itself
+    enforces, so it — not the mirrored vera.mode attribute — is what says "live mic"."""
+
+    identity: str
+    can_publish: bool = False
+
+
 class LiveKitGateway:
     def __init__(
         self,
@@ -167,10 +175,11 @@ class LiveKitGateway:
             resp = await lk.room.list_rooms(api.ListRoomsRequest(names=room_names))
         return {room.name for room in resp.rooms}
 
-    async def room_participant_identities(self, room_name: str) -> list[str] | None:
-        """Identities currently in the room, or None when the room doesn't exist.
-        The sweeper uses this to spot dead-but-open rooms holding only browser
-        observers, which keep the room's departure timeout from ever firing."""
+    async def room_participants(self, room_name: str) -> list[RoomParticipant] | None:
+        """Participants currently in the room, or None when the room doesn't exist.
+        The sweeper reads this to spot dead-but-open rooms holding only browser
+        observers, which keep the room's departure timeout from ever firing; the
+        intervene path reads it to find the window already holding the mic."""
         async with self._client() as lk:
             try:
                 resp = await lk.room.list_participants(api.ListParticipantsRequest(room=room_name))
@@ -178,7 +187,7 @@ class LiveKitGateway:
                 if exc.code == "not_found":
                     return None
                 raise
-        return [p.identity for p in resp.participants]
+        return [RoomParticipant(p.identity, p.permission.can_publish) for p in resp.participants]
 
     async def delete_room(self, room_name: str) -> None:
         """Tear the room down server-side, hanging up the SIP callee and shutting

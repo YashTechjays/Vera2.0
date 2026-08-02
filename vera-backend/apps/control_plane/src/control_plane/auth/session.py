@@ -21,7 +21,7 @@ Two keyspaces share one store via a `namespace`:
 import json
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -56,7 +56,11 @@ class SessionData:
     home tenant); a tenant user's session always carries their tenant. `tenant_slug`
     is that tenant's URL slug, used for display and invite-URL construction;
     `None` for a platform operator (no home tenant) and for any session minted
-    before slug capture."""
+    before slug capture.
+
+    `session_id` is a non-secret handle for THIS login (one user's two browsers get
+    different ids), so per-session resources can be named without exposing the token —
+    it is never a credential itself."""
 
     user_id: UUID
     tenant_id: UUID | None
@@ -66,6 +70,7 @@ class SessionData:
     mfa_passed: bool
     account_type: str  # serialized AccountType value — required; no default
     tenant_slug: str | None = None
+    session_id: UUID = field(default_factory=uuid4)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -78,6 +83,7 @@ class SessionData:
                 "mfa_passed": self.mfa_passed,
                 "account_type": self.account_type,
                 "tenant_slug": self.tenant_slug,
+                "session_id": str(self.session_id),
             }
         )
 
@@ -94,6 +100,8 @@ class SessionData:
             mfa_passed=d["mfa_passed"],
             account_type=d["account_type"],  # required key — raises KeyError on legacy sessions
             tenant_slug=d.get("tenant_slug"),
+            # Sessions minted before this field are still live in Redis — synthesize.
+            session_id=UUID(d["session_id"]) if d.get("session_id") else uuid4(),
         )
 
 
@@ -358,4 +366,5 @@ class SessionVerifier:
             tenant_id=data.tenant_id,
             account_type=AccountType(data.account_type),
             tenant_slug=data.tenant_slug,
+            session_id=data.session_id,
         )
