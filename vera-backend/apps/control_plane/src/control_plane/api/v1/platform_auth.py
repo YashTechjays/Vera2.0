@@ -343,12 +343,16 @@ async def platform_login(
             )
             raise _unauthorized()
         if provisioning_uri is None:  # already enrolled between check and write — retry as verify
-            challenge = await store.put(MFA_NS, base, settings.mfa_challenge_ttl_seconds)
+            challenge = await store.mint_mfa_challenge(
+                MFA_NS, base, settings.mfa_challenge_ttl_seconds
+            )
             await emit_auth_event(
                 audit, tenant_id=None, event=AuthEvent.MFA_CHALLENGE, ip=ip, user_id=creds.user_id
             )
             return ok(LoginResponse(mfa="verify", mfa_token=challenge))
-        enrollment = await store.put(MFA_ENROLL_NS, base, settings.mfa_challenge_ttl_seconds)
+        enrollment = await store.mint_mfa_challenge(
+            MFA_ENROLL_NS, base, settings.mfa_challenge_ttl_seconds
+        )
         await emit_auth_event(
             audit, tenant_id=None, event=AuthEvent.MFA_CHALLENGE, ip=ip, user_id=creds.user_id
         )
@@ -356,7 +360,7 @@ async def platform_login(
             LoginResponse(mfa="enroll", mfa_token=enrollment, provisioning_uri=provisioning_uri)
         )
 
-    challenge = await store.put(MFA_NS, base, settings.mfa_challenge_ttl_seconds)
+    challenge = await store.mint_mfa_challenge(MFA_NS, base, settings.mfa_challenge_ttl_seconds)
     await emit_auth_event(
         audit, tenant_id=None, event=AuthEvent.MFA_CHALLENGE, ip=ip, user_id=creds.user_id
     )

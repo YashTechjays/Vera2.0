@@ -8,6 +8,7 @@ worker-event consumer (a call ended → a slot freed).
 
 import asyncio
 import logging
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -66,6 +67,12 @@ def schedule_dispatch_pass(
 def _track(task: asyncio.Task[None]) -> None:
     _PENDING.add(task)
     task.add_done_callback(_PENDING.discard)
+
+
+def schedule_detached(coro: "Coroutine[Any, Any, None]") -> None:
+    """Fire-and-forget *coro* on the running loop, tracked in the shutdown/test
+    drain set. The coroutine must swallow its own exceptions (like _dispatch_pass)."""
+    _track(asyncio.create_task(coro))
 
 
 async def drain_pending() -> None:

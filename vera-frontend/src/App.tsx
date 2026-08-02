@@ -12,6 +12,8 @@ import { PlatformLogin } from "@/pages/PlatformLogin"
 import { MfaVerify } from "@/pages/MfaVerify"
 import { MfaEnroll } from "@/pages/MfaEnroll"
 import { AcceptInvite } from "@/pages/AcceptInvite"
+import { ForgotPassword } from "@/pages/ForgotPassword"
+import { ResetPassword } from "@/pages/ResetPassword"
 import { PlatformAcceptInvite } from "@/pages/PlatformAcceptInvite"
 import { PlatformOperators } from "@/pages/PlatformOperators"
 import { PlatformSettings } from "@/pages/PlatformSettings"
@@ -46,11 +48,13 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/platform/login" element={<PlatformLogin />} />
         <Route path="/mfa" element={<MfaVerify />} />
         <Route path="/mfa-enroll" element={<MfaEnroll />} />
         {/* Invite links are tenant-scoped (generated in the backend email). */}
         <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
+        <Route path="/tenants/:tenantSlug/reset-password" element={<ResetPassword />} />
         <Route path="/platform/accept-invite" element={<PlatformAcceptInvite />} />
         <Route element={<RequireAuth />}>
           {/* AppShell owns the Suspense boundary around its <Outlet>, so a lazy

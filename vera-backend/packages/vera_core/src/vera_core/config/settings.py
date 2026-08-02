@@ -114,10 +114,19 @@ class Settings(BaseSettings):
     # invitees are workforce members. `frontend_base_url` builds the accept link.
     invite_ttl_seconds: int = 72 * 3600
 
-    # --- email (invites) ---------------------------------------------------
-    # Local dev uses the msztolcman/sendria SMTP sandbox (docker-compose): SMTP on
-    # 1025, captured mail viewable at http://localhost:1080. Production points these
-    # at the real relay. No auth/TLS knobs here yet — added with the prod relay.
+    # Self-service password reset: token far shorter-lived than the 72 h invite
+    # (live recovery, not scheduled onboarding); over-limit is a silent generic 200.
+    password_reset_ttl_seconds: int = 3600
+    password_reset_rate_limit: int = 3
+    password_reset_rate_limit_window_seconds: int = 15 * 60
+
+    # --- email (invites + password resets) ----------------------------------
+    # Deployed environments send via the Twilio Email API, authenticated with the
+    # same Twilio account as outbound SIP (auth token via SecretProvider, never a
+    # setting). Setting the account SID selects it; unset falls back to the local
+    # msztolcman/sendria SMTP sandbox (docker-compose: SMTP 1025, captured mail at
+    # http://localhost:1080). `email_from` must be a Twilio-verified sender.
+    twilio_account_sid: str | None = None
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     email_from: str = "no-reply@vera.local"

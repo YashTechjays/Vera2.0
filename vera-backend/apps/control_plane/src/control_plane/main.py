@@ -17,14 +17,19 @@ from control_plane.auth.rbac import PermissionResolver
 from control_plane.auth.session import RedisSessionStore, SessionStore, SessionVerifier
 from control_plane.call_summary import RedisSummaryCache, SummaryCache
 from control_plane.dispatch import drain_pending
-from control_plane.email import EmailSender, SmtpEmailSender
+from control_plane.email import EmailSender, build_email_sender
 from control_plane.exceptions import register_exception_handlers
 from control_plane.idempotency import IdempotencyStore, RedisIdempotencyStore
 from control_plane.livekit_gateway import LiveKitGateway, build_livekit_gateway
 from control_plane.llm import VertexLLMClient
 from control_plane.pipeline_sweeper import PipelineSweeper
 from control_plane.post_call_consumer import PostCallConsumer
-from control_plane.rate_limit import CallRateLimiter, RedisCallRateLimiter
+from control_plane.rate_limit import (
+    CallRateLimiter,
+    PasswordResetRateLimiter,
+    RedisCallRateLimiter,
+    RedisPasswordResetRateLimiter,
+)
 from control_plane.recording_jobs import RecordingVerifier, RetentionSweeper
 from control_plane.recording_storage import GCSRecordingStorage, RecordingStorage
 from control_plane.request_context import RequestIdMiddleware
@@ -97,6 +102,7 @@ def create_app(
     summary_cache: SummaryCache | None = None,
     notification_service: NotificationService | None = None,
     call_rate_limiter: CallRateLimiter | None = None,
+    password_reset_rate_limiter: PasswordResetRateLimiter | None = None,
     whisper_stt: ResilientSTT | None = None,
 ) -> FastAPI:
     """Keyword overrides exist for tests; production wiring comes from Settings.
@@ -158,6 +164,14 @@ def create_app(
             limit=settings.coaching_rate_limit_per_minute,
             window_seconds=settings.coaching_rate_limit_window_seconds,
         )
+        app.state.password_reset_rate_limiter = (
+            password_reset_rate_limiter
+            or RedisPasswordResetRateLimiter(
+                _redis(),
+                limit=settings.password_reset_rate_limit,
+                window_seconds=settings.password_reset_rate_limit_window_seconds,
+            )
+        )
         # Whisper's fault-tolerant STT chain. Construction is lazy inside
         # ResilientSTT (no provider client until first transcribe()), so this is
         # safe even before ASSEMBLYAI_API_KEY exists.
@@ -200,9 +214,7 @@ def create_app(
         app.state.audit = audit or DatabaseAuditWriter(sessionmaker)
         app.state.auth_audit = auth_audit or DatabaseAuthAuditWriter(sessionmaker)
         app.state.permission_resolver = PermissionResolver(cache)
-        app.state.email_sender = email_sender or SmtpEmailSender(
-            host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from
-        )
+        app.state.email_sender = email_sender or build_email_sender(settings, app.state.secrets)
         app.state.invitation_store = invitation_store or RedisInvitationStore(_redis())
 
         # Both stream consumers need a real LiveKit gateway (to tear rooms down) and are
