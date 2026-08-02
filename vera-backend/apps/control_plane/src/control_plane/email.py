@@ -172,7 +172,9 @@ def build_email_sender(settings: Settings, secrets: SecretProvider) -> EmailSend
         try:
             auth_token = secrets.get("TWILIO_AUTH_TOKEN")
         except SecretNotFoundError:
-            logger.warning(
+            # ERROR, not WARNING: in prod this silently swaps every send onto the
+            # SMTP sandbox sender — an outage, not a one-off bounce.
+            logger.error(
                 "VERA_TWILIO_ACCOUNT_SID is set but TWILIO_AUTH_TOKEN did not resolve; "
                 "falling back to the SMTP sender instead of failing app startup"
             )

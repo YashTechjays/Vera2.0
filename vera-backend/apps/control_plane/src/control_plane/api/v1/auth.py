@@ -30,6 +30,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -918,11 +919,14 @@ async def activate_invitation_mfa(
         codes = await mfa.activate(kms, identity=ident, code=body.code)
         if codes is None:
             raise BadRequestError(message="invalid code")
+        # Claim after verifying so a mistyped code doesn't burn the token; concurrent
+        # correct-code requests race here instead and only the winner's write commits.
+        if await invites.get_and_delete(INVITE_MFA_NS, body.mfa_token) is None:
+            raise _unauthorized()
         ident.mfa_enabled = True
         await session.execute(
             update(AppUser).where(AppUser.id == invite.app_user_id).values(status="active")
         )
-    await invites.delete(INVITE_MFA_NS, body.mfa_token)
     await _audit(
         audit,
         tenant_id=tenant_id,
@@ -1134,7 +1138,7 @@ async def confirm_password_reset(
     revoke_failed = False
     try:
         await store.delete_all_for_user(reset.app_user_id)
-    except Exception:
+    except RedisError:
         revoke_failed = True
         logger.warning(
             "password reset for %s: session revoke failed", reset.app_user_id, exc_info=True

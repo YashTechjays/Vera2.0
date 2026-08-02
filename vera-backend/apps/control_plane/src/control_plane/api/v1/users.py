@@ -16,7 +16,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from control_plane.api.v1.common import (
     AppSettings,
@@ -124,9 +124,10 @@ async def invite_user(
     )
     email = body.email
     # Durable de-dup (no UNIQUE on email exists): a user with this email already in
-    # the tenant is a conflict — also collapses a late retry into one account.
+    # the tenant is a conflict — also collapses a late retry into one account. Matched
+    # case-insensitively like the login lookup, so `User@x` can't shadow `user@x`.
     existing = (
-        await session.execute(select(AppUser.id).where(AppUser.email == email))
+        await session.execute(select(AppUser.id).where(func.lower(AppUser.email) == email.lower()))
     ).scalar_one_or_none()
     if existing is not None:
         raise CustomAPIException(

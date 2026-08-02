@@ -195,6 +195,7 @@ async def test_request_matches_a_differently_cased_email(
     client, world = reset_world
     resp = await _request_reset(client, world, world.email.upper())
     assert resp.status_code == 200
+    await drain_pending()  # the send is a detached task
     assert world.email_sender.sent, "no reset email was sent for a differently-cased email"
 
 
