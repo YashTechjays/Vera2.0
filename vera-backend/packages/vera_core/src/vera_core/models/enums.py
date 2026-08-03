@@ -265,6 +265,9 @@ class AuthEvent(enum.StrEnum):
     TENANT_OBSERVER_UPDATED = "tenant_observer_updated"
     # Tenant concurrency knobs updated (old/new integer values, no PHI).
     CONCURRENCY_CONFIG_UPDATED = "concurrency_config_updated"
+    # Self-service password reset; meta never holds the token or URL.
+    PASSWORD_RESET_REQUESTED = "password_reset_requested"
+    PASSWORD_RESET_COMPLETED = "password_reset_completed"
     # Platform operator changed a tenant's auto-retry config (flag/threshold values, no PHI).
     TENANT_RETRY_CONFIG_UPDATED = "tenant_retry_config_updated"
     # Tenant lifecycle driven from the platform plane (VR2-30). Recorded null-tenant like

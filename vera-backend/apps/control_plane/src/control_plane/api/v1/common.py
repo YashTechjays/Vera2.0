@@ -158,14 +158,18 @@ async def send_invite_email(
         await email_sender.send(
             EmailMessage(
                 to=to,
-                subject="You're invited to Vera",
+                subject="You're invited to Vera Techsolutions",
                 body=(
                     f"Hello{(' ' + name) if name else ''},\n\n"
-                    "You've been invited to Vera. Set your password using the link below "
-                    f"(valid for {ttl_seconds // 3600} hours):\n\n"
+                    "You've been invited to join Vera Techsolutions, the platform your "
+                    "team uses to run AI-assisted insurance benefit verification.\n\n"
+                    "Click below to set your password and get started. This link is "
+                    f"valid for {ttl_seconds // 3600} hours.\n\n"
                     f"{invite_url}\n\n"
-                    "If you didn't expect this, you can ignore this email."
+                    "If you weren't expecting this, you can safely ignore this email."
                 ),
+                action_url=invite_url,
+                action_label="Set your password",
             )
         )
     except Exception:

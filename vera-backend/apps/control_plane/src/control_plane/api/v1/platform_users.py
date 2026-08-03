@@ -85,15 +85,18 @@ async def _send_operator_invite_email(
         await email_sender.send(
             EmailMessage(
                 to=to,
-                subject="You're invited to Vera as a platform operator",
+                subject="You're invited to Vera Techsolutions as a platform operator",
                 body=(
                     f"Hello{(' ' + name) if name else ''},\n\n"
-                    f"{intro} "
-                    f"(valid for {ttl_seconds // 3600} hours). "
-                    "Two-factor authentication is required to finish setup.\n\n"
+                    f"{intro}\n\n"
+                    "Click below to accept the invitation and set your password. This "
+                    f"link is valid for {ttl_seconds // 3600} hours. Two-factor "
+                    "authentication is required to finish setup.\n\n"
                     f"{invite_url}\n\n"
-                    "If you didn't expect this, you can ignore this email."
+                    "If you weren't expecting this, you can safely ignore this email."
                 ),
+                action_url=invite_url,
+                action_label="Accept invitation",
             )
         )
         return True
@@ -168,8 +171,8 @@ async def invite_operator(
             to=email,
             name=body.name,
             intro=(
-                "You've been invited as a Vera platform operator. Set your "
-                "password using the link below"
+                "You've been invited to join Vera Techsolutions as a platform "
+                "operator, with administrative access across tenants."
             ),
             invite_url=invite_url,
             ttl_seconds=settings.invite_ttl_seconds,
@@ -309,7 +312,10 @@ async def resend_operator_invitation(
         email_sender,
         to=user.email,
         name=user.name,
-        intro="Here is a fresh link to set your password",
+        intro=(
+            "Your invitation has been refreshed so you can finish setting up your "
+            "Vera Techsolutions operator account."
+        ),
         invite_url=invite_url,
         ttl_seconds=settings.invite_ttl_seconds,
         log_context="resend platform invitation email",

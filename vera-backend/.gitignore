@@ -29,3 +29,6 @@ infra/**/*.tfstate*
 
 # SDD controller scratch (briefs/reports/diffs/ledger)
 .superpowers/
+
+# Generated TTS probe audio (scripts/tts_probe.py)
+tts-probe/

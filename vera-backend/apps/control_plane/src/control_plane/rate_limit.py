@@ -69,6 +69,57 @@ class RedisCallRateLimiter:
         return int(count) <= self._limit
 
 
+# Password-reset throttle keys are sha256(slug:email) — no raw email in Redis, and
+# unknown emails consume budget too; over-limit is a silent drop, never a 429.
+_RESET_KEY_PREFIX = "vera:pwreset-rl:"
+
+
+def _reset_key(key: str) -> str:
+    return f"{_RESET_KEY_PREFIX}{key}"
+
+
+class PasswordResetRateLimiter(Protocol):
+    async def check_and_increment(self, key: str) -> bool:
+        """Record one reset request against *key*'s window; True if within the limit."""
+        ...
+
+
+class InMemoryPasswordResetRateLimiter:
+    """Dev/tests. Monotonic-clock window; counters vanish on restart."""
+
+    def __init__(self, *, limit: int, window_seconds: int) -> None:
+        self._limit = limit
+        self._window_seconds = window_seconds
+        self._windows: dict[str, tuple[float, int]] = {}
+
+    async def check_and_increment(self, key: str) -> bool:
+        now = time.monotonic()
+        started_at, count = self._windows.get(key, (now, 0))
+        if now - started_at >= self._window_seconds:
+            started_at, count = now, 0
+        count += 1
+        self._windows[key] = (started_at, count)
+        return count <= self._limit
+
+
+class RedisPasswordResetRateLimiter:
+    """Production. Same atomic `INCR` + `EXPIRE ... NX` shape as the coaching
+    limiter (see module docstring)."""
+
+    def __init__(self, redis: Redis, *, limit: int, window_seconds: int) -> None:
+        self._redis = redis
+        self._limit = limit
+        self._window_seconds = window_seconds
+
+    async def check_and_increment(self, key: str) -> bool:
+        redis_key = _reset_key(key)
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.incr(redis_key)
+            pipe.expire(redis_key, self._window_seconds, nx=True)
+            count, _ = await pipe.execute()
+        return int(count) <= self._limit
+
+
 async def check_rate_limit(limiter: CallRateLimiter, call_id: UUID) -> None:
     """Record the action, or reject it as over the shared coaching/whisper budget (429)."""
     if not await limiter.check_and_increment(call_id):
