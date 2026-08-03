@@ -15,8 +15,10 @@ Seeding pattern mirrors tests/integration/control_plane/test_call_queue.py:
 
 from __future__ import annotations
 
+import copy
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -29,7 +31,7 @@ from vera_core.forms.dsl import PromotedFields
 from vera_core.integrations.llm import ExtractedField, FakeLLMClient, JudgeVerdict, TranscriptTurn
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.call import Call
-from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, InsuranceType
+from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, InsuranceType, ReviewReason
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
@@ -1251,3 +1253,93 @@ async def test_observer_answer_without_evidence_anchor_is_judged_with_none(
     by_path = {ef.field_path: ef for ef in llm.judge_calls[0]}
     assert by_path[ctx.collection_path].evidence_seq is None
     assert by_path[_NOTES_PATH].evidence_seq == 2
+
+
+async def _require_notes_and_set_threshold(ctx: _SeedCtx, threshold: float) -> None:
+    """Scope a two-required-field schema (notes flipped to required) and the fill
+    threshold to a single test — leaves the shared `_SCHEMA_JSON` untouched so the
+    fraction can land strictly between 0 and 1 for the gate tests only."""
+    schema: Any = copy.deepcopy(_SCHEMA_JSON)
+    schema["sections"]["coverage"]["fields"]["notes"]["required"] = True
+    await ctx.session.execute(
+        update(SchemaVersion)
+        .where(
+            SchemaVersion.id
+            == select(PatientForm.schema_version_id)
+            .where(PatientForm.id == ctx.form_id)
+            .scalar_subquery()
+        )
+        .values(schema_json=schema)
+    )
+    await ctx.session.execute(
+        update(Tenant).where(Tenant.id == ctx.tenant_id).values(retry_fill_threshold=threshold)
+    )
+    await ctx.session.flush()
+
+
+async def test_threshold_met_routes_to_review_not_retry(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Once the verified fraction clears the tenant's retry_fill_threshold, the
+    form parks for review instead of redialing for the remaining unsatisfied-
+    but-askable field — the good-enough gate suppresses what would otherwise
+    (pre-change) be a retry."""
+    ctx = seeded_ai_processing_form
+    await _require_notes_and_set_threshold(ctx, 0.4)
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    await ctx.session.flush()
+
+    # Only the observer's already-satisfied field is judged; notes is never
+    # extracted, so it stays unsatisfied — one of the two required fields
+    # verified out of two clears the 0.4 threshold (0.5 >= 0.4).
+    turns = [TranscriptTurn(0, "user", "yes in network")]
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[JudgeVerdict(ctx.collection_path, True, 90, "yes in network")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == ReviewReason.FILL_THRESHOLD_MET.value
+    assert form.verified_pct > 0  # persisted
+
+
+async def test_below_threshold_still_retries(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Below the tenant's fill threshold, an unsatisfied askable field still
+    takes the ordinary retry path — the gate only ever suppresses a retry, it
+    never forces one and never overrides the other retry guards."""
+    ctx = seeded_ai_processing_form
+    await _require_notes_and_set_threshold(ctx, 1.0)
+
+    # LLM extracts nothing — both required fields stay unsatisfied, so the
+    # verified fraction is 0.0, well below the 1.0 threshold.
+    turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.IN_QUEUE

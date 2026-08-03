@@ -27,6 +27,7 @@ from vera_core.forms.review import (
     form_completion_pct,
     is_blank_answer,
     retryable_required_paths,
+    satisfied_required_fraction,
     unsatisfied_required_paths,
     unwrap_value,
 )
@@ -469,6 +470,10 @@ async def evaluate_call(
             reason=ReviewReason.TOKEN_VALUE,
         )
     status_by_path = await load_field_status(session, form_id)
+    verified_fraction = satisfied_required_fraction(
+        status_by_path, version.schema_json, floor=deps.floor, values=current_values
+    )
+    form.verified_pct = round(verified_fraction * 100, 2)
     # The authoritative decision evaluates gates against the REAL current values
     # (in-session, never logged) — the dispatcher's PHI-free sentinel
     # approximation is only for the retry-nudge labels. COMPLETED requires every
@@ -484,6 +489,16 @@ async def evaluate_call(
             written=len(kept),
             reviewed=[],
             reason=ReviewReason.READY_FOR_REVIEW,
+        )
+    # Good-enough gate: the call verified the tenant's threshold of the applicable-
+    # required fields, so park for review instead of redialing for the tail. Only
+    # suppresses a retry — the guards below decide the sub-threshold case.
+    if verified_fraction >= float(tenant.retry_fill_threshold):
+        return await _finish(
+            FormStatus.EXCEPTION_REVIEW,
+            written=len(kept),
+            reviewed=unsatisfied,
+            reason=ReviewReason.FILL_THRESHOLD_MET,
         )
     retryable = retryable_required_paths(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
