@@ -357,7 +357,7 @@ class CascadeHarness:
         self.session.update_agent(successor)
         await self.wait_until_listening()
         # The new activity's audio anchor is only set once a frame arrives, so give the
-        # 10ms input a few frames to land before anything reads it.
+        # 20ms input pump a few frames to land before anything reads it.
         await asyncio.sleep(_SETTLE)
         self.agent = successor
         return successor

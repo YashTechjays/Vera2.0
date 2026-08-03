@@ -78,7 +78,11 @@ state. Canonical form: `call--<tenant_uuid>--<call_uuid>`.
   rush; when it is time to migrate, pin `version="v1-mini"` EXPLICITLY rather than relying on
   that default, and get the boundary call confirmed in review — do not read this note as
   clearance.
-- **`livekit-agents` must stay `>=1.6.4`.** Below that, an agent handoff desynchronizes the STT
+- **`livekit-agents` must stay `>=1.6.7`.** Two floors sit on this pin. The *security* one:
+  1.6.4/1.6.5 pin `json-repair==0.59.10` (GHSA-xf7x-x43h-rpqh) and the root
+  `override-dependencies` that used to force the patched version is gone, so 1.6.6 is the
+  lowest safe release — asserted in `tests/unit/test_dependency_floors.py`. The *correctness*
+  one, which is why the floor was 1.6.4 to begin with: below that, an agent handoff desynchronizes the STT
   stream's clock from the audio anchor, so a turn where VAD saw no speech energy gets its
   end-of-turn wait set from a future-dated timestamp — unbounded, never clamped by `max_delay`.
   The reply is generated and parked before TTS, and the caller hears dead air until they speak

@@ -63,7 +63,7 @@ from vera_core.models.enums import (
 )
 from vera_core.observability.correlation import call_trace_attributes, room_name_for_call
 from vera_core.schemas import PersonaTweak
-from vera_core.services.call_lifecycle import apply_terminal_call_status, fail_and_requeue
+from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.field_answers import current_values_by_path
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
@@ -513,24 +513,14 @@ async def try_dispatch(
             if plan_service is not None and staged_plan_room is not None:
                 with contextlib.suppress(Exception):
                     await plan_service.clear(staged_plan_room)
-            # Requeue through the retry budget, never around it: reverting straight
-            # to IN_QUEUE let a persistently-rejecting LiveKit redial forever.
-            if fail_and_requeue(form, tenant_max_retries=tenant.max_retries):
-                form.enqueued_at = func.now()
-                logger.warning(
-                    "dispatch: form %s failed to dispatch (%s) — retry %d of %d",
-                    form.id,
-                    detail,
-                    form.retry_count,
-                    tenant.max_retries,
-                )
-            else:
-                logger.error(
-                    "dispatch: form %s failed to dispatch (%s) — retries exhausted, "
-                    "parked in CALL_FAILED",
-                    form.id,
-                    detail,
-                )
+            # Park without spending the retry budget: reverting to IN_QUEUE redialed
+            # forever, and charging a clinical retry for an infra blip retires the form.
+            sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
+            logger.error(
+                "dispatch: form %s failed to dispatch (%s) — parked in CALL_FAILED",
+                form.id,
+                detail,
+            )
             continue
 
         # 4d. Dial OUTSIDE the savepoint: a failed dial keeps the Call row as
@@ -545,9 +535,8 @@ async def try_dispatch(
                 room_name, form.insurance_provider_phone_number, trunk_id
             )
         except OutboundDialError as exc:
-            logger.warning(
-                "dispatch: outbound dial failed for call %s (%s)", call.id, exc.diagnostic
-            )
+            # str(exc), not .diagnostic: keeps the detail when there is no code to render.
+            logger.warning("dispatch: outbound dial failed for call %s: %s", call.id, exc)
             with contextlib.suppress(Exception):  # room teardown is best-effort
                 await livekit.delete_room(room_name)
             requeued = apply_terminal_call_status(

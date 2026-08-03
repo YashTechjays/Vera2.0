@@ -22,7 +22,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "livekit-agents", extras = ["deepgram", "google", "cartesia", "silero", "turn-detector"], specifier = ">=1.6.4" },
+    { name = "livekit-agents", extras = ["deepgram", "google", "cartesia", "silero", "turn-detector"], specifier = ">=1.6.7" },
     { name = "redis", specifier = ">=5.2" },
     { name = "vera-core", editable = "packages/vera_core" },
 ]

@@ -36,9 +36,11 @@ def fail_and_requeue(form: Any, *, tenant_max_retries: int) -> bool:
     """Park *form* in CALL_FAILED, then auto-retry it while retries remain.
 
     Returns True when the form was requeued — the caller owns `form.enqueued_at`
-    (DB clock) in that case. The single encoding of the failed-call retry edge:
-    both a terminal call status and a dispatch that never produced a call route
-    here, so the retry budget is spent in exactly one place.
+    (DB clock) in that case. The one encoding of the failed-call retry edge, reached
+    only from a terminal call status: a call connected and ended badly, so retrying is
+    a clinical decision and spends the tenant's budget. A dispatch-prep failure never
+    dialed and deliberately does NOT come here — it parks without spending
+    (`queue_dispatcher`), so an infrastructure blip cannot retire a patient's form.
     """
     sm = FormStateMachine()
     sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant_max_retries)

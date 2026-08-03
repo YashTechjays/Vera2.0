@@ -169,9 +169,8 @@ async def start_voice_session(
             await livekit.create_sip_participant(room_name, phone_number, trunk_id)
             logger.info("voice-lab: placed outbound SIP call into room %s", room_name)
         except OutboundDialError as e:
-            logger.warning(
-                "voice-lab: outbound dial failed for room %s (%s)", room_name, e.diagnostic
-            )
+            # str(e), not .diagnostic: keeps the detail when there is no code to render.
+            logger.warning("voice-lab: outbound dial failed for room %s: %s", room_name, e)
             # The dial failed at the LiveKit/telephony seam (e.g. the trunk was deleted
             # after it was stored, or the carrier refused the call). Tear down the room
             # + dispatched agent we just created so nothing is left orphaned, and return

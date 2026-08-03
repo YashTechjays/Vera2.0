@@ -164,7 +164,16 @@ async def test_no_turn_leaves_a_generated_reply_unspoken(otel_spans: Any) -> Non
         if s.name == "agent_turn"
     ]
 
-    assert ["llm_node"] not in turns, "a generated reply never reached TTS"
+    # `wait_for_reply` above is the PRIMARY guard — a parked turn never speaks, so the
+    # regression fails there. This check is secondary and deliberately positive:
+    # `["llm_node"] not in turns` could never fail, because a parked turn's `agent_turn`
+    # span never ends and `get_finished_spans()` omits unended spans entirely. What is
+    # still worth asserting is the turns that DID complete: one that generated a reply
+    # and finished without reaching TTS is a distinct, catchable defect.
+    assert turns, "no agent_turn completed"
+    for child_names in turns:
+        if "llm_node" in child_names:
+            assert "tts_node" in child_names, "a completed turn never reached TTS"
 
 
 async def test_one_llm_call_per_spoken_reply() -> None:

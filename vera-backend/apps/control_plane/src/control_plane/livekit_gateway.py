@@ -30,7 +30,9 @@ _ROOM_DEPARTURE_TIMEOUT_S = 120
 # Transport-level SDK failures, re-raised as domain errors so SDK exception types
 # never leak to the routers. TwirpError is a deprecated alias of the SDK's
 # ServerError, so this covers both application-level rejections and transport loss.
-_LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError)
+# TimeoutError is separate: the SDK re-raises a bare total-timeout, which is not a
+# aiohttp.ClientError (only ServerTimeoutError is).
+_LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError, TimeoutError)
 
 
 def _seam_error[E: TelephonyError](cls: type[E], op: str, exc: Exception) -> E:

@@ -714,18 +714,24 @@ async def hol_form_ids(
 
 
 @pytest.mark.asyncio
-async def test_room_creation_failure_burns_down_the_retry_budget(
+async def test_room_creation_failure_parks_without_spending_the_retry_budget(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     rbac_world: RBACWorld,
     trunk_configured: None,
     queue_form_id: UUID,
 ) -> None:
-    """A LiveKit that keeps rejecting create_call_room must not redial forever.
+    """A LiveKit that rejects create_call_room must not redial forever — and must not
+    charge an infrastructure failure to the tenant's clinical retry budget.
 
-    Each failed pass has to spend one retry and, once the budget is gone, park the
-    form in CALL_FAILED. Run on real Postgres because the failure path reads the
-    form AFTER a savepoint rollback — the unit suite's fake session has a no-op
-    begin_nested and so cannot show whether SQLAlchemy expired those attributes.
+    The form parks in CALL_FAILED on the FIRST failure with retry_count untouched,
+    the same rule the plan-prep failure path already follows. max_retries is set to 2
+    so the budget is demonstrably available and still not spent. Recovery is an
+    operator's manual requeue, which resets the budget — covered by
+    test_manual_requeue_from_call_failed_bypasses_cap_and_resets_budget.
+
+    Run on real Postgres because the failure path reads the form AFTER a savepoint
+    rollback — the unit suite's fake session has a no-op begin_nested and so cannot
+    show whether SQLAlchemy expired those attributes.
     """
     async with admin_sessionmaker() as session, session.begin():
         await session.execute(_requeue(queue_form_id, provider=None, minutes_ago=1))
@@ -771,19 +777,13 @@ async def test_room_creation_failure_burns_down_the_retry_budget(
             )
 
     try:
-        # max_retries=2 → two failed passes stay retryable, the third parks it.
+        # One failure is enough to park it, and the retry budget stays untouched.
         await _one_pass()
-        assert await _form_state() == (FormStatus.IN_QUEUE.value, 1)
-
-        await _one_pass()
-        assert await _form_state() == (FormStatus.IN_QUEUE.value, 2)
-
-        await _one_pass()
-        assert await _form_state() == (FormStatus.CALL_FAILED.value, 2)
+        assert await _form_state() == (FormStatus.CALL_FAILED.value, 0)
 
         # Parked means parked: the next pass must not pick it up at all.
         await _one_pass()
-        assert await _form_state() == (FormStatus.CALL_FAILED.value, 2)
+        assert await _form_state() == (FormStatus.CALL_FAILED.value, 0)
         assert fake.sip_calls == []  # nothing was ever dialed
     finally:
         async with admin_sessionmaker() as session, session.begin():
