@@ -27,7 +27,12 @@ from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
 from vera_core.models import AuditLog, Call, InterventionEvent, PatientForm, Transcript
 from vera_core.models.authoring import FormSchema, SchemaVersion
-from vera_core.models.enums import CallStatus, InsuranceType, TranscriptSource
+from vera_core.models.enums import (
+    CallStatus,
+    InsuranceType,
+    InterventionType,
+    TranscriptSource,
+)
 from vera_core.observability.correlation import (
     parse_room_name,
     room_name_for_call,
@@ -446,6 +451,49 @@ async def test_call_stats_counts_todays_visible_calls(
 
 
 @pytest.mark.asyncio
+async def test_call_stats_total_today_is_personal_live_and_critical_are_not(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """total_today counts only calls the caller initiated or intervened in (VR2-63);
+    live/critical stay visibility-scoped so a published call still surfaces on the
+    monitoring cards of a supervisor who never touched it."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+        published=True,
+    )
+
+    # Published and live: visible to the supervisor's cards, but not THEIR call.
+    resp = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.supervisor_token))
+    assert resp.json()["data"] == {"total_today": 0, "live": 1, "critical": 0}
+
+    # An intervention makes it count toward the supervisor's total.
+    admin_session.add(
+        InterventionEvent(
+            tenant_id=rbac_world.tenant_id,
+            call_id=call_id,
+            supervisor_id=rbac_world.supervisor_id,
+            type=InterventionType.TAKEOVER.value,
+            payload_ref={},
+        )
+    )
+    await admin_session.commit()
+    resp = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.supervisor_token))
+    assert resp.json()["data"] == {"total_today": 1, "live": 1, "critical": 0}
+
+    # The initiator counts it without any intervention row.
+    resp = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.admin_token))
+    assert resp.json()["data"] == {"total_today": 1, "live": 1, "critical": 0}
+
+
+@pytest.mark.asyncio
 async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -513,7 +561,8 @@ async def test_ownerless_terminal_call_hidden_from_non_owners(
 ) -> None:
     """Ownerless visibility is a live-queue affordance only (VR2-62): a terminal
     ownerless call (owner deleted — SET NULL) is nobody's to claim, so it stays
-    out of the history list and the stats — unless it was published."""
+    out of the history list — unless it was published. Neither counts toward the
+    supervisor's personal total_today (VR2-63)."""
     done_id = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
@@ -538,7 +587,7 @@ async def test_ownerless_terminal_call_hidden_from_non_owners(
     assert str(published_id) in ids
 
     stats = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.supervisor_token))
-    assert stats.json()["data"] == {"total_today": 1, "live": 0, "critical": 0}
+    assert stats.json()["data"] == {"total_today": 0, "live": 0, "critical": 0}
 
 
 @pytest.mark.asyncio

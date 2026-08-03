@@ -909,22 +909,33 @@ async def call_stats(
     session: TenantSession,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[CallStats]:
-    """Counts for the Live Monitoring stat cards, over the same calls the list
-    shows the caller. Pure counts (no PHI), so no disclosure audit; "today" is
-    the DB clock's UTC day."""
+    """Counts for the Live Monitoring stat cards. `total_today` is personal — only
+    calls the caller initiated or intervened in (VR2-63) — while `live`/`critical`
+    stay visibility-scoped, so an alert on a published call still surfaces. Pure
+    counts (no PHI), so no disclosure audit; "today" is the DB clock's UTC day."""
     response.headers["Cache-Control"] = "no-store"
     # Structural UTC "today": date_trunc truncates in the session TimeZone, so
     # shift to UTC, truncate, then re-anchor the naive result as UTC.
     utc_midnight = func.timezone("UTC", func.date_trunc("day", func.timezone("UTC", func.now())))
+    # Deliberately not visibility-scoped: an intervened call can drop out of the
+    # list later (ownerless and terminal) yet still counts as the caller's.
+    mine = or_(
+        Call.initiated_by_id == caller.user_id,
+        select(InterventionEvent.id)
+        .where(
+            InterventionEvent.call_id == Call.id,
+            InterventionEvent.supervisor_id == caller.user_id,
+        )
+        .exists(),
+    )
+    visible = _visible_to(caller.user_id)
     row = (
         await session.execute(
             select(
-                func.count().filter(Call.created_at >= utc_midnight),
-                func.count().filter(Call.current_status.in_(list(_ACTIVE_STATUSES))),
-                func.count().filter(Call.current_status == CallStatus.CRITICAL),
-            )
-            .select_from(Call)
-            .where(_visible_to(caller.user_id))
+                func.count().filter(Call.created_at >= utc_midnight, mine),
+                func.count().filter(visible, Call.current_status.in_(list(_ACTIVE_STATUSES))),
+                func.count().filter(visible, Call.current_status == CallStatus.CRITICAL),
+            ).select_from(Call)
         )
     ).one()
     total_today, live, critical = row

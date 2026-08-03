@@ -242,10 +242,11 @@ export function LiveMonitoring() {
     return calls
   }, [tab, calls, history])
 
-  // Stat cards from GET /calls/stats (same visibility as the list); zeros until it loads.
+  // Stat cards from GET /calls/stats; zeros until it loads. total_today is personal
+  // (calls the user initiated or intervened in — VR2-63); live/critical match the list.
   const statCards = useMemo(() => {
     const cards: { label: string; value: number; icon: LucideIcon; tone?: "critical" }[] = [
-      { label: "Total Calls Today", value: stats?.total_today ?? 0, icon: Phone },
+      { label: "My Calls Today", value: stats?.total_today ?? 0, icon: Phone },
       { label: "Active Calls", value: stats?.live ?? 0, icon: PhoneCall },
       {
         label: "Running Smoothly",
@@ -342,7 +343,7 @@ export function LiveMonitoring() {
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="pl-10">Call Ref</TableHead>
+              <TableHead className="pl-10">Call ID</TableHead>
               <TableHead>Patient Name</TableHead>
               <TableHead>Insurance Type</TableHead>
               <TableHead>Duration</TableHead>
