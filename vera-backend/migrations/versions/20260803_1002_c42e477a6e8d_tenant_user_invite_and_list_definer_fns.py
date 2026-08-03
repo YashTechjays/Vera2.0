@@ -1,15 +1,15 @@
 """tenant user invite and list definer fns
 
-Revision ID: b4d7a95a60fb
-Revises: e529f5cac06d
-Create Date: 2026-07-30 23:39:00.310142
+Revision ID: c42e477a6e8d
+Revises: beb5f80a9317
+Create Date: 2026-08-03 10:02:30.544683
 
 The write path a platform operator uses to invite a user INTO a chosen tenant
 (VR2-30), and the read path that lists that tenant's users — neither previously
 possible from the platform plane at all: `app_user`/`user_role` RLS
 (`... OR (tenant_id IS NULL AND app.platform = 'on')`) lets a platform session see
 only NULL-tenant (platform-operator) rows, never a tenant's rows, in either
-direction. Same shape as the tenant CRUD functions (e529f5cac06d): narrow, fixed
+direction. Same shape as the tenant CRUD functions (beb5f80a9317): narrow, fixed
 search_path, `app.platform` GUC guard, EXECUTE revoked from PUBLIC.
 
 No elevation grant is required (spec decision, VR2-30 plan): inviting a user is
@@ -26,6 +26,9 @@ restricted (at the router, before either function is called) to global
 platform session can validate via ordinary RLS-gated reads (the `role_tenant_isolation`
 / `role_permission_tenant_isolation` policies both carry an `OR tenant_id IS NULL`
 clause); a tenant's own custom roles are out of scope for this endpoint.
+
+Regenerated on top of dev's head when rebasing this branch onto dev (see 235ef15d5d1a);
+body unchanged from the original b4d7a95a60fb.
 """
 
 import os
@@ -33,8 +36,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "b4d7a95a60fb"
-down_revision: str | None = "e529f5cac06d"
+revision: str = "c42e477a6e8d"
+down_revision: str | None = "beb5f80a9317"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

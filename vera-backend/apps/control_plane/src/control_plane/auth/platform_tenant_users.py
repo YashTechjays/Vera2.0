@@ -1,5 +1,5 @@
 """SECURITY DEFINER helpers for inviting/listing a chosen tenant's users from the
-platform plane (VR2-30, migration b4d7a95a60fb). `app_user`/`user_role` RLS lets a
+platform plane (VR2-30, migration c42e477a6e8d). `app_user`/`user_role` RLS lets a
 platform session reach only NULL-tenant rows and fails SILENTLY in both directions — a
 plain SELECT returns nothing, a plain INSERT affects nothing — so the read side needs a
 definer fn just as much as the write. Mirrors platform_tenant_config.py.

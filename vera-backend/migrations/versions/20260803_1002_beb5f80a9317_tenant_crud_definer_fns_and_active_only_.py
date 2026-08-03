@@ -1,8 +1,8 @@
 """tenant crud definer fns and active only slug resolver
 
-Revision ID: e529f5cac06d
-Revises: 22683a464337
-Create Date: 2026-07-30 17:39:02.324733
+Revision ID: beb5f80a9317
+Revises: 235ef15d5d1a
+Create Date: 2026-08-03 10:02:26.452324
 
 The sanctioned write paths a platform operator uses to create, edit, and
 deactivate/reactivate a tenant (VR2-30), plus the login change that makes
@@ -44,6 +44,9 @@ Two things this migration also has to fix before `platform_create_tenant` can wo
 - `id` has no server default either, and the project's ids are **UUIDv7** (ADR-0002) minted
   by `vera_core.db.uuid7`. `gen_random_uuid()` would emit a v4 and break that ordering, so
   the caller passes the id in rather than the function generating one.
+
+Regenerated on top of dev's head when rebasing this branch onto dev (see 235ef15d5d1a);
+body unchanged from the original e529f5cac06d.
 """
 
 import os
@@ -51,8 +54,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "e529f5cac06d"
-down_revision: str | None = "22683a464337"
+revision: str = "beb5f80a9317"
+down_revision: str | None = "235ef15d5d1a"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

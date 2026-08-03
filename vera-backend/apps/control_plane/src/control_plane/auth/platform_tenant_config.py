@@ -2,7 +2,7 @@
 The tenant table's platform-readable RLS policy (migration 0022) is SELECT-only, so a
 platform session cannot INSERT/UPDATE a tenant row directly; every write here goes
 through its own definer function guarded by the `app.platform` GUC (migration
-e529f5cac06d for create/update/status; 59308656acda / 9de48c83deeb for the older
+beb5f80a9317 for create/update/status; 59308656acda / 9de48c83deeb for the older
 observer/retry-config toggles). Mirrors auth/platform_provisioning.py.
 """
 

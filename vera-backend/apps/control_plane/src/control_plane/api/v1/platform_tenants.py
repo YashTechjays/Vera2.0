@@ -453,7 +453,7 @@ async def deactivate_tenant(
     caller: Annotated[VerifiedIdentity, platform_require(TENANTS_MANAGE)],
 ) -> ResponseModel[TenantDetail]:
     """Blocks NEW logins for this tenant's users — the resolver
-    (`resolve_tenant_by_slug`, migration e529f5cac06d) stops matching a deactivated
+    (`resolve_tenant_by_slug`, migration beb5f80a9317) stops matching a deactivated
     tenant's slug, so login returns the uniform 401 with no hint the tenant exists.
     Sessions already open at deactivation time run until they expire; this does not
     revoke them. 409 if the tenant is already deactivated. Writes through the
