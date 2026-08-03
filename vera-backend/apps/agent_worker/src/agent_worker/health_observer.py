@@ -21,6 +21,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from opentelemetry import trace
+
 from agent_worker.intervention import takeover_engaged
 from vera_core.call_health import HEALTH_SYSTEM_PROMPT, HealthTranscript, parse_assessment
 from vera_core.call_stream import CallStreamService
@@ -30,6 +32,7 @@ from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.transcript import ROLE_AGENT, ROLE_USER, TurnRole, TurnSource, source_for_role
 
 logger = logging.getLogger("agent_worker")
+tracer = trace.get_tracer(__name__)
 
 
 class _HealthLLM(Protocol):
@@ -80,6 +83,7 @@ class CallHealthObserver:
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None:
         if self._closed:
             return
@@ -129,7 +133,17 @@ class CallHealthObserver:
         user_message = self._transcript.render_user_message()
         turn_count = self._transcript.turn_count
         try:
-            reply = await self._llm.complete(system=HEALTH_SYSTEM_PROMPT, user=user_message)
+            # The prompt/reply here are PHI and a raised provider error can embed them, so BOTH
+            # OTel exception knobs must be off: record_exception=False drops the exception EVENT
+            # (message + traceback), set_status_on_exception=False drops the status description,
+            # which OTel would otherwise fill with f"{type}: {exc}".
+            with tracer.start_as_current_span(
+                "vera.health_observer.llm_call",
+                attributes={"vera.llm.purpose": "health_observer"},
+                record_exception=False,
+                set_status_on_exception=False,
+            ):
+                reply = await self._llm.complete(system=HEALTH_SYSTEM_PROMPT, user=user_message)
         except Exception as exc:  # prompt/reply are PHI — type name only
             logger.warning("health analysis for %s skipped (%s)", self._room, type(exc).__name__)
             return

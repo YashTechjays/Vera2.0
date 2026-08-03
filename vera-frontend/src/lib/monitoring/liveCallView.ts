@@ -1,17 +1,23 @@
 // Pure view logic for the live-call panel — no LiveKit imports, so it unit-tests without a browser.
 
-export type ConnectionPhase = "connecting" | "live" | "reconnecting" | "ended"
+export type ConnectionPhase = "connecting" | "live" | "reconnecting" | "ended" | "replaced"
 
 export const CONNECTION_PHASE_LABEL: Record<ConnectionPhase, string> = {
   connecting: "Connecting…",
   live: "Live",
   reconnecting: "Reconnecting…",
   ended: "Call ended",
+  replaced: "Moved to another tab",
 }
 
 /** Map a raw connection state to a display phase; `everConnected` latches on first connect so a
- *  later disconnect reads as "ended", not "connecting". */
-export function connectionPhase(state: string, everConnected: boolean): ConnectionPhase {
+ *  later disconnect reads as "ended", not "connecting". `replaced` is a LiveKit
+ *  duplicate-identity eviction — the call is still running, this window just lost the seat. */
+export function connectionPhase(
+  state: string,
+  everConnected: boolean,
+  replaced = false,
+): ConnectionPhase {
   switch (state) {
     case "connected":
       return "live"
@@ -19,6 +25,7 @@ export function connectionPhase(state: string, everConnected: boolean): Connecti
     case "signalReconnecting":
       return "reconnecting"
     default:
+      if (replaced) return "replaced"
       return everConnected ? "ended" : "connecting"
   }
 }
@@ -99,14 +106,39 @@ export function isWaitingForCall(state: string, participants: ParticipantLike[])
 
 export type LiveCallMode = "listen" | "intervene"
 
-/** Radix routes every close path (X, Esc, overlay) here; an intervener can't leave until the call ends. */
+/** Radix routes every close path (X, Esc, overlay) here; an intervener can't leave until the call
+ *  ends — unless another tab took the seat, which leaves this one holding a dead panel. */
 export function shouldAllowClose(
   mode: LiveCallMode,
   callEnded: boolean,
   requestedOpen: boolean,
+  replaced = false,
 ): boolean {
   if (requestedOpen) return true
-  return mode !== "intervene" || callEnded
+  return mode !== "intervene" || callEnded || replaced
+}
+
+export type EndCallButtonState = {
+  disabled: boolean
+  title?: string
+}
+
+/** VR2-59: before anyone has intervened, only the call's owner may end it — a
+ *  published/"visible to all" call otherwise let any watching VA end a call they
+ *  never joined. Once a takeover is live, only the intervening supervisor may end
+ *  it, same as before. Mirrors the backend's own gate in calls.py::end_call. */
+export function endCallButtonState(
+  isOwner: boolean,
+  selfIntervening: boolean,
+  status: RoomStatus | null,
+): EndCallButtonState {
+  if (status?.otherIntervener) {
+    return { disabled: true, title: "Only the intervening supervisor can end this call" }
+  }
+  if (!isOwner && !selfIntervening) {
+    return { disabled: true, title: "Only the call owner can end this call before intervention" }
+  }
+  return { disabled: false }
 }
 
 export type InterveneButtonState = {
@@ -126,6 +158,18 @@ export function interveneButtonState(
     return { visible: true, disabled: true, title: "Another supervisor is intervening" }
   }
   return { visible: true, disabled: false }
+}
+
+/** Coaching is independent of Intervene's single-mic lock — visible whenever the
+ *  caller may publish on this call (owns it, or holds calls:intervene) and the
+ *  call hasn't ended, in both listen and intervene mode. Server enforces the
+ *  real rule regardless; this only gates whether the UI is shown. */
+export function coachingPanelVisible(
+  canIntervene: boolean,
+  isOwner: boolean,
+  callEnded: boolean,
+): boolean {
+  return (canIntervene || isOwner) && !callEnded
 }
 
 export type SpeakerButtonState = {

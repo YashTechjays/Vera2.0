@@ -26,4 +26,26 @@ describe("transcriptText", () => {
   it("is empty for no turns", () => {
     expect(transcriptText([])).toBe("")
   })
+
+  it("marks coaching and whisper notes distinctly (never heard on the call)", () => {
+    const text = transcriptText([
+      {
+        role: "coaching",
+        source: "supervisor",
+        text: "ask about the deductible",
+        ts: 1,
+        supervisorLabel: "sam@x.com",
+      },
+      {
+        role: "whisper",
+        source: "supervisor",
+        text: "mention the copay",
+        ts: 2,
+        supervisorLabel: "sam@x.com",
+      },
+    ])
+    expect(text).toBe(
+      "sam@x.com (coaching): ask about the deductible\nsam@x.com (coaching): mention the copay",
+    )
+  })
 })

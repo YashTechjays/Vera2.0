@@ -9,7 +9,9 @@ already in flight.
 """
 
 import asyncio
+import functools
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 import fakeredis
@@ -49,6 +51,12 @@ class _FakeAudio:
     def set_audio_enabled(self, enable: bool) -> None: ...
 
 
+class _FakeSpeechHandle:
+    """`say()` returns a handle; on_enter awaits its playout before leading on."""
+
+    async def wait_for_playout(self) -> None: ...
+
+
 class _FakeSession:
     """Records every way the agent could speak or hang up."""
 
@@ -65,7 +73,7 @@ class _FakeSession:
 
     def say(self, text: str) -> object:
         self.said.append(text)
-        return None
+        return _FakeSpeechHandle()
 
     def generate_reply(self, *, instructions: str | None = None) -> object:
         self.generate_reply_calls.append(instructions)
@@ -75,8 +83,11 @@ class _FakeSession:
         self.shutdown_calls += 1
 
 
-def _tool(agent: Agent, name: str) -> Any:
-    return next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+def _tool(agent: Agent, name: str) -> Callable[[], Awaitable[Any]]:
+    """The named tool, pre-bound with the `reason` every tool now requires — nothing in the
+    runtime reads it, so no test here cares what it says."""
+    tool = next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+    return functools.partial(tool, reason="the task's questions are all answered")
 
 
 def _controller() -> PlanRunController:

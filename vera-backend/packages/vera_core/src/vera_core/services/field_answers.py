@@ -21,8 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import InvalidIntakeValue, promote_columns
-from vera_core.forms.review import completion_pct, completion_pct_v2, unwrap_value
+from vera_core.forms.review import (
+    completion_pct,
+    completion_pct_v2,
+    is_blank_answer,
+    unwrap_value,
+)
 from vera_core.models import FieldAnswer, PatientForm
+from vera_core.models.enums import AnswerSource
 
 logger = logging.getLogger("vera_core.field_answers")
 
@@ -39,6 +45,36 @@ async def current_values_by_path(session: AsyncSession, form_id: UUID) -> dict[s
             )
         ).all()
     }
+
+
+#: What makes up the dispute baseline `B` — what a human put there, as opposed to what the
+#: AI heard on the call. Both baseline queries read these: `baseline_value` below for one
+#: path, and `_baseline_query` (whole form, `DISTINCT ON`) behind the detail view. Two
+#: definitions would let a live dispute and a REST one disagree about the same field.
+BASELINE_SOURCES = (AnswerSource.INTAKE.value, AnswerSource.HUMAN.value)
+
+#: `created_at` is the transaction time, so same-transaction rows tie; `id DESC` (UUIDv7)
+#: breaks it deterministically.
+BASELINE_ORDER = (FieldAnswer.created_at.desc(), FieldAnswer.id.desc())
+
+
+async def baseline_value(session: AsyncSession, form_id: UUID, field_path: str) -> Any | None:
+    """The dispute baseline for ONE field: the most-recent intake/human stored value
+    (`{"value": ...}`), or None if the field has no human/intake answer. Filters on
+    `source` only (NOT `is_current`), so it still resolves after an `ai_call` answer
+    supersedes it."""
+    return (
+        await session.execute(
+            select(FieldAnswer.value)
+            .where(
+                FieldAnswer.form_id == form_id,
+                FieldAnswer.field_path == field_path,
+                FieldAnswer.source.in_(BASELINE_SOURCES),
+            )
+            .order_by(*BASELINE_ORDER)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def record_answer(
@@ -58,6 +94,9 @@ async def record_answer(
     identical (source, call_id, value) that is already current is a no-op (returns False)
     Demote-then-flush-then-insert keeps the `fa_current_uq` partial-unique index (one
     current row per field) satisfied through the swap."""
+    # blank AI answers never demote a baseline (VR2-93); humans/intake may still clear
+    if source == AnswerSource.AI_CALL.value and is_blank_answer(raw_value):
+        return False
     current = (
         await session.execute(
             select(FieldAnswer).where(

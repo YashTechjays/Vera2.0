@@ -74,15 +74,21 @@ class TestShape:
                 {"kind": "prompt_document", "session": {**SESSION, "persona": ""}}
             )
 
-    def test_empty_string_override_rejected(self) -> None:
+    def test_empty_prompt_override_rejected(self) -> None:
         with pytest.raises(ValidationError):
             PromptDocument.model_validate(
                 {
                     "kind": "prompt_document",
                     "session": SESSION,
-                    "task_overrides": {"main": {"intro": ""}},
+                    "task_overrides": {"main": {"prompt": ""}},
                 }
             )
+
+    def test_empty_intro_outro_override_accepted(self) -> None:
+        # "" = speak nothing on task entry/exit; absent = inherit the schema default.
+        doc = prompt_doc(task_overrides={"main": {"intro": "", "outro": ""}})
+        assert (doc.task_overrides["main"].intro, doc.task_overrides["main"].outro) == ("", "")
+        assert validate_prompt_document(doc, schema_doc()) == []
 
     def test_factory_session_is_complete_and_placeholder_free(self) -> None:
         assert isinstance(FACTORY_SESSION, SessionBlock)

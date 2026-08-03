@@ -4,7 +4,9 @@ import {
   CONNECTION_PHASE_LABEL,
   PARTICIPANT_MODE_BADGE,
   agentJoined,
+  coachingPanelVisible,
   connectionPhase,
+  endCallButtonState,
   interveneButtonState,
   isWaitingForCall,
   intervenerLabel,
@@ -38,11 +40,24 @@ describe("connectionPhase", () => {
     expect(connectionPhase("disconnected", true)).toBe("ended")
   })
 
+  it("reads a duplicate-identity eviction as another tab, not the call ending", () => {
+    // Two tabs share a session, so they mint the same identity and LiveKit kicks the
+    // incumbent. Reporting that as "Call ended" describes a call that is still running.
+    expect(connectionPhase("disconnected", true, true)).toBe("replaced")
+    expect(connectionPhase("disconnected", false, true)).toBe("replaced")
+  })
+
+  it("keeps a live connection live even after an earlier eviction was recovered", () => {
+    expect(connectionPhase("connected", true, true)).toBe("live")
+  })
+
   it("has a label for every phase", () => {
     expect(CONNECTION_PHASE_LABEL.connecting).toBe("Connecting…")
     expect(CONNECTION_PHASE_LABEL.live).toBe("Live")
     expect(CONNECTION_PHASE_LABEL.reconnecting).toBe("Reconnecting…")
     expect(CONNECTION_PHASE_LABEL.ended).toBe("Call ended")
+    // A state, like its siblings — "Open in another tab" reads as a command.
+    expect(CONNECTION_PHASE_LABEL.replaced).toBe("Moved to another tab")
   })
 })
 
@@ -73,6 +88,12 @@ describe("participantMode", () => {
     expect(participantMode({ identity: "supervisor-u1" })).toBe("listener")
     expect(participantMode({ identity: "monitor-x" })).toBe("listener")
     expect(participantMode({ identity: "caller-x" })).toBe("listener")
+  })
+
+  it("reads a session-suffixed supervisor identity (two browsers, one account)", () => {
+    // Backend mints supervisor-<user id>~<session id> so LiveKit doesn't evict one
+    // browser when the same account joins from another (see correlation.py).
+    expect(participantMode({ identity: "supervisor-u1~s2" })).toBe("listener")
   })
 
   it("falls back to agent for unrecognized identities (kind-less agent worker)", () => {
@@ -170,6 +191,12 @@ describe("shouldAllowClose", () => {
   it("lets listeners close freely", () => {
     expect(shouldAllowClose("listen", false, false)).toBe(true)
   })
+
+  it("releases the close-lock when another tab took the seat", () => {
+    // The panel is dead — its participant was evicted — so holding the intervener
+    // in it traps them in a modal that can no longer reach the call.
+    expect(shouldAllowClose("intervene", false, false, true)).toBe(true)
+  })
 })
 
 describe("interveneButtonState", () => {
@@ -190,6 +217,49 @@ describe("interveneButtonState", () => {
     const state = interveneButtonState(true, { ...live, otherIntervener: true })
     expect(state.disabled).toBe(true)
     expect(state.title).toBe("Another supervisor is intervening")
+  })
+})
+
+describe("endCallButtonState", () => {
+  const live: RoomStatus = { phase: "live", otherIntervener: false, intervenerLabel: null }
+
+  it("enables for the owner before anyone has intervened", () => {
+    expect(endCallButtonState(true, false, live)).toEqual({ disabled: false })
+    expect(endCallButtonState(true, false, null)).toEqual({ disabled: false })
+  })
+
+  it("disables for a non-owner, non-intervener viewer with a reason (VR2-59)", () => {
+    const state = endCallButtonState(false, false, live)
+    expect(state.disabled).toBe(true)
+    expect(state.title).toBe("Only the call owner can end this call before intervention")
+  })
+
+  it("enables for the viewer currently intervening, even if not the owner", () => {
+    expect(endCallButtonState(false, true, live)).toEqual({ disabled: false })
+  })
+
+  it("disables with a reason while another supervisor is intervening, regardless of ownership", () => {
+    const state = endCallButtonState(true, false, { ...live, otherIntervener: true })
+    expect(state.disabled).toBe(true)
+    expect(state.title).toBe("Only the intervening supervisor can end this call")
+  })
+})
+
+describe("coachingPanelVisible", () => {
+  it("visible for an intervene-permission holder on a live call", () => {
+    expect(coachingPanelVisible(true, false, false)).toBe(true)
+  })
+
+  it("visible for the call owner even without the permission", () => {
+    expect(coachingPanelVisible(false, true, false)).toBe(true)
+  })
+
+  it("hidden without either the permission or ownership", () => {
+    expect(coachingPanelVisible(false, false, false)).toBe(false)
+  })
+
+  it("hidden once the call has ended, regardless of permission/ownership", () => {
+    expect(coachingPanelVisible(true, true, true)).toBe(false)
   })
 })
 

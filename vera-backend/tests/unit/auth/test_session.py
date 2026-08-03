@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from control_plane.auth.session import (
+    MFA_NS,
     SESSION_ABS_NS,
     SESSION_NS,
     InMemorySessionStore,
@@ -27,6 +28,26 @@ def _data() -> SessionData:
         mfa_passed=True,
         account_type="tenant",
     )
+
+
+def test_each_session_gets_its_own_id() -> None:
+    """Two logins by one user are distinct sessions — the id is what keeps their
+    LiveKit participant identities from colliding."""
+    assert _data().session_id != _data().session_id
+
+
+def test_session_id_survives_the_store_round_trip() -> None:
+    data = _data()
+    assert SessionData.from_json(data.to_json()).session_id == data.session_id
+
+
+def test_legacy_session_without_session_id_gets_one() -> None:
+    """Sessions minted before this field exists still live in Redis; they must
+    verify, with a synthesized id rather than a KeyError."""
+    legacy = json.loads(_data().to_json())
+    del legacy["session_id"]
+
+    assert SessionData.from_json(json.dumps(legacy)).session_id is not None
 
 
 async def test_mint_session_sets_both_keys() -> None:
@@ -87,6 +108,37 @@ async def test_delete_session_removes_both_keys() -> None:
     assert _key(SESSION_NS, token) not in store._entries
     assert _key(SESSION_ABS_NS, token) not in store._entries
     assert (await store.extend_session(token, idle_ttl=10)) is None
+
+
+async def test_delete_all_for_user_revokes_every_session_of_that_user_only() -> None:
+    store = InMemorySessionStore()
+    user = _data()
+    other = _data()  # _data() mints a fresh user_id each call
+    t1 = await store.mint_session(user, idle_ttl=10, abs_ttl=100)
+    t2 = await store.mint_session(user, idle_ttl=10, abs_ttl=100)
+    t3 = await store.mint_session(other, idle_ttl=10, abs_ttl=100)
+    await store.delete_all_for_user(user.user_id)
+    assert (await store.get(SESSION_NS, t1)) is None
+    assert (await store.get(SESSION_NS, t2)) is None
+    assert (await store.absolute_remaining(t1)) is None
+    assert (await store.get(SESSION_NS, t3)) is not None
+
+
+async def test_delete_all_for_user_after_logout_is_a_clean_noop() -> None:
+    store = InMemorySessionStore()
+    user = _data()
+    token = await store.mint_session(user, idle_ttl=10, abs_ttl=100)
+    await store.delete_session(token)
+    await store.delete_all_for_user(user.user_id)  # nothing left — must not raise
+    assert (await store.get(SESSION_NS, token)) is None
+
+
+async def test_delete_all_for_user_leaves_mfa_challenge_tokens_alone() -> None:
+    store = InMemorySessionStore()
+    user = _data()
+    challenge = await store.put(MFA_NS, user, 60)
+    await store.delete_all_for_user(user.user_id)
+    assert (await store.get(MFA_NS, challenge)) is not None
 
 
 def test_session_data_from_json_raises_on_missing_account_type() -> None:

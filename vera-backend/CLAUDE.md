@@ -79,6 +79,38 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   Generate once: `python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"`.
   In production, set `VERA_KMS_KEY_NAME` to the Cloud KMS key resource path instead (see `adr/devops-todo.md`).
 - `just api` / `just worker` — run the control plane / agent worker.
+- **Call-flow eval harness** (`apps/agent_worker/tests/evals/`) — replays a whole call end to end
+  (real entrypoint, real compiled CallPlan, a second Gemini as the rep) and an evaluator LLM grades
+  the transcript. Use it for changes to handoffs, prompts, the rule engine or the gap pass. Needs
+  Vertex ADC + a seeded Postgres; details in `README.md` → "Eval harness".
+  ```bash
+  VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
+  ```
+  - `-m evals` is **required** — without it you get the 20 LLM-free tests and NO simulations, which
+    looks like a clean pass. Confirm a real run by the `===== <scenario>: … =====` banners.
+  - **Never add the evals to `just check`**: live LLM cost, and runs vary. The pure parts
+    (`test_judge_parsing.py`) are unmarked and already run in the gate — put new pure helpers' tests
+    there, not behind the marker.
+  - **Do not overclaim from a green run.** No STT, no real DTMF, and extraction settles between turns
+    so rules fire more reliably than on a real call; a scenario reporting `0 answers extracted`
+    proves nothing. A live call is still required before shipping voice-path changes.
+- **A change to spoken output is NOT verified by `pytest`** — the assertions are on strings; the
+  defect lives in the audio. Synthesize and listen: `uv run --no-project --with certifi python
+  scripts/tts_probe.py --set comma` (stdlib-only script; the `--no-project --with certifi` is
+  because a bare `python3` here has no CA bundle and every request dies on
+  `CERTIFICATE_VERIFY_FAILED`). `--set verbatim` renders exactly what `_tts_spoken_text` emits, so
+  you sign off on the shipped string rather than a hand-typed approximation. Judge readback in the
+  **realistic shape** — a bare `<spell>` tag and the same tag inside a carrier sentence behave
+  differently — then a live call, since LiveKit's TTS pipeline can rewrite text before the wire.
+- The Cartesia TTS model is **pinned** (`_CARTESIA_TTS_MODEL`, `cascade.py`), never the floating
+  `sonic-3.5` alias Cartesia moves without notice: `agent_worker/cartesia_workaround.py` works
+  around a defect in that exact snapshot, so unpinning and deleting the workaround are ONE change.
+- **Never add spoken words to the IVR navigator's output.** The payer's IVR is running ASR, so an
+  injected "It's" / "Sure," gets captured as a menu response or spliced into the member ID — a worse
+  failure than the one being fixed. Punctuation and markup are safe; words are not.
+- `<spell>` reaches Cartesia two different ways: **code-inserted** for the navigator
+  (`ivr_agent._spell_id_tokens`, TTS path only — never the transcript) and **LLM-authored** for plan
+  agents (`CARTESIA_MARKUP_GUIDE`). Check which path you're fixing before writing a prompt rule.
 - Code style: PEP 695 type params (`class Foo[T]`, `def f[T]`) — ruff rejects `Generic[T]`/`TypeVar`.
 - Async runtime: **`asyncio` is the single async runtime** — the stack is asyncio-locked (livekit-agents,
   SQLAlchemy async, `redis.asyncio`, `pytest-asyncio`). `anyio` stays **transitive-only** (pulled by
@@ -93,6 +125,8 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   (`vera_core/call_stream.py`) and `control_plane/worker_events.py::_read_once`.
 - uv workspace: `vera_core` (shared core) → consumed by `control_plane` (FastAPI, owns
   Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
+  In a fresh worktree run **`uv sync --all-packages`** — plain `uv sync` leaves the venv without
+  livekit/pytest and every test errors at conftest import.
 
 ## Prime directive
 

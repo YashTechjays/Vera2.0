@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle,
   ArrowUp,
@@ -33,15 +33,15 @@ import {
   type CallStats,
   type CallSummary,
 } from "@/lib/api/calls"
-import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { ApiError } from "@/lib/api/client"
+import { categoryOf, toLiveCall } from "@/lib/monitoring/liveCall"
 import { elapsed } from "@/lib/monitoring/liveTimer"
 import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
 import { humanizeSegment } from "@/lib/patient-forms/display"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
 import { shortCallRef, type OpenCallNavState } from "@/lib/notifications/store"
-import type { CallCategory, LiveCall } from "@/lib/mock-data"
+import type { CallCategory } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
@@ -52,14 +52,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "critical", label: "Critical" },
   { key: "completed", label: "Completed" },
 ]
-
-function categoryOf(status: string): CallCategory {
-  const s = status.toLowerCase()
-  if (s === "critical") return "critical"
-  if (isTerminalCallStatus(s)) return "completed"
-  if (s === "waiting" || s === "ivr") return "processing"
-  return "active"
-}
 
 const rowTint: Record<CallCategory, string> = {
   critical: "bg-red-50",
@@ -78,27 +70,6 @@ const badgeStyle: Record<CallCategory, string> = {
   active: "bg-emerald-100 text-emerald-700",
   processing: "bg-amber-100 text-amber-800",
   completed: "bg-emerald-100 text-emerald-700",
-}
-/** Adapt a real call into the modal's LiveCall shape; fields the API doesn't provide yet
- *  (confidence, form %) are placeholders. */
-function toLiveCall(c: CallSummary, now: number): LiveCall {
-  return {
-    id: c.id,
-    patient: c.patient_name || "—",
-    type: "Patient",
-    agent: "—",
-    duration: elapsed(c.started_at, now),
-    status: c.status,
-    category: categoryOf(c.status),
-    visible: c.published,
-    action: c.is_owner ? "view" : "intervene",
-    insurance: c.insurance_provider || "—",
-    confidence: 0,
-    formProgress: 0,
-    callTime: elapsed(c.started_at, now),
-    startedAt: c.started_at,
-    healthScore: c.health_score,
-  }
 }
 
 function CallIndicator({ category }: { category: CallCategory }) {
@@ -146,7 +117,7 @@ function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
 }
 
 export function LiveMonitoring() {
-  const { openFormById } = useIbv()
+  const { openFormById, openLoadedForm, formId: loadedFormId } = useIbv()
   const canPublish = usePermission("calls:publish")
   const location = useLocation()
   const navigate = useNavigate()
@@ -164,6 +135,15 @@ export function LiveMonitoring() {
   // verdict below so a notification's deep link isn't given up on before the
   // first fetch has even had a chance to include the target call.
   const hasLoadedOnce = useRef(false)
+  // Calls the modal's SSE saw end before the DB caught up (the worker's shutdown
+  // drain defers the status flip by many seconds — VR2-72). Pinned as completed
+  // across polls until the server stops returning them as active.
+  const endedBySse = useRef<Set<string>>(new Set())
+
+  const markEnded = useCallback((callId: string) => {
+    endedBySse.current.add(callId)
+    setCalls((prev) => prev.map((c) => (c.id === callId ? { ...c, status: "completed" } : c)))
+  }, [])
 
   // Load + poll (skip while the tab is hidden); a realtime notification
   // (intervention alert) refetches immediately instead of waiting the poll out.
@@ -178,7 +158,12 @@ export function LiveMonitoring() {
       ])
       if (cancelled) return
       if (items.status === "fulfilled") {
-        setCalls(items.value)
+        const ended = endedBySse.current
+        // Server no longer lists it as active → it caught up; drop the pin.
+        for (const id of [...ended]) if (!items.value.some((c) => c.id === id)) ended.delete(id)
+        setCalls(
+          items.value.map((c) => (ended.has(c.id) ? { ...c, status: "completed" } : c)),
+        )
         setError(null)
       } else {
         setError(
@@ -443,8 +428,12 @@ export function LiveMonitoring() {
         open={overviewOpen}
         onOpenChange={setOverviewOpen}
         onExpand={() => {
-          if (selected) openFormById(selected.form_id)
+          if (!selected) return
+          // Refetching a form the inline panel already has would drop its live answers and edits.
+          if (selected.form_id === loadedFormId) openLoadedForm()
+          else openFormById(selected.form_id)
         }}
+        onCallEnded={markEnded}
       />
     </div>
   )

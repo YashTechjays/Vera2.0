@@ -5,6 +5,7 @@ import { Sidebar } from "./Sidebar"
 import { Topbar } from "./Topbar"
 import { IbvProvider } from "@/components/ibv/IbvProvider"
 import { IbvFormModal } from "@/components/ibv/IbvFormModal"
+import { CreatePatientFormModal } from "@/components/ibv/CreatePatientFormModal"
 import { IdleManager } from "@/components/auth/IdleManager"
 import { useAppDispatch, useAppSelector } from "@/store/hooks"
 import { fetchMe, selectActiveElevation } from "@/store/authSlice"
@@ -50,6 +51,7 @@ export function AppShell() {
         </div>
       </div>
       <IbvFormModal />
+      <CreatePatientFormModal />
     </IbvProvider>
   )
 }

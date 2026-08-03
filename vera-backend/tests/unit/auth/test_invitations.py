@@ -3,7 +3,10 @@
 from uuid import UUID
 
 from control_plane.auth.invitations import (
+    INVITE_MFA_NS,
     INVITE_NS,
+    PLATFORM_INVITE_MFA_NS,
+    PLATFORM_INVITE_NS,
     InMemoryInvitationStore,
     InviteData,
     _hashed,
@@ -60,3 +63,22 @@ async def test_in_memory_email_sender_records() -> None:
     msg = EmailMessage(to="a@example.com", subject="hi", body="link")
     await sender.send(msg)
     assert sender.sent == [msg]
+
+
+def _platform_data() -> InviteData:
+    return InviteData(tenant_id=None, app_user_id=USER, email="operator@example.com")
+
+
+async def test_platform_invite_roundtrip_with_null_tenant() -> None:
+    store = InMemoryInvitationStore()
+    token = await store.put(PLATFORM_INVITE_NS, _platform_data(), 60)
+    assert await store.get(PLATFORM_INVITE_NS, token) == _platform_data()
+
+
+def test_platform_invite_data_json_roundtrip_with_null_tenant() -> None:
+    assert InviteData.from_json(_platform_data().to_json()) == _platform_data()
+
+
+def test_platform_namespaces_are_distinct_from_tenant_namespaces() -> None:
+    assert PLATFORM_INVITE_NS not in (INVITE_NS, INVITE_MFA_NS)
+    assert PLATFORM_INVITE_MFA_NS not in (INVITE_NS, INVITE_MFA_NS)

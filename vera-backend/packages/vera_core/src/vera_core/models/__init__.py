@@ -12,13 +12,13 @@ from .auth import (
 )
 from .authoring import FormSchema, Prompt, PromptVersion, SchemaVersion
 from .call import Call, CallEvent, CallLineage
+from .export_artifact import ExportArtifact
 from .field_answer import CallFormSnapshot, DisputeAction, FieldAnswer, FieldEvaluation
 from .insurance import InsuranceProvider, IvrPlaybook
 from .integrations import ApiKey, Integration, IntegrationType
 from .oversight import (
     CallProviderUsage,
     EvalRun,
-    ExportArtifact,
     HumanRating,
     InterventionEvent,
 )
@@ -26,6 +26,7 @@ from .patient_form import PatientForm
 from .rbac import Permission, Role, RolePermission, UserRole
 from .tenant import Tenant
 from .transcript import Recording, Transcript
+from .voice_model_config import VoiceModelConfig
 
 __all__ = [
     "ApiKey",
@@ -64,4 +65,5 @@ __all__ = [
     "Transcript",
     "UserIdentity",
     "UserRole",
+    "VoiceModelConfig",
 ]

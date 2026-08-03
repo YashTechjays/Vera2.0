@@ -20,14 +20,21 @@ from control_plane.auth.permission_cache import InMemoryPermissionCache
 from control_plane.auth.session import InMemorySessionStore, SessionData
 from control_plane.dispatch import drain_pending
 from control_plane.email import InMemoryEmailSender
-from control_plane.livekit_gateway import LiveKitGateway, LiveKitUnavailable, OutboundDialError
+from control_plane.livekit_gateway import (
+    LiveKitGateway,
+    LiveKitUnavailable,
+    OutboundDialError,
+    RoomParticipant,
+)
 from control_plane.main import create_app
+from control_plane.rate_limit import InMemoryPasswordResetRateLimiter
 from scripts.seed import _seed_permissions, _seed_system_roles
 from vera_core.call_stream import CallStreamEvent, CallStreamService
 from vera_core.config import EnvSecretProvider, Settings
 from vera_core.config.kms import KeyManagementService, LocalDevKMS
 from vera_core.db import uuid7
 from vera_core.db.rls import tenant_session
+from vera_core.events import PostCallJob
 from vera_core.integrations.credentials import seal_credentials
 from vera_core.models import (
     AppUser,
@@ -55,6 +62,19 @@ class MintedToken(NamedTuple):
     ttl: timedelta
 
 
+class FakePostCallBus:
+    """Records emitted PostCallJobs for test assertions; no Redis required."""
+
+    def __init__(self) -> None:
+        self.emitted: list[PostCallJob] = []
+
+    async def emit(self, job: PostCallJob) -> None:
+        self.emitted.append(job)
+
+    async def ensure_group(self) -> None:
+        pass
+
+
 class FakeLiveKit(LiveKitGateway):
     """Minimal LiveKitGateway stand-in: records created rooms and mints a
     deterministic token so tests can assert without a real LiveKit server."""
@@ -72,11 +92,11 @@ class FakeLiveKit(LiveKitGateway):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
-        # room -> current participant identities; rooms absent from the map are
-        # "gone" (room_participant_identities returns None), mirroring LiveKit.
-        self.participants: dict[str, list[str]] = {}
+        # room -> current participants; rooms absent from the map are "gone"
+        # (room_participants returns None), mirroring LiveKit.
+        self.participants: dict[str, list[RoomParticipant]] = {}
 
-    async def room_participant_identities(self, room_name: str) -> list[str] | None:
+    async def room_participants(self, room_name: str) -> list[RoomParticipant] | None:
         return self.participants.get(room_name)
 
     async def create_call_room(
@@ -120,6 +140,18 @@ class FakeLiveKit(LiveKitGateway):
 @pytest.fixture(scope="session")
 def fake_livekit() -> FakeLiveKit:
     return FakeLiveKit()
+
+
+@pytest.fixture(scope="session")
+def fake_post_call_bus() -> FakePostCallBus:
+    return FakePostCallBus()
+
+
+@pytest.fixture(autouse=True)
+def reset_fake_bus(fake_post_call_bus: FakePostCallBus) -> Iterator[None]:
+    """Clear the bus before each test so emissions don't bleed across tests."""
+    fake_post_call_bus.emitted.clear()
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -170,7 +202,11 @@ class _MemCallStreamStore:
         return room_name in self._entries
 
     async def read(
-        self, room_name: str, *, first_entry_deadline_s: float | None = None
+        self,
+        room_name: str,
+        *,
+        start_id: str = "0",
+        first_entry_deadline_s: float | None = None,
     ) -> AsyncIterator[tuple[str, CallStreamEvent]]:
         # This fake replays a fixed snapshot and never blocks; the deadline is only
         # recorded so endpoint tests can assert what was passed.
@@ -200,6 +236,7 @@ class RBACWorld:
         self.admin_id: UUID = UUID(int=0)
         self.supervisor_id: UUID = UUID(int=0)
         self.virtual_assistant_id: UUID = UUID(int=0)
+        self.listener_id: UUID = UUID(int=0)
         # Filled once sessions are minted (see rbac_world).
         self.admin_token = ""
         self.norole_token = ""
@@ -373,6 +410,7 @@ async def rbac_world(
         tenant_id=tenant_id,
         email="virtual_assistant@test.example",
     )
+    world.listener_id = listener_id
     world.listener_token = await _mint(
         session_store, user_id=listener_id, tenant_id=tenant_id, email="listener@test.example"
     )
@@ -426,6 +464,7 @@ async def authz_app(
     email_sender: InMemoryEmailSender,
     invitation_store: InMemoryInvitationStore,
     fake_livekit: FakeLiveKit,
+    fake_post_call_bus: FakePostCallBus,
     call_stream_service: CallStreamService,
 ) -> AsyncGenerator[FastAPI]:
     """The app talks to Postgres as the NON-superuser role: RLS is live under
@@ -441,11 +480,17 @@ async def authz_app(
         permission_cache=InMemoryPermissionCache(),
         email_sender=email_sender,
         invitation_store=invitation_store,
+        # Generous window so unrelated tests never trip it; the rate-limit test
+        # builds its own app with a tight limit.
+        password_reset_rate_limiter=InMemoryPasswordResetRateLimiter(
+            limit=1000, window_seconds=900
+        ),
         livekit=fake_livekit,
         secrets=EnvSecretProvider(),
         call_stream_service=call_stream_service,
     )
     async with app.router.lifespan_context(app):
+        app.state.post_call_bus = fake_post_call_bus
         yield app
 
 

@@ -21,15 +21,23 @@ from livekit.agents import (
     get_job_context,
     llm,
 )
+from opentelemetry import trace
 
+from agent_worker.cartesia_workaround import guard_utterance_initial_spell
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
+from agent_worker.prompt import TOOL_REASON_ARG
 from vera_core.config.settings import get_settings
 from vera_core.schemas import IvrPlaybookConfig
 
 logger = logging.getLogger("agent_worker")
+
+# Fixed id: exactly one IvrNavigatorAgent instance exists per call, so a sentinel (not a
+# per-instance value) is enough — matches the "@..." sentinel convention used for the plan
+# runtime's WrapUpAgent (agent_worker.plan_runtime.WRAP_UP_TASK_KEY).
+IVR_NAVIGATOR_ID = "@ivr_navigator"
 
 # Deterministic backstop: if the navigator takes this many IVR turns without reaching a
 # human, it hangs up rather than looping forever (enforced in on_user_turn_completed).
@@ -92,8 +100,10 @@ def _spell_id_tokens(text: str) -> str:
 
 
 async def _tts_spoken_text(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    # The lead-in guard is per-utterance, which holds only because _strip_silence_token buffers
+    # the whole turn into one chunk — make it stream and the comma lands on every chunk.
     async for chunk in _strip_silence_token(text):
-        yield _spell_id_tokens(chunk)
+        yield guard_utterance_initial_spell(_spell_id_tokens(chunk))
 
 
 def ivr_turn_handling() -> TurnHandlingOptions:
@@ -160,6 +170,7 @@ class IvrNavigatorAgent(Agent):
             instructions=build_ivr_instructions(playbook, context),
             tools=[],
             turn_handling=ivr_turn_handling(),
+            id=IVR_NAVIGATOR_ID,
         )
 
     def tts_node(
@@ -203,31 +214,55 @@ class IvrNavigatorAgent(Agent):
         self._end_navigation(f"turn cap reached ({_IVR_MAX_TURNS} IVR turns, no human)")
         raise StopResponse
 
-    @function_tool
-    async def give_up(self) -> str:
-        """Give up and end the call. Call this ONLY after the full escalation ladder
-        (rep_keyword → press 0 → "Agent") has been tried and the SAME menu keeps looping with no
-        progress — a self-service menu that never routes to a human. Ends the call cleanly."""
+    @function_tool(
+        description=(
+            "Give up and end the call. Call this ONLY after the full escalation ladder "
+            '(rep_keyword → press 0 → "Agent") has been tried and the SAME menu keeps looping '
+            "with no progress — a self-service menu that never routes to a human. Ends the call "
+            "cleanly. " + TOOL_REASON_ARG
+        )
+    )
+    async def give_up(self, reason: str) -> str:
+        """Hang up on a loop (`reason` is transcript evidence only — see VeraAgent._end_call)."""
         self._end_navigation("gave up on an unresolvable IVR loop")
         return "Ending the call."
 
-    @function_tool
-    async def transfer_to_verification(self) -> Agent:
-        """Hand the call to the verification agent. Call this ONLY when a live human
-        representative has clearly greeted you — a personal name paired with an open request
-        for your info (e.g. "Hi, this is Martha, who am I speaking with?")."""
-        logger.info("handoff: IVR navigator -> verification agent")
+    @function_tool(
+        description=(
+            "Hand the call to the verification agent. Call this ONLY when a live human "
+            "representative has clearly greeted you — a personal name paired with an open "
+            'request for your info (e.g. "Hi, this is Martha, who am I speaking with?"). '
+            + TOOL_REASON_ARG
+        )
+    )
+    async def transfer_to_verification(self, reason: str) -> Agent:
+        """Hand off to the plan (`reason` is transcript evidence only — see VeraAgent._end_call)."""
         verifier = self._make_verification_agent()
         # Carry the IVR conversation (incl. the member ID already spoken) into the
         # plan agent so it doesn't re-ask what the navigator already established.
         await carry_chat_ctx(self, verifier)
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.handoff.from_task": IVR_NAVIGATOR_ID,
+                    "vera.handoff.to_task": verifier.id,
+                    "vera.handoff.reason": "ivr_live_human",
+                }
+            )
+        except Exception as exc:
+            logger.warning("IVR handoff span tagging failed (%s)", type(exc).__name__)
+        logger.info("handoff: %s -> %s (reason=ivr_live_human)", IVR_NAVIGATOR_ID, verifier.id)
         return verifier
 
-    @function_tool
-    async def press_keypad(self, digits: str) -> str:
-        """Press keypad digits on the phone menu (sends DTMF tones). Use ONLY for digits
-        the IVR actually offered (e.g. "press 1 for eligibility"); never invent an account,
-        member, or ID number. `digits` may contain 0-9, * or #."""
+    @function_tool(
+        description=(
+            "Press keypad digits on the phone menu (sends DTMF tones). Use ONLY for digits the "
+            'IVR actually offered (e.g. "press 1 for eligibility"); never invent an account, '
+            "member, or ID number. `digits` may contain 0-9, * or #. " + TOOL_REASON_ARG
+        )
+    )
+    async def press_keypad(self, digits: str, reason: str) -> str:
+        """Send DTMF tones (`reason` is transcript evidence only — see VeraAgent._end_call)."""
         # Log the count only — a DTMF sequence can be a member ID/NPI (PHI), and the
         # return string feeds the LLM/traces, so neither echoes the raw digits.
         count = len(digits.strip())

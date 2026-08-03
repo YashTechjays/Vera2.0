@@ -22,6 +22,7 @@ from vera_core.events.worker import CallAnswerRecordedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, FlowRule
 from vera_core.llm import LLMUnavailableError
+from vera_core.observability.otel_testing import assert_no_phi_values
 
 ROOM = "call--t--c"
 
@@ -320,6 +321,81 @@ class TestRouting:
         assert run_state.records == [(ROOM, "sections.a.x", "Yes", None)]
 
 
+class EvidenceBoundExtractor:
+    """Answers only when the rep's line is in the window it was handed, so a lost turn cannot
+    hide behind the outgoing Observer draining a question-only window (as it can with
+    FakeExtractor, which answers from any transcript)."""
+
+    def __init__(self, evidence: str, answer: ExtractedAnswer) -> None:
+        self._evidence = evidence
+        self._answer = answer
+        self.calls = 0
+
+    async def extract(self, task: Any, transcript: str) -> list[ExtractedAnswer]:
+        self.calls += 1
+        return [self._answer] if self._evidence in transcript else []
+
+
+class TestHandoffGrace:
+    """The outgoing Observer keeps receiving turns for one more rep turn before it closes,
+    because a turn is attributed by the controller's LIVE cursor but reaches the manager
+    arbitrarily late (hold buffer → queue → Redis → tail) — so when VERA asks and calls
+    `task_complete` in one turn, the answer would land under the next task, off its
+    whitelist, and be silently dropped (P1)."""
+
+    @pytest.mark.asyncio
+    async def test_answer_arriving_after_the_handoff_is_still_extracted(self) -> None:
+        extractor = EvidenceBoundExtractor(
+            "Yes, x is covered.", ExtractedAnswer("sections.a.x", "Yes", 90)
+        )
+        manager, run_state, _, controller = _manager(_plan(), extractor)  # type: ignore[arg-type]
+        await _feed(manager, _bot("Is x covered?"))  # seq 0 — asked by t1
+        controller.active_task_index = 1  # task_complete swapped in that same turn
+        await _feed(manager, _rep("Yes, x is covered."))  # seq 1 — arrives under t2
+        await _settle()
+        assert run_state.records == [(ROOM, "sections.a.x", "Yes", 1)]
+
+    @pytest.mark.asyncio
+    async def test_grace_lasts_exactly_one_rep_turn(self) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, controller = _manager(_plan(), extractor)
+        controller.active_task_index = 1
+        await _feed(manager, _rep("the straddling answer"))
+        await _settle()
+        after_grace = extractor.calls
+        await _feed(manager, _rep("a later turn, t2's alone"))
+        await _settle()
+        assert extractor.calls == after_grace + 1  # only t2's Observer ran
+
+    @pytest.mark.asyncio
+    async def test_window_stays_one_deep_across_back_to_back_rotations(self) -> None:
+        # Bounded by design, which is why P10 (doubled `task_complete`) must land first: two
+        # rotations with no rep turn between them retire two tasks, and only the most recent
+        # one can still catch a straddling answer.
+        extractor = FakeExtractor(
+            [ExtractedAnswer("sections.a.x", "Yes", 90), ExtractedAnswer("sections.b.y", "B", 90)]
+        )
+        manager, run_state, _, controller = _manager(_plan(), extractor)
+        await _feed(manager, _bot("Is x covered?"))
+        controller.active_task_index = 1
+        await _feed(manager, _bot("And now for b?"))
+        controller.active_task_index = 0  # gap pass walks backwards
+        await _feed(manager, _rep("b is fine."))
+        await _settle()
+        recorded = {r[1] for r in run_state.records}
+        assert "sections.b.y" in recorded  # the most recently retired task still catches it
+
+    @pytest.mark.asyncio
+    async def test_aclose_drains_a_retiring_observer_that_never_got_its_grace_turn(self) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, run_state, _, controller = _manager(_plan(), extractor)
+        await _feed(manager, _bot("Is x covered?"))  # buffered, no pass yet
+        controller.active_task_index = 1
+        await _feed(manager, _bot("Now for b."))  # rotation; no rep turn ever arrives
+        await manager.aclose()
+        assert (ROOM, "sections.a.x", "Yes", None) in run_state.records
+
+
 class TestTailLoop:
     @pytest.mark.asyncio
     async def test_tail_reads_stream_filters_and_records(self) -> None:
@@ -354,6 +430,44 @@ class TestRuleIntervention:
         manager, _, _, controller = _manager(_plan(flow_rules=[flow]), extractor)
         await _feed(manager, _rep("the answer is no"))
         assert controller.applied == [Terminate(rule_key="stop")]
+
+    @pytest.mark.asyncio
+    async def test_fired_rule_tags_the_evaluate_span(self, otel_spans: Any) -> None:
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "No", 90)])
+        manager, _, _, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is no"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.rule_engine.evaluate"
+        )
+        assert span.attributes["vera.rule_engine.fired"] is True
+        assert span.attributes["vera.handoff.directive_type"] == "Terminate"
+        assert span.attributes["vera.handoff.rule_key"] == "stop"
+        # PHI guardrail (design §6/§8): the answer value that fired this rule ("No") must
+        # never reach the span — only the enum/key metadata above. Substring check, so an
+        # attribute that merely EMBEDS the value (e.g. "answer: No") fails too.
+        assert_no_phi_values(span, "No")
+
+    @pytest.mark.asyncio
+    async def test_non_firing_evaluation_is_still_visible(self, otel_spans: Any) -> None:
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is yes"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.rule_engine.evaluate"
+        )
+        assert span.attributes["vera.rule_engine.fired"] is False
+        assert "vera.handoff.directive_type" not in span.attributes
+        assert_no_phi_values(span, "Yes")
 
 
 class TestCrashIsolation:
@@ -393,15 +507,15 @@ class TestCrashIsolation:
 class FakeCompletionLLM:
     """Stands in for vera_core.llm.ResilientLLM's `complete` surface."""
 
-    def __init__(self, reply: str = "[]", *, raises: bool = False) -> None:
+    def __init__(self, reply: str = "[]", *, error: Exception | None = None) -> None:
         self.reply = reply
-        self.raises = raises
+        self.error = error
         self.calls: list[tuple[str, str]] = []
 
     async def complete(self, *, system: str, user: str) -> str:
         self.calls.append((system, user))
-        if self.raises:
-            raise LLMUnavailableError
+        if self.error is not None:
+            raise self.error
         return self.reply
 
 
@@ -422,9 +536,46 @@ class TestResilientExtractor:
         # which would let the caller retire the window as extracted. The raise is what lets
         # TaskObserver re-arm and retry those turns (see test_failed_pass_is_retried_...).
         with pytest.raises(LLMUnavailableError):
-            await ResilientAnswerExtractor(FakeCompletionLLM(raises=True)).extract(
+            await ResilientAnswerExtractor(FakeCompletionLLM(error=LLMUnavailableError())).extract(
                 _plan().tasks[0], "anything"
             )
+
+    @pytest.mark.asyncio
+    async def test_extract_tags_the_llm_call_span(self, otel_spans: Any) -> None:
+        reply = '[{"field_path": "sections.a.x", "value": "Yes", "confidence": 90}]'
+        llm = FakeCompletionLLM(reply)
+        await ResilientAnswerExtractor(llm).extract(
+            _plan().tasks[0], "Representative: yes, Jane Doe is covered."
+        )
+        span = next(
+            s
+            for s in otel_spans.get_finished_spans()
+            if s.name == "vera.observer.extraction_llm_call"
+        )
+        assert span.attributes["vera.llm.purpose"] == "observer_extraction"
+        assert span.attributes["vera.task.key"] == "t1"
+        # PHI guardrail (design §8): the transcript window handed to the chain is raw PHI —
+        # none of it may ride along on the span.
+        assert_no_phi_values(span, "Jane Doe")
+
+    @pytest.mark.asyncio
+    async def test_extract_llm_call_span_does_not_record_exceptions(self, otel_spans: Any) -> None:
+        # PHI guardrail: a provider error message can embed the prompt/transcript, so nothing
+        # derived from the exception may reach the span — both OTel knobs asserted below.
+        # The exception must CARRY a message for this to test anything: LLMUnavailableError is
+        # always raised bare (str() == ""), so it would pass even unguarded. `complete` is a
+        # Protocol, and an unexpected provider/SDK error escaping it can embed the request body.
+        llm = FakeCompletionLLM(error=RuntimeError("provider rejected prompt for Jane Doe"))
+        with pytest.raises(RuntimeError):
+            await ResilientAnswerExtractor(llm).extract(_plan().tasks[0], "anything")
+        span = next(
+            s
+            for s in otel_spans.get_finished_spans()
+            if s.name == "vera.observer.extraction_llm_call"
+        )
+        assert not span.events  # record_exception=False — no exception event
+        assert span.status.description is None  # set_status_on_exception=False — no str(exc)
+        assert_no_phi_values(span, "Jane Doe")
 
 
 class TestParsing:
@@ -442,3 +593,11 @@ class TestParsing:
     def test_clamps_confidence_and_coerces_value(self) -> None:
         out = _parse_extraction('[{"field_path": "a.b", "value": 500, "confidence": 250}]')
         assert out == [ExtractedAnswer("a.b", "500", 100)]
+
+    def test_blank_values_are_dropped(self) -> None:  # VR2-93
+        out = _parse_extraction(
+            '[{"field_path": "a.b", "value": ""},'
+            ' {"field_path": "a.c", "value": "   "},'
+            ' {"field_path": "a.d", "value": "No"}]'
+        )
+        assert out == [ExtractedAnswer("a.d", "No", None)]

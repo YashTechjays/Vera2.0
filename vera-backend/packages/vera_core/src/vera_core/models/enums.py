@@ -127,9 +127,36 @@ class ProviderStage(enum.StrEnum):
     TTS = "tts"
 
 
-class ExportFormat(enum.StrEnum):
-    XLSX = "xlsx"
-    PDF = "pdf"
+class ReviewReason(enum.StrEnum):
+    """Why the post-call pipeline routed a form to EXCEPTION_REVIEW. NULL on the
+    form outside review and for manual transitions (a pipeline artifact)."""
+
+    # Every required field is satisfied — nothing is wrong, the form just needs a
+    # human to sign it off. The pipeline never auto-COMPLETEs; COMPLETED is a
+    # human-only transition out of review (once any disputes are resolved).
+    READY_FOR_REVIEW = "ready_for_review"
+    TOKEN_VALUE = "token_value"
+    RETRIES_EXHAUSTED = "retries_exhausted"
+    LLM_ERROR = "llm_error"
+    NO_TRANSCRIPT = "no_transcript"
+    # Required fields are unsatisfied but none are askable — a retry call could
+    # not fix them, so the form needs human review.
+    UNSATISFIED_UNASKABLE = "unsatisfied_unaskable"
+    # The form's pinned schema document failed to parse (e.g. legacy v1) — the
+    # eval cannot run against it.
+    UNSUPPORTED_SCHEMA = "unsupported_schema"
+    # A supervisor ended the call by hand — it is never auto-redialed even with
+    # unsatisfied retryable fields; a human takes it from here.
+    USER_ENDED = "user_ended"
+    # Required fields are unsatisfied and retryable, but the deployment-wide
+    # form_auto_retry_enabled flag is off — the eval never auto-redials, so
+    # the form parks for a human instead of re-queueing.
+    AUTO_RETRY_DISABLED = "auto_retry_disabled"
+    # The automated post-call eval did not run for this form — either the eval
+    # consumer isn't configured (no Vertex/Gemini), so the close path resolved
+    # the form synchronously, or the pipeline sweeper reclaimed a form stranded
+    # in AI_PROCESSING. A human reviews it without AI-extracted values.
+    NOT_EVALUATED = "not_evaluated"
 
 
 class VersionStatus(enum.StrEnum):
@@ -160,6 +187,15 @@ class PlaybookStatus(enum.StrEnum):
 
     ACTIVE = "active"
     INACTIVE = "inactive"
+
+
+class VoiceModelStage(enum.StrEnum):
+    """Which voice-cascade stage a `voice_model_config` row overrides. Only LLM is
+    read by the cascade today; STT/TTS are schema-ready for a future iteration."""
+
+    STT = "stt"
+    LLM = "llm"
+    TTS = "tts"
 
 
 class EvalScope(enum.StrEnum):
@@ -214,6 +250,26 @@ class AuthEvent(enum.StrEnum):
     LOGOUT = "logout"
     # Tenant-level recording retention policy updated (old/new day counts, no PHI).
     RETENTION_POLICY_UPDATED = "retention_policy_updated"
+    # Tenant-tier invite resend (fixes a gap: neither the invite link nor the MFA
+    # bridge token had any recovery path before this feature).
+    INVITE_RESENT = "invite_resent"
+    # Platform-operator lifecycle — kept distinct from the tenant USER_INVITED /
+    # INVITE_ACCEPTED / USER_DEACTIVATED events so privilege-granting activity is
+    # separately auditable.
+    PLATFORM_USER_INVITED = "platform_user_invited"
+    PLATFORM_INVITE_ACCEPTED = "platform_invite_accepted"
+    PLATFORM_USER_ACTIVATED = "platform_user_activated"
+    PLATFORM_USER_DEACTIVATED = "platform_user_deactivated"
+    PLATFORM_INVITE_RESENT = "platform_invite_resent"
+    # Super-admin flipped a tenant's AI form-filling (observer) switch; recorded null-tenant.
+    TENANT_OBSERVER_UPDATED = "tenant_observer_updated"
+    # Tenant concurrency knobs updated (old/new integer values, no PHI).
+    CONCURRENCY_CONFIG_UPDATED = "concurrency_config_updated"
+    # Self-service password reset; meta never holds the token or URL.
+    PASSWORD_RESET_REQUESTED = "password_reset_requested"
+    PASSWORD_RESET_COMPLETED = "password_reset_completed"
+    # Platform operator changed a tenant's auto-retry config (flag/threshold values, no PHI).
+    TENANT_RETRY_CONFIG_UPDATED = "tenant_retry_config_updated"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

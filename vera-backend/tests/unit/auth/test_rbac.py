@@ -24,6 +24,7 @@ from .conftest import SpyAudit, make_request
 
 TENANT = UUID("00000000-0000-0000-0000-0000000000aa")
 USER_ID = UUID("00000000-0000-0000-0000-0000000000cc")
+SESSION_ID = UUID("00000000-0000-0000-0000-0000000000ee")  # fixed: _identity() is compared by value
 
 
 # --- fakes -------------------------------------------------------------------
@@ -132,6 +133,7 @@ def _identity() -> VerifiedIdentity:
         email="a@example.com",
         tenant_id=TENANT,
         account_type=AccountType.TENANT,
+        session_id=SESSION_ID,
     )
 
 

@@ -89,6 +89,13 @@ describe("normalize + equality", () => {
     expect(normalizeDocument(server).task_overrides).toEqual({ wrap_up: { outro: "bye" } })
   })
 
+  it("keeps a blank intro override — \"\" is an override, not an absent field", () => {
+    const d = doc({ main: { intro: "" } })
+    expect(normalizeDocument(d).task_overrides).toEqual({ main: { intro: "" } })
+    expect(overrideStateOf(d, "main", "intro", "Hello.")).toBe("overridden")
+    expect(documentsEqual(d, doc())).toBe(false)
+  })
+
   it("documentsEqual ignores null-vs-absent and key order", () => {
     const a = doc({ wrap_up: { outro: "bye", intro: null }, main: { prompt: "x" } })
     const b = doc({ main: { prompt: "x" }, wrap_up: { outro: "bye" } })
@@ -98,18 +105,23 @@ describe("normalize + equality", () => {
 })
 
 describe("validation", () => {
-  it("clientValidationErrors flags empty session fields and empty overrides", () => {
+  it("clientValidationErrors flags empty session fields and an empty prompt override", () => {
     const d: PromptDocument = {
       kind: "prompt_document",
       session: { persona: "", goal: "g", base_instructions: "b" },
-      task_overrides: { main: { intro: "  " } },
+      task_overrides: { main: { prompt: "  " } },
     }
     const errors = clientValidationErrors(d)
     expect(errors["session.persona"]).toEqual(["Required."])
-    expect(errors["task_overrides.main.intro"]).toEqual([
+    expect(errors["task_overrides.main.prompt"]).toEqual([
       "An override cannot be empty — use Reset to remove it.",
     ])
     expect(Object.keys(clientValidationErrors(doc())).length).toBe(0)
+  })
+
+  it("clientValidationErrors accepts blank intro/outro overrides (say nothing)", () => {
+    const d = doc({ main: { intro: "" }, wrap_up: { outro: "" } })
+    expect(clientValidationErrors(d)).toEqual({})
   })
 
   it("hasErrorsFor matches by field-error key prefix (rail error dots)", () => {

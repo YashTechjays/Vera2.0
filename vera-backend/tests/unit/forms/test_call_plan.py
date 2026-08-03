@@ -8,7 +8,9 @@ from vera_core.forms.call_plan import (
     CallPlan,
     PlanTask,
     _render_value,
+    bookend_paths,
     compile_call_plan,
+    focus_call_plan,
     fuse_prefill,
 )
 from vera_core.forms.conditions import leaf_gates
@@ -115,6 +117,22 @@ class TestTasks:
             IBV, doc, schema_version_id=SCHEMA_VERSION_ID, prompt_version_id=PROMPT_VERSION_ID
         )
         assert plan_task(plan, "introduction").outro == "Onward."
+
+    def test_blank_override_survives_compile_and_fuse(self) -> None:
+        # A blank override must reach the worker blank, never as the schema default.
+        doc = PromptDocument(
+            kind="prompt_document",
+            session=FACTORY_SESSION,
+            task_overrides={"introduction": TaskTextOverride(intro="", outro="")},
+        )
+        plan = compile_call_plan(
+            IBV, doc, schema_version_id=SCHEMA_VERSION_ID, prompt_version_id=PROMPT_VERSION_ID
+        )
+        fused = fuse_prefill(IBV, plan, {}, current_year=2026)
+        assert (plan_task(fused, "introduction").intro, plan_task(fused, "introduction").outro) == (
+            "",
+            "",
+        )
 
     def test_applicable_when_carried_from_schema_task(self) -> None:
         for plan_t, doc_t in zip(PLAN.tasks, IBV.tasks, strict=True):
@@ -284,3 +302,60 @@ class TestRulesAndRoundTrip:
 
     def test_json_round_trip(self) -> None:
         assert CallPlan.model_validate_json(PLAN.model_dump_json()) == PLAN
+
+
+class TestFocusCallPlan:
+    """focus_call_plan narrows a fused plan to a FOCUSED retry (only the given
+    fields) — the mechanism that replaced the retry-announcing prompt overlay."""
+
+    def _all_paths(self, plan: CallPlan) -> list[str]:
+        return [f.path for t in plan.tasks for f in t.fields]
+
+    def test_keeps_only_requested_fields(self) -> None:
+        target = self._all_paths(PLAN)[0]
+        focused = focus_call_plan(PLAN, {target})
+        assert self._all_paths(focused) == [target]
+
+    def test_drops_tasks_left_empty(self) -> None:
+        target = self._all_paths(PLAN)[0]
+        focused = focus_call_plan(PLAN, {target})
+        assert all(t.fields for t in focused.tasks)
+        assert len(focused.tasks) == 1
+
+    def test_clears_on_file_values_but_keeps_persona(self) -> None:
+        target = self._all_paths(PLAN)[0]
+        focused = focus_call_plan(PLAN, {target})
+        assert focused.on_file_values is None
+        assert focused.session == PLAN.session
+        assert focused.stt_key_terms == PLAN.stt_key_terms
+
+    def test_empty_focus_yields_no_tasks(self) -> None:
+        assert focus_call_plan(PLAN, set()).tasks == []
+
+    def test_original_plan_not_mutated(self) -> None:
+        before = len(self._all_paths(PLAN))
+        focus_call_plan(PLAN, {self._all_paths(PLAN)[0]})
+        assert len(self._all_paths(PLAN)) == before
+
+
+class TestBookendPaths:
+    """bookend_paths names the fields a FOCUSED retry must always keep so every call
+    still greets (opening task) and captures its own rep name + call reference number
+    (wrap-up task) — dropping those tasks was QA issues 3 and 4."""
+
+    def test_includes_opening_and_wrapup_fields(self) -> None:
+        paths = set(bookend_paths(PLAN, IBV.rep_call_reference_number_field))
+        assert "sections.patient_verification.is_insurance_active" in paths  # greeting task
+        assert "sections.insurance_representative.rep_name" in paths  # wrap-up task
+        assert IBV.rep_call_reference_number_field in paths  # every call logs its own ref
+
+    def test_focused_retry_retains_greeting_and_wrapup_when_those_fields_satisfied(self) -> None:
+        """Even when the intro/wrap-up fields are already satisfied (excluded from the
+        retryable set), unioning bookends keeps both tasks in the focused plan."""
+        coverage_field = next(
+            f.path for t in PLAN.tasks if t.task_key == "coverage" for f in t.fields
+        )
+        focus = [coverage_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
+        keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
+        assert "introduction" in keys
+        assert "wrap_up" in keys

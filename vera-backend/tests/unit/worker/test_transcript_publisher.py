@@ -31,6 +31,7 @@ class _RecordingSink:
         *,
         ts: int,
         source: TurnSource | None = None,
+        user_id: str | None = None,
     ) -> None:
         self.turns.append(
             TranscriptEvent.model_validate({"role": role, "source": source, "text": text, "ts": ts})

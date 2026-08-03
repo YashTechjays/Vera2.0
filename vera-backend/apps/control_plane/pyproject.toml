@@ -15,8 +15,11 @@ dependencies = [
     "google-cloud-storage>=2.18",
     "pyotp>=2.9",
     "aiosmtplib>=3.0",
+    "httpx>=0.28",
     "livekit-api>=1.0",
+    "google-genai>=1.0",
     "email-validator>=2.0",
+    "python-multipart>=0.0.20",
     "vera-core",
 ]
 

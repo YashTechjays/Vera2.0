@@ -7,13 +7,27 @@
 export class ApiError extends Error {
   readonly httpStatus: number
   readonly errorCode: string | null
+  /** The failure envelope's `data` — validation errors carry `{fields: [...]}`
+   *  (field PATHS only; the backend never echoes a submitted value). Live only:
+   *  deliberately not serialized into the store. */
+  readonly data: unknown
 
-  constructor(httpStatus: number, errorCode: string | null, message: string) {
+  constructor(httpStatus: number, errorCode: string | null, message: string, data?: unknown) {
     super(message)
     this.name = "ApiError"
     this.httpStatus = httpStatus
     this.errorCode = errorCode
+    this.data = data
   }
+}
+
+/** Field paths a validation failure named, or [] for any other error shape.
+ * Unlike its siblings this reads `data`, which `serializeApiError` drops — so it
+ * works on a thrown ApiError only, never one recovered from the store. */
+export function apiErrorFieldPaths(err: unknown): string[] {
+  if (!(err instanceof ApiError)) return []
+  const fields = (err.data as { fields?: unknown } | null | undefined)?.fields
+  return Array.isArray(fields) ? fields.filter((f): f is string => typeof f === "string") : []
 }
 
 /** What an ApiError survives as after `serializeApiError`. */

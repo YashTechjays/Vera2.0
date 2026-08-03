@@ -340,6 +340,32 @@ async def test_admin_endpoint_denied_without_permission(
     assert resp.status_code == 403
 
 
+async def test_list_users_includes_role_names(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """VR2-78: each user row carries its assigned role names; a role-less user gets []."""
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "rolecolumn@test.example", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
+    supervisor_id = next(r["id"] for r in roles.json()["data"] if r["name"] == "SUPERVISOR")
+    assign = await client.post(
+        f"/api/v1/users/{user_id}/roles",
+        headers=_auth(rbac_world.admin_token),
+        json={"role_id": supervisor_id},
+    )
+    assert assign.status_code == 200, assign.text
+
+    listing = await client.get("/api/v1/users", headers=_auth(rbac_world.admin_token))
+    assert listing.status_code == 200, listing.text
+    by_id = {u["id"]: u for u in listing.json()["data"]}
+    assert by_id[user_id]["roles"] == ["SUPERVISOR"]
+    assert "TENANT_ADMIN" in by_id[str(rbac_world.admin_id)]["roles"]
+
+
 # --- roles -------------------------------------------------------------------
 
 
@@ -466,6 +492,31 @@ async def test_create_role_rejects_platform_permission(
         "/api/v1/roles",
         headers={**_auth(rbac_world.admin_token), **_idem()},
         json={"name": "SNEAKY", "permission_ids": [str(platform_perm_id)]},
+    )
+    assert resp.status_code == 403
+
+
+async def test_create_role_rejects_platform_users_permissions(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # The two new platform:users:* codes must be rejected by the same guard as
+    # every other platform-tier permission — a seed bug attaching either of these
+    # SPECIFIC codes to a tenant role must not slip past create_role undetected.
+    async with admin_sessionmaker() as session:
+        rows = await session.execute(
+            text(
+                "SELECT id FROM permission "
+                "WHERE code IN ('platform:users:invite', 'platform:users:read')"
+            )
+        )
+        platform_perm_ids = list(rows.scalars())
+    assert len(platform_perm_ids) == 2
+    resp = await client.post(
+        "/api/v1/roles",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"name": "SNEAKY_USERS", "permission_ids": [str(i) for i in platform_perm_ids]},
     )
     assert resp.status_code == 403
 
@@ -1032,17 +1083,31 @@ async def test_provider_toggle_and_mfa_rule(
     )
     assert bad.status_code == 400, bad.text
 
-    good = await client.patch(
-        "/api/v1/auth/providers/password",
-        headers=_auth(rbac_world.admin_token),
-        json={"enabled": True, "enforce_mfa": True},
-    )
-    assert good.status_code == 200, good.text
+    try:
+        good = await client.patch(
+            "/api/v1/auth/providers/password",
+            headers=_auth(rbac_world.admin_token),
+            json={"enabled": True, "enforce_mfa": True},
+        )
+        assert good.status_code == 200, good.text
 
-    listing = await client.get("/api/v1/auth/providers", headers=_auth(rbac_world.admin_token))
-    password = next(p for p in listing.json()["data"] if p["provider_type"] == "password")
-    assert password["enabled"] is True
-    assert password["enforce_mfa"] is True
+        listing = await client.get("/api/v1/auth/providers", headers=_auth(rbac_world.admin_token))
+        password = next(p for p in listing.json()["data"] if p["provider_type"] == "password")
+        assert password["enabled"] is True
+        assert password["enforce_mfa"] is True
+    finally:
+        # The `sso_provider` row is real tenant-scoped state living in rbac_world's
+        # session-scoped DB, not something rolled back between tests (unlike the
+        # in-memory fakes reset_livekit_knobs cleans up above). Leaving enforce_mfa=True
+        # here changes accept_invitation's behavior (user.status stays "invited" instead
+        # of flipping to "active") for every later test in this file that accepts an
+        # invite — restore the default so this test's mutation doesn't leak forward.
+        reset = await client.patch(
+            "/api/v1/auth/providers/password",
+            headers=_auth(rbac_world.admin_token),
+            json={"enabled": False, "enforce_mfa": False},
+        )
+        assert reset.status_code == 200, reset.text
 
 
 async def test_provider_unknown_type_rejected(
@@ -1159,3 +1224,66 @@ async def test_api_key_name_reusable_after_revoke(
         json={"name": "rotate", "scope": "intake:write"},
     )
     assert again.status_code == 200, again.text
+
+
+# --- resend invitation -------------------------------------------------------
+
+
+async def test_resend_invitation_reissues_a_working_token(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "stuck@test.example", "name": "Stuck", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    user_id = invite.json()["data"]["user_id"]
+    stale_token = _extract_token(invite)
+
+    resend = await client.post(
+        f"/api/v1/users/{user_id}/resend-invitation",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+    )
+    assert resend.status_code == 200, resend.text
+    fresh_token = _extract_token(resend)
+    assert fresh_token != stale_token
+
+    # The fresh token validates. The stale token is deliberately NOT invalidated:
+    # InvitationStore is keyed by the hash of each token with no reverse index from
+    # app_user_id back to a token, by design (tokens are meant to be un-enumerable).
+    # Resend's contract is "a fresh working link exists," not "the old one is revoked" —
+    # the dominant real case is an already-TTL-expired stale link, and the invite token
+    # carries no PHI (workforce invite). Building a reverse index to revoke it would
+    # mean extending the InvitationStore protocol for marginal benefit; not worth it.
+    tid = rbac_world.tenant_id
+    fresh_check = await client.get(
+        f"/api/v1/tenants/{tid}/auth/invitations/validate", params={"token": fresh_token}
+    )
+    assert fresh_check.json()["data"]["state"] == "valid"
+
+
+async def test_resend_invitation_409s_if_already_accepted(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+) -> None:
+    invite = await client.post(
+        "/api/v1/users/invitations",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+        json={"email": "already-active@test.example", "name": "", "send_email": False},
+    )
+    user_id = invite.json()["data"]["user_id"]
+    token = _extract_token(invite)
+    tid = rbac_world.tenant_id
+    accept = await client.post(
+        f"/api/v1/tenants/{tid}/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert accept.status_code == 200, accept.text
+
+    resend = await client.post(
+        f"/api/v1/users/{user_id}/resend-invitation",
+        headers={**_auth(rbac_world.admin_token), **_idem()},
+    )
+    assert resend.status_code == 409, resend.text

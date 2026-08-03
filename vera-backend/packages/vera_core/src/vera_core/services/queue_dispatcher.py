@@ -19,18 +19,32 @@ from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from opentelemetry import trace
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord
-from vera_core.forms.call_plan import CallPlan, PrefillFuser, compile_call_plan
+from vera_core.forms.call_plan import (
+    CallPlan,
+    PrefillFuser,
+    bookend_paths,
+    compile_call_plan,
+    focus_call_plan,
+)
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
+from vera_core.forms.review import (
+    REVIEW_CONFIDENCE_FLOOR,
+    expand_to_groups,
+    has_call_reference,
+    retryable_required_paths,
+)
 from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models import (
     Call,
     CallEvent,
+    CallLineage,
     InsuranceProvider,
     PatientForm,
     PromptVersion,
@@ -45,15 +59,17 @@ from vera_core.models.enums import (
     FormStatus,
     VersionStatus,
 )
-from vera_core.observability.correlation import room_name_for_call
+from vera_core.observability.correlation import call_trace_attributes, room_name_for_call
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.ivr_selection import (
     add_active_playbook_metadata,
     add_agent_context_metadata,
 )
+from vera_core.services.model_config import add_llm_model_override_metadata
 from vera_core.services.recordings import start_recording_for_call
 from vera_core.telephony import LiveKitUnavailable, OutboundDialError
 
@@ -66,10 +82,11 @@ if TYPE_CHECKING:
     from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 _EASTERN = ZoneInfo("America/New_York")
 
-# Form statuses that count toward the tenant's concurrency cap.
+# Form statuses that count toward the tenant's max_concurrent_calls ceiling.
 _ACTIVE_FORM_STATUSES = (
     FormStatus.IN_CALL.value,
     FormStatus.AI_PROCESSING.value,
@@ -108,6 +125,7 @@ async def try_dispatch(
     recording: RecordingConfig | None = None,
     dial_pacing_s: float = 1.0,
     plan_service: CallPlanService | None = None,
+    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
 ) -> int:
     """Attempt to dispatch queued forms for *tenant_id*.
 
@@ -130,6 +148,10 @@ async def try_dispatch(
     audit:
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
+    retry_floor:
+        Confidence floor for which field labels to embed in RETRY room
+        metadata. Best-effort prompt guidance only — the authoritative
+        retry-vs-review decision happened earlier in ``evaluate_call``.
     recording:
         Optional ``RecordingConfig``. When provided, audio egress is started
         for each successfully dialed call (fail-open — a recording failure
@@ -176,7 +198,7 @@ async def try_dispatch(
         )
     ).scalar_one()
 
-    slots = tenant.max_agents_per_va - active_count
+    slots = tenant.max_concurrent_calls - active_count
     if slots <= 0:
         return 0
 
@@ -301,6 +323,9 @@ async def try_dispatch(
     # fuse each form's intake prefill into its own per-form plan.
     plan_cache: _PlanCache = {}
 
+    # Forms in one pass typically share a schema version — fetch each once.
+    schema_versions: dict[UUID, SchemaVersion] = {}
+
     for form in candidates:
         # 4b. Working-hours re-check at dial time — the SQL gate above used the
         # pass-start clock, and the window can close mid-pass (dial pacing).
@@ -336,11 +361,46 @@ async def try_dispatch(
         metadata: dict[str, Any] = {
             "wait_for_speaker": True,
             "publish_events": True,
+            "enable_observer": tenant.observer_enabled,
         }
         if form.ivr_navigation_enabled:
             metadata["enable_ivr_navigation"] = True
         if tweak_fields:
             metadata["persona_tweak"] = tweak_fields
+
+        # Retry scope: with a call reference number captured, the retry is FOCUSED —
+        # stage a plan narrowed to the still-missing (group-expanded) fields so the
+        # agent asks ONLY those, never announcing a prior call. Without a reference
+        # number it retries FRESH (the full plan, a call from the top).
+        if call_mode == CallMode.RETRY and staged_plan is not None:
+            version = schema_versions.get(form.schema_version_id)
+            if version is None:
+                version = (
+                    await session.execute(
+                        select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+                    )
+                ).scalar_one()
+                schema_versions[form.schema_version_id] = version
+            doc = FormSchemaDoc.model_validate(version.schema_json)
+            status_by_path = await load_field_status(session, form.id)
+            if has_call_reference(status_by_path, doc):
+                plan, plan_prompt_version_id = staged_plan
+                # Pass the form's real values so eq/in gates evaluate exactly — without
+                # them a sentinel reads every value-gate as unmatched and silently drops
+                # its still-missing dependents from the retry (issue 6).
+                values = await current_values_by_path(session, form.id)
+                retryable = retryable_required_paths(
+                    status_by_path, version.schema_json, floor=retry_floor, values=values
+                )
+                focus = expand_to_groups(doc, retryable)
+                # Always keep the greeting + wrap-up tasks: a focused retry must still
+                # open with a greeting and capture its OWN rep name + call reference
+                # number (dropping those tasks was QA issues 3 and 4, and a retry that
+                # never logs a reference breaks the next retry's focus gate).
+                bookends = bookend_paths(plan, doc.rep_call_reference_number_field)
+                focus = [*focus, *bookends]  # focus_call_plan matches a path set — dupes are inert
+                if focus:
+                    staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
 
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-dispatched calls earlier in the same pass.
@@ -368,41 +428,88 @@ async def try_dispatch(
                 )
                 session.add(call)
                 await session.flush()
+                # For RETRY calls: find the most-recent prior call so we can write a
+                # CallLineage row. The retry is SCOPED by the plan itself (a focused
+                # retry stages a narrowed plan via focus_call_plan above), never by a
+                # prompt overlay — the agent is never told this is a retry, so nothing
+                # leaks to the payer rep.
+                parent_call_id = None
+                if call_mode == CallMode.RETRY:
+                    parent_call_id = (
+                        await session.execute(
+                            select(Call.id)
+                            .where(Call.form_id == form.id, Call.id != call.id)
+                            .order_by(Call.created_at.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+
                 room_name = room_name_for_call(tenant_id, call.id)
-                if plan_service is not None and staged_plan is not None:
-                    plan, plan_prompt_version_id = staged_plan
-                    # Fail fast: a staging failure aborts THIS dispatch — the raise
-                    # propagates to the except below, which rolls back the Call and
-                    # reverts the form to IN_QUEUE. Never place a call whose plan
-                    # didn't reach the store (the plan-only worker can't serve it).
-                    await plan_service.put(room_name, plan)
-                    metadata["use_call_plan"] = True
-                    staged_plan_room = room_name  # for orphan cleanup on rollback
-                    # Lineage rides the same failure path as the put above: a
-                    # staging raise aborts the dispatch, so a call never claims a
-                    # prompt version it didn't actually load.
-                    call.prompt_version_id = plan_prompt_version_id
-                if form.ivr_navigation_enabled and provider is not None:
-                    await add_active_playbook_metadata(session, provider.id, metadata)
-                if form.ivr_navigation_enabled:
-                    await add_agent_context_metadata(session, form, metadata)
-                try:
-                    await livekit.create_call_room(room_name, metadata=metadata)
-                except Exception as exc:
-                    # metadata carries agent_context (raw PHI); a raised SDK/Twirp error could embed
-                    # the request body, and the outer handler logs the traceback — re-raise PHI-free
-                    # (chain suppressed) so no PHI can leak into logs.
-                    raise LiveKitUnavailable(
-                        f"create_call_room failed: {type(exc).__name__}"
-                    ) from None
-                session.add(
-                    CallEvent(
-                        tenant_id=tenant_id,
-                        call_id=call.id,
-                        event_type=CallEventType.STATUS.value,
-                        event_value=CallStatus.INITIATED.value,
+                span_attrs: dict[str, Any] = {
+                    **call_trace_attributes(room_name),
+                    "vera.dispatch.ivr_enabled": bool(metadata.get("enable_ivr_navigation")),
+                }
+                if staged_plan is not None:
+                    span_attrs["vera.dispatch.task_count"] = len(staged_plan[0].tasks)
+                # This section builds `metadata` (agent_context, raw PHI) and stages the plan
+                # (raw intake values) to Redis — a raised SQLAlchemy/redis error can embed the
+                # statement params, so BOTH OTel exception knobs must be off:
+                # record_exception=False drops the exception EVENT (message + traceback),
+                # set_status_on_exception=False drops the f"{type}: {exc}" status description.
+                # create_call_room's own handler re-raises PHI-free for the same reason (below).
+                with tracer.start_as_current_span(
+                    "vera.dispatch.stage_call",
+                    attributes=span_attrs,
+                    record_exception=False,
+                    set_status_on_exception=False,
+                ):
+                    if plan_service is not None and staged_plan is not None:
+                        plan, plan_prompt_version_id = staged_plan
+                        # Fail fast: a staging failure aborts THIS dispatch — the raise
+                        # propagates to the except below, which rolls back the Call and
+                        # reverts the form to IN_QUEUE. Never place a call whose plan
+                        # didn't reach the store (the plan-only worker can't serve it).
+                        await plan_service.put(room_name, plan)
+                        metadata["use_call_plan"] = True
+                        staged_plan_room = room_name  # for orphan cleanup on rollback
+                        # Lineage rides the same failure path as the put above: a
+                        # staging raise aborts the dispatch, so a call never claims a
+                        # prompt version it didn't actually load.
+                        call.prompt_version_id = plan_prompt_version_id
+                    if form.ivr_navigation_enabled and provider is not None:
+                        await add_active_playbook_metadata(session, provider.id, metadata)
+                    if form.ivr_navigation_enabled:
+                        await add_agent_context_metadata(session, form, metadata)
+                    # Unlike the two calls above, this one never raises — a broken config-table
+                    # read degrades to the hardcoded default instead of failing the dispatch.
+                    await add_llm_model_override_metadata(session, metadata)
+                    try:
+                        await livekit.create_call_room(room_name, metadata=metadata)
+                    except Exception as exc:
+                        # metadata carries agent_context (raw PHI); a raised SDK/Twirp error
+                        # could embed the request body, and the outer handler logs the
+                        # traceback — re-raise PHI-free (chain suppressed) so no PHI can leak
+                        # into logs.
+                        raise LiveKitUnavailable(
+                            f"create_call_room failed: {type(exc).__name__}"
+                        ) from None
+                    session.add(
+                        CallEvent(
+                            tenant_id=tenant_id,
+                            call_id=call.id,
+                            event_type=CallEventType.STATUS.value,
+                            event_value=CallStatus.INITIATED.value,
+                        )
                     )
-                )
+
+                    if parent_call_id is not None:
+                        session.add(
+                            CallLineage(
+                                tenant_id=tenant_id,
+                                parent_call_id=parent_call_id,
+                                retry_call_id=call.id,
+                            )
+                        )
         except Exception:
             logger.exception(
                 "dispatch: failed to dispatch form %s — reverting to IN_QUEUE", form.id
@@ -503,7 +610,18 @@ async def _resolve_call_plan(
     fuser, prompt_version_id = template
     try:
         values = await current_values_by_path(session, form.id)
-        fused = fuser.fuse(values, current_year=datetime.now(_EASTERN).year)
+        # fuser.fuse operates on field_answer values (PHI) and a raised exception can embed
+        # them, so BOTH OTel exception knobs must be off: record_exception=False drops the
+        # exception EVENT (message + traceback), set_status_on_exception=False drops the
+        # f"{type}: {exc}" status description — the same reason the handler below logs a
+        # type name only.
+        with tracer.start_as_current_span(
+            "vera.dispatch.fuse_plan",
+            attributes={"vera.dispatch.form_id": str(form.id)},
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
+            fused = fuser.fuse(values, current_year=datetime.now(_EASTERN).year)
         return fused, prompt_version_id
     except Exception as exc:
         # field_answer values are PHI — type name only, never the statement/params.
@@ -560,12 +678,21 @@ async def _resolve_plan_template(
                 else None
             )
             prompt_version_id = prompt_version.id if prompt_version is not None else None
-            plan = compile_call_plan(
-                doc,
-                prompt_doc,
-                schema_version_id=schema_version.id,
-                prompt_version_id=prompt_version_id,
-            )
+            # Unlike the fuse_plan / stage_call spans, this one deliberately keeps OTel's
+            # exception defaults (record_exception / set_status_on_exception both True):
+            # compile_call_plan only touches schema + prompt documents, which are config, not
+            # PHI — so a recorded exception is safe and useful here, for the same reason the
+            # handler below logs the full traceback.
+            with tracer.start_as_current_span(
+                "vera.dispatch.compile_plan",
+                attributes={"vera.dispatch.schema_version": str(schema_version.id)},
+            ):
+                plan = compile_call_plan(
+                    doc,
+                    prompt_doc,
+                    schema_version_id=schema_version.id,
+                    prompt_version_id=prompt_version_id,
+                )
             resolved = (PrefillFuser(doc, plan), prompt_version_id)
     except Exception:
         # Schema/prompt documents are config, not PHI — the traceback is safe.

@@ -335,6 +335,31 @@ async def test_create_draft_increments_version(
     assert d["composite_json"]["session"]["goal"] == "edited"
 
 
+async def test_create_draft_accepts_blank_intro_outro_overrides(
+    prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
+) -> None:
+    """Blank intro/outro = "say nothing on entry/exit" — saved verbatim, not rejected."""
+    client, w, ids = prompts_world
+    body = {**VALID_PROMPT_DOC, "task_overrides": {"main": {"intro": "", "outro": ""}}}
+    resp = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/versions", headers=_auth(w.super_token), json=body
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["composite_json"]["task_overrides"]["main"] == {
+        "intro": "",
+        "outro": "",
+        "prompt": None,
+    }
+    preview = await client.post(
+        f"/api/v1/prompts/{ids.prompt_id}/preview", headers=_auth(w.super_token), json=body
+    )
+    assert preview.status_code == 200, preview.text
+    data = preview.json()["data"]
+    assert data["errors"] == []
+    main = next(t for t in data["rendered"]["tasks"] if t["task_key"] == "main")
+    assert (main["intro"], main["outro"]) == ("", "")
+
+
 async def test_publish_promotes_and_demotes(
     prompts_world: tuple[httpx.AsyncClient, World, PromptIds],
 ) -> None:

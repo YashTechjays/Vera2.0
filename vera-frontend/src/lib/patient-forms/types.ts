@@ -22,6 +22,27 @@ export type PatientFormStatusResult = {
 /** Where a field's current value came from (vera_core AnswerSource enum). */
 export type FieldSource = "intake" | "ai_call" | "human"
 
+/** Judge verdict attached to a field's provenance. */
+export type FieldJudge = { confidence: number | null; supported: boolean; evidence: string | null }
+
+/** Which call attempt produced a field's current value and the judge verdict. */
+export type FieldProvenance = { attempt: number; mode: "full" | "retry"; judge: FieldJudge | null }
+
+/** One entry in the call-attempt timeline (GET /patient-forms/{id}/calls). */
+export type CallAttempt = {
+  id: string
+  attempt: number
+  mode: "full" | "retry"
+  status: string
+  created_at: string
+  retry_of: string | null
+  changed_paths: string[]
+  /** True when THIS caller may fetch the attempt's recording (it is AVAILABLE,
+   *  the call is owner-or-published visible, and the caller holds
+   *  recordings:read) — false means render no play control. */
+  recording_available: boolean
+}
+
 /** JSONB field value — the backend stores/returns `Any`. */
 export type FieldValue = string | number | boolean | null
 
@@ -44,6 +65,7 @@ export type PatientFormField = {
   source: FieldSource
   confidence: number | null
   dispute: FieldDispute | null
+  provenance: FieldProvenance | null
 }
 
 /** Worklist row (GET /patient-forms). */
@@ -61,6 +83,7 @@ export type PatientFormSummary = {
   completion_pct: number
   created_at: string
   updated_at: string
+  review_reason: string | null
 }
 
 /** Full review payload (GET /patient-forms/{id} and the resolve response). */
@@ -143,4 +166,24 @@ export type SchemaVersionDetail = {
   name: string
   /** the raw DSL document (schema_version.schema_json); parse with `parseSchema` */
   document: unknown
+}
+
+/** GET /patient-forms/schemas — a form family selectable for in-app intake
+ *  (only families with a published version are returned). Catalog data, not PHI. */
+export type IntakeSchemaOption = {
+  schema_id: string
+  name: string
+  insurance_type: string
+  published_version_id: string
+  published_version: number
+}
+
+/** Non-PHI ack returned by POST /patient-forms:create. */
+export type PatientFormCreateResult = {
+  id: string
+  status: PatientFormStatus
+  insurance_type: string
+  schema_version_id: string
+  completion_pct: number
+  created_at: string
 }

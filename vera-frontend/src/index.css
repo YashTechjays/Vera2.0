@@ -135,3 +135,10 @@
     @apply font-sans;
     }
 }
+
+/* Hides the picker arrow (▼) Chrome paints on any input carrying a datalist (VR2-91).
+   Keep it a flat rule: Tailwind's arbitrary variant compiles to a nested one Chrome
+   never applies to this pseudo-element. */
+.no-picker-arrow::-webkit-calendar-picker-indicator {
+  display: none !important;
+}

@@ -2,10 +2,13 @@
 // contract. Each call rides `apiRequest`, which injects the bearer token,
 // unwraps the response envelope, and throws `ApiError` on failure.
 
-import { apiRequest } from "@/lib/api/client"
+import { apiRequest, apiRequestBlob } from "@/lib/api/client"
 import type {
+  CallAttempt,
+  IntakeSchemaOption,
   ListPatientFormsParams,
   PaginatedPatientForms,
+  PatientFormCreateResult,
   PatientFormDetail,
   PatientFormStatus,
   PatientFormStatusResult,
@@ -87,4 +90,45 @@ export function updatePatientFormStatus(
       },
     },
   )
+}
+
+/** GET /patient-forms/{id}/calls — the attempt timeline. */
+export function getPatientFormCalls(formId: string): Promise<CallAttempt[]> {
+  return apiRequest<CallAttempt[]>(
+    `/patient-forms/${encodeURIComponent(formId)}/calls`,
+  )
+}
+
+/** POST /patient-forms/{id}/export — streamed XLSX (forms:export). */
+export function exportPatientForm(formId: string): Promise<Blob> {
+  return apiRequestBlob(`/patient-forms/${encodeURIComponent(formId)}/export`, {
+    method: "POST",
+  })
+}
+
+/** GET /patient-forms/schemas — form families with a published version. */
+export function listIntakeSchemas(): Promise<IntakeSchemaOption[]> {
+  return apiRequest<IntakeSchemaOption[]>("/patient-forms/schemas")
+}
+
+/** POST /patient-forms:create — create a patient form from a family's published
+ *  schema version. The server resolves the version; `publishedVersionId` is the one
+ *  this client rendered, sent so a version published mid-flow 409s instead of
+ *  silently binding a document the user never filled. `idempotencyKey` must be
+ *  stable across retries of one submit — a fresh key per call de-dups nothing. */
+export function createPatientForm(
+  schemaId: string,
+  publishedVersionId: string,
+  intakePayload: Record<string, unknown>,
+  idempotencyKey: string,
+): Promise<PatientFormCreateResult> {
+  return apiRequest<PatientFormCreateResult>("/patient-forms:create", {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: {
+      schema_id: schemaId,
+      published_version_id: publishedVersionId,
+      intake_payload: intakePayload,
+    },
+  })
 }

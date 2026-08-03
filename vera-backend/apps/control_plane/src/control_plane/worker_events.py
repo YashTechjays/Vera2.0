@@ -39,13 +39,17 @@ from vera_core.events import (
     CallFailedEvent,
     CallFailureReason,
     CallHealthEvent,
+    PostCallJob,
+    PostCallJobBus,
     WorkerEvent,
     WorkerEventBus,
     parse_worker_event,
 )
+from vera_core.forms.review import dispute_view
 from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import AnswerSource, CallEventType, CallHealthFlag, CallStatus
+from vera_core.models.field_answer import CallFormSnapshot
 from vera_core.notifications import (
     TYPE_INTERVENTION_NEEDED,
     Notification,
@@ -54,9 +58,15 @@ from vera_core.notifications import (
 )
 from vera_core.observability.correlation import parse_room_name
 from vera_core.plan_store import CallPlanService
-from vera_core.services.field_answers import recompute_form_projection, record_answer
+from vera_core.services.field_answers import (
+    baseline_value,
+    current_values_by_path,
+    recompute_form_projection,
+    record_answer,
+)
 
 if TYPE_CHECKING:
+    from vera_core.observability.correlation import RoomRef
     from vera_core.services.recordings import RecordingConfig
 
 logger = logging.getLogger("control_plane.worker_events")
@@ -105,6 +115,19 @@ def _entry_room(fields: dict[str, str]) -> str:
     return room if isinstance(room, str) else ""
 
 
+# Close events resolve the form (closeout + retry decision) and must not overtake an
+# earlier same-room event still pending after a failed handler (stale-projection re-dial).
+_CLOSE_EVENT_TYPES: frozenset[str] = frozenset({"call.ended", "call.failed"})
+_PENDING_SCAN = 256  # bounded pending-set scan per close-ordering check
+
+
+def _stream_id_key(stream_id: str) -> tuple[int, int]:
+    """(ms, seq) numeric sort key for a Redis stream id — a lexical compare misorders
+    across a millisecond digit boundary ("100-0" sorts below "99-0")."""
+    ms, _, seq = stream_id.partition("-")
+    return (int(ms), int(seq or 0))
+
+
 def _retry_young_or_drop(room_name: str, ts_ms: int) -> None:
     """A canonical-room event whose Call row isn't there yet: retry if the event is
     young (the dispatcher dials inside the dispatch transaction, so a fast answer/
@@ -126,11 +149,13 @@ class WorkerEventConsumer:
         *,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
+        max_close_deliveries: int = 3,
         teardown_grace_ms: int = 1_500,
         consumer_name: str | None = None,
         form_auto_retry_enabled: bool = False,
         recording: "RecordingConfig | None" = None,
         call_plans: CallPlanService | None = None,
+        post_call_bus: PostCallJobBus | None = None,
         notifications: NotificationService | None = None,
     ) -> None:
         self._redis = redis
@@ -141,11 +166,13 @@ class WorkerEventConsumer:
         self._call_stream = call_stream
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
+        self._max_close_deliveries = max_close_deliveries
         self._teardown_grace_ms = teardown_grace_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._form_auto_retry_enabled = form_auto_retry_enabled
         self._recording = recording
         self._call_plans = call_plans
+        self._post_call_bus = post_call_bus
         self._notifications = notifications
         self._bus = WorkerEventBus(redis)
         self._handlers: dict[str, EventHandler] = {
@@ -176,6 +203,7 @@ class WorkerEventConsumer:
                 raise
             except RedisError:
                 logger.exception("worker-event consumer Redis error; backing off")
+                group_ready = False
                 await asyncio.sleep(1.0)
 
     async def _read_once(self) -> None:
@@ -257,6 +285,16 @@ class WorkerEventConsumer:
             logger.warning("no handler for worker event type %s; dropping", event.type)
             await self._ack(entry_id)
             return
+        # Hold a close behind an earlier same-room event still pending from a prior window.
+        room = getattr(event, "room_name", "")
+        if event.type in _CLOSE_EVENT_TYPES and room and await self._close_blocked(entry_id, room):
+            logger.info(
+                "deferring %s (%s) for %s — an earlier same-room event is still pending",
+                entry_id,
+                event.type,
+                room,
+            )
+            return  # unacked → XAUTOCLAIM redelivers after the predecessor is processed
         try:
             await handler(event)
         except _RetryEventLater:
@@ -276,6 +314,46 @@ class WorkerEventConsumer:
             )
             return  # do NOT ack → XAUTOCLAIM retries later (at-least-once)
         await self._ack(entry_id)
+
+    async def _close_blocked(self, entry_id: str, room_name: str) -> bool:
+        """Whether a close event must wait for an earlier-id, same-room entry still
+        pending — bounded so a poison predecessor past ``max_close_deliveries`` no longer
+        wedges the room."""
+        # Read the close's OWN delivery count directly (a single-id XPENDING), so the cap
+        # trips no matter how deep the pending set is. If it is not pending we are somehow
+        # not its delivery owner — fail OPEN (proceed): deferring a phantom would wedge.
+        own = await self._redis.xpending_range(
+            WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, min=entry_id, max=entry_id, count=1
+        )
+        if not own:
+            return False
+        delivered = int(own[0]["times_delivered"])
+        if delivered > self._max_close_deliveries:
+            logger.warning(
+                "close %s for %s proceeding after %d deliveries despite a possible pending "
+                "predecessor — resolution may run on an incomplete projection",
+                entry_id,
+                room_name,
+                delivered,
+            )
+            return False
+        # Earlier-id pending entries only (bounded to ids <= the close, lowest first, so the
+        # oldest — the stuck predecessors — are the ones surfaced).
+        earlier = await self._redis.xpending_range(
+            WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, min="-", max=entry_id, count=_PENDING_SCAN
+        )
+        close_key = _stream_id_key(entry_id)
+        for p in earlier:
+            pid = str(p["message_id"])
+            if _stream_id_key(pid) >= close_key:
+                continue  # the close's own id is the range max — exclude it
+            rows = cast(
+                "list[tuple[str, dict[str, str]]]",
+                await self._redis.xrange(WORKER_EVENTS_STREAM, min=pid, max=pid),
+            )
+            if rows and _entry_room(rows[0][1]) == room_name:
+                return True
+        return False
 
     async def _ack(self, entry_id: str) -> None:
         await self._redis.xack(WORKER_EVENTS_STREAM, WORKER_EVENTS_GROUP, entry_id)
@@ -355,9 +433,9 @@ class WorkerEventConsumer:
 
     async def _handle_call_answer_recorded(self, event: WorkerEvent) -> None:
         """Persist an Observer-extracted answer as an ai_call field_answer, then re-derive
-        the form's promoted columns + completion_pct. Idempotent under redelivery (the
-        writer no-ops an unchanged value); the form row lock serializes against a
-        concurrent human resolve on the same form."""
+        the form's promoted columns + completion_pct, then relay it onto the per-call SSE
+        stream. Idempotent under redelivery (the writer no-ops an unchanged value); the form
+        row lock serializes against a concurrent human resolve on the same form."""
         if not isinstance(event, CallAnswerRecordedEvent):
             return
         ref = parse_room_name(event.room_name)
@@ -370,6 +448,7 @@ class WorkerEventConsumer:
             if call is None:
                 _retry_young_or_drop(event.room_name, event.ts)
                 return  # voice-lab room (or the Call row hasn't committed yet → retry)
+            call_is_terminal = call.current_status in TERMINAL_VALUES
             form = (
                 await session.execute(
                     select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
@@ -409,6 +488,32 @@ class WorkerEventConsumer:
                     detail={"field_path": event.field_path, "call_id": str(call.id)},
                 )
             )
+            # Closeout already deleted this call's stream; an XADD would recreate it and
+            # pin every client to a dead call. The DB row is written — just skip the relay,
+            # and skip the baseline read it would need. See the test for the full chain.
+            if call_is_terminal:
+                return
+            # Everything the relay needs, read while the row is still live in this session.
+            dispute = dispute_view(
+                source=AnswerSource.AI_CALL.value,
+                value=event.value,
+                confidence=event.confidence,
+                evidence=None,
+                baseline_value=await baseline_value(session, form.id, event.field_path),
+            )
+            completion_pct = float(form.completion_pct)
+
+        # Committed and unlocked — see the docstring.
+        await self._call_stream.publish_field_answer(
+            event.room_name,
+            field_path=event.field_path,
+            value=event.value,
+            confidence=event.confidence,
+            evidence_seq=event.evidence_seq,
+            completion_pct=completion_pct,
+            dispute=dispute,
+            ts=event.ts,
+        )
 
     async def _handle_call_health(self, event: WorkerEvent) -> None:
         """Persist one observer analysis (spec §4.3). Every surviving analysis
@@ -577,17 +682,22 @@ class WorkerEventConsumer:
             ref, applied = closed  # applied may be CANCELED (user-requested end wins)
             await finalize_transcript(self._sessionmaker, self._call_stream, ref, room_name)
             if applied in (CallStatus.COMPLETED, CallStatus.CANCELED):
-                # Both park the form in AI_PROCESSING; resolve the lifecycle's
-                # next system edge (EXCEPTION_REVIEW or low-completion
-                # auto-requeue — suppressed for a canceled call) before
-                # refilling — either way a slot is freed.
-                await resolve_ai_processing(
-                    self._sessionmaker,
-                    self._audit,
-                    ref,
-                    trigger=trigger,
-                    auto_retry_enabled=self._form_auto_retry_enabled,
-                )
+                # Both park the form in AI_PROCESSING. When the post-call eval
+                # consumer is wired, hand it the resolution: snapshot the form's
+                # pre-eval answers and enqueue a job — evaluate_call owns the
+                # transition out of AI_PROCESSING (and its own dispatch pass).
+                # Without it (no GCP project), resolve synchronously as before;
+                # either way the sweeper still covers a crash in between.
+                if self._post_call_bus is not None:
+                    await self._enqueue_post_call_eval(ref)
+                else:
+                    await resolve_ai_processing(
+                        self._sessionmaker,
+                        self._audit,
+                        ref,
+                        trigger=trigger,
+                        auto_retry_enabled=self._form_auto_retry_enabled,
+                    )
             await run_dispatch_pass(
                 self._sessionmaker,
                 ref.tenant_id,
@@ -597,3 +707,34 @@ class WorkerEventConsumer:
                 recording=self._recording,
                 plan_service=self._call_plans,
             )
+
+    async def _enqueue_post_call_eval(self, ref: "RoomRef") -> None:
+        """Write the pre-eval CallFormSnapshot and enqueue the eval job.
+
+        Redelivery-safe: a second closeout of the same call finds the form no
+        longer in AI_PROCESSING inside evaluate_call, which skips it."""
+        assert self._post_call_bus is not None
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id))
+            ).scalar_one_or_none()
+            if call is None:
+                return  # voice-lab room — no pipeline form
+            form_id = call.form_id
+            existing = (
+                await session.execute(
+                    select(CallFormSnapshot.id).where(CallFormSnapshot.call_id == ref.call_id)
+                )
+            ).scalar_one_or_none()
+            if existing is None:  # redelivered closeout → snapshot already taken
+                session.add(
+                    CallFormSnapshot(
+                        tenant_id=ref.tenant_id,
+                        call_id=ref.call_id,
+                        before_state=await current_values_by_path(session, form_id),
+                        after_state={},
+                    )
+                )
+        await self._post_call_bus.emit(
+            PostCallJob(tenant_id=ref.tenant_id, form_id=form_id, call_id=ref.call_id)
+        )

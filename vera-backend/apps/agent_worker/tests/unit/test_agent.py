@@ -12,10 +12,12 @@ import pytest
 from conftest import chat_ctx_texts
 from livekit.agents import Agent, StopResponse
 from livekit.agents.llm import FunctionTool
+from livekit.agents.llm.utils import build_legacy_openai_schema
 from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
-from agent_worker.handoff import carry_chat_ctx
+from agent_worker.cartesia_workaround import SPELL_LEAD_IN, guard_utterance_initial_spell
+from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
@@ -26,7 +28,8 @@ from agent_worker.ivr_agent import (
     ivr_turn_handling,
 )
 from agent_worker.ivr_prompt import SILENCE_TOKEN
-from agent_worker.plan_runtime import PlanRunController, PlanTaskAgent
+from agent_worker.plan_runtime import GapTaskAgent, PlanRunController, PlanTaskAgent
+from agent_worker.prompt import TOOL_REASON_ARG
 from vera_core.forms.call_plan import CallPlan, PlanSession, PlanTask
 from vera_core.schemas import PersonaTweak
 
@@ -51,8 +54,8 @@ def _plan_controller() -> PlanRunController:
 async def _press(agent: IvrNavigatorAgent, digits: str) -> str:
     """Call the press_keypad tool. The @function_tool descriptor binds the method at
     runtime, but its type stub doesn't model that, so cast to the real call signature."""
-    call = cast("Callable[[str], Awaitable[str]]", agent.press_keypad)
-    return await call(digits)
+    call = cast("Callable[[str, str], Awaitable[str]]", agent.press_keypad)
+    return await call(digits, "the menu asked for a selection")
 
 
 class _FakeParticipant:
@@ -109,11 +112,81 @@ async def test_carry_chat_ctx_copies_spoken_turns_not_instructions() -> None:
     assert target.instructions == "TARGET INSTRUCTIONS"  # target keeps its own
 
 
+@pytest.mark.asyncio
+async def test_carry_returns_the_inheritance_boundary() -> None:
+    # The returned ids are what later lets `own_items` tell the target's own turns from
+    # the ones it inherited — the whole basis of the previous-task window.
+    source = VeraAgent(instructions="S")
+    source._chat_ctx.add_message(role="user", content="inherited turn")
+    target = VeraAgent(instructions="T")
+
+    boundary = await carry_chat_ctx(source, target)
+
+    assert own_items(target, boundary) == []  # nothing of its own yet
+    target._chat_ctx.add_message(role="user", content="its own turn")
+    assert [i.text_content for i in own_items(target, boundary)] == ["its own turn"]
+
+
+@pytest.mark.asyncio
+async def test_carry_items_replaces_rather_than_accumulates() -> None:
+    source = VeraAgent(instructions="S")
+    source._chat_ctx.add_message(role="user", content="keep me")
+    source._chat_ctx.add_message(role="system", content="SOURCE INSTRUCTIONS")
+    target = VeraAgent(instructions="T")
+    target._chat_ctx.add_message(role="user", content="stale turn")
+
+    await carry_items(target, source.chat_ctx.items)
+
+    # Replaced, not merged — and the same instruction filter `merge` applies still holds.
+    assert chat_ctx_texts(target) == ["keep me"]
+
+
+@pytest.mark.asyncio
+async def test_carry_items_dedupes_by_id() -> None:
+    # The carry set is assembled from several agents' turns, so the same item can appear twice.
+    source = VeraAgent(instructions="S")
+    source._chat_ctx.add_message(role="user", content="opening turn")
+    target = VeraAgent(instructions="T")
+    overlapping = [*source.chat_ctx.items, *source.chat_ctx.items]
+
+    await carry_items(target, overlapping)
+
+    assert chat_ctx_texts(target) == ["opening turn"]
+
+
 def test_vera_agent_carries_only_the_end_call_tool() -> None:
     agent = VeraAgent(instructions="do things")
     tool_names = [t.info.name for t in agent.tools if isinstance(t, FunctionTool)]
     assert tool_names == ["end_call"]
     assert agent.instructions == "do things"
+
+
+def test_every_tool_requires_a_reason() -> None:
+    """The reason is how a run explains itself — the eval transcript renders it and the judge's
+    `tool_calls` dimension grades it. A default on the parameter would make it optional in the
+    schema the model sees, and it would go missing exactly on the calls worth explaining."""
+    controller = _plan_controller()
+    # A one-task plan builds no gap agent (the closing task is never gap-swept), so name it.
+    agents: list[Agent] = [
+        VeraAgent(instructions="x"),
+        _navigator(),
+        *controller.agents,
+        GapTaskAgent(controller, 0),
+    ]
+    tools = [t for a in agents for t in a.tools if isinstance(t, FunctionTool)]
+    for tool in tools:
+        schema = build_legacy_openai_schema(tool, internally_tagged=True)
+        params = cast(dict[str, Any], schema["parameters"])
+        assert "reason" in params["required"], f"{tool.info.name} does not require a reason"
+        assert TOOL_REASON_ARG in (schema["description"] or ""), tool.info.name
+    assert {t.info.name for t in tools} == {
+        "end_call",
+        "task_complete",
+        "gap_complete",
+        "press_keypad",
+        "transfer_to_verification",
+        "give_up",
+    }
 
 
 def test_ivr_navigator_agent_is_generic_and_silent_on_enter() -> None:
@@ -144,9 +217,36 @@ async def test_give_up_ends_the_call() -> None:
         t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == "give_up"
     )
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
-        result = await give_up_tool()
+        result = await give_up_tool(reason="the menu looped past the full escalation ladder")
     assert result == "Ending the call."  # the tool signals the model the call is over
     mock_session.shutdown.assert_called_once_with(drain=True)
+
+
+@pytest.mark.asyncio
+async def test_no_tool_puts_its_reason_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """The `reason` is Gemini-authored prose about live call state, so it can carry a member
+    name or a clinical detail — it reaches the tool-call item for the eval harness and must go
+    nowhere near a log. Asserted over real invocations rather than by grepping for a helper,
+    so a tool that starts logging it again is caught however it does so."""
+    caplog.set_level(logging.DEBUG, logger="agent_worker")
+    controller = _plan_controller()
+
+    async def _invoke(agent: Agent, name: str, **kwargs: Any) -> None:
+        tool = next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+        with patch.object(type(agent), "session", new=property(lambda self: _mock_session())):
+            await tool(reason=f"because of {name}", **kwargs)
+
+    await _invoke(VeraAgent(instructions="x"), "end_call")
+    await _invoke(controller.agents[0], "task_complete")
+    await _invoke(GapTaskAgent(controller, 0), "gap_complete")
+    await _invoke(_navigator(), "give_up")
+    await _invoke(_navigator(), "press_keypad", digits="")
+    await _invoke(_navigator(), "transfer_to_verification")
+
+    # Not a bare "reason" search: the handoff lines legitimately log a FIXED internal label
+    # (`reason=task_complete`, `reason=ivr_live_human`), which is metadata, not model text.
+    assert "because of" not in caplog.text
+    assert "reason len=" not in caplog.text  # nor the shape the removed seam used to emit
 
 
 @pytest.mark.asyncio
@@ -406,10 +506,31 @@ def test_spell_id_tokens_rewrites_only_the_id_inside_a_sentence() -> None:
     )
 
 
+def test_guard_adds_lead_in_only_when_the_utterance_opens_with_a_spell_tag() -> None:
+    # sonic-3.5 misreads the first character of an utterance-initial <spell> ("Y" -> "I"), so a
+    # reply that IS the bare ID needs the comma; one where the tag follows speech does not.
+    assert guard_utterance_initial_spell(_spelled("YA123456789")) == (
+        f"{SPELL_LEAD_IN}{_spelled('YA123456789')}"
+    )
+    assert guard_utterance_initial_spell(f"the ID is {_spelled('YA123456789')}") == (
+        f"the ID is {_spelled('YA123456789')}"
+    )
+    assert guard_utterance_initial_spell(f"  {_spelled('YA1234')}") == (
+        f"{SPELL_LEAD_IN}  {_spelled('YA1234')}"
+    )
+    assert guard_utterance_initial_spell("press 2 for eligibility") == "press 2 for eligibility"
+
+
 @pytest.mark.asyncio
 async def test_tts_spoken_text_strips_silence_then_spells_ids() -> None:
-    # The TTS path composes both transforms: sentinel gone, ID spelled.
-    assert await _drain(_tts_spoken_text(_astream("POL-661522"))) == _spelled("POL-661522")
+    # The TTS path composes all three transforms: sentinel gone, ID spelled, lead-in added only
+    # when the spelled ID opens the utterance (mid-sentence it is voiced correctly as-is).
+    assert await _drain(_tts_spoken_text(_astream("POL-661522"))) == (
+        f"{SPELL_LEAD_IN}{_spelled('POL-661522')}"
+    )
+    assert await _drain(_tts_spoken_text(_astream("the member ID is POL-661522"))) == (
+        f"the member ID is {_spelled('POL-661522')}"
+    )
     assert await _drain(_tts_spoken_text(_astream(SILENCE_TOKEN))) == ""  # silent turn: no sound
 
 
@@ -514,8 +635,8 @@ async def test_ivr_hands_off_to_the_first_plan_task_when_a_plan_is_active() -> N
     controller = _plan_controller()
     agent = build_agent({"enable_ivr_navigation": True}, controller=controller)
     assert isinstance(agent, IvrNavigatorAgent)
-    call = cast("Callable[[], Awaitable[Agent]]", agent.transfer_to_verification)
-    handoff = await call()
+    call = cast("Callable[[str], Awaitable[Agent]]", agent.transfer_to_verification)
+    handoff = await call("a named human greeted the caller")
     assert isinstance(handoff, PlanTaskAgent)
     assert handoff is controller.agents[0]
 
@@ -527,6 +648,6 @@ async def test_ivr_handoff_carries_the_navigation_conversation() -> None:
     controller = _plan_controller()
     nav = build_agent({"enable_ivr_navigation": True}, controller=controller)
     nav._chat_ctx.add_message(role="assistant", content="The member ID is POL-661522.")
-    call = cast("Callable[[], Awaitable[Agent]]", nav.transfer_to_verification)
-    handoff = await call()
+    call = cast("Callable[[str], Awaitable[Agent]]", nav.transfer_to_verification)
+    handoff = await call("a named human greeted the caller")
     assert "The member ID is POL-661522." in chat_ctx_texts(handoff)

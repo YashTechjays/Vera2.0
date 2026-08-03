@@ -8,6 +8,7 @@ vi.mock("@/lib/auth/storage", () => ({ getToken: () => "tok" }))
 import {
   asCallHealth,
   asCallStatus,
+  asFieldAnswer,
   asTranscriptTurn,
   isTerminalCallStatus,
   streamCallEvents,
@@ -52,6 +53,35 @@ describe("asTranscriptTurn", () => {
         ts: 1,
       }),
     ).toEqual({ role: "user", source: "rep", text: "hi", ts: 1 })
+  })
+
+  it("maps a coaching envelope, carrying the speaker's user id", () => {
+    const e: CallStreamEvent = {
+      type: "transcript",
+      data: { role: "coaching", source: "supervisor", text: "ask about the deductible", user_id: "sup-1" },
+      ts: 9,
+    }
+    expect(asTranscriptTurn(e)).toEqual({
+      role: "coaching",
+      source: "supervisor",
+      text: "ask about the deductible",
+      ts: 9,
+      speakerUserId: "sup-1",
+    })
+  })
+
+  it("maps a whisper envelope with no speaker id (unknown/legacy)", () => {
+    const e: CallStreamEvent = {
+      type: "transcript",
+      data: { role: "whisper", source: "supervisor", text: "mention the copay" },
+      ts: 10,
+    }
+    expect(asTranscriptTurn(e)).toEqual({
+      role: "whisper",
+      source: "supervisor",
+      text: "mention the copay",
+      ts: 10,
+    })
   })
 
   it("ignores non-transcript envelopes", () => {
@@ -214,6 +244,106 @@ describe("asCallHealth", () => {
       flag: "none",
       reason: null,
       ts: 2,
+    })
+  })
+})
+
+describe("asFieldAnswer", () => {
+  it("narrows a field_answer envelope", () => {
+    const e: CallStreamEvent = {
+      type: "field_answer",
+      data: {
+        field_path: "sections.patient.name",
+        value: "Jane Doe",
+        source: "ai_call",
+        confidence: 88,
+        completion_pct: 40,
+      },
+      ts: 7,
+    }
+    expect(asFieldAnswer(e)).toEqual({
+      fieldPath: "sections.patient.name",
+      value: "Jane Doe",
+      source: "ai_call",
+      confidence: 88,
+      completionPct: 40,
+      ts: 7,
+    })
+  })
+
+  it("returns null for other event types or a missing field_path", () => {
+    expect(asFieldAnswer({ type: "transcript", data: { text: "x" }, ts: 1 })).toBeNull()
+    expect(asFieldAnswer({ type: "field_answer", data: { value: "x" }, ts: 1 })).toBeNull()
+  })
+
+  it("accepts non-string field values and nulls unusable metadata", () => {
+    expect(
+      asFieldAnswer({
+        type: "field_answer",
+        data: { field_path: "a.b", value: true, confidence: "high", completion_pct: null },
+        ts: 2,
+      }),
+    ).toEqual({
+      fieldPath: "a.b",
+      value: true,
+      source: null,
+      confidence: null,
+      completionPct: null,
+      ts: 2,
+    })
+  })
+
+  it("coerces an unsupported value shape to null", () => {
+    expect(
+      asFieldAnswer({ type: "field_answer", data: { field_path: "a.b", value: { x: 1 } }, ts: 3 }),
+    ).toEqual({
+      fieldPath: "a.b",
+      value: null,
+      source: null,
+      confidence: null,
+      completionPct: null,
+      ts: 3,
+    })
+  })
+
+  it("leaves dispute undefined when the frame omits the key", () => {
+    const a = asFieldAnswer({ type: "field_answer", data: { field_path: "a.b", value: "x" }, ts: 1 })
+    expect(a).not.toBeNull()
+    expect("dispute" in a!).toBe(false)
+    expect(a!.dispute).toBeUndefined()
+  })
+
+  it("parses an explicit null dispute (not disputed → clear)", () => {
+    const a = asFieldAnswer({
+      type: "field_answer",
+      data: { field_path: "a.b", value: "x", dispute: null },
+      ts: 1,
+    })
+    expect(a!.dispute).toBeNull()
+  })
+
+  it("parses a dispute object into camelCase raw values", () => {
+    const a = asFieldAnswer({
+      type: "field_answer",
+      data: {
+        field_path: "a.b",
+        value: "Jane",
+        dispute: {
+          previous_value: "John",
+          current_value: "Jane",
+          confidence: 88,
+          evidence: "member said Jane",
+          reasoning: null,
+        },
+      },
+      ts: 4,
+    })
+    expect(a!.dispute).toEqual({
+      previousValue: "John",
+      currentValue: "Jane",
+      confidence: 88,
+      evidence: "member said Jane",
+      reasoning: null,
     })
   })
 })

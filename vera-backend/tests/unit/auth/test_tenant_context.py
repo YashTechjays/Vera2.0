@@ -12,7 +12,7 @@ All 5 cases run without a database — the elevation lookup is monkeypatched at 
 from contextlib import asynccontextmanager
 from datetime import UTC
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -59,6 +59,7 @@ def _tenant_identity(tenant_id: UUID | None = TENANT_ID) -> VerifiedIdentity:
         email="user@example.com",
         tenant_id=tenant_id,
         account_type=AccountType.TENANT,
+        session_id=uuid4(),
     )
 
 
@@ -69,6 +70,7 @@ def _platform_identity(tenant_id: UUID | None = None) -> VerifiedIdentity:
         email="admin@example.com",
         tenant_id=tenant_id,
         account_type=AccountType.PLATFORM,
+        session_id=uuid4(),
     )
 
 

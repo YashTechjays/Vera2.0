@@ -26,6 +26,18 @@ chmod 600 "$tmp"
   # (the Settings Literal has no `test`), so the GCP `test` env runs as `dev`.
   echo "VERA_ENV=dev"
   echo "VERA_LOG_LEVEL=INFO"
+  # GCP project for the control-plane's Vertex AI (Gemini) post-call eval. Not a
+  # secret (it's the same PROJECT the secrets are fetched from, already in plaintext
+  # in the pipeline vars / AR image path). Setting it starts the post-call eval
+  # consumer; unset leaves the feature dormant.
+  echo "VERA_GCP_PROJECT=$PROJECT"
+  # Auto-retry: on a low-fill form (completion_pct < tenant.retry_fill_threshold),
+  # the control-plane re-queues the call instead of parking it in EXCEPTION_REVIEW,
+  # bounded by tenant.max_retries. Control-plane-only; the worker ignores it.
+  echo "VERA_FORM_AUTO_RETRY_ENABLED=true"
+  # Outbound email sender identity for the Twilio Email API (credentials come from
+  # secrets.map). veratechsolutions.ai is domain-authenticated in Twilio (em7583.*).
+  echo "VERA_EMAIL_FROM=no-reply@veratechsolutions.ai"
 } >> "$tmp"
 
 while IFS= read -r line; do

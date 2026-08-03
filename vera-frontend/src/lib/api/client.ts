@@ -43,6 +43,7 @@ type Envelope<T> = {
 // re-exported here so existing `from "@/lib/api/client"` imports keep working.
 export {
   ApiError,
+  apiErrorFieldPaths,
   apiErrorHttpStatus,
   apiErrorMessage,
   serializeApiError,
@@ -56,14 +57,58 @@ type RequestOptions = {
   auth?: boolean
   /** Extra headers (e.g. Idempotency-Key). */
   headers?: Record<string, string>
+  /** Cancel the in-flight request (e.g. on unmount) — nothing is sent past abort. */
+  signal?: AbortSignal
+}
+
+/** apiRequest for binary downloads: returns the raw Blob. Failures still arrive
+ *  as the JSON envelope, so parse it for the error message when present. */
+export async function apiRequestBlob(path: string, opts: RequestOptions = {}): Promise<Blob> {
+  const { method = "GET", body, auth = true, headers: extraHeaders } = opts
+  const headers: Record<string, string> = { ...extraHeaders }
+  if (body !== undefined) headers["Content-Type"] = "application/json"
+  if (auth) {
+    const token = getToken()
+    if (token) headers.Authorization = `Bearer ${token}`
+  }
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch {
+    throw new ApiError(0, "NETWORK_ERROR", "Could not reach the server. Is the API running?")
+  }
+  if (!res.ok) {
+    let envelope: Envelope<unknown> | null = null
+    try {
+      envelope = (await res.json()) as Envelope<unknown>
+    } catch {
+      /* non-JSON error body */
+    }
+    // Reuse apiRequest's 401 handling so an expired session clears auth state.
+    if (res.status === 401 && auth) authFailureHandler?.()
+    throw new ApiError(
+      res.status,
+      envelope?.error_code ?? null,
+      envelope?.message ?? `Request failed (${res.status})`,
+    )
+  }
+  return res.blob()
 }
 
 export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, auth = true, headers: extraHeaders } = opts
+  const { method = "GET", body, auth = true, headers: extraHeaders, signal } = opts
 
+  // A FormData body (multipart upload) must NOT get a JSON Content-Type or be
+  // stringified — the browser sets its own boundary-bearing header when the
+  // header is left unset.
+  const isFormData = body instanceof FormData
   const headers: Record<string, string> = {
     ...extraHeaders,
-    "Content-Type": "application/json",
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
   }
   if (auth) {
     const token = getToken()
@@ -75,7 +120,8 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
     res = await fetch(`${BASE_URL}${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body),
+      signal,
     })
   } catch {
     throw new ApiError(0, "NETWORK_ERROR", "Could not reach the server. Is the API running?")
@@ -96,6 +142,7 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
       res.status,
       envelope?.error_code ?? null,
       envelope?.message ?? `Request failed (${res.status}).`,
+      envelope?.data,
     )
   }
 

@@ -12,6 +12,11 @@ import { PlatformLogin } from "@/pages/PlatformLogin"
 import { MfaVerify } from "@/pages/MfaVerify"
 import { MfaEnroll } from "@/pages/MfaEnroll"
 import { AcceptInvite } from "@/pages/AcceptInvite"
+import { ForgotPassword } from "@/pages/ForgotPassword"
+import { ResetPassword } from "@/pages/ResetPassword"
+import { PlatformAcceptInvite } from "@/pages/PlatformAcceptInvite"
+import { PlatformOperators } from "@/pages/PlatformOperators"
+import { PlatformSettings } from "@/pages/PlatformSettings"
 import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
 import { Users } from "@/pages/Users"
@@ -21,6 +26,8 @@ import { AgentPrompt } from "@/pages/AgentPrompt"
 import { InsuranceProviders } from "@/pages/InsuranceProviders"
 import { IvrPlaybooks } from "@/pages/IvrPlaybooks"
 import { FormSchemas } from "@/pages/FormSchemas"
+import { LlmConfig } from "@/pages/LlmConfig"
+import { CallHistory } from "@/pages/CallHistory"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -41,11 +48,14 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/platform/login" element={<PlatformLogin />} />
         <Route path="/mfa" element={<MfaVerify />} />
         <Route path="/mfa-enroll" element={<MfaEnroll />} />
         {/* Invite links are tenant-scoped (generated in the backend email). */}
         <Route path="/tenants/:tenantSlug/accept-invite" element={<AcceptInvite />} />
+        <Route path="/tenants/:tenantSlug/reset-password" element={<ResetPassword />} />
+        <Route path="/platform/accept-invite" element={<PlatformAcceptInvite />} />
         <Route element={<RequireAuth />}>
           {/* AppShell owns the Suspense boundary around its <Outlet>, so a lazy
               page (e.g. Voice Lab) shows a spinner in the content area while the
@@ -75,13 +85,17 @@ function App() {
             />
             <Route
               path="call-history"
-              element={<RequireNavRoute to="/call-history"><Placeholder title="Call History" /></RequireNavRoute>}
+              element={<RequireNavRoute to="/call-history"><CallHistory /></RequireNavRoute>}
             />
             <Route
               path="analytics"
               element={<RequireNavRoute to="/analytics"><Placeholder title="Analytics" /></RequireNavRoute>}
             />
             <Route path="tenant-access" element={<TenantAccess />} />
+            {/* Super-admin-only platform-operator roster. */}
+            <Route path="platform-operators" element={<PlatformOperators />} />
+            {/* Super-admin-only per-tenant AI form-filling toggle. */}
+            <Route path="platform-settings" element={<PlatformSettings />} />
             {/* Super-admin-only prompt editor. */}
             <Route path="agent-prompt" element={<AgentPrompt />} />
             {/* Super-admin-only insurance-provider catalog CRUD. */}
@@ -90,6 +104,8 @@ function App() {
             <Route path="ivr-playbooks" element={<IvrPlaybooks />} />
             {/* Super-admin-only read-only form-schema catalog. */}
             <Route path="form-schemas" element={<FormSchemas />} />
+            {/* Super-admin-only voice cascade LLM model override. */}
+            <Route path="voice-model" element={<LlmConfig />} />
             <Route path="settings" element={<Settings />} />
             <Route path="*" element={<Placeholder title="Not Found" />} />
           </Route>

@@ -2,7 +2,15 @@
 
 This repository holds the backend (`vera-backend/`) and frontend (`vera-frontend/`),
 each with its own `CLAUDE.md` of domain/security rules that load when you touch that
-code. The rule below is **repo-wide** and applies to every change in Vera 2.0.
+code. The rules below are **repo-wide** and apply to every change in Vera 2.0.
+
+## MANDATORY: code comments — only when truly needed
+
+Default to no comments: well-named, readable code is the documentation. Add a
+comment only when it explains something the code cannot — a non-obvious constraint,
+a real race or lock order, a compliance rule, or a deliberate trade-off — and keep
+it to one line. Never narrate what the code already says, and keep docstrings to a
+single sentence.
 
 ## MANDATORY: simplify code after every implementation
 
@@ -24,3 +32,9 @@ This is not optional for Vera 2.0 — treat it as part of "done."
 
 > Note: this is a model-followed workflow rule (a hook can't launch an agent), so it
 > lives here in `CLAUDE.md` rather than as a `settings.json` hook.
+
+## Git remote: Bitbucket, not GitHub
+
+`origin` is a Bitbucket remote (`git remote -v`), so `gh` cannot create PRs here — push the branch
+and open the PR from the URL git prints on push. Branches track `origin/dev`, so **always push with
+an explicit refspec** (`git push origin HEAD:refs/heads/<branch>`) — a bare `git push` targets dev.

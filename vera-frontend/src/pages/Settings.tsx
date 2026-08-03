@@ -1,5 +1,6 @@
 import { MfaSetupDialog } from "@/components/auth/MfaSetupDialog"
 import { ApiKeysSection } from "@/components/settings/ApiKeysSection"
+import { ConcurrencySection } from "@/components/settings/ConcurrencySection"
 import { IntegrationsSection } from "@/components/settings/IntegrationsSection"
 import { RolesSection } from "@/components/settings/RolesSection"
 import { SettingsCard } from "@/components/settings/SettingsCard"
@@ -12,6 +13,7 @@ export function Settings() {
   const canManageApiKeys = usePermission("apikeys:manage")
   const canManageIntegrations = usePermission("integrations:manage")
   const canManageRoles = usePermission("roles:manage")
+  const canManageTenantConfig = usePermission("tenant:config:manage")
   return (
     <div className="space-y-6 p-6">
       <div>
@@ -31,6 +33,8 @@ export function Settings() {
       {canManageRoles && <RolesSection />}
 
       {canManageIntegrations && <IntegrationsSection />}
+
+      {canManageTenantConfig && <ConcurrencySection />}
     </div>
   )
 }

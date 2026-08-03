@@ -15,14 +15,17 @@ Every PHI response audits field **names** only (never values).
 """
 
 import asyncio
+import hashlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.common import (
     AppSettings,
@@ -32,24 +35,29 @@ from control_plane.api.v1.common import (
     TenantId,
     TenantSession,
     emit_phi_read_audit,
+    published_schema_version,
 )
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
-from control_plane.auth.rbac import require
-from control_plane.deps import get_audit, get_sessionmaker
+from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.deps import get_audit, get_idempotency_store, get_sessionmaker
 from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
+    ConflictError,
     CustomAPIException,
     CustomAPIResponse,
     DefaultExceptionCode,
+    ExceptionCode,
     NotFoundError,
 )
-from control_plane.queueability import ensure_queueable
+from control_plane.idempotency import idempotency_guard, require_idempotency_key
+from control_plane.queueability import ensure_queueable, ensure_va_capacity
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.export import build_workbook
 from vera_core.forms.intake import (
     InvalidIntakeValue,
     PromotedIdentifiers,
@@ -75,6 +83,7 @@ from vera_core.forms.review import (
 )
 from vera_core.models import (
     DisputeAction,
+    ExportArtifact,
     FieldAnswer,
     FormSchema,
     InsuranceProvider,
@@ -88,8 +97,21 @@ from vera_core.models.enums import (
     DisputeActionType,
     FormStatus,
     ProviderStatus,
+    VersionStatus,
 )
-from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.call_provenance import (
+    CallAttempt,
+    FieldProvenance,
+    load_call_attempts,
+    load_field_provenance,
+)
+from vera_core.services.call_visibility import recording_playable
+from vera_core.services.field_answers import (
+    BASELINE_ORDER,
+    BASELINE_SOURCES,
+    current_values_by_path,
+)
+from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
 
@@ -160,6 +182,116 @@ def _normalize_date_value_or_422(value: Any, field_path: str, date_format: str |
         _raise_422(exc)
 
 
+@dataclass(frozen=True)
+class CreatedPatientForm:
+    """What both create paths (API-key intake, in-app create) hand back to their
+    endpoint: the non-PHI ack payload plus the FORM_INTAKE audit detail (section
+    keys and answer count — names/counts only, never values)."""
+
+    response: PatientFormResponse
+    audit_detail: dict[str, Any]
+
+
+async def _create_patient_form(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    version: SchemaVersion,
+    form_schema: FormSchema,
+    intake_payload: dict[str, Any],
+) -> CreatedPatientForm:
+    """Validate + persist one new patient form: `missing_required` against the
+    schema's `system_fields` (422 with paths), promote the typed worklist columns
+    (422 on bad values), insert the `PatientForm` (status ready_for_processing)
+    and one INTAKE-source `field_answer` per provided leaf. Shared verbatim by the
+    API-key intake endpoint and the session-user create endpoint."""
+    missing = missing_required(intake_payload, version.schema_json)
+    if missing:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="missing required fields",
+            data={"fields": missing},
+        )
+    doc = _v2_doc(version.schema_json)
+
+    # Flattened + phone-normalized intake answers: one INTAKE-source field_answer per
+    # provided leaf. v2 documents use root-anchored paths (`sections.…` — spec §4.2), so
+    # the payload (nested by section_key) is flattened under a `sections` root. v1
+    # schemas have no leaf set to validate against, so the unknown-path check and phone
+    # normalization both live in the `doc is not None` branch. Building `answers` before
+    # promotion (rather than after) lets `promote_columns` read the already-`+`-prefixed
+    # value, so field_answer and the promoted column agree on it (2026-07-15 design doc).
+    if doc is not None:
+        answers = list(iter_leaf_answers({"sections": intake_payload}))
+        unrecognized = unknown_payload_paths(answers, doc)
+        if unrecognized:
+            raise CustomAPIException(
+                DefaultExceptionCode.VALIDATION_ERROR,
+                message="intake payload contains unknown field paths",
+                data={"fields": unrecognized},
+            )
+        answers = normalize_phone_answers(answers, doc)
+        answers = _normalize_date_answers_or_422(answers, doc)
+        promoted = _promote_or_422(dict(answers).get, doc)
+    else:
+        answers = list(iter_leaf_answers(intake_payload))
+        promoted = PromotedIdentifiers()
+
+    form = PatientForm(
+        tenant_id=tenant_id,
+        schema_version_id=version.id,
+        status=FormStatus.READY_FOR_PROCESSING.value,
+        intake_payload=intake_payload,
+        patient_name=promoted.patient_name,
+        patient_dob=promoted.patient_dob,
+        appointment_date=promoted.appointment_date,
+        chart_number=promoted.chart_number,
+        appointment_type=promoted.appointment_type,
+        member_id=promoted.member_id,
+        insurance_provider=promoted.insurance_provider,
+        insurance_provider_phone_number=promoted.insurance_provider_phone_number,
+        completion_pct=0,
+        retry_count=0,
+    )
+    session.add(form)
+    await session.flush()
+
+    session.add_all(
+        FieldAnswer(
+            tenant_id=tenant_id,
+            form_id=form.id,
+            call_id=None,
+            field_path=path,
+            value={"value": raw},
+            source=AnswerSource.INTAKE.value,
+            confidence=None,
+            evidence_seq=None,
+            evidence=None,
+            is_current=True,
+        )
+        for path, raw in answers
+    )
+
+    await session.refresh(form)  # populate server-defaulted created_at
+    return CreatedPatientForm(
+        response=PatientFormResponse(
+            id=form.id,
+            status=form.status,
+            insurance_type=form_schema.insurance_type,
+            schema_version_id=form.schema_version_id,
+            completion_pct=float(form.completion_pct),
+            created_at=form.created_at,
+        ),
+        audit_detail={
+            "schema_version_id": str(version.id),
+            "sections": sorted(
+                key for key, value in intake_payload.items() if isinstance(value, dict)
+            ),
+            "answer_count": len(answers),
+        },
+    )
+
+
 @router.post(
     "/patient-forms",
     response_model=ResponseModel[PatientFormResponse],
@@ -196,84 +328,12 @@ async def upload_patient_form(
                 message="schema version does not belong to that form type",
             )
 
-        missing = missing_required(body.intake_payload, version.schema_json)
-        if missing:
-            raise CustomAPIException(
-                DefaultExceptionCode.VALIDATION_ERROR,
-                message="missing required fields",
-                data={"fields": missing},
-            )
-        doc = _v2_doc(version.schema_json)
-
-        # Flattened + phone-normalized intake answers: one INTAKE-source field_answer per
-        # provided leaf. v2 documents use root-anchored paths (`sections.…` — spec §4.2), so
-        # the payload (nested by section_key) is flattened under a `sections` root. v1
-        # schemas have no leaf set to validate against, so the unknown-path check and phone
-        # normalization both live in the `doc is not None` branch. Building `answers` before
-        # promotion (rather than after) lets `promote_columns` read the already-`+`-prefixed
-        # value, so field_answer and the promoted column agree on it (2026-07-15 design doc).
-        if doc is not None:
-            answers = list(iter_leaf_answers({"sections": body.intake_payload}))
-            unrecognized = unknown_payload_paths(answers, doc)
-            if unrecognized:
-                raise CustomAPIException(
-                    DefaultExceptionCode.VALIDATION_ERROR,
-                    message="intake payload contains unknown field paths",
-                    data={"fields": unrecognized},
-                )
-            answers = normalize_phone_answers(answers, doc)
-            answers = _normalize_date_answers_or_422(answers, doc)
-            promoted = _promote_or_422(dict(answers).get, doc)
-        else:
-            answers = list(iter_leaf_answers(body.intake_payload))
-            promoted = PromotedIdentifiers()
-
-        form = PatientForm(
+        created = await _create_patient_form(
+            session,
             tenant_id=principal.tenant_id,
-            schema_version_id=body.schema_version_id,
-            status=FormStatus.READY_FOR_PROCESSING.value,
+            version=version,
+            form_schema=form_schema,
             intake_payload=body.intake_payload,
-            patient_name=promoted.patient_name,
-            patient_dob=promoted.patient_dob,
-            appointment_date=promoted.appointment_date,
-            chart_number=promoted.chart_number,
-            appointment_type=promoted.appointment_type,
-            member_id=promoted.member_id,
-            insurance_provider=promoted.insurance_provider,
-            insurance_provider_phone_number=promoted.insurance_provider_phone_number,
-            completion_pct=0,
-            retry_count=0,
-        )
-        session.add(form)
-        await session.flush()
-
-        session.add_all(
-            FieldAnswer(
-                tenant_id=principal.tenant_id,
-                form_id=form.id,
-                call_id=None,
-                field_path=path,
-                value={"value": raw},
-                source=AnswerSource.INTAKE.value,
-                confidence=None,
-                evidence_seq=None,
-                evidence=None,
-                is_current=True,
-            )
-            for path, raw in answers
-        )
-
-        await session.refresh(form)  # populate server-defaulted created_at
-        response = PatientFormResponse(
-            id=form.id,
-            status=form.status,
-            insurance_type=form_schema.insurance_type,
-            schema_version_id=form.schema_version_id,
-            completion_pct=float(form.completion_pct),
-            created_at=form.created_at,
-        )
-        sections = sorted(
-            key for key, value in body.intake_payload.items() if isinstance(value, dict)
         )
 
     # Audit the PHI write after commit — field names/counts/ids only, never values.
@@ -285,15 +345,97 @@ async def upload_patient_form(
             actor_label=str(principal.key_id),
             event_type=AuditEvent.FORM_INTAKE.value,
             resource_type="patient_form",
-            resource_id=str(response.id),
-            detail={
-                "schema_version_id": str(body.schema_version_id),
-                "sections": sections,
-                "answer_count": len(answers),
-            },
+            resource_id=str(created.response.id),
+            detail=created.audit_detail,
         )
     )
-    return ok(response)
+    return ok(created.response)
+
+
+class PatientFormCreateRequest(BaseModel):
+    schema_id: UUID  # form_schema.id — the server binds to its published version
+    intake_payload: dict[str, Any]  # nested by section_key
+    # Optimistic concurrency: the version the client rendered, so a version
+    # published mid-flow is rejected rather than silently bound.
+    published_version_id: UUID | None = None
+
+
+@router.post(
+    "/patient-forms:create",
+    response_model=ResponseModel[PatientFormResponse],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.CONFLICT,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+        ExceptionCode.MISSING_IDEMPOTENCY_KEY,
+        ExceptionCode.IDEMPOTENCY_CONFLICT,
+    ),
+)
+async def create_patient_form(
+    body: PatientFormCreateRequest,
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    settings: AppSettings,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
+    caller: VerifiedIdentity = require("forms:write"),
+) -> ResponseModel[PatientFormResponse]:
+    """In-app patient-form creation (Data Management). Unlike the API-key intake
+    path — which binds to the exact version the sheet was generated from — the
+    caller picks only the form family; the server resolves and binds its single
+    published version, so an in-app form can never be created against a draft."""
+    response.headers["Cache-Control"] = "no-store"
+    # `patient_form` has no natural key, so this lock is the only duplicate guard.
+    # Guarded, not a bare claim: a rejected submit creates nothing, and holding its
+    # key would 409 the user's own corrected resubmit for the rest of the TTL.
+    async with idempotency_guard(
+        get_idempotency_store(request),
+        tenant_id,
+        caller.user_id,
+        idempotency_key,
+        settings.idempotency_lock_ttl_seconds,
+    ):
+        form_schema = (
+            await session.execute(select(FormSchema).where(FormSchema.id == body.schema_id))
+        ).scalar_one_or_none()
+        if form_schema is None:
+            raise NotFoundError(message="unknown form schema")
+        version = await published_schema_version(session, body.schema_id)
+        if version is None:
+            # E.g. demoted between the picker fetch and this submit.
+            raise ConflictError(message="this form schema has no published version")
+        if body.published_version_id is not None and body.published_version_id != version.id:
+            raise ConflictError(
+                message="a newer version of this form schema has been published — "
+                "reopen the form to continue"
+            )
+
+        created = await _create_patient_form(
+            session,
+            tenant_id=tenant_id,
+            version=version,
+            form_schema=form_schema,
+            intake_payload=body.intake_payload,
+        )
+
+    # PHI write by a session user — same FORM_INTAKE event as the sheet path,
+    # attributed to the user. Field names/counts/ids only, never values.
+    await get_audit(request).emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.FORM_INTAKE.value,
+            resource_type="patient_form",
+            resource_id=str(created.response.id),
+            detail=created.audit_detail,
+        )
+    )
+    return ok(created.response, message="Patient form created.")
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +457,7 @@ class PatientFormSummary(BaseModel):
     insurance_provider: str | None
     insurance_provider_phone_number: str | None
     completion_pct: float
+    review_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -354,12 +497,41 @@ class DisputeView(BaseModel):
     reasoning: str | None
 
 
+class JudgeView(BaseModel):
+    confidence: int | None
+    supported: bool
+    evidence: str | None
+
+
+class ProvenanceView(BaseModel):
+    attempt: int
+    mode: str
+    judge: JudgeView | None
+
+
 class FieldView(BaseModel):
     field_path: str
     value: Any
     source: str
     confidence: int | None
     dispute: DisputeView | None
+    provenance: ProvenanceView | None = None
+
+
+def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
+    # Explicit field mapping: the view models ARE the API contract, so a service-
+    # dataclass rename or new field must be an explicit decision here — not a
+    # silent splat-through (or runtime TypeError) via dataclasses.asdict.
+    if p is None:
+        return None
+    judge = (
+        JudgeView(
+            confidence=p.judge.confidence, supported=p.judge.supported, evidence=p.judge.evidence
+        )
+        if p.judge is not None
+        else None
+    )
+    return ProvenanceView(attempt=p.attempt, mode=p.mode, judge=judge)
 
 
 class PatientFormDetail(BaseModel):
@@ -382,6 +554,40 @@ class PatientFormDetail(BaseModel):
     fields: list[FieldView]
 
 
+class CallAttemptView(BaseModel):
+    id: UUID
+    attempt: int
+    mode: str
+    status: str
+    created_at: datetime
+    retry_of: UUID | None
+    changed_paths: list[str]
+    # True only when THIS caller may actually fetch the recording: it is
+    # AVAILABLE, the call passes the playback endpoint's owner-or-published
+    # gate, and the caller holds recordings:read — the DTO must never
+    # advertise a recording the playback endpoint would refuse.
+    recording_available: bool
+
+
+def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
+    return CallAttemptView(
+        id=a.id,
+        attempt=a.attempt,
+        mode=a.mode,
+        status=a.status,
+        created_at=a.created_at,
+        retry_of=a.retry_of,
+        changed_paths=a.changed_paths,
+        recording_available=recording_playable(
+            has_recording=a.recording_available,
+            initiated_by_id=a.initiated_by_id,
+            published=a.published,
+            user_id=caller_id,
+            can_play=can_play,
+        ),
+    )
+
+
 class ResolveRequest(BaseModel):
     form_data: dict[str, Any] = {}  # current value per dotted path (post-edit)
     dispute_fields: list[str] = []  # paths the reviewer explicitly accepted
@@ -390,19 +596,16 @@ class ResolveRequest(BaseModel):
 
 def _baseline_query(form_id: UUID) -> Any:
     """`(field_path, value)` of the most recent `intake`/`human` answer per `field_path`
-    for one form — the dispute baseline `B`. `created_at` is the transaction time, so
-    same-transaction rows tie; `id DESC` (UUIDv7) breaks the tie deterministically."""
+    for one form — the dispute baseline `B`. The whole-form counterpart to
+    `baseline_value`, which resolves a single path for the live SSE relay; both read the
+    shared `BASELINE_SOURCES` / `BASELINE_ORDER` so the two can never disagree."""
     return (
         select(FieldAnswer.field_path, FieldAnswer.value)
         .where(
             FieldAnswer.form_id == form_id,
-            FieldAnswer.source.in_([AnswerSource.INTAKE.value, AnswerSource.HUMAN.value]),
+            FieldAnswer.source.in_(BASELINE_SOURCES),
         )
-        .order_by(
-            FieldAnswer.field_path,
-            FieldAnswer.created_at.desc(),
-            FieldAnswer.id.desc(),
-        )
+        .order_by(FieldAnswer.field_path, *BASELINE_ORDER)
         .distinct(FieldAnswer.field_path)
     )
 
@@ -468,6 +671,15 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         )
     ).scalar_one()
 
+    attempts = await load_call_attempts(session, form.id)
+    # No calls → no ai_call answers → nothing to join; skip the provenance query
+    # (this runs on every form-detail GET, incl. intake-only forms).
+    prov = (
+        await load_field_provenance(session, form.id, {a.id: (a.attempt, a.mode) for a in attempts})
+        if attempts
+        else {}
+    )
+
     return PatientFormDetail(
         id=form.id,
         status=form.status,
@@ -479,9 +691,13 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         patient_name=form.patient_name,
         chart_number=form.chart_number,
         appointment_date=form.appointment_date,
+        member_id=form.member_id,
         insurance_provider=form.insurance_provider,
         ivr_navigation_enabled=form.ivr_navigation_enabled,
-        fields=[FieldView(**view) for view in views],
+        fields=[
+            FieldView(**view, provenance=_provenance_view(prov.get(view["field_path"])))
+            for view in views
+        ],
     )
 
 
@@ -582,6 +798,7 @@ async def list_patient_forms(
             insurance_provider=r.insurance_provider,
             insurance_provider_phone_number=r.insurance_provider_phone_number,
             completion_pct=float(r.completion_pct),
+            review_reason=r.review_reason,
             created_at=r.created_at,
             updated_at=r.updated_at,
         )
@@ -624,6 +841,58 @@ async def list_form_insurance_providers(
     return ok([ProviderOption(id=row.id, name=row.name) for row in rows])
 
 
+class IntakeSchemaOption(BaseModel):
+    """One form family selectable for in-app intake — global catalog data only
+    (the form template, never patient values)."""
+
+    schema_id: UUID
+    name: str
+    insurance_type: str
+    published_version_id: UUID
+    published_version: int
+
+
+# NOTE: declared before GET /patient-forms/{form_id} — FastAPI matches routes in
+# declaration order, and the parameterized route would otherwise swallow "schemas".
+@router.get(
+    "/patient-forms/schemas",
+    response_model=ResponseModel[list[IntakeSchemaOption]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.UNAUTHORIZED, DefaultExceptionCode.FORBIDDEN
+    ),
+)
+async def list_intake_schemas(
+    response: Response,
+    session: TenantSession,
+    caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[list[IntakeSchemaOption]]:
+    """The form families a tenant user can create a patient form from — only
+    families with a published version (the in-app create path binds to it).
+    Reads the global catalog only (no patient data), so no PHI-access audit —
+    same stance as GET /schema-versions/{version_id}."""
+    response.headers["Cache-Control"] = "no-store"
+    rows = (
+        await session.execute(
+            select(FormSchema, SchemaVersion)
+            .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
+            .where(SchemaVersion.status == VersionStatus.PUBLISHED)
+            .order_by(FormSchema.name)
+        )
+    ).all()
+    return ok(
+        [
+            IntakeSchemaOption(
+                schema_id=form_schema.id,
+                name=form_schema.name,
+                insurance_type=form_schema.insurance_type,
+                published_version_id=version.id,
+                published_version=version.version,
+            )
+            for form_schema, version in rows
+        ]
+    )
+
+
 @router.get(
     "/patient-forms/{form_id}",
     response_model=ResponseModel[PatientFormDetail],
@@ -658,6 +927,49 @@ async def get_patient_form(
         fields=[f.field_path for f in detail.fields],
     )
     return ok(detail)
+
+
+@router.get(
+    "/patient-forms/{form_id}/calls",
+    response_model=ResponseModel[list[CallAttemptView]],
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def list_form_calls(
+    form_id: UUID,
+    request: Request,
+    response: Response,
+    session: TenantSession,
+    tenant_id: TenantId,
+    resolver: Annotated[PermissionResolver, Depends(get_resolver)],
+    caller: VerifiedIdentity = require("forms:read"),
+) -> ResponseModel[list[CallAttemptView]]:
+    """The form's call-attempt timeline: mode, status, lineage, and which field
+    paths each call changed. Paths and timings only — no field values."""
+    response.headers["Cache-Control"] = "no-store"
+    form = (
+        await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+    attempts = await load_call_attempts(session, form_id)
+    await emit_phi_read_audit(
+        get_audit(request),
+        request,
+        tenant_id=tenant_id,
+        caller=caller,
+        resource_type="patient_form",
+        resource_id=str(form_id),
+        fields=sorted({p for a in attempts for p in a.changed_paths}),
+    )
+    # recordings:read shapes recording_available only (no 403 — the timeline
+    # itself needs just forms:read); the playback endpoint re-enforces it.
+    _, permissions = await resolver.effective_permissions(session, tenant_id, caller.user_id)
+    can_play = "recordings:read" in permissions
+    return ok([_call_attempt_view(a, caller.user_id, can_play) for a in attempts])
 
 
 @router.post(
@@ -859,6 +1171,88 @@ async def resolve_disputes(
 
 
 # ---------------------------------------------------------------------------
+# XLSX export (binary — errors still ride the standard envelope)
+# ---------------------------------------------------------------------------
+
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.post(
+    "/patient-forms/{form_id}/export",
+    response_class=Response,
+    responses=CustomAPIResponse.custom(
+        DefaultExceptionCode.NOT_FOUND,
+        DefaultExceptionCode.VALIDATION_ERROR,
+        DefaultExceptionCode.UNAUTHORIZED,
+        DefaultExceptionCode.FORBIDDEN,
+    ),
+)
+async def export_patient_form(
+    form_id: UUID,
+    request: Request,
+    session: TenantSession,
+    tenant_id: TenantId,
+    caller: VerifiedIdentity = require("forms:export"),
+) -> Response:
+    """Stream the COMPLETED form as XLSX — a PHI disclosure. Writes one
+    export_artifact ledger row + a FORM_EXPORTED audit (field names only).
+    The one binary endpoint: errors still ride the standard envelope."""
+    form = (
+        await session.execute(select(PatientForm).where(PatientForm.id == form_id))
+    ).scalar_one_or_none()
+    if form is None:
+        raise NotFoundError(message="patient form not found")
+    if form.status != FormStatus.COMPLETED:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="only completed forms can be exported",
+            data={"status": form.status},
+        )
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    values = await current_values_by_path(session, form_id)
+    sources = {p: s.source or "" for p, s in (await load_field_status(session, form_id)).items()}
+    attempts = await load_call_attempts(session, form_id)
+    prov = await load_field_provenance(
+        session, form_id, {a.id: (a.attempt, a.mode) for a in attempts}
+    )
+    data = build_workbook(version.schema_json, values, sources, prov, attempts)
+
+    artifact = ExportArtifact(
+        tenant_id=tenant_id,
+        form_id=form_id,
+        format="xlsx",
+        sha256=hashlib.sha256(data).hexdigest(),
+        exported_by=caller.user_id,
+    )
+    session.add(artifact)
+    await session.flush()
+    await get_audit(request).emit(
+        AuditRecord(
+            tenant_id=tenant_id,
+            actor_type=ActorType.USER,
+            actor_user_id=caller.user_id,
+            actor_label=caller.email or caller.subject,
+            event_type=AuditEvent.FORM_EXPORTED.value,
+            resource_type="patient_form",
+            resource_id=str(form_id),
+            detail={"artifact_id": str(artifact.id), "format": "xlsx", "fields": sorted(values)},
+        )
+    )
+    return Response(
+        content=data,
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="ibv-{form_id}.xlsx"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Schema version lookup (the document a form is pinned to)
 # ---------------------------------------------------------------------------
 
@@ -1014,10 +1408,14 @@ async def update_patient_form_status(
             data={"from": current.value, "to": target.value},
         )
 
+    # Load tenant for the capacity gate and the state-machine retry cap.
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+
     # Hard dialability gate: a form that can never be dialed must not enter the queue.
     canonicalized_provider = False
     if target == FormStatus.IN_QUEUE:
         await ensure_queueable(session, kms, form)
+        await ensure_va_capacity(session, tenant, caller.user_id)
         # Canonicalize the provider from the operator's pick so the async dispatcher
         # resolves the right catalog provider (and its IVR playbook) — the string, not
         # a new FK, carries the choice. insurance_provider is GLOBAL (no RLS).
@@ -1049,9 +1447,6 @@ async def update_patient_form_status(
                 data={"unresolved_disputes": remaining},
             )
 
-    # Load tenant for state machine guard (retry cap).
-    tenant = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
-
     sm = FormStateMachine()
     try:
         # This endpoint is the operator surface — manual transitions start a
@@ -1063,6 +1458,8 @@ async def update_patient_form_status(
             message=str(exc),
             data={"from": current.value, "to": target.value},
         ) from exc
+
+    # review_reason is stamped/cleared inside FormStateMachine.transition.
 
     # Callers own enqueued_at — use the DB clock to avoid cross-node skew.
     if target == FormStatus.IN_QUEUE:

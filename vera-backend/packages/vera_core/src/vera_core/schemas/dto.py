@@ -34,6 +34,10 @@ class CallSummary(BaseModel):
     # the health tooltip. Disclosure is audited alongside patient_name.
     health_reason: str | None = None
     health_analyzed_at: datetime | None = None
+    # Form completion 0-100 (the patient_form projection); None = never projected. Gives
+    # the live monitoring progress bar a correct fallback before any answer streams this
+    # call — e.g. a late retry whose answers are all already on file.
+    completion_pct: float | None = None
 
 
 class CallStats(BaseModel):
@@ -83,6 +87,21 @@ class RetentionPolicyUpdate(BaseModel):
     """PATCH body: None retention_days reverts the tenant to the platform default."""
 
     retention_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class ConcurrencyConfig(BaseModel):
+    """Tenant concurrency knobs: the per-VA in-flight cap (enqueue gate) and the
+    tenant-wide dial ceiling (dispatcher slot math)."""
+
+    max_agents_per_va: int = Field(ge=1, le=20)
+    max_concurrent_calls: int = Field(ge=1, le=100)
+
+
+class ConcurrencyConfigUpdate(BaseModel):
+    """PATCH body: omitted knobs stay unchanged."""
+
+    max_agents_per_va: int | None = Field(default=None, ge=1, le=20)
+    max_concurrent_calls: int | None = Field(default=None, ge=1, le=100)
 
 
 class RecordingPlayback(BaseModel):
