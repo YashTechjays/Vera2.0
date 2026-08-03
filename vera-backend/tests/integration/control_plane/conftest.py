@@ -92,6 +92,7 @@ class FakeLiveKit(LiveKitGateway):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
+        self.room_error: Exception | None = None  # create_call_room raises it
         # room -> current participants; rooms absent from the map are "gone"
         # (room_participants returns None), mirroring LiveKit.
         self.participants: dict[str, list[RoomParticipant]] = {}
@@ -102,6 +103,8 @@ class FakeLiveKit(LiveKitGateway):
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
     ) -> None:
+        if self.room_error is not None:
+            raise self.room_error
         self.created.append(room_name)
         self.dispatch_metadata.append(metadata)
 
@@ -161,6 +164,7 @@ def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
     fake_livekit.known_trunks = set()
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
+    fake_livekit.room_error = None
     fake_livekit.participants = {}
     yield
 

@@ -44,7 +44,7 @@ from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.plan_store import CallPlanService
 from vera_core.services import queue_dispatcher
 from vera_core.services.queue_dispatcher import is_within_working_hours, try_dispatch
-from vera_core.telephony import OutboundDialError
+from vera_core.telephony import LiveKitUnavailable, OutboundDialError
 
 IBV_SCHEMA_JSON: dict[str, Any] = json.loads(
     (
@@ -238,22 +238,23 @@ class FakeLiveKit:
         self.dispatch_metadata: list[dict[str, object] | None] = []
         self.sip_dials: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
-        self.dial_error = False
-        self.room_error: str | None = None  # when set, create_call_room raises with this message
+        # When set, the matching method raises it instead of recording the call.
+        self.room_error: Exception | None = None
+        self.dial_error: Exception | None = None
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
     ) -> None:
         if self.room_error is not None:
-            raise RuntimeError(self.room_error)
+            raise self.room_error
         self.created.append(room_name)
         self.dispatch_metadata.append(metadata)
 
     async def create_sip_participant(
         self, room_name: str, phone_number: str, trunk_id: str
     ) -> None:
-        if self.dial_error:
-            raise OutboundDialError("fake provider rejected the call")
+        if self.dial_error is not None:
+            raise self.dial_error
         self.sip_dials.append((room_name, phone_number, trunk_id))
 
     async def delete_room(self, room_name: str) -> None:
@@ -365,14 +366,97 @@ async def test_create_call_room_failure_scrubs_phi_from_logs(
     form = _form(tenant.id, ivr_navigation_enabled=True)
     session = FakeSession(tenant=tenant, candidates=[form])
     livekit = FakeLiveKit()
-    livekit.room_error = "twirp invalid_argument: bad metadata SECRET_PHI_200236789"
+    livekit.room_error = RuntimeError("twirp invalid_argument: bad metadata SECRET_PHI_200236789")
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         dispatched = await _dispatch(session, tenant.id, livekit)
 
     assert dispatched == 0  # the dispatch failed
     assert form.status == FormStatus.IN_QUEUE.value  # ...and the form was reverted for retry
-    assert "SECRET_PHI_200236789" not in caplog.text  # the raw error / request body never logged
+    assert "failed to dispatch" in caplog.text  # the failure IS reported...
+    assert "SECRET_PHI_200236789" not in caplog.text  # ...without the raw error / request body
+
+
+async def test_create_call_room_failure_consumes_a_retry(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """A room-creation failure requeues through the retry budget, not around it.
+
+    Reverting straight to IN_QUEUE without touching retry_count let a persistent
+    LiveKit rejection redial the same form forever (retry_count stuck at 0).
+    """
+    tenant = _tenant(max_retries=5)
+    form = _form(tenant.id, retry_count=0)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.room_error = RuntimeError("twirp internal: boom")
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 0
+    assert form.status == FormStatus.IN_QUEUE.value  # still retryable...
+    assert form.retry_count == 1  # ...but the attempt cost a retry
+
+
+async def test_create_call_room_failure_parks_form_once_retries_exhausted(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """With the retry budget spent, the form parks in CALL_FAILED instead of
+    looping — an operator requeues it (CALL_FAILED → IN_QUEUE)."""
+    tenant = _tenant(max_retries=2)
+    form = _form(tenant.id, retry_count=2)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.room_error = RuntimeError("twirp internal: boom")
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 0
+    assert form.status == FormStatus.CALL_FAILED.value
+    assert form.retry_count == 2  # the cap held; no further retry consumed
+
+
+async def test_create_call_room_failure_logs_livekit_error_code(
+    caplog: pytest.LogCaptureFixture,
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """The LiveKit rejection code/status reaches the log so the failure is
+    diagnosable, while the error message (which can echo the PHI-bearing request
+    body) does not."""
+    tenant = _tenant()
+    form = _form(tenant.id, ivr_navigation_enabled=True)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.room_error = LiveKitUnavailable(
+        "create_call_room failed", code="resource_exhausted", status=429
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await _dispatch(session, tenant.id, livekit)
+
+    assert "resource_exhausted" in caplog.text
+    assert "429" in caplog.text
+
+
+async def test_dial_failure_logs_livekit_error_code(
+    caplog: pytest.LogCaptureFixture,
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """Same for the dial: a rejected outbound call names the LiveKit code, so a
+    stale trunk id (not_found) is distinguishable from a downed SIP service."""
+    tenant = _tenant()
+    form = _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.dial_error = OutboundDialError(
+        "create_sip_participant failed", code="not_found", status=404
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await _dispatch(session, tenant.id, livekit)
+
+    assert "not_found" in caplog.text
+    assert "404" in caplog.text
 
 
 async def test_ivr_navigation_key_absent_when_form_opts_out(
@@ -468,7 +552,7 @@ async def test_dial_failure_marks_call_failed_and_requeues_form(
     form = _form(tenant.id, retry_count=0)
     session = FakeSession(tenant=tenant, candidates=[form])
     livekit = FakeLiveKit()
-    livekit.dial_error = True
+    livekit.dial_error = OutboundDialError("fake provider rejected the call")
 
     dispatched = await _dispatch(session, tenant.id, livekit)
 
