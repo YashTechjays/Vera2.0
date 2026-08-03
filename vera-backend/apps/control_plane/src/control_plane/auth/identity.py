@@ -32,6 +32,9 @@ class VerifiedIdentity:
     email: str
     tenant_id: UUID | None  # None ⇒ a platform operator (no home tenant)
     account_type: AccountType  # definitive platform-vs-tenant signal (ADR §3.5.9)
+    # This login's non-secret handle (SessionData.session_id) — what tells one user's
+    # concurrent browsers apart, and so what names their LiveKit participant.
+    session_id: UUID
     # The home tenant's URL slug. Used for display and invite-URL construction only;
     # `tenant_context` derives the operating tenant from the verified session UUID,
     # not this field. None for a platform operator or a slug-less session.

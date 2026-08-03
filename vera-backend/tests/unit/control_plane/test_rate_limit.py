@@ -11,8 +11,11 @@ from redis.asyncio import Redis
 from control_plane.exceptions import CustomAPIException, DefaultExceptionCode
 from control_plane.rate_limit import (
     InMemoryCallRateLimiter,
+    InMemoryPasswordResetRateLimiter,
     RedisCallRateLimiter,
+    RedisPasswordResetRateLimiter,
     _key,
+    _reset_key,
     check_rate_limit,
 )
 
@@ -65,6 +68,36 @@ async def test_check_rate_limit_raises_429_over_the_limit() -> None:
         await check_rate_limit(limiter, call_id)
 
     assert exc_info.value.code is DefaultExceptionCode.RATE_LIMIT_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_reset_limiter_allows_requests_up_to_the_limit() -> None:
+    limiter = InMemoryPasswordResetRateLimiter(limit=3, window_seconds=900)
+
+    assert await limiter.check_and_increment("k1") is True
+    assert await limiter.check_and_increment("k1") is True
+    assert await limiter.check_and_increment("k1") is True
+    assert await limiter.check_and_increment("k1") is False  # 4th in the same window
+
+
+@pytest.mark.asyncio
+async def test_reset_limiter_keys_have_independent_windows() -> None:
+    limiter = InMemoryPasswordResetRateLimiter(limit=1, window_seconds=900)
+
+    assert await limiter.check_and_increment("k1") is True
+    assert await limiter.check_and_increment("k1") is False  # k1 exhausted
+    assert await limiter.check_and_increment("k2") is True  # k2 unaffected
+
+
+@pytest.mark.asyncio
+async def test_redis_reset_limiter_counts_and_sets_ttl_atomically(redis: Redis) -> None:
+    limiter = RedisPasswordResetRateLimiter(redis, limit=2, window_seconds=900)
+
+    assert await limiter.check_and_increment("k1") is True
+    assert await limiter.check_and_increment("k1") is True
+    assert await limiter.check_and_increment("k1") is False
+    ttl = await redis.ttl(_reset_key("k1"))
+    assert 0 < ttl <= 900
 
 
 @pytest.mark.asyncio

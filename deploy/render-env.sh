@@ -35,6 +35,9 @@ chmod 600 "$tmp"
   # the control-plane re-queues the call instead of parking it in EXCEPTION_REVIEW,
   # bounded by tenant.max_retries. Control-plane-only; the worker ignores it.
   echo "VERA_FORM_AUTO_RETRY_ENABLED=true"
+  # Outbound email sender identity for the Twilio Email API (credentials come from
+  # secrets.map). veratechsolutions.ai is domain-authenticated in Twilio (em7583.*).
+  echo "VERA_EMAIL_FROM=no-reply@veratechsolutions.ai"
 } >> "$tmp"
 
 while IFS= read -r line; do

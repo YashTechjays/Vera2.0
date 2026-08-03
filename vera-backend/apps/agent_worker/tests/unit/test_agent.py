@@ -16,6 +16,7 @@ from livekit.agents.llm.utils import build_legacy_openai_schema
 from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
+from agent_worker.cartesia_workaround import SPELL_LEAD_IN, guard_utterance_initial_spell
 from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
@@ -505,10 +506,31 @@ def test_spell_id_tokens_rewrites_only_the_id_inside_a_sentence() -> None:
     )
 
 
+def test_guard_adds_lead_in_only_when_the_utterance_opens_with_a_spell_tag() -> None:
+    # sonic-3.5 misreads the first character of an utterance-initial <spell> ("Y" -> "I"), so a
+    # reply that IS the bare ID needs the comma; one where the tag follows speech does not.
+    assert guard_utterance_initial_spell(_spelled("YA123456789")) == (
+        f"{SPELL_LEAD_IN}{_spelled('YA123456789')}"
+    )
+    assert guard_utterance_initial_spell(f"the ID is {_spelled('YA123456789')}") == (
+        f"the ID is {_spelled('YA123456789')}"
+    )
+    assert guard_utterance_initial_spell(f"  {_spelled('YA1234')}") == (
+        f"{SPELL_LEAD_IN}  {_spelled('YA1234')}"
+    )
+    assert guard_utterance_initial_spell("press 2 for eligibility") == "press 2 for eligibility"
+
+
 @pytest.mark.asyncio
 async def test_tts_spoken_text_strips_silence_then_spells_ids() -> None:
-    # The TTS path composes both transforms: sentinel gone, ID spelled.
-    assert await _drain(_tts_spoken_text(_astream("POL-661522"))) == _spelled("POL-661522")
+    # The TTS path composes all three transforms: sentinel gone, ID spelled, lead-in added only
+    # when the spelled ID opens the utterance (mid-sentence it is voiced correctly as-is).
+    assert await _drain(_tts_spoken_text(_astream("POL-661522"))) == (
+        f"{SPELL_LEAD_IN}{_spelled('POL-661522')}"
+    )
+    assert await _drain(_tts_spoken_text(_astream("the member ID is POL-661522"))) == (
+        f"the member ID is {_spelled('POL-661522')}"
+    )
     assert await _drain(_tts_spoken_text(_astream(SILENCE_TOKEN))) == ""  # silent turn: no sound
 
 

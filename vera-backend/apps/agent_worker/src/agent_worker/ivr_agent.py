@@ -23,6 +23,7 @@ from livekit.agents import (
 )
 from opentelemetry import trace
 
+from agent_worker.cartesia_workaround import guard_utterance_initial_spell
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import takeover_engaged
@@ -99,8 +100,10 @@ def _spell_id_tokens(text: str) -> str:
 
 
 async def _tts_spoken_text(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    # The lead-in guard is per-utterance, which holds only because _strip_silence_token buffers
+    # the whole turn into one chunk — make it stream and the comma lands on every chunk.
     async for chunk in _strip_silence_token(text):
-        yield _spell_id_tokens(chunk)
+        yield guard_utterance_initial_spell(_spell_id_tokens(chunk))
 
 
 def ivr_turn_handling() -> TurnHandlingOptions:

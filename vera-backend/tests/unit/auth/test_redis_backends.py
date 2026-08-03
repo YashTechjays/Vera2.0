@@ -13,6 +13,7 @@ from control_plane.auth.session import (
     MFA_NS,
     SESSION_ABS_NS,
     SESSION_NS,
+    SESSION_USER_NS,
     RedisSessionStore,
     SessionData,
     _key,
@@ -42,8 +43,9 @@ def _data() -> SessionData:
 
 async def test_session_store_put_get_roundtrip(redis: Redis) -> None:
     store = RedisSessionStore(redis)
-    token = await store.put(SESSION_NS, _data(), 60)
-    assert await store.get(SESSION_NS, token) == _data()
+    data = _data()  # each SessionData carries its own session_id — compare the same one
+    token = await store.put(SESSION_NS, data, 60)
+    assert await store.get(SESSION_NS, token) == data
 
 
 async def test_session_store_delete(redis: Redis) -> None:
@@ -66,8 +68,9 @@ async def test_session_store_miss_returns_none(redis: Redis) -> None:
 
 async def test_mint_session_sets_both_keys(redis: Redis) -> None:
     store = RedisSessionStore(redis)
-    token = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
-    assert await store.get(SESSION_NS, token) == _data()
+    data = _data()
+    token = await store.mint_session(data, idle_ttl=10, abs_ttl=100)
+    assert await store.get(SESSION_NS, token) == data
     assert await redis.ttl(_key(SESSION_NS, token)) > 0
     assert await redis.ttl(_key(SESSION_ABS_NS, token)) > 0
 
@@ -109,6 +112,59 @@ async def test_delete_session_removes_both_keys(redis: Redis) -> None:
     await store.delete_session(token)
     assert await store.get(SESSION_NS, token) is None
     assert await redis.ttl(_key(SESSION_ABS_NS, token)) < 0  # -2 = no key
+
+
+def _other_user_data() -> SessionData:
+    return SessionData(
+        user_id=UUID("00000000-0000-0000-0000-0000000000dd"),
+        tenant_id=TENANT,
+        email="b@example.com",
+        subject="b@example.com",
+        provider_type="password",
+        mfa_passed=True,
+        account_type="tenant",
+        tenant_slug="acme",
+    )
+
+
+async def test_delete_all_for_user_revokes_every_session_of_that_user_only(
+    redis: Redis,
+) -> None:
+    store = RedisSessionStore(redis)
+    t1 = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    t2 = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    t3 = await store.mint_session(_other_user_data(), idle_ttl=10, abs_ttl=100)
+    await store.delete_all_for_user(USER)
+    assert await store.get(SESSION_NS, t1) is None
+    assert await store.get(SESSION_NS, t2) is None
+    assert await redis.ttl(_key(SESSION_ABS_NS, t1)) < 0  # -2 = no key
+    assert await redis.exists(_key(SESSION_USER_NS, str(USER))) == 0  # index dropped
+    assert await store.get(SESSION_NS, t3) is not None
+
+
+async def test_user_index_carries_a_ttl(redis: Redis) -> None:
+    store = RedisSessionStore(redis)
+    await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    ttl = await redis.ttl(_key(SESSION_USER_NS, str(USER)))
+    assert 99 <= ttl <= 100  # refreshed to abs_ttl on every mint
+
+
+async def test_delete_all_for_user_survives_an_already_expired_member(redis: Redis) -> None:
+    store = RedisSessionStore(redis)
+    t1 = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    t2 = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    await redis.delete(_key(SESSION_NS, t1), _key(SESSION_ABS_NS, t1))  # idle-expired
+    await store.delete_all_for_user(USER)
+    assert await store.get(SESSION_NS, t2) is None
+
+
+async def test_logout_removes_the_token_from_the_user_index(redis: Redis) -> None:
+    store = RedisSessionStore(redis)
+    t1 = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    t2 = await store.mint_session(_data(), idle_ttl=10, abs_ttl=100)
+    await store.delete_session(t1)
+    members: set[bytes | str] = await redis.smembers(_key(SESSION_USER_NS, str(USER)))
+    assert members == {t2}  # fixture client decodes responses, so members are str
 
 
 async def test_permission_cache_set_get(redis: Redis) -> None:

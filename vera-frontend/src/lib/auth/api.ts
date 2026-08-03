@@ -130,6 +130,30 @@ export function validateInvite(slug: string, token: string) {
   )
 }
 
+// Password reset: a 2xx from request says nothing about whether the account exists.
+export function requestPasswordReset(slug: string, email: string) {
+  return apiRequest<null>(`${tenantAuth(slug)}/password-reset/request`, {
+    method: "POST",
+    body: { email },
+    auth: false,
+  })
+}
+
+export function validatePasswordReset(slug: string, token: string) {
+  return apiRequest<InviteValidateResult>(
+    `${tenantAuth(slug)}/password-reset/validate?token=${encodeURIComponent(token)}`,
+    { method: "GET", auth: false },
+  )
+}
+
+export function confirmPasswordReset(slug: string, token: string, password: string) {
+  return apiRequest<null>(`${tenantAuth(slug)}/password-reset/confirm`, {
+    method: "POST",
+    body: { token, password },
+    auth: false,
+  })
+}
+
 export function getMe() {
   return apiRequest<MeResponse>(`/auth/me`)
 }

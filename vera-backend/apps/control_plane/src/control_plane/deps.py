@@ -28,7 +28,7 @@ from control_plane.auth.session import SessionStore
 from control_plane.call_summary import SummaryCache
 from control_plane.email import EmailSender
 from control_plane.idempotency import IdempotencyStore
-from control_plane.rate_limit import CallRateLimiter
+from control_plane.rate_limit import CallRateLimiter, PasswordResetRateLimiter
 from vera_core.audit import AuditSink, AuthAuditSink
 from vera_core.call_stream import CallStreamService
 from vera_core.config import Settings
@@ -147,6 +147,11 @@ def get_idempotency_store(request: Request) -> IdempotencyStore:
 
 def get_call_rate_limiter(request: Request) -> CallRateLimiter:
     limiter: CallRateLimiter = request.app.state.call_rate_limiter
+    return limiter
+
+
+def get_password_reset_rate_limiter(request: Request) -> PasswordResetRateLimiter:
+    limiter: PasswordResetRateLimiter = request.app.state.password_reset_rate_limiter
     return limiter
 
 
