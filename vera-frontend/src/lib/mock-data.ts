@@ -17,6 +17,9 @@ export type LiveCall = {
   insurance: string
   confidence: number
   formProgress: number
+  /** Verified-field percentage (0-100) shown beside the filled %; post-call only in the
+   *  real API — mock rows give it a placeholder value. */
+  verifiedProgress: number
   /** The patient form this call fills — the inline panel loads it and live AI answers
    *  from SSE are applied to it. Absent on mock rows. */
   formId?: string
@@ -45,6 +48,7 @@ export const liveCalls: LiveCall[] = [
     insurance: "Aetna",
     confidence: 42,
     formProgress: 40,
+    verifiedProgress: 20,
     callTime: "06:14",
   },
   {
@@ -60,6 +64,7 @@ export const liveCalls: LiveCall[] = [
     insurance: "Cigna",
     confidence: 51,
     formProgress: 25,
+    verifiedProgress: 10,
     callTime: "12:06",
   },
   {
@@ -75,6 +80,7 @@ export const liveCalls: LiveCall[] = [
     insurance: "UnitedHealthcare",
     confidence: 88,
     formProgress: 60,
+    verifiedProgress: 45,
     callTime: "02:06",
   },
   {
@@ -90,6 +96,7 @@ export const liveCalls: LiveCall[] = [
     insurance: "Blue Cross",
     confidence: 79,
     formProgress: 55,
+    verifiedProgress: 40,
     callTime: "08:06",
   },
   {
@@ -105,6 +112,7 @@ export const liveCalls: LiveCall[] = [
     insurance: "Humana",
     confidence: 64,
     formProgress: 35,
+    verifiedProgress: 15,
     callTime: "03:06",
   },
 ]
@@ -251,6 +259,7 @@ export const completedCalls: LiveCall[] = [
     insurance: "Aetna",
     confidence: 96,
     formProgress: 100,
+    verifiedProgress: 100,
     callTime: "04:12",
   },
   {
@@ -266,6 +275,7 @@ export const completedCalls: LiveCall[] = [
     insurance: "Cigna",
     confidence: 93,
     formProgress: 100,
+    verifiedProgress: 96,
     callTime: "03:47",
   },
 ]

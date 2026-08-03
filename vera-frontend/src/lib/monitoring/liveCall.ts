@@ -27,6 +27,7 @@ export function toLiveCall(c: CallSummary, now: number): LiveCall {
     insurance: c.insurance_provider || "—",
     confidence: 0,
     formProgress: c.completion_pct ?? 0,
+    verifiedProgress: c.verified_pct ?? 0,
     formId: c.form_id,
     callTime: elapsed(c.started_at, now),
     startedAt: c.started_at,
