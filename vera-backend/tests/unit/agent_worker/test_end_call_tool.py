@@ -34,7 +34,7 @@ async def test_end_call_triggers_shutdown() -> None:
 
     # Patch the session property so _end_call can access it without a live activity
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
-        await end_call_tool()
+        await end_call_tool(reason="the closing line has been spoken")
 
     mock_session.shutdown.assert_called_once_with(drain=True)
 
@@ -49,7 +49,7 @@ async def test_end_call_refuses_once_a_supervisor_has_taken_over() -> None:
     end_call_tool = next(t for t in _function_tools(agent) if t.info.name == "end_call")
 
     with patch.object(type(agent), "session", new=property(lambda self: mock_session)):
-        result = await end_call_tool()
+        result = await end_call_tool(reason="the closing line has been spoken")
 
     mock_session.shutdown.assert_not_called()
     assert result != "Call ended."

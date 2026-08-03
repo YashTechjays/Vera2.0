@@ -321,6 +321,81 @@ class TestRouting:
         assert run_state.records == [(ROOM, "sections.a.x", "Yes", None)]
 
 
+class EvidenceBoundExtractor:
+    """Answers only when the rep's line is in the window it was handed, so a lost turn cannot
+    hide behind the outgoing Observer draining a question-only window (as it can with
+    FakeExtractor, which answers from any transcript)."""
+
+    def __init__(self, evidence: str, answer: ExtractedAnswer) -> None:
+        self._evidence = evidence
+        self._answer = answer
+        self.calls = 0
+
+    async def extract(self, task: Any, transcript: str) -> list[ExtractedAnswer]:
+        self.calls += 1
+        return [self._answer] if self._evidence in transcript else []
+
+
+class TestHandoffGrace:
+    """The outgoing Observer keeps receiving turns for one more rep turn before it closes,
+    because a turn is attributed by the controller's LIVE cursor but reaches the manager
+    arbitrarily late (hold buffer → queue → Redis → tail) — so when VERA asks and calls
+    `task_complete` in one turn, the answer would land under the next task, off its
+    whitelist, and be silently dropped (P1)."""
+
+    @pytest.mark.asyncio
+    async def test_answer_arriving_after_the_handoff_is_still_extracted(self) -> None:
+        extractor = EvidenceBoundExtractor(
+            "Yes, x is covered.", ExtractedAnswer("sections.a.x", "Yes", 90)
+        )
+        manager, run_state, _, controller = _manager(_plan(), extractor)  # type: ignore[arg-type]
+        await _feed(manager, _bot("Is x covered?"))  # seq 0 — asked by t1
+        controller.active_task_index = 1  # task_complete swapped in that same turn
+        await _feed(manager, _rep("Yes, x is covered."))  # seq 1 — arrives under t2
+        await _settle()
+        assert run_state.records == [(ROOM, "sections.a.x", "Yes", 1)]
+
+    @pytest.mark.asyncio
+    async def test_grace_lasts_exactly_one_rep_turn(self) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, controller = _manager(_plan(), extractor)
+        controller.active_task_index = 1
+        await _feed(manager, _rep("the straddling answer"))
+        await _settle()
+        after_grace = extractor.calls
+        await _feed(manager, _rep("a later turn, t2's alone"))
+        await _settle()
+        assert extractor.calls == after_grace + 1  # only t2's Observer ran
+
+    @pytest.mark.asyncio
+    async def test_window_stays_one_deep_across_back_to_back_rotations(self) -> None:
+        # Bounded by design, which is why P10 (doubled `task_complete`) must land first: two
+        # rotations with no rep turn between them retire two tasks, and only the most recent
+        # one can still catch a straddling answer.
+        extractor = FakeExtractor(
+            [ExtractedAnswer("sections.a.x", "Yes", 90), ExtractedAnswer("sections.b.y", "B", 90)]
+        )
+        manager, run_state, _, controller = _manager(_plan(), extractor)
+        await _feed(manager, _bot("Is x covered?"))
+        controller.active_task_index = 1
+        await _feed(manager, _bot("And now for b?"))
+        controller.active_task_index = 0  # gap pass walks backwards
+        await _feed(manager, _rep("b is fine."))
+        await _settle()
+        recorded = {r[1] for r in run_state.records}
+        assert "sections.b.y" in recorded  # the most recently retired task still catches it
+
+    @pytest.mark.asyncio
+    async def test_aclose_drains_a_retiring_observer_that_never_got_its_grace_turn(self) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, run_state, _, controller = _manager(_plan(), extractor)
+        await _feed(manager, _bot("Is x covered?"))  # buffered, no pass yet
+        controller.active_task_index = 1
+        await _feed(manager, _bot("Now for b."))  # rotation; no rep turn ever arrives
+        await manager.aclose()
+        assert (ROOM, "sections.a.x", "Yes", None) in run_state.records
+
+
 class TestTailLoop:
     @pytest.mark.asyncio
     async def test_tail_reads_stream_filters_and_records(self) -> None:

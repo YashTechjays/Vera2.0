@@ -28,7 +28,11 @@ from livekit.agents import Agent, llm
 from agent_worker.intervention import takeover_engaged
 from agent_worker.ivr_agent import IvrNavigatorAgent
 from agent_worker.ivr_prompt import parse_agent_context, parse_ivr_playbook
-from agent_worker.prompt import build_voice_lab_instructions, resolve_voice_lab_greeting
+from agent_worker.prompt import (
+    TOOL_REASON_ARG,
+    build_voice_lab_instructions,
+    resolve_voice_lab_greeting,
+)
 from vera_core.schemas import PersonaTweak
 
 if TYPE_CHECKING:
@@ -49,11 +53,15 @@ class VeraAgent(Agent):
         description=(
             "End the phone call. Call this tool IMMEDIATELY after you say your "
             "closing line (e.g. 'thanks so much for your help, have a good one'). "
-            "This hangs up the call for all participants."
+            "This hangs up the call for all participants. " + TOOL_REASON_ARG
         ),
     )
-    async def _end_call(self) -> str:
-        """Drain pending TTS audio then shut down the session."""
+    async def _end_call(self, reason: str) -> str | None:
+        """Drain pending TTS audio then shut down the session.
+
+        `reason` drives nothing here — it lands on the tool-call item, which is where the eval
+        harness reads it. It is deliberately never logged: Gemini writes it about live call
+        state, so it can carry a member name or a clinical detail."""
         if takeover_engaged(self.session):
             # Reachable via a tool call already in flight when engage() interrupted us.
             logger.info("end_call refused: supervisor has taken over the call")
@@ -61,8 +69,12 @@ class VeraAgent(Agent):
                 "This call has been taken over by a human supervisor and will not be "
                 "ended. Do not speak and do not call any more tools."
             )
+        self.close_call()
+        return None
+
+    def close_call(self) -> None:
+        """Hang up, letting queued speech (a closing outro) finish playing first."""
         self.session.shutdown(drain=True)
-        return "Call ended."
 
 
 class VoiceLabAgent(VeraAgent):

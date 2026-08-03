@@ -24,6 +24,8 @@ never double-swap the active agent.
 
 import asyncio
 import logging
+from collections import Counter
+from collections.abc import Sequence
 from typing import Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
@@ -35,7 +37,13 @@ from agent_worker.coaching import apply_pending_coaching_notes
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState, takeover_engaged
-from agent_worker.prompt import CARTESIA_MARKUP_GUIDE, SCOPE_DISCIPLINE
+from agent_worker.prompt import (
+    CARTESIA_MARKUP_GUIDE,
+    CLOSING_DISCIPLINE,
+    HANDOFF_DISCIPLINE,
+    SCOPE_DISCIPLINE,
+    TOOL_REASON_ARG,
+)
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.plan_store import PlanRunStateService
@@ -76,23 +84,70 @@ def _gap_block(title: str) -> str:
     )
 
 
-def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
-    """Live re-ask directive listing the still-missing required fields."""
+def _owning_segment(path: str) -> str:
+    """The segment that owns the leaf, e.g. `...labs.cpt_58340.covered` → `cpt_58340`."""
+    parts = path.split(".")
+    return parts[-2] if len(parts) > 1 else path
+
+
+def _field_lines(fields: list[PlanFieldDescriptor]) -> str:
+    """Questions as a bulleted list, naming the expected values where the schema fixes them."""
+    # Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title list
+    # would read "- Covered" four times and name nothing the agent could ask about.
+    title_counts = Counter(field.title for field in fields)
     lines: list[str] = []
     for field in fields:
         line = f"- {field.title}"
+        if title_counts[field.title] > 1:
+            line += f" ({_owning_segment(field.path)})"
         if field.values:
             line += f" (expected one of: {', '.join(field.values)})"
         lines.append(line)
-    listed = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
+    """Live re-ask directive listing the still-missing required fields."""
     return (
         "I have a couple of quick follow-up questions. Re-ask the representative for these "
         "still-missing required details, briefly and naturally — do not imply the call is "
-        f"ending:\n{listed}"
+        f"ending:\n{_field_lines(fields)}"
     )
 
 
-def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
+def _gating_block(
+    applicable: list[PlanFieldDescriptor], excluded: list[PlanFieldDescriptor]
+) -> str:
+    """This call's narrowed question list, or "" when the gates exclude nothing.
+
+    Leads with what DOES apply. An exclusions-only list was read as "the whole task is
+    excluded" — the financial task announced itself and completed in the same turn, claiming
+    every question was gated out while its deductible fields were still open. A positive
+    enumeration cannot be over-generalized into an empty task.
+    """
+    if not excluded:
+        return ""
+    sections: list[str] = []
+    if applicable:
+        sections.append(
+            "# Questions that apply on THIS call — ask every one of them\n"
+            f"{_field_lines(applicable)}"
+        )
+    sections.append(
+        "# Excluded by the plan's gates — do NOT ask these, whatever the task list says\n"
+        f"{_field_lines(excluded)}"
+    )
+    return "\n\n".join(sections)
+
+
+def _is_message(item: ChatItem, role: str) -> bool:
+    """Whether `item` is a spoken message from `role` — a function call or its output is not."""
+    return item.type == "message" and item.role == role
+
+
+def _instructions(
+    plan: CallPlan, task_block: str, *, extra_instructions: str | None, gating: str = ""
+) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
     the scope-discipline guardrail + the Cartesia TTS markup guide — fused once, at
@@ -116,7 +171,13 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
     if extra_instructions:
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
+    if gating:
+        # Directly after the task list it narrows, and inside the instructions rather than a
+        # per-reply directive — the latter lives for one inference only (see _apply_gating).
+        parts.append(gating)
     parts.append(SCOPE_DISCIPLINE)
+    parts.append(HANDOFF_DISCIPLINE)
+    parts.append(CLOSING_DISCIPLINE)
     parts.append(CARTESIA_MARKUP_GUIDE)
     return "\n\n".join(parts)
 
@@ -129,13 +190,19 @@ class PlanTaskAgent(Agent):
         self._controller = controller
         self._task_index = task_index
         self._task = controller.plan.tasks[task_index]
-        super().__init__(
-            instructions=_instructions(
-                controller.plan,
-                f"# Current task: {self._task.title}\n{self._task.prompt}",
-                extra_instructions=controller.extra_instructions,
-            ),
-            id=self._task.task_key,
+        self._task_block = f"# Current task: {self._task.title}\n{self._task.prompt}"
+        # Spent once per task: a premature task_complete is refused, a second one is honoured.
+        self._completion_refused = False
+        self._rep_turns = 0
+        super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
+
+    def _build_instructions(self, gating: str = "") -> str:
+        """This task's full instruction text, narrowed by `gating` when the gates exclude some."""
+        return _instructions(
+            self._controller.plan,
+            self._task_block,
+            extra_instructions=self._controller.extra_instructions,
+            gating=gating,
         )
 
     async def on_enter(self) -> None:
@@ -143,21 +210,70 @@ class PlanTaskAgent(Agent):
         if takeover_engaged(self.session):
             logger.info("task entered under supervisor takeover; staying silent")
             return
+        if await self._skip_when_nothing_applies():
+            return
+        await self._apply_gating()
         # Read before opening_line — that call flips `opened` as a side effect.
         is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
         if opening:
             # Awaited, so the lead below can never be queued on top of in-flight TTS.
-            await self.session.say(opening).wait_for_playout()
+            handle = self.session.say(opening)
+            await handle.wait_for_playout()
+            if is_opening_turn:
+                # Only the CALL's opening is pinned — a later task's intro is not an introduction.
+                self._controller.note_opening_spoken(handle.chat_items)
         if not is_opening_turn:
             # The call's opening turn belongs to the rep — they answer the greeting
             # first. Every later swap leads proactively so it never lands in silence.
             self.session.generate_reply(instructions=_OPENING_DIRECTIVE)
 
+    async def _skip_when_nothing_applies(self) -> bool:
+        """Hand straight on, silently, when the gates exclude every question in this task.
+
+        Announcing a section and closing it in the same breath ("Now I'd like to ask about male
+        partner coverage… Thanks, that covers the male partner benefits.") sounds broken, and
+        asking those questions anyway is worse. A task with NO fields at all is a different thing
+        — it carries only speech, so it still runs."""
+        if not self._task.fields or self._controller.applicable_fields(self._task_index):
+            return False
+        if not self._controller.opened:
+            # The call's greeting and recording disclosure ride on the opening task's intro;
+            # skipping silently here would drop them from the call altogether.
+            return False
+        logger.info("task %s skipped: every question is gated out", self._task.task_key)
+        # Nothing was spoken, so the closer must still sign off (see note_task_outro).
+        self._controller.note_task_outro(None)
+        successor = await self._controller.advance_from(self._task_index)
+        await self._controller.prepare_successor(self, successor)
+        self.session.update_agent(successor)
+        return True
+
+    async def _apply_gating(self) -> None:
+        """Narrow this task's question list against the live answers, in the INSTRUCTIONS.
+
+        `SCOPE_DISCIPLINE` tells the agent its task list is "the complete set of questions for
+        this call", which is what makes a gated-out question look mandatory; this is the only
+        place that list gets narrowed. It has to live in the instructions: a `generate_reply`
+        directive is stapled to a COPY of the chat context and discarded after that one
+        inference, so from the task's second turn on the agent could no longer see it and asked
+        the excluded questions anyway.
+
+        Rebuilt from `_task_block` rather than appended to the current instructions, so a
+        re-entry (a ReAsk directive) re-narrows against fresher answers instead of stacking."""
+        gating = _gating_block(
+            self._controller.applicable_fields(self._task_index),
+            self._controller.inapplicable_fields(self._task_index),
+        )
+        if not gating:
+            return
+        await self.update_instructions(self._build_instructions(gating))
+
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
+        self._rep_turns += 1
 
     @llm.function_tool(
         name="task_complete",
@@ -165,23 +281,61 @@ class PlanTaskAgent(Agent):
             "Move on to the next task of the call. Call this ONLY when every "
             "question in the current task has been answered or the representative "
             "has confirmed they cannot answer what remains. Never call it to skip "
-            "questions that are still answerable."
+            "questions that are still answerable, and never in the same turn as a "
+            "question — the representative's answer must arrive first. " + TOOL_REASON_ARG
         ),
     )
-    async def _task_complete(self) -> Agent | str:
+    async def _task_complete(self, reason: str) -> Agent | str:
         if takeover_engaged(self.session):
             # A str is a tool result, so the plan parks here. Returning `self` would
             # re-fire on_enter and speak the intro again.
             return "A human supervisor has taken over this call. Stay silent."
-        if self._task.outro:
+        if (refusal := self._refuse_premature_completion()) is not None:
+            return refusal
+        outro = self._task.outro
+        self._controller.note_task_outro(outro)
+        if outro:
             # Exit speech first; LiveKit drains queued speech through the swap.
-            self.session.say(self._task.outro)
+            self.session.say(outro)
         successor = await self._controller.advance_from(self._task_index)
         # Carry the conversation into the successor — LiveKit doesn't for a
         # tool-returned agent, so without this it re-greets and re-asks.
         await self._controller.prepare_successor(self, successor)
         self._tag_task_complete_handoff(successor)
         return successor
+
+    def _refuse_premature_completion(self) -> str | None:
+        """Send the agent back for this task's still-open required questions, ONCE.
+
+        The deterministic half of the gating fix: the prompt can only make a correct handoff
+        likely, and the financial task skipped itself on a lighter model despite it. A tool that
+        returns output sets LiveKit's `reply_required`, so the refusal buys a forced follow-up
+        turn in which the question actually gets asked (see VeraAgent._end_call).
+
+        Refuses at most once per task BY DESIGN. A rep who cannot answer never empties
+        `gap_fields`, so an unconditional guard would refuse every completion for the rest of
+        the call and strand the plan on this task. One retry, then the end-of-call gap pass
+        remains the backstop."""
+        outstanding = self._controller.gap_fields(self._task_index)
+        if not outstanding or self._completion_refused:
+            return None
+        # The Observer extracts in a detached pass, so the answer to the task's last question is
+        # never on file yet here; judge by turns instead, since N questions cannot have been asked
+        # in fewer than N exchanges. Coarse until answers carry the asking task's index.
+        if self._rep_turns >= len(outstanding):
+            return None
+        self._completion_refused = True
+        logger.info(
+            "task %s: completion refused, %d required question(s) still open",
+            self._task.task_key,
+            len(outstanding),
+        )
+        return (
+            "Not yet — these required questions of the current task have no answer on file. "
+            "Ask the representative for them now (one at a time), and call task_complete once "
+            f"they are answered or the representative says they cannot answer:\n"
+            f"{_field_lines(outstanding)}"
+        )
 
     def _tag_task_complete_handoff(self, successor: Agent) -> None:
         try:
@@ -223,6 +377,13 @@ class WrapUpAgent(VeraAgent):
         self._controller.note_wrap_up_entered()  # the cursor still records where we parked
         if takeover_engaged(self.session):
             logger.info("wrap-up entered under supervisor takeover; skipping the goodbye")
+            return
+        if self._controller.signed_off:
+            # The closing task's outro already said goodbye, so there is nothing left to say and
+            # nothing to decide. Hanging up here rather than asking the LLM to do it silently is
+            # what makes the single sign-off deterministic: the same instruction was obeyed in two
+            # of three eval scenarios and ignored in the third, which spoke a second goodbye.
+            self.close_call()
             return
         self.session.generate_reply(instructions=_WRAP_UP_DIRECTIVE)
 
@@ -276,10 +437,11 @@ class GapTaskAgent(Agent):
         description=(
             "Finish re-asking the outstanding questions and move on. Call this once "
             "you have re-asked every question you were given — whether or not the "
-            "representative could answer them."
+            "representative could answer them — and never in the same turn as a "
+            "question, since their answer must arrive first. " + TOOL_REASON_ARG
         ),
     )
-    async def _gap_complete(self) -> Agent | str:
+    async def _gap_complete(self, reason: str) -> Agent | str:
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
         successor = await self._controller.advance_gap_from(self._task_index)
@@ -322,6 +484,11 @@ class PlanRunController:
         # a PlanTaskAgent and its GapTaskAgent share one.
         self._boundaries: dict[Agent, frozenset[str]] = {}
         self._opened = False  # has any task agent spoken the call's opening line yet
+        self._signed_off = False  # did the task that JUST finished speak a closing line?
+        # The call's opening (greeting + recording/identity disclosure). Pinned: it leads EVERY
+        # carry set while the rest of the window stays one task deep, or a long walk hands the
+        # closer a context in which VERA never introduced herself.
+        self._anchor_items: list[ChatItem] = []
         self._run_state = run_state
         # In-process answers snapshot for applicability/skip decisions, seeded
         # with the form's intake prefill (so gates work from call start); the
@@ -390,24 +557,33 @@ class PlanRunController:
 
         Storing the target's resulting item ids is what makes the window work: a path that
         skipped this seam would leave its target with no boundary, and the hop after it would
-        carry that agent's whole context again."""
+        carry that agent's whole context again.
+
+        The call's opening is ANCHORED here — pinned on first capture, then prepended to every
+        carry set, so a seven-task walk still shows the closer that VERA already introduced
+        herself."""
+        self._ensure_anchor(source)
         if not self.previous_task_only:
             self._boundaries[target] = await carry_chat_ctx(source, target)
             return
         self._boundaries[target] = await carry_items(target, self._carry_set(source, target))
 
     def _carry_set(self, source: Agent, target: Agent) -> list[ChatItem]:
-        """Chronological carry set: the swept task's turns for a gap target, then the
-        source's own turns. Nothing older — the window is one task deep.
+        """Chronological carry set: the pinned opening, then the swept task's turns for a gap
+        target, then the source's own turns. Nothing older — the window is one task deep.
 
         A gap agent re-asks ITS OWN task's missing fields, so it needs that task's turns —
         mid-call ones, not those of the chronological predecessor it arrives from (the gap
-        pass walks backwards from just before the closing task)."""
+        pass walks backwards from just before the closing task).
+
+        `carry_items` dedupes on id keeping the FIRST occurrence, so on the hop where the opener
+        is itself the source the anchor keeps the lead and the later copy drops — the order is
+        unchanged from before the anchor existed."""
         carried: list[ChatItem] = []
         if isinstance(target, GapTaskAgent):
             swept = self.agents[target.task_index]
             carried += self._own_turns(swept)
-        return [*carried, *self._own_turns(source)]
+        return [*self._anchor_items, *carried, *self._own_turns(source)]
 
     def _own_turns(self, agent: Agent) -> list[ChatItem]:
         """What `agent` contributes to a successor's window.
@@ -440,6 +616,54 @@ class PlanRunController:
         opening = (self.greeting or intro) if not self._opened else intro
         self._opened = True
         return opening
+
+    @property
+    def signed_off(self) -> bool:
+        """Whether the last task to finish already spoke a closing line."""
+        return self._signed_off
+
+    def note_task_outro(self, outro: str | None) -> None:
+        """Record whether the task now finishing had an outro to speak.
+
+        ASSIGNED, never accumulated: every task speaks an outro, so a sticky flag would be left
+        set by an earlier task and would silence wrap-up on a schema whose closing task authors
+        none (`disease_only`'s does not). A terminate directive never reaches here, so that path
+        keeps the initial False and still gets a spoken goodbye."""
+        self._signed_off = bool(outro)
+
+    def note_opening_spoken(self, items: Sequence[ChatItem]) -> None:
+        """Pin the items the call's opening line produced, by identity — called by the agent that
+        spoke it with its `SpeechHandle.chat_items`, so nothing here depends on the wording.
+
+        Idempotent and empty-safe: an interrupted `say` can forward no text and so add no item, in
+        which case `_ensure_anchor`'s first-handoff fallback takes over."""
+        if self._anchor_items or not items:
+            return
+        self._anchor_items = [item for item in items if item.type == "message"]
+
+    def _ensure_anchor(self, source: Agent) -> None:
+        """Last-chance anchor capture, at the FIRST handoff only.
+
+        Two gaps `note_opening_spoken` cannot cover: `ivr_agent.transfer_to_verification` carries
+        with `carry_chat_ctx` directly and never reaches `prepare_successor`, so the opening can
+        arrive INHERITED; and an interrupted say adds no chat item. Both leave the opening as the
+        earliest assistant message in the source's context — positional and id-preserving, not a
+        text match. Restricted to the first handoff so a later assistant turn (a gap re-ask, say)
+        can never be mistaken for the opening.
+
+        The rep's reply comes along when it directly follows: a pinned exchange reads as answered,
+        where a lone opening question invites the closer to re-ask it."""
+        if self._anchor_items or self._boundaries:
+            return
+        items = list(source.chat_ctx.items)
+        index = next((i for i, item in enumerate(items) if _is_message(item, "assistant")), None)
+        if index is None:
+            return
+        anchor = [items[index]]
+        following = items[index + 1 : index + 2]
+        if following and _is_message(following[0], "user"):
+            anchor += following
+        self._anchor_items = anchor
 
     def note_task_entered(self, index: int) -> None:
         self.active_task_index = index
@@ -551,6 +775,29 @@ class PlanRunController:
 
     # -- gap-pass API -------------------------------------------------------------
 
+    def applicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """A task's questions whose gates hold, so they are askable on THIS call."""
+        shared = self.plan.shared_conditions
+        return [
+            field
+            for field in self.plan.tasks[task_index].fields
+            if is_applicable(field.gates, self._answers, shared)
+        ]
+
+    def inapplicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """The complement: questions the compiled prompt still lists but the gates exclude.
+
+        The prompt is rendered per schema, before any answer exists, so it enumerates every
+        question and can only express a gate as prose the model must evaluate itself — often
+        against a value it was never given. Naming the exclusions live is the only signal it has.
+        """
+        shared = self.plan.shared_conditions
+        return [
+            field
+            for field in self.plan.tasks[task_index].fields
+            if not is_applicable(field.gates, self._answers, shared)
+        ]
+
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
         """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,
         against the live answer snapshot — the same required/applicable set the form's
@@ -558,10 +805,8 @@ class PlanRunController:
         shared = self.plan.shared_conditions
         return [
             field
-            for field in self.plan.tasks[task_index].fields
-            if is_applicable(field.gates, self._answers, shared)
-            and is_required(field, self._answers, shared)
-            and not self._is_answered(field.path)
+            for field in self.applicable_fields(task_index)
+            if is_required(field, self._answers, shared) and not self._is_answered(field.path)
         ]
 
     def _is_answered(self, path: str) -> bool:

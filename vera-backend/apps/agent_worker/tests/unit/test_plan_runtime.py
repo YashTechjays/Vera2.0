@@ -2,7 +2,9 @@
 skip-scan on applicable_when, wrap-up, and the agent-owned cursor write."""
 
 import asyncio
+import functools
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,13 +14,17 @@ from livekit.agents import Agent
 from livekit.agents.llm import ChatMessage, FunctionTool
 
 from agent_worker.directives import ReAsk, SkipToTask, Terminate
+from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState, push_coaching_note
 from agent_worker.plan_runtime import (
+    _OPENING_DIRECTIVE,
+    _WRAP_UP_DIRECTIVE,
     WRAP_UP_TASK_KEY,
     GapTaskAgent,
     PlanRunController,
     PlanTaskAgent,
     WrapUpAgent,
+    _field_lines,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, RequiredWhen
@@ -87,8 +93,18 @@ def _controller(
     return controller, state
 
 
-def _tool(agent: Agent, name: str) -> FunctionTool:
-    return next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+def _tool(agent: Agent, name: str) -> Callable[[], Awaitable[Any]]:
+    """The named tool, pre-bound with a `reason` — every tool requires one, and no test here
+    cares what it says (the reason is transcript evidence, and nothing in the runtime reads it)."""
+    tool = next(t for t in agent.tools if isinstance(t, FunctionTool) and t.info.name == name)
+    return functools.partial(tool, reason="the task's questions are all answered")
+
+
+async def _rep_turn(agent: PlanTaskAgent, said: str = "Pat") -> None:
+    """One completed rep turn, as the session would deliver it."""
+    await agent.on_user_turn_completed(
+        agent.chat_ctx.copy(), new_message=ChatMessage(role="user", content=[said])
+    )
 
 
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
@@ -96,6 +112,8 @@ def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
     mock_session.userdata = TakeoverState()
     # on_enter awaits the intro's playout before leading into the task.
     mock_session.say.return_value.wait_for_playout = AsyncMock()
+    # on_enter pins the opening from the say's chat items; a bare MagicMock is not iterable.
+    mock_session.say.return_value.chat_items = []
     return patch.object(type(agent), "session", new=property(lambda self: mock_session))
 
 
@@ -127,6 +145,13 @@ class TestConstruction:
         controller, _ = _controller()
         for agent in [*controller.agents, controller.wrap_up_agent]:
             assert "only the questions listed" in agent.instructions.lower()
+
+    def test_closing_discipline_appended_to_every_agent(self) -> None:
+        # A task's authored outro IS the closing line; a farewell the model adds itself lands
+        # immediately before it and signs the call off twice.
+        controller, _ = _controller()
+        for agent in [*controller.agents, controller.wrap_up_agent]:
+            assert "never say goodbye" in agent.instructions.lower()
 
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")
@@ -444,15 +469,106 @@ class TestWrapUp:
         assert state.cursor_writes == [(ROOM, WRAP_UP_TASK_KEY)]
         mock_session.generate_reply.assert_called_once()
 
+    @staticmethod
+    def _directive(mock_session: MagicMock) -> str:
+        return cast(str, mock_session.generate_reply.call_args.kwargs["instructions"])
+
+    async def _enter_wrap_up(self, controller: PlanRunController) -> MagicMock:
+        """Finish the closing task the way the chain does, then enter wrap-up."""
+        closing = controller.agents[-1]
+        with _session_patch(closing, MagicMock()):
+            successor = cast(Agent, await _tool(closing, "task_complete")())
+        assert successor is controller.wrap_up_agent
+        mock_session = MagicMock()
+        with _session_patch(controller.wrap_up_agent, mock_session):
+            await controller.wrap_up_agent.on_enter()
+        return mock_session
+
     @pytest.mark.asyncio
-    async def test_wrap_up_end_call_shuts_down(self) -> None:
+    async def test_wrap_up_hangs_up_itself_after_the_closing_outro(self) -> None:
+        # The outro IS the goodbye, spoken verbatim just before the swap, so wrap-up must not
+        # produce a turn at all — asking the LLM to close silently was obeyed in only two of
+        # three eval scenarios, and the third spoke a second goodbye.
+        plan = _plan()
+        plan.tasks[-1] = plan.tasks[-1].model_copy(update={"outro": "Have a wonderful day!"})
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        mock_session = await self._enter_wrap_up(controller)
+        mock_session.generate_reply.assert_not_called()
+        mock_session.shutdown.assert_called_once_with(drain=True)
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_says_goodbye_when_the_closing_task_has_no_outro(self) -> None:
+        # An outro is authored per-schema (`disease_only`'s wrap_up has none), so silencing
+        # wrap-up unconditionally would hang up with no closing line at all.
+        controller, _ = _controller()  # `_plan`'s last task authors no outro
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        mock_session = await self._enter_wrap_up(controller)
+        assert self._directive(mock_session) == _WRAP_UP_DIRECTIVE
+        mock_session.shutdown.assert_not_called()  # the goodbye has to be spoken first
+
+    @pytest.mark.asyncio
+    async def test_an_earlier_outro_does_not_silence_the_close(self) -> None:
+        # Every task speaks an outro, so the flag must be ASSIGNED per task, not accumulated:
+        # `_plan`'s intro_task has one and its closing task does not.
+        controller, _ = _controller()
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        opener = controller.agents[0]
+        with _session_patch(opener, MagicMock()):
+            await _tool(opener, "task_complete")()
+        assert controller.signed_off, "the opener's outro was not recorded"
+        assert self._directive(await self._enter_wrap_up(controller)) == _WRAP_UP_DIRECTIVE
+
+    @pytest.mark.asyncio
+    async def test_a_terminate_directive_still_gets_a_spoken_goodbye(self) -> None:
+        # `apply_directive_now` swaps straight here, so no outro ever played — an inactive-policy
+        # call must not hang up wordlessly.
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _attach_ordered_session(controller)
+        await controller.apply_directive_now(Terminate(rule_key="insurance_not_active"))
+        assert not controller.signed_off
+        mock_session = MagicMock()
+        with _session_patch(controller.wrap_up_agent, mock_session):
+            await controller.wrap_up_agent.on_enter()
+        assert self._directive(mock_session) == _WRAP_UP_DIRECTIVE
+        mock_session.shutdown.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_stays_silent_under_takeover(self) -> None:
+        controller, _ = _controller()
+        mock_session = MagicMock()
+        with _session_patch(controller.wrap_up_agent, mock_session):
+            mock_session.userdata.engaged = True
+            await controller.wrap_up_agent.on_enter()
+        mock_session.generate_reply.assert_not_called()
+        mock_session.shutdown.assert_not_called()  # a supervisor's call is theirs to end
+
+    @pytest.mark.asyncio
+    async def test_wrap_up_end_call_shuts_down_and_returns_nothing(self) -> None:
+        # None on purpose: tool OUTPUT sets reply_required, and LiveKit schedules that follow-up
+        # with force=True, bypassing the drain — so a returned string is spoken to the rep as one
+        # last line ("I have successfully concluded the call.").
         controller, _ = _controller()
         agent = controller.wrap_up_agent
         mock_session = MagicMock()
         with _session_patch(agent, mock_session):
             result = await _tool(agent, "end_call")()
-        assert result == "Call ended."
+        assert result is None
         mock_session.shutdown.assert_called_once_with(drain=True)
+
+    @pytest.mark.asyncio
+    async def test_end_call_under_takeover_refuses_in_words(self) -> None:
+        # The one case where a spoken reply IS wanted: the return text tells the model to stop.
+        controller, _ = _controller()
+        agent = controller.wrap_up_agent
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            mock_session.userdata.engaged = True
+            result = await _tool(agent, "end_call")()
+        assert isinstance(result, str)
+        assert "supervisor" in result
+        mock_session.shutdown.assert_not_called()
 
 
 def _attach_ordered_session(controller: PlanRunController) -> tuple[MagicMock, list[Any]]:
@@ -714,6 +830,162 @@ def _gap_plan() -> CallPlan:
 
 
 _CLOSER = 3  # index of closing_task in _gap_plan()
+
+
+class TestGating:
+    """`coverage_task` is the shape that failed on a live eval: one applicable question
+    (deductible) plus one the gates exclude (oon_note, gated on in_network == "No")."""
+
+    async def _enter(self, controller: PlanRunController, index: int) -> Agent:
+        agent = controller.agents[index]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_gating_lands_in_the_instructions_not_a_one_shot_directive(self) -> None:
+        # The defect: the list was a generate_reply directive, which LiveKit staples to a COPY
+        # of the chat ctx and discards — so from turn 2 the agent asked the excluded question.
+        # Instructions persist for every turn of the task, which is the whole fix.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await self._enter(controller, 2)
+        assert "OON note" in agent.instructions
+        assert "Deductible" in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_applicable_questions_are_named_before_the_excluded_ones(self) -> None:
+        # An exclusions-only list read as "the whole task is excluded" and the task completed
+        # itself immediately. Leading with what DOES apply is what prevents that reading.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await self._enter(controller, 2)
+        assert agent.instructions.index("Deductible") < agent.instructions.index("OON note")
+        assert "apply on THIS call" in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_a_task_with_nothing_excluded_keeps_its_original_instructions(self) -> None:
+        # No gates in play → no narrowing text at all, so the common case is untouched.
+        controller, _ = _controller(_gap_plan())
+        before = controller.agents[0].instructions
+        agent = await self._enter(controller, 0)
+        assert agent.instructions == before
+
+    @pytest.mark.asyncio
+    async def test_re_entry_re_narrows_instead_of_stacking(self) -> None:
+        # A ReAsk directive re-enters the task; the block must be rebuilt against fresher
+        # answers, not appended again.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await self._enter(controller, 2)
+        once = agent.instructions
+        await self._enter(controller, 2)
+        assert agent.instructions == once
+
+
+class TestPrematureCompletion:
+    @pytest.mark.asyncio
+    async def test_task_complete_is_refused_while_required_questions_are_open(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        with _session_patch(agent, MagicMock()):
+            result = await _tool(agent, "task_complete")()
+        # A str parks the plan on this task; an Agent would have advanced it.
+        assert isinstance(result, str)
+        assert "Representative name" in result
+        assert controller.agents[0] is agent  # cursor did not move on
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_names_every_open_question(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = controller.agents[2]
+        with _session_patch(agent, MagicMock()):
+            result = cast(str, await _tool(agent, "task_complete")())
+        assert "Deductible" in result
+        assert "OON note" not in result  # inapplicable, so never outstanding
+
+    @pytest.mark.asyncio
+    async def test_a_second_task_complete_advances_even_with_questions_still_open(self) -> None:
+        # THE no-deadlock property. A rep who cannot answer never empties gap_fields, so an
+        # unconditional guard would refuse every completion and strand the call on this task.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            assert isinstance(await _tool(agent, "task_complete")(), str)
+            second = await _tool(agent, "task_complete")()
+        assert isinstance(second, Agent)
+        assert second is not agent
+
+    @pytest.mark.asyncio
+    async def test_a_complete_task_is_never_refused(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_another_tasks_open_questions_do_not_block_this_one(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})  # task 0 satisfied
+        agent = controller.agents[0]  # task 2's deductible is still open, and irrelevant here
+        with _session_patch(agent, MagicMock()):
+            assert isinstance(await _tool(agent, "task_complete")(), Agent)
+
+    @pytest.mark.asyncio
+    async def test_a_task_that_walked_its_questions_is_not_refused(self) -> None:
+        """A task that took at least as many turns as it has open questions is trusted, because
+        the answer to its last question is never extracted yet when `task_complete` fires."""
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        with _session_patch(agent, MagicMock()):
+            await _rep_turn(agent)
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_a_task_is_still_refused_when_it_asked_less_than_it_owes(self) -> None:
+        # The case the guard exists for: one exchange cannot have answered two open questions.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "No"})  # opens oon_note too
+        agent = controller.agents[2]
+        with _session_patch(agent, MagicMock()):
+            await _rep_turn(agent)
+            result = cast(str, await _tool(agent, "task_complete")())
+        assert "Deductible" in result
+        assert "OON note" in result
+
+    @pytest.mark.asyncio
+    async def test_takeover_still_wins_over_the_guard(self) -> None:
+        # Under takeover nothing may be spoken, so the refusal must not preempt that check.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        session = MagicMock()
+        with _session_patch(agent, session):
+            session.userdata.engaged = True
+            result = cast(str, await _tool(agent, "task_complete")())
+        assert "supervisor" in result
+
+
+class TestFieldLines:
+    """Every CPT code's field is titled "Covered", so a bare-title list names nothing askable."""
+
+    def test_duplicated_titles_are_qualified_by_their_owning_path_segment(self) -> None:
+        lines = _field_lines(
+            [
+                _field("sections.diag.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
+                _field("sections.diag.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
+            ]
+        )
+        assert "- Covered (cpt_58340) (expected one of: Yes, No)" in lines
+        assert "- Covered (cpt_82670) (expected one of: Yes, No)" in lines
+
+    def test_a_unique_title_is_left_alone(self) -> None:
+        lines = _field_lines([_field("sections.intro.rep_name", "Representative name")])
+        assert lines == "- Representative name"
 
 
 class TestGapDetection:
@@ -1032,8 +1304,21 @@ async def _walk(controller: PlanRunController, upto: int) -> Agent:
         controller.note_task_entered(index)  # on_enter's job; the walk drives tools directly
         agent._chat_ctx.add_message(role="user", content=f"turn-from-task{index}")
         with _session_patch(agent, MagicMock()):
-            current = cast(Agent, await _tool(agent, "task_complete")())
+            current = await _insist_complete(agent)
     return current
+
+
+async def _insist_complete(agent: Agent) -> Agent:
+    """`task_complete`, retried through one refusal.
+
+    These walks leave required questions unanswered on purpose — that is what gives the gap
+    pass something to sweep — so the premature-completion guard refuses the first call. It
+    refuses only once, and the walk is asserting the handoff chain, not the guard."""
+    result = await _tool(agent, "task_complete")()
+    if isinstance(result, str):
+        result = await _tool(agent, "task_complete")()
+    assert isinstance(result, Agent), result
+    return result
 
 
 async def _turn_ctx_after_user_turn(agent: Agent, *, pending_note: str | None = None) -> Any:
@@ -1192,3 +1477,318 @@ class TestPreviousTaskWindow:
         assert "turn-from-task0" in texts  # the swept task's own turns
         assert "turn-from-task2" in texts  # the source it arrived from
         assert "turn-from-task1" not in texts  # not the whole call
+
+
+_OPENING = "Hello, I'm VERA. This call is recorded for quality and training purposes."
+
+
+def _pin_opening(controller: PlanRunController, agent: Agent) -> ChatMessage:
+    """Pin an opening the way `on_enter` does: the item the `say` added, by identity."""
+    message = agent._chat_ctx.add_message(role="assistant", content=_OPENING)
+    controller.note_opening_spoken([message])
+    return message
+
+
+async def _inherit_opening(controller: PlanRunController, *replies: str) -> None:
+    """Hand the first task agent an opening it did NOT speak, the way
+    `ivr_agent.transfer_to_verification` does — nothing pinned it, so only `_ensure_anchor`'s
+    positional fallback can find it."""
+    navigator = Agent(instructions="navigate the menu")
+    navigator._chat_ctx.add_message(role="assistant", content=_OPENING)
+    for reply in replies:
+        navigator._chat_ctx.add_message(role="user", content=reply)
+    await carry_chat_ctx(navigator, controller.first_agent())
+
+
+class TestOpeningAnchor:
+    """The call's opening — greeting plus the recording/identity disclosure — is PINNED: it leads
+    every carry set however deep the walk goes, while the rest of the window stays one task deep.
+    Without it a seven-task walk hands the closer a context in which VERA never introduced
+    herself, and she re-introduces herself to a rep she already greeted."""
+
+    async def test_on_enter_pins_the_spoken_opening(self) -> None:
+        controller, _ = _controller()
+        opener = controller.agents[0]
+        message = opener._chat_ctx.add_message(role="assistant", content=_OPENING)
+        session = MagicMock()
+        with _session_patch(opener, session):
+            session.say.return_value.chat_items = [message]
+            await opener.on_enter()
+        assert [item.id for item in controller._anchor_items] == [message.id]
+
+    async def test_a_later_task_intro_does_not_overwrite_the_opening(self) -> None:
+        # Only the CALL's opening is an introduction; task 2's intro is just a section header.
+        controller, _ = _controller()
+        message = _pin_opening(controller, controller.agents[0])
+        later = controller.agents[2]
+        session = MagicMock()
+        with _session_patch(later, session):
+            session.say.return_value.chat_items = [
+                later._chat_ctx.add_message(role="assistant", content="Next up.")
+            ]
+            await later.on_enter()
+        assert [item.id for item in controller._anchor_items] == [message.id]
+
+    async def test_opening_survives_a_seven_task_walk(self) -> None:
+        # The eval failure (`test_opening_survives_to_the_end_of_the_call`) at unit level: the
+        # opening leads, and everything but the immediate predecessor has still aged out.
+        controller, _ = _controller(_linear_plan(8), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 7)
+        assert chat_ctx_texts(landed) == [_OPENING, "turn-from-task6"]
+
+    async def test_wrap_up_gets_the_opening_and_the_closing_task(self) -> None:
+        controller, _ = _controller(_linear_plan(4), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 4)
+        assert landed is controller.wrap_up_agent
+        assert chat_ctx_texts(landed) == [_OPENING, "turn-from-task3"]
+
+    async def test_anchor_is_not_duplicated_on_the_first_hop(self) -> None:
+        # On the first hop the opener IS the source, so the opening is in the carry set twice.
+        # `carry_items` dedupes on id keeping the first, so it stays single and stays in front.
+        controller, _ = _controller(_linear_plan(3), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 1)
+        texts = chat_ctx_texts(landed)
+        assert texts.count(_OPENING) == 1
+        assert texts == [_OPENING, "turn-from-task0"]
+
+    async def test_anchor_falls_back_to_an_inherited_opening(self) -> None:
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        await _inherit_opening(controller)
+        landed = await _walk(controller, 4)
+        texts = chat_ctx_texts(landed)
+        assert texts[0] == _OPENING
+        assert "turn-from-task3" in texts  # the predecessor, still there
+        assert "turn-from-task1" not in texts  # and the window is still one task deep
+
+    async def test_anchor_closes_the_exchange_with_the_reps_reply(self) -> None:
+        # A lone opening question invites the closer to re-ask it; the rep's reply comes along so
+        # the pinned pair reads as an exchange already had.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        await _inherit_opening(controller, "Yes, that's the member.")
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == [_OPENING, "Yes, that's the member.", "turn-from-task3"]
+
+    async def test_a_later_assistant_turn_is_never_mistaken_for_the_opening(self) -> None:
+        # The fallback is positional, so it is gated to the FIRST handoff — otherwise a gap
+        # agent's re-ask would be pinned as the call's introduction.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        gap._chat_ctx.add_message(role="assistant", content="re-ask from the gap pass")
+        with _session_patch(gap, MagicMock()):
+            successor = cast(Agent, await _tool(gap, "gap_complete")())
+        assert controller._anchor_items == []
+        assert _OPENING not in chat_ctx_texts(successor)
+
+    async def test_the_opening_leads_a_gap_agents_context(self) -> None:
+        # A re-ask agent that cannot see the opening is the same re-introduction hazard.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name still missing
+        landed = await _walk(controller, 3)
+        assert isinstance(landed, GapTaskAgent)
+        texts = chat_ctx_texts(landed)
+        assert texts[0] == _OPENING
+        assert texts.index(_OPENING) < texts.index("turn-from-task0")
+
+    async def test_a_silent_gap_agent_still_passes_the_opening_through(self) -> None:
+        # `_own_turns`' whole-context escape hatch for a silent gap agent must compose with the
+        # anchor: the closer still gets the opening, and still exactly once.
+        controller, _ = _controller(_gap_plan(), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        controller.update_answers({"sections.a.in_network": "Yes"})  # rep_name missing -> gap
+        gap = await _walk(controller, 3)
+        assert isinstance(gap, GapTaskAgent)
+        controller.update_answers(
+            {
+                "sections.a.in_network": "Yes",
+                "sections.intro.rep_name": "Martha",
+                "sections.gated.copay": "$20",
+                "sections.cov.deductible": "Met",
+            }
+        )
+        mock_session = MagicMock()
+        with _session_patch(gap, mock_session):
+            await gap.on_enter()
+        successor = mock_session.update_agent.call_args.args[0]
+        texts = chat_ctx_texts(successor)
+        assert texts.count(_OPENING) == 1
+        assert texts[0] == _OPENING
+
+    async def test_cumulative_mode_is_unaffected_by_the_anchor(self) -> None:
+        # The opt-out already carries the whole call, so it must not gain a prepended copy.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=False)
+        _pin_opening(controller, controller.agents[0])
+        landed = await _walk(controller, 4)
+        assert chat_ctx_texts(landed) == [_OPENING] + [f"turn-from-task{i}" for i in range(4)]
+
+    async def test_directive_swap_carries_the_opening(self) -> None:
+        # `apply_directive_now` is the other path into wrap-up, and it goes through the same seam.
+        controller, _ = _controller(_linear_plan(5), previous_task_only=True)
+        _pin_opening(controller, controller.agents[0])
+        await _walk(controller, 2)
+        live = controller.agents[2]
+        live._chat_ctx.add_message(role="user", content="turn-from-task2")
+        session = MagicMock()
+        session.userdata = TakeoverState()
+        session.interrupt = AsyncMock()
+        session.current_agent = live
+        controller.attach_session(session)
+        await controller.apply_directive_now(Terminate(rule_key="r"))
+        assert chat_ctx_texts(controller.wrap_up_agent) == [_OPENING, "turn-from-task2"]
+
+
+_MALE_GATE = Comparison(field="sections.patient.spouse_gender", op="eq", value="Male")
+
+
+def _gated_task_plan() -> CallPlan:
+    """Three tasks; the MIDDLE one's every question is gated on a value that never holds — the
+    shape of the schema's `male_partner` task on a call with no male spouse."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="basics",
+                title="Basics",
+                intro="Hello rep.",
+                outro="Noted.",
+                prompt="Basics.",
+                fields=[_field("sections.a.plan_type", "Plan type")],
+            ),
+            PlanTask(
+                task_key="male_partner",
+                title="Male Partner Coverage",
+                intro="Now I'd like to ask about male partner fertility coverage.",
+                outro="Thanks, that covers the male partner benefits.",
+                prompt="Male partner.",
+                fields=[
+                    _field("sections.male.covered", "Male partner covered", gates=(_MALE_GATE,)),
+                    _field("sections.male.cpt_89320", "CPT 89320", gates=(_MALE_GATE,)),
+                ],
+            ),
+            PlanTask(
+                task_key="closing_task",
+                title="Wrap Up",
+                prompt="Close.",
+                fields=[_field("sections.rep.name", "Representative name")],
+            ),
+        ],
+    )
+
+
+class TestGatedOutTask:
+    """A task whose every question is excluded by its gates must be handed straight on. The
+    compiled prompt is rendered per schema, before any answer exists, so it lists every question
+    and expresses each gate only as prose the model must evaluate against a value it may never
+    have been given — which is how the eval judge caught VERA asking all of them."""
+
+    def test_applicable_fields_drops_the_gated_ones(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        assert controller.applicable_fields(1) == []
+        assert [f.title for f in controller.inapplicable_fields(1)] == [
+            "Male partner covered",
+            "CPT 89320",
+        ]
+
+    def test_the_gate_holding_makes_them_applicable_again(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Male"})
+        assert len(controller.applicable_fields(1)) == 2
+        assert controller.inapplicable_fields(1) == []
+
+    @pytest.mark.asyncio
+    async def test_a_fully_gated_task_is_skipped_without_speaking(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")  # the call has already opened
+        gated = controller.agents[1]
+        mock_session = MagicMock()
+        with _session_patch(gated, mock_session):
+            await gated.on_enter()
+        mock_session.say.assert_not_called()  # no "Now I'd like to ask about male partner…"
+        mock_session.generate_reply.assert_not_called()
+        assert mock_session.update_agent.call_args.args[0] is controller.agents[2]
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_task_leaves_the_closer_to_sign_off(self) -> None:
+        # It speaks no outro, so the flag `note_task_outro` sets must not be left True by the
+        # task before it — otherwise wrap-up closes silently and nobody says goodbye.
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")
+        basics = controller.agents[0]
+        with _session_patch(basics, MagicMock()):
+            await _insist_complete(basics)
+        assert controller.signed_off, "the first task's outro was not recorded"
+        with _session_patch(controller.agents[1], MagicMock()):
+            await controller.agents[1].on_enter()
+        assert not controller.signed_off
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_task_still_counts_as_visited(self) -> None:
+        # The cursor and the visited set drive the gap pass and the compiled-order assertion; a
+        # skipped task is entered, it just says nothing.
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")
+        with _session_patch(controller.agents[1], MagicMock()):
+            await controller.agents[1].on_enter()
+        assert 1 in controller._visited_tasks
+
+    @pytest.mark.asyncio
+    async def test_the_opening_task_is_never_skipped_silently(self) -> None:
+        # The greeting and the recording/identity disclosure ride on the opening task's intro.
+        plan = _gated_task_plan()
+        plan.tasks[0] = plan.tasks[0].model_copy(
+            update={"fields": [_field("sections.a.x", "Gated", gates=(_MALE_GATE,))]}
+        )
+        controller, _ = _controller(plan)
+        opener = controller.agents[0]
+        mock_session = MagicMock()
+        with _session_patch(opener, mock_session):
+            await opener.on_enter()
+        mock_session.say.assert_called_once_with("Hello rep.")
+        mock_session.update_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_task_with_no_fields_at_all_still_runs(self) -> None:
+        # `_plan`'s tasks carry only speech; "no applicable fields" must not mean "no fields".
+        controller, _ = _controller()
+        controller.opening_line("Hello rep.")
+        agent = controller.agents[2]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+        mock_session.say.assert_called_once_with("Next up.")
+        mock_session.update_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_partly_gated_task_excludes_only_the_gated_question(self) -> None:
+        # The other half of the same defect: the task runs, but the model must be told which of
+        # its listed questions are out of scope this call — and only those. See TestGating for
+        # why this lives in the instructions rather than the per-reply lead.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})  # gates out `oon_note`
+        controller.opening_line("Hello rep.")
+        coverage = controller.agents[2]
+        with _session_patch(coverage, MagicMock()):
+            await coverage.on_enter()
+        excluded_section = coverage.instructions.split("do NOT ask these")[1]
+        assert "OON note" in excluded_section
+        assert "Deductible" not in excluded_section  # the applicable one is not excluded
+
+    @pytest.mark.asyncio
+    async def test_an_ungated_task_keeps_the_plain_lead(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "No"})  # every coverage field applies
+        controller.opening_line("Hello rep.")
+        coverage = controller.agents[2]
+        mock_session = MagicMock()
+        with _session_patch(coverage, mock_session):
+            await coverage.on_enter()
+        assert mock_session.generate_reply.call_args.kwargs["instructions"] == _OPENING_DIRECTIVE
