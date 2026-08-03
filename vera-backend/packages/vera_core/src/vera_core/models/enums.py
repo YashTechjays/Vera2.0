@@ -270,6 +270,15 @@ class AuthEvent(enum.StrEnum):
     PASSWORD_RESET_COMPLETED = "password_reset_completed"
     # Platform operator changed a tenant's auto-retry config (flag/threshold values, no PHI).
     TENANT_RETRY_CONFIG_UPDATED = "tenant_retry_config_updated"
+    # Tenant lifecycle driven from the platform plane (VR2-30). Recorded null-tenant like
+    # every other /platform event; meta carries the target tenant id and field names only.
+    TENANT_CREATED = "tenant_created"
+    TENANT_UPDATED = "tenant_updated"
+    TENANT_DEACTIVATED = "tenant_deactivated"
+    TENANT_REACTIVATED = "tenant_reactivated"
+    # A platform operator invited a user INTO a tenant (distinct from USER_INVITED, which a
+    # tenant admin emits inside their own tenant).
+    TENANT_USER_INVITED = "tenant_user_invited"
 
 
 def values_of(enum_cls: type[enum.StrEnum]) -> tuple[str, ...]:

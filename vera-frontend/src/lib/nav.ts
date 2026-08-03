@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  Building,
   Building2,
   Cpu,
   PhoneCall,
@@ -34,6 +35,7 @@ export const navItems: NavItem[] = [
   { title: "Call History", to: "/call-history", icon: PhoneCall, permission: "calls:read" },
   { title: "Analytics", to: "/analytics", icon: BarChart3, permission: "calls:read" },
   { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, permission: "platform:elevations:read" },
+  { title: "Tenants", to: "/platform-tenants", icon: Building, permission: "platform:tenants:manage" },
   { title: "Platform Operators", to: "/platform-operators", icon: Users, permission: "platform:users:read" },
   { title: "Platform Settings", to: "/platform-settings", icon: SlidersHorizontal, permission: "platform:tenants:manage" },
   { title: "Agent Prompt", to: "/agent-prompt", icon: Bot, permission: "platform:prompts:read" },

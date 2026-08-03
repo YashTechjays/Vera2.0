@@ -32,6 +32,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from redis.exceptions import RedisError
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.api.v1.common import (
@@ -241,6 +242,11 @@ class _PasswordCreds:
 
 
 DEACTIVATED_MESSAGE = "Your account has been deactivated. Please contact your administrator."
+
+# Named because the invite-time pre-checks (platform_tenants.invite_tenant_user) and the
+# accept-time constraint fallbacks must answer with the identical 409.
+EMAIL_IN_OTHER_TENANT_MESSAGE = "this email is already registered to an account in another tenant"
+EMAIL_IN_SAME_TENANT_MESSAGE = "a user with that email already exists in this tenant"
 
 
 def raise_for_inactive(creds: _PasswordCreds) -> None:
@@ -837,38 +843,59 @@ async def accept_invitation(
 
     provisioning_uri: str | None = None
     enforce_mfa = False
-    async with tenant_session(sessionmaker, tenant_id) as session:
-        user = (
-            await session.execute(select(AppUser).where(AppUser.id == invite.app_user_id))
-        ).scalar_one_or_none()
-        if user is None or user.status != "invited":
-            # Already accepted / deactivated / gone — the single-use invite is spent.
-            raise _unauthorized()
-        if await _password_identity_row(session, user.id) is not None:
-            raise CustomAPIException(
-                DefaultExceptionCode.CONFLICT, message="invitation already accepted"
-            )
-        provider_row = (
-            await session.execute(
-                select(SsoProvider).where(SsoProvider.provider_type == ProviderKind.PASSWORD.value)
-            )
-        ).scalar_one_or_none()
-        enforce_mfa = provider_row.enforce_mfa if provider_row is not None else False
+    try:
+        async with tenant_session(sessionmaker, tenant_id) as session:
+            user = (
+                await session.execute(select(AppUser).where(AppUser.id == invite.app_user_id))
+            ).scalar_one_or_none()
+            if user is None or user.status != "invited":
+                # Already accepted / deactivated / gone — the single-use invite is spent.
+                raise _unauthorized()
+            if await _password_identity_row(session, user.id) is not None:
+                raise CustomAPIException(
+                    DefaultExceptionCode.CONFLICT, message="invitation already accepted"
+                )
+            provider_row = (
+                await session.execute(
+                    select(SsoProvider).where(
+                        SsoProvider.tenant_id == tenant_id,
+                        SsoProvider.provider_type == ProviderKind.PASSWORD.value,
+                    )
+                )
+            ).scalar_one_or_none()
+            enforce_mfa = provider_row.enforce_mfa if provider_row is not None else False
 
-        identity = UserIdentity(
-            tenant_id=tenant_id,
-            app_user_id=user.id,
-            provider_type=ProviderKind.PASSWORD.value,
-            provider_subject=invite.email,
-            email=invite.email,
-            hashed_password=hash_password(body.password),
-            mfa_enabled=False,
-        )
-        session.add(identity)
-        if enforce_mfa:
-            provisioning_uri = await mfa.enroll(kms, identity=identity, account_email=invite.email)
-        else:
-            user.status = "active"
+            identity = UserIdentity(
+                tenant_id=tenant_id,
+                app_user_id=user.id,
+                provider_type=ProviderKind.PASSWORD.value,
+                provider_subject=invite.email,
+                email=invite.email,
+                hashed_password=hash_password(body.password),
+                mfa_enabled=False,
+            )
+            session.add(identity)
+            if enforce_mfa:
+                provisioning_uri = await mfa.enroll(
+                    kms, identity=identity, account_email=invite.email
+                )
+            else:
+                user.status = "active"
+    except IntegrityError as exc:
+        # The invite-time pre-checks can't see a race between two open invites, so an
+        # identity-uniqueness violation here means this email accepted first somewhere
+        # else — a 409, not a 500. Two constraints can fire: the global exact-case
+        # (provider_type, provider_subject) one, and the per-tenant lower(email) index.
+        detail = str(exc.orig)
+        if "uq_user_identity_provider_type" in detail:
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT, message=EMAIL_IN_OTHER_TENANT_MESSAGE
+            ) from None
+        if "uq_user_identity_tenant_provider_lower_email" in detail:
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT, message=EMAIL_IN_SAME_TENANT_MESSAGE
+            ) from None
+        raise
 
     await _audit(
         audit,
