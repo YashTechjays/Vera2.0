@@ -445,6 +445,15 @@ async def evaluate_call(
     current_values.update({ef.field_path: ef.value for ef, _ in kept})
     form.completion_pct = form_completion_pct(current_values, version.schema_json)
 
+    # verified_pct must always mirror completion_pct — compute it here, before the
+    # token_fields early return below, so a token-flagged form never persists a stale
+    # verified_pct beside a fresh completion_pct.
+    status_by_path = await load_field_status(session, form_id)
+    verified_fraction = satisfied_required_fraction(
+        status_by_path, version.schema_json, floor=deps.floor, values=current_values
+    )
+    form.verified_pct = round(verified_fraction * 100, 2)
+
     # (8) Update call_form_snapshot.after_state (the before_state row was written
     #     by the callback; here we fill in after_state).
     result = cast(
@@ -469,11 +478,6 @@ async def evaluate_call(
             reviewed=token_fields,
             reason=ReviewReason.TOKEN_VALUE,
         )
-    status_by_path = await load_field_status(session, form_id)
-    verified_fraction = satisfied_required_fraction(
-        status_by_path, version.schema_json, floor=deps.floor, values=current_values
-    )
-    form.verified_pct = round(verified_fraction * 100, 2)
     # The authoritative decision evaluates gates against the REAL current values
     # (in-session, never logged) — the dispatcher's PHI-free sentinel
     # approximation is only for the retry-nudge labels. COMPLETED requires every
