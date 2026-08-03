@@ -121,13 +121,45 @@ distinguish "stopped: good-enough" from "stopped: fully satisfied"
 (`ready_for_review`). Emitted in the `_finish(...)` audit `detail.reason` like
 the other reasons.
 
-### 5. UI — copy tweak only
+### 5. Surface "Verified %" in the UI (the number the gate uses)
 
-The control already exists. Update the label/help text in `TenantFormDialog.tsx`
-so it reads as a satisfaction threshold rather than raw fill, e.g.
-**"Min verified % before sending to review instead of retrying"**, and consider
-rendering as a percentage (stored as the existing 0–1 decimal). No new endpoint,
-authz, or validation.
+The gate compares `satisfied_required_fraction` to the threshold, but the number
+users see today — **"Patient Information Form 52%"** — is `completion_pct`
+(**filled**, presence-based), rendered in the **Live Monitoring → View →
+Overview modal** (`vera-frontend/src/components/monitoring/LiveCallModal.tsx:70`,
+via `formProgress = call.completion_pct`). It is *not* shown in the Data
+Management review dialog (that shows fields + a dispute count, no %). So to make
+the threshold legible we surface the **verified** fraction next to the filled one
+in that same Overview modal:
+
+> **Patient Information Form — Filled 52% · Verified 40%**
+
+Verification is post-call only (no evaluations exist mid-call), so `verified_pct`
+reads **0%** live and populates once eval runs — same lifecycle as, but stricter
+than, `completion_pct`.
+
+**Persist it like `completion_pct`** (that column exists precisely to avoid
+recomputation on reads):
+
+- **New column** `patient_form.verified_pct` (`Numeric(5,2)`, `NOT NULL DEFAULT 0`,
+  mirroring `completion_pct`), set in `evaluate_call` from
+  `satisfied_required_fraction × 100` — computed once, stored, and reused by the
+  gate (§2). Idempotent migration (`ADD COLUMN IF NOT EXISTS`, per repo migration
+  rules).
+- **DTO:** add `verified_pct: float | None` to `CallSummary`
+  (`control_plane/api/v1/calls.py`), selected + `_pct(...)`-normalized in the
+  list/summary query alongside `completion_pct` (no SSE change — verified is
+  post-call, not a live frame).
+- **Frontend:** thread `verified_pct` through `CallSummary` (`lib/api/calls.ts`)
+  → `LiveCall` (`lib/monitoring/liveCall.ts`, `lib/mock-data.ts`) →
+  `LiveCallModal.tsx`, rendered next to the existing filled %.
+
+### 6. Tenant-setting copy tweak
+
+The threshold control already exists in `TenantFormDialog.tsx`. Update its
+label/help so it reads as a verified threshold, e.g. **"Min verified fraction
+before review (0–1)"**, and add a `max: 1` bound. No new endpoint, authz, or
+validation.
 
 ## Edge cases
 
@@ -140,17 +172,28 @@ authz, or validation.
 
 ## Components / files
 
+Backend:
 - `packages/vera_core/src/vera_core/forms/review.py` — add
   `satisfied_required_fraction` helper.
 - `packages/vera_core/src/vera_core/models/enums.py` — add
   `ReviewReason.FILL_THRESHOLD_MET`.
-- `packages/vera_core/src/vera_core/services/post_call_eval.py` — insert gate 2
-  in `evaluate_call`.
-- `vera-frontend/src/components/platform/TenantFormDialog.tsx` — label/help copy.
-- Tests (see below).
+- `packages/vera_core/src/vera_core/models/patient_form.py` — add `verified_pct`
+  column; new idempotent Alembic migration under `migrations/`.
+- `packages/vera_core/src/vera_core/services/post_call_eval.py` — set
+  `form.verified_pct` and insert the suppressor gate in `evaluate_call`.
+- `apps/control_plane/src/control_plane/api/v1/calls.py` — add `verified_pct` to
+  `CallSummary` + the list/summary query.
 
-**Untouched (deliberately):** the config storage/endpoint/definer-fn/audit, and
-the fallback resolver `post_call.py` (see Out of scope).
+Frontend:
+- `vera-frontend/src/lib/api/calls.ts` — `verified_pct` on `CallSummary`.
+- `vera-frontend/src/lib/monitoring/liveCall.ts` + `lib/mock-data.ts` — carry it
+  on `LiveCall`.
+- `vera-frontend/src/components/monitoring/LiveCallModal.tsx` — render "Verified %".
+- `vera-frontend/src/components/platform/TenantFormDialog.tsx` — threshold label.
+
+**Untouched (deliberately):** the config storage/endpoint/definer-fn/audit, the
+fallback resolver `post_call.py`, and the live SSE frames (verified is post-call)
+— see Out of scope.
 
 ## Data flow
 
@@ -185,7 +228,17 @@ Integration (`evaluate_call`, existing `test_post_call_eval.py` patterns):
 - below threshold but unaskable tail → `unsatisfied_unaskable` (no redial)
 - `fill_threshold_met` appears in the audit `detail.reason`
 
-Frontend: existing `TenantFormDialog` test updated for the new copy.
+- `evaluate_call` persists `form.verified_pct = satisfied_fraction × 100` on the
+  decision paths (asserted alongside the status/reason cases above).
+
+DTO: `list_calls`/summary returns `verified_pct` mirroring `completion_pct`
+(existing `calls.py` test patterns).
+
+Frontend:
+- `LiveCallModal` renders "Verified X%" from `call.verified_pct` (and 0 when
+  null/live) next to the filled %.
+- `liveCall` maps `verified_pct → LiveCall`.
+- `TenantFormDialog` test updated for the new threshold label.
 
 ## Out of scope (future)
 
