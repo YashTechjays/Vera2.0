@@ -15,6 +15,7 @@ from vera_core.forms.review import (
     has_call_reference,
     is_disputed,
     normalize_value,
+    satisfied_required_fraction,
     unwrap_value,
 )
 from vera_core.models.enums import DisputeActionType
@@ -324,3 +325,36 @@ class TestExpandToGroups:
         # The call-reference leaf sits directly under a section, in no group.
         ref = _IBV_DOC.rep_call_reference_number_field
         assert expand_to_groups(_IBV_DOC, {ref}) == [ref]
+
+
+class TestSatisfiedRequiredFraction:
+    def test_none_satisfied_is_zero(self) -> None:
+        assert satisfied_required_fraction({}, SCHEMA, floor=70) == 0.0
+
+    def test_one_of_three_satisfied(self) -> None:
+        assert (
+            satisfied_required_fraction(
+                {"patient_information.patient_name": _status()}, SCHEMA, floor=70
+            )
+            == 1 / 3
+        )
+
+    def test_all_satisfied_is_one(self) -> None:
+        status = {
+            "patient_information.patient_name": _status(),
+            "patient_information.patient_dob": _status(),
+            "insurance_information.policy_number": _status(),
+        }
+        assert satisfied_required_fraction(status, SCHEMA, floor=70) == 1.0
+
+    def test_no_applicable_required_is_one(self) -> None:
+        assert satisfied_required_fraction({}, {"sections": []}, floor=70) == 1.0
+
+    def test_ai_answer_below_floor_counts_unsatisfied(self) -> None:
+        weak = FieldStatus(source="ai_call", ai_supported=True, ai_confidence=50)
+        assert (
+            satisfied_required_fraction(
+                {"patient_information.patient_name": weak}, SCHEMA, floor=70
+            )
+            == 0.0
+        )
