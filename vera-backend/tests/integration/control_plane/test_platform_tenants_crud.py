@@ -1168,3 +1168,81 @@ async def test_invited_tenant_user_lands_in_the_right_tenant_and_cannot_see_anot
     assert "isolation@acme.example" in emails
     assert TENANT_ADMIN_EMAIL in emails
     assert "other-tenant-user@other.example" not in emails
+
+
+async def test_invite_email_with_password_identity_in_another_tenant_conflicts(
+    crud_world: tuple[httpx.AsyncClient, TenantCrudWorld],
+) -> None:
+    """The user_identity (provider_type, provider_subject) unique constraint is global,
+    so an email whose invite was already ACCEPTED in one tenant can never accept in a
+    second — reject the second invite up front with an exact message, not at accept."""
+    client, world = crud_world
+    # Unique per run: tenants and accepted identities created here outlive the test in
+    # the shared local DB, and a reused email would trip the very check under test.
+    unique = uuid4().hex[:8]
+    email = f"taken-elsewhere-{unique}@acme.example"
+    other_slug = f"email-taken-other-{unique}"
+
+    other_tenant_id = await _create(client, world.super_admin_token, other_slug)
+    invite = await client.post(
+        f"/api/v1/platform/tenants/{other_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": email, "name": "Taken", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+    accept = await client.post(
+        f"/api/v1/tenants/{other_slug}/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert accept.status_code == 200, accept.text
+
+    second = await client.post(
+        f"/api/v1/platform/tenants/{world.active_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": email, "name": "Taken Again", "send_email": False},
+    )
+    assert second.status_code == 409, second.text
+    assert "another tenant" in second.json()["message"]
+
+
+async def test_accept_races_identity_in_another_tenant_conflicts_cleanly(
+    crud_world: tuple[httpx.AsyncClient, TenantCrudWorld],
+) -> None:
+    """Both invites issued BEFORE either accept (so the invite-time check passes), then
+    the second accept hits the global identity constraint — it must surface the exact
+    409, not a 500."""
+    client, world = crud_world
+    unique = uuid4().hex[:8]
+    email = f"race-accept-{unique}@acme.example"
+    other_slug = f"race-accept-other-{unique}"
+
+    other_tenant_id = await _create(client, world.super_admin_token, other_slug)
+    first = await client.post(
+        f"/api/v1/platform/tenants/{other_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": email, "name": "Race", "send_email": False},
+    )
+    assert first.status_code == 200, first.text
+    second = await client.post(
+        f"/api/v1/platform/tenants/{world.active_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": email, "name": "Race", "send_email": False},
+    )
+    assert second.status_code == 200, second.text
+
+    first_token = first.json()["data"]["invite_url"].split("token=", 1)[1]
+    second_token = second.json()["data"]["invite_url"].split("token=", 1)[1]
+
+    accept_first = await client.post(
+        f"/api/v1/tenants/{other_slug}/auth/invitations/accept",
+        json={"token": first_token, "password": "a-strong-password"},
+    )
+    assert accept_first.status_code == 200, accept_first.text
+
+    accept_second = await client.post(
+        f"/api/v1/tenants/{world.active_tenant_slug}/auth/invitations/accept",
+        json={"token": second_token, "password": "a-strong-password"},
+    )
+    assert accept_second.status_code == 409, accept_second.text
+    assert "another tenant" in accept_second.json()["message"]

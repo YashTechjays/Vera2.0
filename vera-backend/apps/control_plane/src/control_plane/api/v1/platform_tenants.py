@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from control_plane.api.v1.auth import EMAIL_IN_OTHER_TENANT_MESSAGE
 from control_plane.api.v1.common import (
     AppSettings,
     AuthAudit,
@@ -656,6 +657,8 @@ async def invite_tenant_user(
         raise NotFoundError(message="no such tenant")
     if outcome == "duplicate":
         raise ConflictError(message="a user with that email already exists in this tenant")
+    if outcome == "email_in_other_tenant":
+        raise ConflictError(message=EMAIL_IN_OTHER_TENANT_MESSAGE)
 
     token = await invites.put(
         INVITE_NS,

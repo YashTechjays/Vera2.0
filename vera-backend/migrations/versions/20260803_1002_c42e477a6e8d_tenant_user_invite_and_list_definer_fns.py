@@ -47,11 +47,12 @@ _APP_ROLE = os.environ.get("VERA_APP_DB_ROLE") or "CURRENT_USER"
 _INVITE_SIG = "platform_invite_tenant_user(uuid, uuid, text, text, uuid, uuid[], uuid[])"
 _LIST_SIG = "platform_list_tenant_users(uuid)"
 
-# Returns 'no_tenant' | 'duplicate' | 'ok' so the router can tell a 404 from a 409
-# from success in one round trip, the same shape as platform_set_tenant_status.
-# p_grant_ids[i] is the id for the user_role row granting p_role_ids[i]: user_role.id
-# has no server default either (same UUIDv7 gap as tenant.id/app_user.id — ADR-0002),
-# so the caller mints one per grant instead of the function generating it.
+# Returns 'no_tenant' | 'duplicate' | 'email_in_other_tenant' | 'ok' so the router can
+# tell a 404 from the two 409 shapes from success in one round trip, the same shape as
+# platform_set_tenant_status. p_grant_ids[i] is the id for the user_role row granting
+# p_role_ids[i]: user_role.id has no server default either (same UUIDv7 gap as
+# tenant.id/app_user.id — ADR-0002), so the caller mints one per grant instead of the
+# function generating it.
 _INVITE_TENANT_USER = """
 CREATE OR REPLACE FUNCTION platform_invite_tenant_user(
     p_tenant_id uuid,
@@ -80,6 +81,16 @@ BEGIN
     -- durable de-dup check is the only guard against a double-invite.
     IF EXISTS (SELECT 1 FROM app_user WHERE tenant_id = p_tenant_id AND email = p_email) THEN
         RETURN 'duplicate';
+    END IF;
+    -- user_identity (provider_type, provider_subject) is UNIQUE across ALL tenants, so
+    -- an email that already accepted a password invite anywhere can never accept a
+    -- second one — reject at invite time with an exact outcome instead of letting the
+    -- accept 500 on the constraint. Exact-case match mirrors the constraint itself.
+    IF EXISTS (
+        SELECT 1 FROM user_identity
+        WHERE provider_type = 'password' AND provider_subject = p_email
+    ) THEN
+        RETURN 'email_in_other_tenant';
     END IF;
 
     INSERT INTO app_user (id, tenant_id, email, name, status, account_type, invited_by)
@@ -144,6 +155,8 @@ _APP_USER_INSERT_COLUMNS = (
     "invited_by",
 )
 _APP_USER_SELECT_COLUMNS = ("id", "tenant_id", "email", "name", "status")
+# Only what the cross-tenant email pre-check in platform_invite_tenant_user reads.
+_USER_IDENTITY_SELECT_COLUMNS = ("provider_type", "provider_subject")
 _USER_ROLE_INSERT_COLUMNS = (
     "id",
     "tenant_id",
@@ -174,6 +187,10 @@ def upgrade() -> None:
         f"GRANT INSERT ({', '.join(_USER_ROLE_INSERT_COLUMNS)}) ON user_role TO {DEFINER_ROLE}"
     )
     op.execute(f"GRANT SELECT (id, name) ON role TO {DEFINER_ROLE}")
+    op.execute(
+        f"GRANT SELECT ({', '.join(_USER_IDENTITY_SELECT_COLUMNS)}) "
+        f"ON user_identity TO {DEFINER_ROLE}"
+    )
 
     for body, signature in _FUNCTIONS:
         op.execute(body)
@@ -187,6 +204,10 @@ def downgrade() -> None:
         op.execute(f"REVOKE EXECUTE ON FUNCTION {signature} FROM {_APP_ROLE}")
         op.execute(f"DROP FUNCTION IF EXISTS {signature}")
 
+    op.execute(
+        f"REVOKE SELECT ({', '.join(_USER_IDENTITY_SELECT_COLUMNS)}) "
+        f"ON user_identity FROM {DEFINER_ROLE}"
+    )
     op.execute(f"REVOKE SELECT (id, name) ON role FROM {DEFINER_ROLE}")
     op.execute(
         f"REVOKE INSERT ({', '.join(_USER_ROLE_INSERT_COLUMNS)}) ON user_role FROM {DEFINER_ROLE}"
