@@ -47,12 +47,12 @@ _APP_ROLE = os.environ.get("VERA_APP_DB_ROLE") or "CURRENT_USER"
 _INVITE_SIG = "platform_invite_tenant_user(uuid, uuid, text, text, uuid, uuid[], uuid[])"
 _LIST_SIG = "platform_list_tenant_users(uuid)"
 
-# Returns 'no_tenant' | 'duplicate' | 'email_in_other_tenant' | 'ok' so the router can
-# tell a 404 from the two 409 shapes from success in one round trip, the same shape as
-# platform_set_tenant_status. p_grant_ids[i] is the id for the user_role row granting
-# p_role_ids[i]: user_role.id has no server default either (same UUIDv7 gap as
-# tenant.id/app_user.id — ADR-0002), so the caller mints one per grant instead of the
-# function generating it.
+# Returns 'no_tenant' | 'tenant_not_active' | 'duplicate' | 'email_in_other_tenant' |
+# 'ok' so the router can tell a 404 from the 409 shapes from success in one round trip,
+# the same shape as platform_set_tenant_status. p_grant_ids[i] is the id for the
+# user_role row granting p_role_ids[i]: user_role.id has no server default either (same
+# UUIDv7 gap as tenant.id/app_user.id — ADR-0002), so the caller mints one per grant
+# instead of the function generating it.
 _INVITE_TENANT_USER = """
 CREATE OR REPLACE FUNCTION platform_invite_tenant_user(
     p_tenant_id uuid,
@@ -69,17 +69,31 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE
     v_i integer;
+    v_tenant_status text;
 BEGIN
     IF (current_setting('app.platform', true) = 'on') IS NOT TRUE THEN
         RAISE EXCEPTION 'platform_invite_tenant_user: not a platform session';
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM tenant WHERE id = p_tenant_id AND deleted_at IS NULL) THEN
+    SELECT status INTO v_tenant_status
+    FROM tenant
+    WHERE id = p_tenant_id AND deleted_at IS NULL;
+    IF v_tenant_status IS NULL THEN
         RETURN 'no_tenant';
     END IF;
+    -- A deactivated tenant's slug no longer resolves at login, so an invite into it
+    -- would mint a dead link — reject up front instead.
+    IF v_tenant_status <> 'active' THEN
+        RETURN 'tenant_not_active';
+    END IF;
     -- No UNIQUE constraint on email (matches invite_user's own comment) — this
-    -- durable de-dup check is the only guard against a double-invite.
-    IF EXISTS (SELECT 1 FROM app_user WHERE tenant_id = p_tenant_id AND email = p_email) THEN
+    -- durable de-dup check is the only guard against a double-invite. lower() on
+    -- both sides, like the tenant-admin invite path, so User@x can't shadow user@x
+    -- (accept would otherwise 500 on uq_user_identity_tenant_provider_lower_email).
+    IF EXISTS (
+        SELECT 1 FROM app_user
+        WHERE tenant_id = p_tenant_id AND lower(email) = lower(p_email)
+    ) THEN
         RETURN 'duplicate';
     END IF;
     -- user_identity (provider_type, provider_subject) is UNIQUE across ALL tenants, so

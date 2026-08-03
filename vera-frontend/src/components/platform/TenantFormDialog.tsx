@@ -103,7 +103,8 @@ function TenantForm({ tenant, busy, setBusy, close, onSaved }: TenantFormProps) 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
-    if (!fields.name.trim()) {
+    const name = fields.name.trim()
+    if (!name) {
       setError("Name is required.")
       return
     }
@@ -111,21 +112,21 @@ function TenantForm({ tenant, busy, setBusy, close, onSaved }: TenantFormProps) 
       setError("Slug must be lowercase letters, digits and hyphens (max 63 characters).")
       return
     }
+    if (NUMBER_FIELDS.some(({ key }) => Number.isNaN(fields[key]))) {
+      setError("Numeric limits cannot be empty.")
+      return
+    }
     setBusy(true)
     try {
       if (tenant) {
-        const patch = changedTenantFields(tenant, fields)
+        const patch = changedTenantFields(tenant, { ...fields, name })
         if (Object.keys(patch).length === 0) {
           close()
           return
         }
         await updateTenant(tenant.id, patch)
       } else {
-        await createTenant({
-          name: fields.name.trim(),
-          slug,
-          ...(fields.region ? { region: fields.region } : {}),
-        })
+        await createTenant({ name, slug, ...(fields.region ? { region: fields.region } : {}) })
       }
       onSaved?.()
       close()
@@ -206,8 +207,11 @@ function TenantForm({ tenant, busy, setBusy, close, onSaved }: TenantFormProps) 
                       type="number"
                       min={min}
                       step={step}
-                      value={fields[key]}
-                      onChange={(e) => set(key, Number(e.target.value))}
+                      value={Number.isNaN(fields[key]) ? "" : fields[key]}
+                      onChange={(e) =>
+                        // A cleared input becomes NaN (blocked at submit), never a silent 0.
+                        set(key, e.target.value === "" ? Number.NaN : Number(e.target.value))
+                      }
                     />
                   </div>
                 ))}

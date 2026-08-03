@@ -81,6 +81,34 @@ function TenantUsersContent({ tenant, onClose }: ContentProps) {
     }
   }
 
+  function inviteSection() {
+    if (inviting) {
+      return (
+        <InviteTenantUserForm
+          tenantId={tenant.id}
+          roles={roles}
+          onDone={() => {
+            setInviting(false)
+            void reload()
+          }}
+          onCancel={() => setInviting(false)}
+        />
+      )
+    }
+    if (tenant.status !== "active") {
+      return (
+        <p className="text-sm text-muted-foreground">
+          This tenant is deactivated — reactivate it before inviting users.
+        </p>
+      )
+    }
+    return (
+      <Button type="button" onClick={() => setInviting(true)}>
+        Invite user
+      </Button>
+    )
+  }
+
   return (
     <DialogContent showCloseButton className="max-w-2xl gap-0 p-0">
       <DialogHeader className="border-b border-border p-5 pr-12">
@@ -125,21 +153,7 @@ function TenantUsersContent({ tenant, onClose }: ContentProps) {
           </ul>
         )}
 
-        {inviting ? (
-          <InviteTenantUserForm
-            tenantId={tenant.id}
-            roles={roles}
-            onDone={() => {
-              setInviting(false)
-              void reload()
-            }}
-            onCancel={() => setInviting(false)}
-          />
-        ) : (
-          <Button type="button" onClick={() => setInviting(true)}>
-            Invite user
-          </Button>
-        )}
+        {inviteSection()}
       </div>
 
       <div className="flex justify-end border-t border-border p-4">

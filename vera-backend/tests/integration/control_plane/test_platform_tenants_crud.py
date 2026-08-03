@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from control_plane.auth.password import hash_password
@@ -1246,3 +1246,105 @@ async def test_accept_races_identity_in_another_tenant_conflicts_cleanly(
     )
     assert accept_second.status_code == 409, accept_second.text
     assert "another tenant" in accept_second.json()["message"]
+
+
+async def test_invite_into_deactivated_tenant_conflicts(
+    crud_world: tuple[httpx.AsyncClient, TenantCrudWorld],
+) -> None:
+    """A deactivated tenant's slug no longer resolves at login, so an invite into it
+    would mint a dead link — rejected up front instead."""
+    client, world = crud_world
+    resp = await client.post(
+        f"/api/v1/platform/tenants/{world.deactivated_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": "dead-link@acme.example", "name": "Dead", "send_email": False},
+    )
+    assert resp.status_code == 409, resp.text
+    assert "deactivated" in resp.json()["message"]
+
+
+async def test_invite_duplicate_email_check_is_case_insensitive(
+    crud_world: tuple[httpx.AsyncClient, TenantCrudWorld],
+) -> None:
+    """`User@x` must not slip past the duplicate check that caught `user@x` — accept
+    would otherwise 500 on the per-tenant lower(email) identity index."""
+    client, world = crud_world
+    unique = uuid4().hex[:8]
+    first = await client.post(
+        f"/api/v1/platform/tenants/{world.active_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": f"case-dupe-{unique}@acme.example", "name": "Case", "send_email": False},
+    )
+    assert first.status_code == 200, first.text
+    second = await client.post(
+        f"/api/v1/platform/tenants/{world.active_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": f"Case-Dupe-{unique}@acme.example", "name": "Case", "send_email": False},
+    )
+    assert second.status_code == 409, second.text
+    assert "this tenant" in second.json()["message"]
+
+
+async def test_accept_case_variant_identity_conflicts_cleanly(
+    crud_world: tuple[httpx.AsyncClient, TenantCrudWorld],
+) -> None:
+    """A case-variant identity that appears between invite and accept (the window the
+    invite-time check can't see) hits uq_user_identity_tenant_provider_lower_email —
+    it must surface as the exact 409, not a 500."""
+    client, world = crud_world
+    unique = uuid4().hex[:8]
+    email = f"Handler-Case-{unique}@acme.example"
+
+    invite = await client.post(
+        f"/api/v1/platform/tenants/{world.active_tenant_id}/users/invitations",
+        headers={**_auth(world.super_admin_token), **_idem()},
+        json={"email": email, "name": "Handler", "send_email": False},
+    )
+    assert invite.status_code == 200, invite.text
+    token = invite.json()["data"]["invite_url"].split("token=", 1)[1]
+
+    # Simulate the race: a lower-cased variant identity lands before the accept.
+    async with world.sm() as s, s.begin():
+        admin_id = (
+            await s.execute(select(AppUser.id).where(AppUser.email == TENANT_ADMIN_EMAIL))
+        ).scalar_one()
+        s.add(
+            UserIdentity(
+                tenant_id=world.active_tenant_id,
+                app_user_id=admin_id,
+                provider_type=ProviderKind.PASSWORD.value,
+                provider_subject=email.lower(),
+                email=email.lower(),
+                hashed_password=hash_password("irrelevant-password"),
+                mfa_enabled=False,
+            )
+        )
+
+    accept = await client.post(
+        f"/api/v1/tenants/{world.active_tenant_slug}/auth/invitations/accept",
+        json={"token": token, "password": "a-strong-password"},
+    )
+    assert accept.status_code == 409, accept.text
+    assert "this tenant" in accept.json()["message"]
+
+
+async def test_create_tenant_rejected_submit_frees_the_idempotency_key(
+    crud_world: tuple[httpx.AsyncClient, TenantCrudWorld],
+) -> None:
+    """A 422 on a malformed slug must not lock the operator out of their corrected
+    resubmit for the key's TTL (idempotency_guard, not bare claim_or_conflict)."""
+    client, world = crud_world
+    key = {"Idempotency-Key": str(uuid4())}
+    bad = await client.post(
+        "/api/v1/platform/tenants",
+        headers={**_auth(world.super_admin_token), **key},
+        json={"name": "Retry Co", "slug": "Bad Slug!"},
+    )
+    assert bad.status_code == 422, bad.text
+
+    good = await client.post(
+        "/api/v1/platform/tenants",
+        headers={**_auth(world.super_admin_token), **key},
+        json={"name": "Retry Co", "slug": f"retry-co-{uuid4().hex[:8]}"},
+    )
+    assert good.status_code == 201, good.text

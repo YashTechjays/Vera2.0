@@ -136,13 +136,12 @@ describe("platform api client — tenant CRUD (VR2-30)", () => {
     expect(apiRequest).toHaveBeenCalledWith("/platform/tenants/t1")
   })
 
-  it("updates only the fields it is given", async () => {
+  it("updates only the fields it is given, with no Idempotency-Key (route skips the gate)", async () => {
     vi.mocked(apiRequest).mockResolvedValue({})
     await updateTenant("t1", { name: "Renamed", max_retries: 2 })
     expect(apiRequest).toHaveBeenCalledWith("/platform/tenants/t1", {
       method: "PATCH",
       body: { name: "Renamed", max_retries: 2 },
-      headers: { "Idempotency-Key": "test-idempotency-key" },
     })
   })
 

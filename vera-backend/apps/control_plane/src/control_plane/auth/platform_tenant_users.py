@@ -33,10 +33,10 @@ async def invite_tenant_user(
     grant_ids: list[UUID],
 ) -> str:
     """Create the invited `app_user` row (+ its `user_role` grants) via the platform
-    definer fn, returning 'ok' | 'duplicate' | 'email_in_other_tenant' | 'no_tenant'.
-    `grant_ids[i]` is the caller-minted id for the grant assigning `role_ids[i]` — the two
-    run parallel because user_role.id has no server default (ADR-0002), same as the
-    app_user id itself."""
+    definer fn, returning 'ok' | 'no_tenant' | 'tenant_not_active' | 'duplicate' |
+    'email_in_other_tenant'. `grant_ids[i]` is the caller-minted id for the grant
+    assigning `role_ids[i]` — the two run parallel because user_role.id has no server
+    default (ADR-0002), same as the app_user id itself."""
     result = await session.execute(
         text(
             "SELECT platform_invite_tenant_user("

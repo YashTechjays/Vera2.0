@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane.api.v1.auth import EMAIL_IN_OTHER_TENANT_MESSAGE
+from control_plane.api.v1.auth import EMAIL_IN_OTHER_TENANT_MESSAGE, EMAIL_IN_SAME_TENANT_MESSAGE
 from control_plane.api.v1.common import (
     AppSettings,
     AuthAudit,
@@ -56,6 +56,7 @@ from control_plane.exceptions import (
 from control_plane.idempotency import (
     PLATFORM_IDEM_SCOPE,
     claim_or_conflict,
+    idempotency_guard,
     require_idempotency_key,
 )
 from control_plane.responses import ResponseModel, ok
@@ -257,37 +258,39 @@ async def create_tenant(
     rather than something this endpoint tries to prevent. Writes through the
     platform_create_tenant SECURITY DEFINER fn (the tenant table's platform RLS policy
     is SELECT-only), audited null-tenant like every other /platform authz."""
-    await claim_or_conflict(
+    # Guard (not bare claim): every effect is inside the request transaction, so a
+    # rejected submit (422/409) frees the key for the corrected resubmit.
+    async with idempotency_guard(
         get_idempotency_store(request),
         PLATFORM_IDEM_SCOPE,
         caller.user_id,
         idempotency_key,
         settings.idempotency_lock_ttl_seconds,
-    )
-    slug = normalize_slug(body.slug)
-    if not is_valid_slug(slug):
-        raise CustomAPIException(
-            DefaultExceptionCode.VALIDATION_ERROR,
-            message="slug must be a lowercase DNS-label (letters, digits, hyphens)",
-        )
-    tenant_id = uuid7()
-    try:
-        await create_tenant_row(
-            session, tenant_id=tenant_id, name=body.name, slug=slug, region=body.region
-        )
-    except IntegrityError as exc:
-        raise _conflict_or_raise(exc, "a tenant with that slug already exists") from exc
+    ):
+        slug = normalize_slug(body.slug)
+        if not is_valid_slug(slug):
+            raise CustomAPIException(
+                DefaultExceptionCode.VALIDATION_ERROR,
+                message="slug must be a lowercase DNS-label (letters, digits, hyphens)",
+            )
+        tenant_id = uuid7()
+        try:
+            await create_tenant_row(
+                session, tenant_id=tenant_id, name=body.name, slug=slug, region=body.region
+            )
+        except IntegrityError as exc:
+            raise _conflict_or_raise(exc, "a tenant with that slug already exists") from exc
 
-    tenant = await _load_tenant(session, tenant_id)
-    await emit_auth_event(
-        audit,
-        tenant_id=None,
-        event=AuthEvent.TENANT_CREATED,
-        ip=client_ip(request),
-        user_id=caller.user_id,
-        meta={"target_tenant": str(tenant_id), "slug": slug},
-    )
-    return ok(_to_detail(tenant))
+        tenant = await _load_tenant(session, tenant_id)
+        await emit_auth_event(
+            audit,
+            tenant_id=None,
+            event=AuthEvent.TENANT_CREATED,
+            ip=client_ip(request),
+            user_id=caller.user_id,
+            meta={"target_tenant": str(tenant_id), "slug": slug},
+        )
+        return ok(_to_detail(tenant))
 
 
 @router.get(
@@ -460,16 +463,16 @@ async def deactivate_tenant(
     revoke them. 409 if the tenant is already deactivated. Writes through the
     platform_set_tenant_status SECURITY DEFINER fn, audited null-tenant like every
     other /platform authz."""
-    await claim_or_conflict(
+    async with idempotency_guard(
         get_idempotency_store(request),
         PLATFORM_IDEM_SCOPE,
         caller.user_id,
         idempotency_key,
         settings.idempotency_lock_ttl_seconds,
-    )
-    return await _flip_tenant_status(
-        tenant_id, request, session, audit, caller, target_status="deactivated"
-    )
+    ):
+        return await _flip_tenant_status(
+            tenant_id, request, session, audit, caller, target_status="deactivated"
+        )
 
 
 @router.post(
@@ -492,16 +495,16 @@ async def reactivate_tenant(
     caller: Annotated[VerifiedIdentity, platform_require(TENANTS_MANAGE)],
 ) -> ResponseModel[TenantDetail]:
     """Restores login for this tenant's users. 409 if the tenant is already active."""
-    await claim_or_conflict(
+    async with idempotency_guard(
         get_idempotency_store(request),
         PLATFORM_IDEM_SCOPE,
         caller.user_id,
         idempotency_key,
         settings.idempotency_lock_ttl_seconds,
-    )
-    return await _flip_tenant_status(
-        tenant_id, request, session, audit, caller, target_status="active"
-    )
+    ):
+        return await _flip_tenant_status(
+            tenant_id, request, session, audit, caller, target_status="active"
+        )
 
 
 class TenantUser(BaseModel):
@@ -655,8 +658,10 @@ async def invite_tenant_user(
     )
     if outcome == "no_tenant":
         raise NotFoundError(message="no such tenant")
+    if outcome == "tenant_not_active":
+        raise ConflictError(message="tenant is deactivated — reactivate it before inviting users")
     if outcome == "duplicate":
-        raise ConflictError(message="a user with that email already exists in this tenant")
+        raise ConflictError(message=EMAIL_IN_SAME_TENANT_MESSAGE)
     if outcome == "email_in_other_tenant":
         raise ConflictError(message=EMAIL_IN_OTHER_TENANT_MESSAGE)
 

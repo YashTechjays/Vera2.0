@@ -243,9 +243,10 @@ class _PasswordCreds:
 
 DEACTIVATED_MESSAGE = "Your account has been deactivated. Please contact your administrator."
 
-# Named because the invite-time pre-check (platform_tenants.invite_tenant_user) and the
-# accept-time constraint fallback must answer with the identical 409.
+# Named because the invite-time pre-checks (platform_tenants.invite_tenant_user) and the
+# accept-time constraint fallbacks must answer with the identical 409.
 EMAIL_IN_OTHER_TENANT_MESSAGE = "this email is already registered to an account in another tenant"
+EMAIL_IN_SAME_TENANT_MESSAGE = "a user with that email already exists in this tenant"
 
 
 def raise_for_inactive(creds: _PasswordCreds) -> None:
@@ -881,14 +882,20 @@ async def accept_invitation(
             else:
                 user.status = "active"
     except IntegrityError as exc:
-        # user_identity (provider_type, provider_subject) is UNIQUE across ALL tenants and
-        # the invite-time pre-check can't see a race between two open invites, so hitting
-        # the constraint means this email accepted elsewhere first — a 409, not a 500.
-        if "uq_user_identity_provider_type" not in str(exc.orig):
-            raise
-        raise CustomAPIException(
-            DefaultExceptionCode.CONFLICT, message=EMAIL_IN_OTHER_TENANT_MESSAGE
-        ) from None
+        # The invite-time pre-checks can't see a race between two open invites, so an
+        # identity-uniqueness violation here means this email accepted first somewhere
+        # else — a 409, not a 500. Two constraints can fire: the global exact-case
+        # (provider_type, provider_subject) one, and the per-tenant lower(email) index.
+        detail = str(exc.orig)
+        if "uq_user_identity_provider_type" in detail:
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT, message=EMAIL_IN_OTHER_TENANT_MESSAGE
+            ) from None
+        if "uq_user_identity_tenant_provider_lower_email" in detail:
+            raise CustomAPIException(
+                DefaultExceptionCode.CONFLICT, message=EMAIL_IN_SAME_TENANT_MESSAGE
+            ) from None
+        raise
 
     await _audit(
         audit,

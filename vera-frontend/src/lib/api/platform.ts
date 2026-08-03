@@ -118,12 +118,13 @@ export function getTenant(tenantId: string) {
   return apiRequest<TenantDetail>(tenantPath(tenantId))
 }
 
-/** Omitted fields stay unchanged. Requires `platform:tenants:manage`. */
+/** Omitted fields stay unchanged. Requires `platform:tenants:manage`. Sends no
+ *  Idempotency-Key: every field is an absolute value, so the PATCH is naturally
+ *  idempotent and the backend route deliberately skips the gate. */
 export function updateTenant(tenantId: string, patch: UpdateTenantInput) {
   return apiRequest<TenantDetail>(tenantPath(tenantId), {
     method: "PATCH",
     body: patch,
-    headers: { "Idempotency-Key": randomId() },
   })
 }
 
