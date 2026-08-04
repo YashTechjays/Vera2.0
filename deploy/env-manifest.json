@@ -10,7 +10,8 @@
       "LIVEKIT_API_KEY",
       "LIVEKIT_API_SECRET",
       "VERA_FRONTEND_BASE_URL",
-      "VERA_RECORDING_BUCKET"
+      "VERA_RECORDING_BUCKET",
+      "VERA_EMAIL_FROM"
     ]
   },
   "worker": {
