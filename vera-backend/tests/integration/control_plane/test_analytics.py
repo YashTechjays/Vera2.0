@@ -1,5 +1,7 @@
 """Integration tests for /api/v1/analytics — counts only, real RLS + RBAC."""
 
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import httpx
@@ -9,12 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.control_plane.conftest import RBACWorld, seed_call
 from vera_core.db import uuid7
-from vera_core.models import Call, PatientForm, Tenant
+from vera_core.models import Call, InterventionEvent, PatientForm, Tenant
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 
 QUEUE_STATUS_PATH = "/api/v1/analytics/queue-status"
 LIVE_PATH = "/api/v1/analytics/live"
+REPORT_PATH = "/api/v1/analytics/report"
+FILTERS_PATH = "/api/v1/analytics/filters"
+
+_FROM = datetime(2026, 1, 8, tzinfo=UTC)
+_TO = datetime(2026, 1, 15, tzinfo=UTC)
+_PREV = datetime(2026, 1, 3, tzinfo=UTC)  # inside the previous 7-day window
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -236,3 +244,198 @@ async def test_live_panel_requires_reports_dashboard(
     assert resp.status_code == 403
     ok_resp = await client.get(LIVE_PATH, headers=_auth(rbac_world.supervisor_token))
     assert ok_resp.status_code == 200
+
+
+async def _seed_report_world(
+    admin_sessionmaker: async_sessionmaker[AsyncSession], world: RBACWorld
+) -> tuple[list[UUID], list[UUID]]:
+    """4 calls in the window (2 completed w/ known durations+completion, 1 active,
+    1 canceled), 1 whisper intervention on one of them, 1 call in the previous window.
+    Returns (call_ids, form_ids) for the caller to clean up."""
+    specs = [
+        # (status, ended offset minutes, completion_pct)
+        ("completed", 5, "80.00"),
+        ("completed", 10, "60.00"),
+        ("active", None, "0"),
+        ("canceled", 3, "20.00"),
+    ]
+    started = _FROM.replace(hour=12)
+    call_ids: list[UUID] = []
+    form_ids: list[UUID] = []
+    for status, end_min, completion in specs:
+        async with admin_sessionmaker() as session, session.begin():
+            form_id = await _seed_form(session, world.tenant_id)
+        form_ids.append(form_id)
+        call_id = await seed_call(
+            admin_sessionmaker,
+            world.tenant_id,
+            form_id,
+            initiated_by_id=world.supervisor_id,
+            status=status,
+        )
+        call_ids.append(call_id)
+        values: dict[str, object] = {
+            "created_at": started,
+            "started_at": started,
+            "completion_pct": Decimal(completion),
+        }
+        if end_min is not None:
+            values["ended_at"] = started + timedelta(minutes=end_min)
+        async with admin_sessionmaker() as session, session.begin():
+            await session.execute(update(Call).where(Call.id == call_id).values(**values))
+
+    async with admin_sessionmaker() as session, session.begin():
+        session.add(
+            InterventionEvent(
+                tenant_id=world.tenant_id,
+                call_id=call_ids[0],
+                supervisor_id=world.supervisor_id,
+                type="whisper",
+            )
+        )
+
+    # One call in the PREVIOUS window.
+    async with admin_sessionmaker() as session, session.begin():
+        prev_form = await _seed_form(session, world.tenant_id)
+    form_ids.append(prev_form)
+    prev_call = await seed_call(
+        admin_sessionmaker,
+        world.tenant_id,
+        prev_form,
+        initiated_by_id=world.supervisor_id,
+        status="completed",
+    )
+    call_ids.append(prev_call)
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(update(Call).where(Call.id == prev_call).values(created_at=_PREV))
+
+    return call_ids, form_ids
+
+
+@pytest.mark.asyncio
+async def test_report_matches_hand_computed_numbers(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _call_ids, form_ids = await _seed_report_world(admin_sessionmaker, rbac_world)
+    try:
+        resp = await client.get(
+            REPORT_PATH,
+            params={"date_from": _FROM.isoformat(), "date_to": _TO.isoformat()},
+            headers=_auth(rbac_world.admin_token),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["cache-control"] == "no-store"
+        data = resp.json()["data"]
+
+        cur = data["current"]
+        assert cur["call_volume"] == 4
+        # Durations: 300s, 600s, 3*60=180s over the three ended calls -> avg 360s.
+        assert cur["avg_duration_seconds"] == pytest.approx(360.0)
+        # Completion over TERMINAL calls only: (80 + 60 + 20) / 3.
+        assert cur["avg_completion_pct"] == pytest.approx(160 / 3)
+        assert cur["intervened_calls"] == 1
+        assert cur["intervention_rate"] == pytest.approx(0.25)
+
+        assert data["previous"]["call_volume"] == 1
+
+        days = {row["day"]: row["calls"] for row in data["calls_per_day"]}
+        assert days == {"2026-01-08": 4}
+        assert data["interventions_by_type"] == [{"type": "whisper", "count": 1}]
+    finally:
+        await _delete_calls_and_forms(admin_sessionmaker, *form_ids)
+
+
+@pytest.mark.asyncio
+async def test_report_filters_narrow_by_va(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    """The virtual assistant never initiates calls in this fixed window, so filtering
+    by their id must report zero volume regardless of what else the window holds."""
+    resp = await client.get(
+        REPORT_PATH,
+        params={
+            "date_from": _FROM.isoformat(),
+            "date_to": _TO.isoformat(),
+            "va_id": str(rbac_world.virtual_assistant_id),
+        },
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["current"]["call_volume"] == 0
+
+
+@pytest.mark.asyncio
+async def test_report_rejects_inverted_range(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        REPORT_PATH,
+        params={"date_from": _TO.isoformat(), "date_to": _FROM.isoformat()},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_report_rejects_range_over_366_days(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        REPORT_PATH,
+        params={
+            "date_from": _FROM.isoformat(),
+            "date_to": (_FROM + timedelta(days=367)).isoformat(),
+        },
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_report_requires_reports_dashboard(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(
+        REPORT_PATH,
+        params={"date_from": _FROM.isoformat(), "date_to": _TO.isoformat()},
+        headers=_auth(rbac_world.virtual_assistant_token),
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_filters_lists_active_providers_and_call_owners(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Seeds its own call so the VA-owner assertion never depends on other tests'
+    cleanup order."""
+    async with admin_sessionmaker() as session, session.begin():
+        form_id = await _seed_form(session, rbac_world.tenant_id)
+    await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        form_id,
+        initiated_by_id=rbac_world.supervisor_id,
+        status="active",
+    )
+    try:
+        resp = await client.get(FILTERS_PATH, headers=_auth(rbac_world.admin_token))
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+        data = resp.json()["data"]
+        assert data["providers"] == [] or {"id", "name"} == set(data["providers"][0])
+        assert any(v["id"] == str(rbac_world.supervisor_id) for v in data["vas"])
+    finally:
+        await _delete_calls_and_forms(admin_sessionmaker, form_id)
+
+
+@pytest.mark.asyncio
+async def test_filters_requires_reports_dashboard(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    resp = await client.get(FILTERS_PATH, headers=_auth(rbac_world.virtual_assistant_token))
+    assert resp.status_code == 403
