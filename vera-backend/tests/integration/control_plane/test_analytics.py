@@ -7,13 +7,14 @@ import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tests.integration.control_plane.conftest import RBACWorld
+from tests.integration.control_plane.conftest import RBACWorld, seed_call
 from vera_core.db import uuid7
-from vera_core.models import PatientForm, Tenant
+from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import InsuranceType
 
 QUEUE_STATUS_PATH = "/api/v1/analytics/queue-status"
+LIVE_PATH = "/api/v1/analytics/live"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -139,3 +140,100 @@ async def test_queue_status_is_tenant_isolated(
         assert after == before
     finally:
         await _delete_forms(admin_sessionmaker, other_form)
+
+
+async def _delete_calls_and_forms(
+    sessionmaker: async_sessionmaker[AsyncSession], *form_ids: UUID
+) -> None:
+    async with sessionmaker() as session, session.begin():
+        await session.execute(delete(Call).where(Call.form_id.in_(form_ids)))
+    await _delete_forms(sessionmaker, *form_ids)
+
+
+@pytest.mark.asyncio
+async def test_live_panel_matches_live_monitoring(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The ticket's hard rule: sum(active) == /calls/stats live == len(GET /calls)."""
+    headers = _auth(rbac_world.supervisor_token)
+    # Seed for the SUPERVISOR persona: one own active call, one published call
+    # owned by someone else (visible), one unpublished call owned by someone
+    # else (INVISIBLE), one queued form.
+    async with admin_sessionmaker() as session, session.begin():
+        form_a = await _seed_form(session, rbac_world.tenant_id)
+        form_b = await _seed_form(session, rbac_world.tenant_id)
+        form_c = await _seed_form(session, rbac_world.tenant_id)
+        form_q = await _seed_form(session, rbac_world.tenant_id)
+        await session.execute(
+            update(PatientForm).where(PatientForm.id == form_q).values(status="in_queue")
+        )
+    await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        form_a,
+        initiated_by_id=rbac_world.supervisor_id,
+        status="active",
+    )
+    await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        form_b,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+        published=True,
+    )
+    await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        form_c,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+    )  # hidden from the supervisor: unpublished, someone else's
+
+    try:
+        panel = (await client.get(LIVE_PATH, headers=headers)).json()["data"]
+        stats = (await client.get("/api/v1/calls/stats", headers=headers)).json()["data"]
+        live_list = (await client.get("/api/v1/calls", headers=headers)).json()["data"]
+
+        assert sum(r["active"] for r in panel["rows"]) == stats["live"] == len(live_list)
+        assert sum(r["in_queue"] for r in panel["rows"]) >= 1
+    finally:
+        await _delete_calls_and_forms(admin_sessionmaker, form_a, form_b, form_c, form_q)
+
+
+@pytest.mark.asyncio
+async def test_unmatched_provider_text_lands_in_the_null_bucket(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with admin_sessionmaker() as session, session.begin():
+        form_id = await _seed_form(session, rbac_world.tenant_id)
+        await session.execute(
+            update(PatientForm)
+            .where(PatientForm.id == form_id)
+            .values(status="in_queue", insurance_provider="No Such Payer Inc")
+        )
+
+    try:
+        rows = (await client.get(LIVE_PATH, headers=_auth(rbac_world.admin_token))).json()["data"][
+            "rows"
+        ]
+        bucket = next(r for r in rows if r["provider_id"] is None)
+        assert bucket["provider_name"] is None
+        assert bucket["in_queue"] >= 1
+    finally:
+        await _delete_forms(admin_sessionmaker, form_id)
+
+
+@pytest.mark.asyncio
+async def test_live_panel_requires_reports_dashboard(
+    client: httpx.AsyncClient, rbac_world: RBACWorld
+) -> None:
+    # VIRTUAL_ASSISTANT holds calls:read but NOT reports:dashboard.
+    resp = await client.get(LIVE_PATH, headers=_auth(rbac_world.virtual_assistant_token))
+    assert resp.status_code == 403
+    ok_resp = await client.get(LIVE_PATH, headers=_auth(rbac_world.supervisor_token))
+    assert ok_resp.status_code == 200
