@@ -352,10 +352,8 @@ class TestBookendPaths:
     def test_focused_retry_retains_greeting_and_wrapup_when_those_fields_satisfied(self) -> None:
         """Even when the intro/wrap-up fields are already satisfied (excluded from the
         retryable set), unioning bookends keeps both tasks in the focused plan."""
-        coverage_field = next(
-            f.path for t in PLAN.tasks if t.task_key == "coverage" for f in t.fields
-        )
-        focus = [coverage_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
+        mid_field = next(f.path for t in PLAN.tasks[1:-1] for f in t.fields)
+        focus = [mid_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
         keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
         assert "introduction" in keys
         assert "wrap_up" in keys

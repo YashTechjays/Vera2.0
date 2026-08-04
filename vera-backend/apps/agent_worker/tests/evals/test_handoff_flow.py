@@ -69,7 +69,7 @@ pytestmark = [
 ]
 
 # Hard stop so a plan that never reaches wrap-up cannot run forever. Generous: the full IBV walk
-# is 7 tasks over 184 fields.
+# is 9 tasks over 184 fields.
 _MAX_PLAN_TURNS = 250
 
 # How VERA names herself. Deliberately only self-identification: "calling on behalf of Dr. Smith"

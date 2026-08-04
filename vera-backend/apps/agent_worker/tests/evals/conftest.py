@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from agent_worker.agent import build_agent
+from agent_worker.cascade import resolve_thinking_config
 from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
@@ -50,7 +51,7 @@ INSURANCE_TYPE = "infertility_treatment"
 # so it uses the newer tier the Observer already trusts for grounded extraction
 # (`settings.observer_extract_primary_model`): it sticks to the fact sheet and invents fewer
 # values. Both are paired with thinking_budget=0, as `main.py` does for extraction.
-VERA_MODEL = "gemini-3.1-flash-lite"
+VERA_MODEL = "gemini-3.6-flash"
 REP_MODEL = "gemini-3.5-flash"
 
 # One synthetic case, so the IVR menu context and the intake prefill can never contradict
@@ -374,7 +375,7 @@ def build_llm(model: str = VERA_MODEL) -> google.LLM:
         model=model,
         vertexai=True,
         location="global",
-        thinking_config=ThinkingConfig(thinking_budget=0),
+        thinking_config=resolve_thinking_config(model, {"thinking_level": "minimal"}),
     )
 
 
