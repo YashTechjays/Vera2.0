@@ -30,6 +30,12 @@ gcloud iam workload-identity-pools create-cred-config "$GCP_WIF_PROVIDER" \
   --credential-source-file="$token_file" \
   --output-file="$cred_file"
 
+# TEMP DEBUG (remove): masking-proof — prints only a length + a count, never the value. Tells us if
+# the run picked up the bare provider (len 100) or the old prefixed one (len 121), and whether the
+# generated audience is doubled (2 occurrences) or correct (1).
+echo "DEBUG provider len=${#GCP_WIF_PROVIDER}"
+echo "DEBUG audience iam.googleapis.com count=$(grep -o 'iam\.googleapis\.com' "$cred_file" | wc -l | tr -d ' ')"
+
 gcloud auth login --cred-file="$cred_file" --quiet
 gcloud config set project "$GCP_PROJECT_ID" --quiet
 
