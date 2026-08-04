@@ -300,6 +300,12 @@ class TestRulesAndRoundTrip:
         assert PLAN.contradictions == (IBV.contradictions or [])
         assert PLAN.shared_conditions == (IBV.shared_conditions or {})
 
+    def test_plan_carries_numeric_consistencies(self) -> None:
+        assert [r.rule_key for r in PLAN.numeric_consistencies] == [
+            "lifetime_maximum_triplet_consistency"
+        ]
+        assert PLAN.numeric_consistencies[0].triplet == "sections.lifetime_maximum"
+
     def test_json_round_trip(self) -> None:
         assert CallPlan.model_validate_json(PLAN.model_dump_json()) == PLAN
 
