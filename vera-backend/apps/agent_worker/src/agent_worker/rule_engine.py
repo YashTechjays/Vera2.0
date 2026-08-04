@@ -14,6 +14,9 @@ Two rule kinds, from the compiled CallPlan:
 * `contradictions` **re-arm**: they push back once per distinct set of values for their
   `fields`, so a rep who restates the same conflicting answer isn't re-challenged, but a
   genuinely new conflicting combination is.
+* `numeric_consistencies` re-arm the same way, but their `when` is computed —
+  the money-triplet checks in vera_core.forms.consistency — and their ReAsk
+  reason embeds the actual recorded amounts.
 
 Flow rules are evaluated before contradictions so a call that should end or jump wins over
 a mere clarification when both would fire on the same turn.
@@ -25,17 +28,20 @@ from typing import Any
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.conditions import evaluate
+from vera_core.forms.consistency import check_triplet, triplet_paths
 
 
 class RuleEngine:
     def __init__(self, plan: CallPlan) -> None:
         self._flow_rules = plan.flow_rules
         self._contradictions = plan.contradictions
+        self._numeric = plan.numeric_consistencies
         self._shared = plan.shared_conditions
         # Flow rules never re-fire; contradictions re-fire only when their fields'
         # values differ from the combination that last triggered them.
         self._fired_flow: set[str] = set()
         self._contradiction_snapshots: dict[str, tuple[Any, ...]] = {}
+        self._numeric_snapshots: dict[str, tuple[Any, ...]] = {}
 
     def evaluate(self, answers: Mapping[str, Any]) -> Directive | None:
         for rule in self._flow_rules:
@@ -58,4 +64,13 @@ class RuleEngine:
                     reason=contradiction.reason,
                     clarify=contradiction.clarify,
                 )
+
+        for rule in self._numeric:
+            snapshot = tuple(answers.get(path) for path in triplet_paths(rule.triplet))
+            if snapshot == self._numeric_snapshots.get(rule.rule_key):
+                continue  # same impossible values we already pushed back on
+            reason = check_triplet(rule.triplet, answers)
+            if reason is not None:
+                self._numeric_snapshots[rule.rule_key] = snapshot
+                return ReAsk(rule_key=rule.rule_key, reason=reason, clarify=rule.clarify)
         return None

@@ -5,13 +5,14 @@ import uuid
 from agent_worker.directives import ReAsk, SkipToTask, Terminate
 from agent_worker.rule_engine import RuleEngine
 from vera_core.forms.call_plan import CallPlan, PlanSession, PlanTask
-from vera_core.forms.dsl import Comparison, Contradiction, FlowRule
+from vera_core.forms.dsl import Comparison, Contradiction, FlowRule, NumericConsistency
 
 
 def _plan(
     *,
     flow_rules: list[FlowRule] | None = None,
     contradictions: list[Contradiction] | None = None,
+    numeric_consistencies: list[NumericConsistency] | None = None,
 ) -> CallPlan:
     return CallPlan(
         schema_name="Test",
@@ -25,6 +26,7 @@ def _plan(
         ],
         flow_rules=flow_rules or [],
         contradictions=contradictions or [],
+        numeric_consistencies=numeric_consistencies or [],
     )
 
 
@@ -99,3 +101,63 @@ def test_flow_rule_beats_contradiction_in_the_same_pass() -> None:
     )
     engine = RuleEngine(_plan(flow_rules=[flow], contradictions=[contradiction]))
     assert engine.evaluate({"sections.a.covered": "No"}) == Terminate(rule_key="term")
+
+
+LTM = "sections.lifetime_maximum"
+LTM_RULE = NumericConsistency(
+    rule_key="ltm_consistency", triplet=LTM, clarify="Could you double-check those amounts?"
+)
+
+
+def test_numeric_consistency_fires_reask_with_dynamic_reason() -> None:
+    engine = RuleEngine(_plan(numeric_consistencies=[LTM_RULE]))
+    directive = engine.evaluate(
+        {f"{LTM}.total": "$100", f"{LTM}.met_amount": "$300", f"{LTM}.remaining": "$300"}
+    )
+    assert isinstance(directive, ReAsk)
+    assert directive.rule_key == "ltm_consistency"
+    assert "$300.00" in directive.reason and "$100.00" in directive.reason
+    assert directive.clarify == "Could you double-check those amounts?"
+
+
+def test_numeric_consistency_silent_on_consistent_or_partial_values() -> None:
+    engine = RuleEngine(_plan(numeric_consistencies=[LTM_RULE]))
+    assert engine.evaluate({}) is None
+    assert engine.evaluate({f"{LTM}.total": "$25,000"}) is None
+    consistent = {
+        f"{LTM}.total": "$25,000",
+        f"{LTM}.met_amount": "$5,000",
+        f"{LTM}.remaining": "$20,000",
+    }
+    assert engine.evaluate(consistent) is None
+    no_limit = {
+        f"{LTM}.total": "No Limit",
+        f"{LTM}.met_amount": "$300",
+        f"{LTM}.remaining": "$300",
+    }
+    assert engine.evaluate(no_limit) is None
+
+
+def test_numeric_consistency_rearms_on_new_values_only() -> None:
+    engine = RuleEngine(_plan(numeric_consistencies=[LTM_RULE]))
+    bad = {f"{LTM}.total": "$100", f"{LTM}.met_amount": "$300", f"{LTM}.remaining": "$300"}
+    assert engine.evaluate(bad) is not None
+    # same impossible combination restated → do not badger the rep again
+    assert engine.evaluate(bad) is None
+    # a genuinely new impossible combination re-arms the push-back
+    still_bad = dict(bad, **{f"{LTM}.met_amount": "$500"})
+    assert engine.evaluate(still_bad) is not None
+
+
+def test_contradiction_beats_numeric_consistency_in_the_same_pass() -> None:
+    contradiction = Contradiction(
+        rule_key="c",
+        when=Comparison(field=f"{LTM}.total", op="eq", value="$100"),
+        fields=[f"{LTM}.total"],
+        reason="r",
+    )
+    engine = RuleEngine(_plan(contradictions=[contradiction], numeric_consistencies=[LTM_RULE]))
+    directive = engine.evaluate(
+        {f"{LTM}.total": "$100", f"{LTM}.met_amount": "$300", f"{LTM}.remaining": "$300"}
+    )
+    assert directive == ReAsk(rule_key="c", reason="r", clarify=None)
