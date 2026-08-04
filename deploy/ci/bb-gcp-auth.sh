@@ -17,11 +17,6 @@ set -euo pipefail
 : "${GCP_DEPLOYER_SA:?repository variable GCP_DEPLOYER_SA is required}"
 : "${GCP_PROJECT_ID:?repository variable GCP_PROJECT_ID is required}"
 
-# TEMP DEBUG (remove after diagnosing UAT WIF audience error): show the exact provider value
-# and its length so a missing //iam.googleapis.com/ prefix or a stray space/newline is visible.
-echo "DEBUG GCP_WIF_PROVIDER=[$GCP_WIF_PROVIDER] len=${#GCP_WIF_PROVIDER}"
-echo "DEBUG GCP_PROJECT_ID=[$GCP_PROJECT_ID]"
-
 token_file="$(mktemp)"
 cred_file="$(mktemp)"
 # The token is written to a file (not passed on the CLI) so it never lands in a process list.
