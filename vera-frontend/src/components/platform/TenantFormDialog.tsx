@@ -44,11 +44,11 @@ const CREATE_DEFAULTS: TenantFormValues = {
 }
 
 const NUMBER_FIELDS = [
-  { key: "max_agents_per_va", label: "Max agents per VA", min: 1, step: 1 },
-  { key: "max_concurrent_calls", label: "Max concurrent calls", min: 1, step: 1 },
-  { key: "max_retries", label: "Max retries", min: 0, step: 1 },
-  { key: "queue_expiry_hours", label: "Queue expiry (hours)", min: 1, step: 1 },
-  { key: "retry_fill_threshold", label: "Retry fill threshold (0–1)", min: 0, step: 0.05 },
+  { key: "max_agents_per_va", label: "Max agents per VA", min: 1, step: 1, max: undefined },
+  { key: "max_concurrent_calls", label: "Max concurrent calls", min: 1, step: 1, max: undefined },
+  { key: "max_retries", label: "Max retries", min: 0, step: 1, max: undefined },
+  { key: "queue_expiry_hours", label: "Queue expiry (hours)", min: 1, step: 1, max: undefined },
+  { key: "retry_fill_threshold", label: "Min verified fraction before review (0–1)", min: 0, max: 1, step: 0.05 },
 ] as const
 
 const CHECKBOX_FIELDS = [
@@ -199,18 +199,19 @@ function TenantForm({ tenant, busy, setBusy, close, onSaved }: TenantFormProps) 
           {isEdit && (
             <>
               <div className="grid grid-cols-2 gap-4">
-                {NUMBER_FIELDS.map(({ key, label, min, step }) => (
-                  <div key={key} className="space-y-1.5">
-                    <Label htmlFor={`tenant-${key}`}>{label}</Label>
+                {NUMBER_FIELDS.map((field) => (
+                  <div key={field.key} className="space-y-1.5">
+                    <Label htmlFor={`tenant-${field.key}`}>{field.label}</Label>
                     <Input
-                      id={`tenant-${key}`}
+                      id={`tenant-${field.key}`}
                       type="number"
-                      min={min}
-                      step={step}
-                      value={Number.isNaN(fields[key]) ? "" : fields[key]}
+                      min={field.min}
+                      max={field.max}
+                      step={field.step}
+                      value={Number.isNaN(fields[field.key]) ? "" : fields[field.key]}
                       onChange={(e) =>
                         // A cleared input becomes NaN (blocked at submit), never a silent 0.
-                        set(key, e.target.value === "" ? Number.NaN : Number(e.target.value))
+                        set(field.key, e.target.value === "" ? Number.NaN : Number(e.target.value))
                       }
                     />
                   </div>

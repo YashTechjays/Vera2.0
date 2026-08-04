@@ -299,6 +299,27 @@ def retryable_required_paths(
     ]
 
 
+def satisfied_required_fraction(
+    status_by_path: Mapping[str, FieldStatus],
+    schema_json: Mapping[str, Any],
+    *,
+    floor: int,
+    values: Mapping[str, Any] | None = None,
+) -> float:
+    """Fraction (0.0-1.0) of required, applicable fields that are satisfied - the
+    same set unsatisfied_required_paths measures. No applicable-required fields -> 1.0.
+    Satisfaction is verified (is_field_satisfied: AI answers need supported +
+    confidence >= floor), not mere value presence."""
+    gate_values = _gate_values(status_by_path, values)
+    applicable = _required_paths(schema_json, gate_values, askable_only=False)
+    if not applicable:
+        return 1.0
+    satisfied = sum(
+        1 for path in applicable if is_field_satisfied(status_by_path.get(path), floor=floor)
+    )
+    return satisfied / len(applicable)
+
+
 def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[str]:
     """Human-readable labels for field paths: leaf titles in v2, else the paths themselves."""
     if not is_v2(schema_json):

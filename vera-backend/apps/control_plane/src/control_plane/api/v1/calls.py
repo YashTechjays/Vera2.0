@@ -208,6 +208,7 @@ def _summary(
     insurance_provider: str | None = None,
     insurance_type: str | None = None,
     completion_pct: float | None = None,
+    verified_pct: float | None = None,
 ) -> CallSummary:
     return CallSummary(
         id=call.id,
@@ -228,6 +229,7 @@ def _summary(
         health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
         completion_pct=completion_pct,
+        verified_pct=verified_pct,
     )
 
 
@@ -865,6 +867,7 @@ async def list_calls(
             PatientForm.insurance_provider,
             FormSchema.insurance_type,
             PatientForm.completion_pct,
+            PatientForm.verified_pct,
         )
         .join(PatientForm, PatientForm.id == Call.form_id)
         .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
@@ -889,8 +892,16 @@ async def list_calls(
     )
     return ok(
         [
-            _summary(c, name, caller.user_id, provider, insurance_type, _pct(completion))
-            for c, name, provider, insurance_type, completion in rows
+            _summary(
+                c,
+                name,
+                caller.user_id,
+                provider,
+                insurance_type,
+                _pct(completion),
+                _pct(verified),
+            )
+            for c, name, provider, insurance_type, completion, verified in rows
         ]
     )
 

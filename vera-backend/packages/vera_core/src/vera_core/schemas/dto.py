@@ -38,6 +38,10 @@ class CallSummary(BaseModel):
     # the live monitoring progress bar a correct fallback before any answer streams this
     # call — e.g. a late retry whose answers are all already on file.
     completion_pct: float | None = None
+    # Verified completion 0-100 (the patient_form projection, judge-confirmed field
+    # answers only); None = never evaluated. Mirrors completion_pct's None-preserving
+    # fallback for the same reason.
+    verified_pct: float | None = None
 
 
 class CallStats(BaseModel):
