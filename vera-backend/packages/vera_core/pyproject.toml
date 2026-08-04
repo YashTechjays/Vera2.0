@@ -13,7 +13,7 @@ dependencies = [
     "opentelemetry-sdk>=1.39",
     "opentelemetry-exporter-otlp-proto-http>=1.39",
     "redis>=5.2",
-    "cryptography>=44",
+    "cryptography>=50",
     # IANA tz data for zoneinfo on platforms without a system database (Windows);
     # queue_dispatcher pins its business-hours window to America/New_York.
     "tzdata>=2025.1",
