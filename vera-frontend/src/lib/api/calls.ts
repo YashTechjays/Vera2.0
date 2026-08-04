@@ -56,10 +56,25 @@ export type CallStats = {
   critical: number
 }
 
-/** GET /calls — calls the caller owns or that are published, newest first.
- *  scope "live" (default) is the in-flight list; "history" the most recent terminal calls. */
-export function listCalls(scope: "live" | "history" = "live"): Promise<CallSummary[]> {
-  return apiRequest<CallSummary[]>(scope === "history" ? "/calls?scope=history" : "/calls")
+/** A server-driven page envelope (matches the backend's paginated responses). */
+export type Paginated<T> = {
+  items: T[]
+  page: number
+  page_size: number
+  total: number
+}
+
+/** GET /calls — in-flight calls the caller owns or that are published, newest first. */
+export function listCalls(): Promise<CallSummary[]> {
+  return apiRequest<CallSummary[]>("/calls")
+}
+
+/** GET /calls?scope=history — terminal calls, newest first, one server page at a time. */
+export function listCompletedCalls(
+  params: { page?: number; page_size?: number } = {},
+): Promise<Paginated<CallSummary>> {
+  const { page = 1, page_size = 20 } = params
+  return apiRequest<Paginated<CallSummary>>(`/calls?scope=history&page=${page}&page_size=${page_size}`)
 }
 
 /** GET /calls/stats — counts for the Live Monitoring stat cards. */
@@ -88,12 +103,7 @@ export type CallHistoryRow = {
   transcript_available: boolean
 }
 
-export type PaginatedCalls = {
-  items: CallHistoryRow[]
-  page: number
-  page_size: number
-  total: number
-}
+export type PaginatedCalls = Paginated<CallHistoryRow>
 
 export type ListCallHistoryParams = {
   page?: number

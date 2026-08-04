@@ -25,11 +25,13 @@ import {
   getRecordingPlayback,
   listCallHistory,
   listCalls,
+  listCompletedCalls,
   publishCall,
   type CallStats,
   type CallSummary,
   type JoinTokenResponse,
   type LiveCallSummary,
+  type Paginated,
   type PaginatedCalls,
 } from "./calls"
 
@@ -70,12 +72,19 @@ describe("calls API client", () => {
     expect(apiRequest).toHaveBeenCalledWith("/calls")
   })
 
-  it("lists terminal calls with GET /calls?scope=history", async () => {
+  it("lists completed calls as a page with GET /calls?scope=history", async () => {
     const done = { ...call, status: "completed", ended_at: "2026-07-04T10:05:00Z" }
-    vi.mocked(apiRequest).mockResolvedValue([done])
-    const out = await listCalls("history")
-    expect(out).toEqual([done])
-    expect(apiRequest).toHaveBeenCalledWith("/calls?scope=history")
+    const page = { items: [done], page: 2, page_size: 20, total: 41 }
+    vi.mocked(apiRequest).mockResolvedValue(page)
+    const out = await listCompletedCalls({ page: 2 })
+    expect(out).toEqual(page)
+    expect(apiRequest).toHaveBeenCalledWith("/calls?scope=history&page=2&page_size=20")
+  })
+
+  it("listCompletedCalls defaults to page 1, size 20", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
+    await listCompletedCalls()
+    expect(apiRequest).toHaveBeenCalledWith("/calls?scope=history&page=1&page_size=20")
   })
 
   it("fetches stat-card counts with GET /calls/stats", async () => {
