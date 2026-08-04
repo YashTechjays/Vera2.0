@@ -39,11 +39,16 @@ definitions:
             echo "PR: $SRC -> $DEST"
             case "$DEST" in
               main)
-                # CURRENT (dev + main only): allow dev and hotfix/*.
-                # TODO when qa/stg exist: tighten to  stg|hotfix/*
+                # Release train: prod takes only uat (+ hotfix/* for emergency prod fixes).
                 case "$SRC" in
-                  dev|hotfix/*) echo "OK" ;;
-                  *) echo "BLOCKED: main accepts only dev or hotfix/* (until stg exists)"; exit 1 ;;
+                  uat|hotfix/*) echo "OK" ;;
+                  *) echo "BLOCKED: main accepts only uat or hotfix/*"; exit 1 ;;
+                esac ;;
+              uat)
+                # Release train: uat takes only dev (the integrated release candidate).
+                case "$SRC" in
+                  dev) echo "OK" ;;
+                  *) echo "BLOCKED: uat accepts only dev"; exit 1 ;;
                 esac ;;
               dev)
                 # Allow the conventional-commit branch prefixes (feat/fix/chore, `/` or
@@ -52,7 +57,6 @@ definitions:
                   feature/*|bugfix/*|feat/*|feat-*|fix/*|fix-*|chore/*|chore-*) echo "OK" ;;
                   *) echo "BLOCKED: dev accepts only feature/*, bugfix/*, feat/*, feat-*, fix/*, fix-*, chore/*, chore-*"; exit 1 ;;
                 esac ;;
-              # TODO when qa/stg branches exist, add: qa<-dev, stg<-qa, main<-stg|hotfix/*
               *)
                 echo "No promotion rule for destination '$DEST' — allowed" ;;
             esac
@@ -236,6 +240,63 @@ definitions:
           - bash deploy/ci/bb-gcp-auth.sh
           - bash deploy/ci/bb-deploy-changed.sh
 
+    # ===================== UAT: CI only (build + push, NO deploy) =====================
+    # Runs on the `uat` branch. Backend (control-plane, agent-worker) build as images -> the UAT
+    # project's Artifact Registry (keyless OIDC->WIF, same scripts as dev). The frontend is NOT an
+    # image on UAT: it's a static Vite build synced to a GCS bucket (see &uat-frontend-* below).
+    # There is NO deploy step — UAT CD is owned by the infra repo. UAT GCP values come from
+    # UAT_-prefixed repository variables, remapped onto the names the shared scripts already
+    # expect, so the dev project's GCP_* variables are never touched. MOVING_TAG=uat keeps the
+    # image :uat tag separate from :dev.
+    - step: &uat-build-control-plane
+        name: Build control-plane (uat)
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        script:
+          - export GCP_WIF_PROVIDER="$UAT_GCP_WIF_PROVIDER" GCP_DEPLOYER_SA="$UAT_GCP_DEPLOYER_SA" GCP_PROJECT_ID="$UAT_GCP_PROJECT_ID" GCP_REGION="$UAT_GCP_REGION" AR_REPO="$UAT_AR_REPO" MOVING_TAG=uat
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh control-plane vera-backend vera-backend/docker/control_plane.Dockerfile
+
+    - step: &uat-build-worker
+        name: Build agent-worker (uat)
+        image: google/cloud-sdk:slim
+        oidc: true
+        services: [docker]
+        caches: [docker]
+        script:
+          - export GCP_WIF_PROVIDER="$UAT_GCP_WIF_PROVIDER" GCP_DEPLOYER_SA="$UAT_GCP_DEPLOYER_SA" GCP_PROJECT_ID="$UAT_GCP_PROJECT_ID" GCP_REGION="$UAT_GCP_REGION" AR_REPO="$UAT_AR_REPO" MOVING_TAG=uat
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-build-push.sh agent-worker vera-backend vera-backend/docker/agent_worker.Dockerfile
+
+    # Frontend on UAT is static, not an image: build the SPA, then sync dist/ to a GCS bucket.
+    # Two steps because the toolchains differ (node to build, gcloud to upload); dist/ passes
+    # between them as a pipeline artifact. VITE_API_BASE_URL stays the relative "/api/v1" — the
+    # UAT GCS bucket is fronted by a GCP HTTPS LB that routes /api/* to the control-plane, so the
+    # browser is same-origin exactly as nginx makes it on dev (no CORS on PHI endpoints).
+    - step: &uat-frontend-build
+        name: Build frontend (uat)
+        image: node:22
+        caches: [npm]
+        script:
+          - ': "${VITE_API_BASE_URL:?VITE_API_BASE_URL repository variable required}"'
+          - cd vera-frontend
+          - corepack enable
+          - npm ci
+          - npm run build            # Vite bakes in VITE_API_BASE_URL from the step env
+        artifacts:
+          - vera-frontend/dist/**
+
+    - step: &uat-frontend-upload
+        name: Upload frontend to GCS (uat)
+        image: google/cloud-sdk:slim
+        oidc: true
+        script:
+          - export GCP_WIF_PROVIDER="$UAT_GCP_WIF_PROVIDER" GCP_DEPLOYER_SA="$UAT_GCP_DEPLOYER_SA" GCP_PROJECT_ID="$UAT_GCP_PROJECT_ID" FRONTEND_BUCKET="$UAT_FRONTEND_BUCKET"
+          - bash deploy/ci/bb-gcp-auth.sh
+          - bash deploy/ci/bb-frontend-upload.sh
+
 pipelines:
   branches:
     # ---- dev (auto CD): full DB-backed gate -> build changed components -> deploy to test. ----
@@ -251,6 +312,21 @@ pipelines:
           - step: *build-worker
           - step: *build-frontend
       - step: *deploy-test
+
+    # ---- uat (CI only): full DB-backed gate -> build backend images + push to UAT AR, and ----
+    #      build the frontend + sync to GCS. NO deploy. Unconditional (no changeset filter) so
+    #      every uat commit yields a complete image set + a fresh frontend for the infra repo.
+    #      The GCS upload tails the parallel block (it consumes the frontend-build artifact).
+    uat:
+      - parallel:
+          - step: *dev-ci-backend
+          - step: *ci-frontend
+          - step: *gitleaks
+      - parallel:
+          - step: *uat-build-control-plane
+          - step: *uat-build-worker
+          - step: *uat-frontend-build
+      - step: *uat-frontend-upload
 
     # ---- EVERY OTHER branch: fast feedback (static + unit + frontend + secret scan). No DB. ----
     '**':
