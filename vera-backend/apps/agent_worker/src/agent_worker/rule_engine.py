@@ -65,12 +65,16 @@ class RuleEngine:
                     clarify=contradiction.clarify,
                 )
 
-        for rule in self._numeric:
-            snapshot = tuple(answers.get(path) for path in triplet_paths(rule.triplet))
-            if snapshot == self._numeric_snapshots.get(rule.rule_key):
+        for consistency in self._numeric:
+            snapshot = tuple(answers.get(path) for path in triplet_paths(consistency.triplet))
+            if snapshot == self._numeric_snapshots.get(consistency.rule_key):
                 continue  # same impossible values we already pushed back on
-            reason = check_triplet(rule.triplet, answers)
+            reason = check_triplet(consistency.triplet, answers)
             if reason is not None:
-                self._numeric_snapshots[rule.rule_key] = snapshot
-                return ReAsk(rule_key=rule.rule_key, reason=reason, clarify=rule.clarify)
+                self._numeric_snapshots[consistency.rule_key] = snapshot
+                return ReAsk(
+                    rule_key=consistency.rule_key,
+                    reason=reason,
+                    clarify=consistency.clarify,
+                )
         return None

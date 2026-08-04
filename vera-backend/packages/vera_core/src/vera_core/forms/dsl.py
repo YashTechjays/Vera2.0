@@ -819,14 +819,14 @@ class FormSchemaDoc(_Model):
                     )
 
         # numeric consistencies
-        for rule in self.numeric_consistencies or []:
-            rk = rule.rule_key
+        for consistency in self.numeric_consistencies or []:
+            rk = consistency.rule_key
             check_key(f"numeric_consistency {rk}", rk)
             if rk in rule_keys:
                 errors.append(f"duplicate rule_key {rk!r}")
             rule_keys.add(rk)
             for child in TRIPLET_KEYS:
-                path = f"{rule.triplet}.{child}"
+                path = f"{consistency.triplet}.{child}"
                 if path not in leaves:
                     errors.append(f"numeric_consistency {rk}: {path!r} is not a leaf field")
                 elif leaves[path].type != "currency":
