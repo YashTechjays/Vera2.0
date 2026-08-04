@@ -26,6 +26,14 @@ async def _delete_forms(sessionmaker: async_sessionmaker[AsyncSession], *form_id
         await session.execute(delete(PatientForm).where(PatientForm.id.in_(form_ids)))
 
 
+async def _delete_calls_and_forms(
+    sessionmaker: async_sessionmaker[AsyncSession], *form_ids: UUID
+) -> None:
+    async with sessionmaker() as session, session.begin():
+        await session.execute(delete(Call).where(Call.form_id.in_(form_ids)))
+    await _delete_forms(sessionmaker, *form_ids)
+
+
 async def _seed_form(session: AsyncSession, tenant_id: UUID) -> UUID:
     """A minimal PatientForm satisfying `schema_version_id` NOT NULL, for queue-status
     counts. Mirrors `test_call_queue._seed_ready_form`'s schema find-or-create (the
@@ -142,14 +150,6 @@ async def test_queue_status_is_tenant_isolated(
         await _delete_forms(admin_sessionmaker, other_form)
 
 
-async def _delete_calls_and_forms(
-    sessionmaker: async_sessionmaker[AsyncSession], *form_ids: UUID
-) -> None:
-    async with sessionmaker() as session, session.begin():
-        await session.execute(delete(Call).where(Call.form_id.in_(form_ids)))
-    await _delete_forms(sessionmaker, *form_ids)
-
-
 @pytest.mark.asyncio
 async def test_live_panel_matches_live_monitoring(
     client: httpx.AsyncClient,
@@ -158,28 +158,26 @@ async def test_live_panel_matches_live_monitoring(
 ) -> None:
     """The ticket's hard rule: sum(active) == /calls/stats live == len(GET /calls)."""
     headers = _auth(rbac_world.supervisor_token)
-    # Seed for the SUPERVISOR persona: one own active call, one published call
-    # owned by someone else (visible), one unpublished call owned by someone
-    # else (INVISIBLE), one queued form.
+    # Supervisor visibility: own and published calls count, another user's unpublished one must not.
     async with admin_sessionmaker() as session, session.begin():
-        form_a = await _seed_form(session, rbac_world.tenant_id)
-        form_b = await _seed_form(session, rbac_world.tenant_id)
-        form_c = await _seed_form(session, rbac_world.tenant_id)
-        form_q = await _seed_form(session, rbac_world.tenant_id)
+        own_form = await _seed_form(session, rbac_world.tenant_id)
+        published_form = await _seed_form(session, rbac_world.tenant_id)
+        hidden_form = await _seed_form(session, rbac_world.tenant_id)
+        queued_form = await _seed_form(session, rbac_world.tenant_id)
         await session.execute(
-            update(PatientForm).where(PatientForm.id == form_q).values(status="in_queue")
+            update(PatientForm).where(PatientForm.id == queued_form).values(status="in_queue")
         )
     await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
-        form_a,
+        own_form,
         initiated_by_id=rbac_world.supervisor_id,
         status="active",
     )
     await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
-        form_b,
+        published_form,
         initiated_by_id=rbac_world.admin_id,
         status="active",
         published=True,
@@ -187,10 +185,10 @@ async def test_live_panel_matches_live_monitoring(
     await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
-        form_c,
+        hidden_form,
         initiated_by_id=rbac_world.admin_id,
         status="active",
-    )  # hidden from the supervisor: unpublished, someone else's
+    )
 
     try:
         panel = (await client.get(LIVE_PATH, headers=headers)).json()["data"]
@@ -200,7 +198,9 @@ async def test_live_panel_matches_live_monitoring(
         assert sum(r["active"] for r in panel["rows"]) == stats["live"] == len(live_list)
         assert sum(r["in_queue"] for r in panel["rows"]) >= 1
     finally:
-        await _delete_calls_and_forms(admin_sessionmaker, form_a, form_b, form_c, form_q)
+        await _delete_calls_and_forms(
+            admin_sessionmaker, own_form, published_form, hidden_form, queued_form
+        )
 
 
 @pytest.mark.asyncio
@@ -218,9 +218,8 @@ async def test_unmatched_provider_text_lands_in_the_null_bucket(
         )
 
     try:
-        rows = (await client.get(LIVE_PATH, headers=_auth(rbac_world.admin_token))).json()["data"][
-            "rows"
-        ]
+        resp = await client.get(LIVE_PATH, headers=_auth(rbac_world.admin_token))
+        rows = resp.json()["data"]["rows"]
         bucket = next(r for r in rows if r["provider_id"] is None)
         assert bucket["provider_name"] is None
         assert bucket["in_queue"] >= 1

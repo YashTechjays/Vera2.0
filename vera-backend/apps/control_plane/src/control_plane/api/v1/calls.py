@@ -104,8 +104,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["calls"])
 
-# The single definition of a live call, shared by Live Monitoring and the analytics
-# live panel — the ticket requires the two screens to agree, so never fork it.
+# Exported: the analytics live panel must count "live" exactly as Live Monitoring does.
 ACTIVE_CALL_STATUSES = (
     CallStatus.INITIATED,
     CallStatus.RINGING,

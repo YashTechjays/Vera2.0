@@ -92,59 +92,52 @@ async def live_panel(
     per-user visibility, `in_queue` resolves each form's free-text provider the way
     the dispatcher does."""
     response.headers["Cache-Control"] = "no-store"
-    active_rows = (
-        await session.execute(
-            select(Call.insurance_provider_id, func.count())
-            .where(
-                Call.current_status.in_(list(ACTIVE_CALL_STATUSES)),
-                visible_to(caller.user_id),
-            )
-            .group_by(Call.insurance_provider_id)
+    active_result = await session.execute(
+        select(Call.insurance_provider_id, func.count())
+        .where(
+            Call.current_status.in_(list(ACTIVE_CALL_STATUSES)),
+            visible_to(caller.user_id),
         )
-    ).all()
-    queued_rows = (
-        await session.execute(
-            select(InsuranceProvider.id, func.count())
-            .select_from(PatientForm)
-            .outerjoin(
-                InsuranceProvider,
-                and_(
-                    # Same match as queue_dispatcher._resolve_provider.
-                    func.lower(InsuranceProvider.name)
-                    == func.lower(func.trim(PatientForm.insurance_provider)),
-                    InsuranceProvider.status == ProviderStatus.ACTIVE.value,
-                ),
-            )
-            .where(PatientForm.status == FormStatus.IN_QUEUE.value)
-            .group_by(InsuranceProvider.id)
+        .group_by(Call.insurance_provider_id)
+    )
+    queued_result = await session.execute(
+        select(InsuranceProvider.id, func.count())
+        .select_from(PatientForm)
+        .outerjoin(
+            InsuranceProvider,
+            and_(
+                # Same match as queue_dispatcher._resolve_provider.
+                func.lower(InsuranceProvider.name)
+                == func.lower(func.trim(PatientForm.insurance_provider)),
+                InsuranceProvider.status == ProviderStatus.ACTIVE.value,
+            ),
         )
-    ).all()
-    counts: dict[UUID | None, dict[str, int]] = defaultdict(lambda: {"in_queue": 0, "active": 0})
-    for provider_id, n in active_rows:
-        counts[provider_id]["active"] = n
-    for provider_id, n in queued_rows:
-        counts[provider_id]["in_queue"] = n
-    named = [pid for pid in counts if pid is not None]
+        .where(PatientForm.status == FormStatus.IN_QUEUE.value)
+        .group_by(InsuranceProvider.id)
+    )
+    # A None key is the no-provider bucket: no provider on the call, or queued free
+    # text the outer join couldn't match.
+    active_counts: dict[UUID | None, int] = dict(active_result.tuples().all())
+    queued_counts: dict[UUID | None, int] = dict(queued_result.tuples().all())
+    provider_ids = active_counts.keys() | queued_counts.keys()
+    catalog_ids = [pid for pid in provider_ids if pid is not None]
     names: dict[UUID, str] = {}
-    if named:
-        name_rows = (
-            await session.execute(
-                select(InsuranceProvider.id, InsuranceProvider.name).where(
-                    InsuranceProvider.id.in_(named)
-                )
+    if catalog_ids:
+        name_rows = await session.execute(
+            select(InsuranceProvider.id, InsuranceProvider.name).where(
+                InsuranceProvider.id.in_(catalog_ids)
             )
-        ).all()
-        for pid, name in name_rows:
-            names[pid] = name
+        )
+        names = dict(name_rows.tuples().all())
     rows = sorted(
         (
             LiveProviderRow(
                 provider_id=pid,
                 provider_name=names.get(pid) if pid is not None else None,
-                in_queue=c["in_queue"],
-                active=c["active"],
+                in_queue=queued_counts.get(pid, 0),
+                active=active_counts.get(pid, 0),
             )
-            for pid, c in counts.items()
+            for pid in provider_ids
         ),
         # Named providers alphabetically; the no-provider bucket last.
         key=lambda r: (r.provider_name is None, r.provider_name or ""),
