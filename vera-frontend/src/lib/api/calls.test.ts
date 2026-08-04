@@ -74,7 +74,7 @@ describe("calls API client", () => {
 
   it("lists completed calls as a page with GET /calls?scope=history", async () => {
     const done = { ...call, status: "completed", ended_at: "2026-07-04T10:05:00Z" }
-    const page = { items: [done], page: 2, page_size: 20, total: 41 }
+    const page: Paginated<CallSummary> = { items: [done], page: 2, page_size: 20, total: 41 }
     vi.mocked(apiRequest).mockResolvedValue(page)
     const out = await listCompletedCalls({ page: 2 })
     expect(out).toEqual(page)
