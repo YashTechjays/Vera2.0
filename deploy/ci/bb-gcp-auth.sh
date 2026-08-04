@@ -17,6 +17,18 @@ set -euo pipefail
 : "${GCP_DEPLOYER_SA:?repository variable GCP_DEPLOYER_SA is required}"
 : "${GCP_PROJECT_ID:?repository variable GCP_PROJECT_ID is required}"
 
+# TEMP DEBUG (remove after diagnosing UAT WIF audience error): decode ONLY the aud + iss claims
+# from the OIDC token to compare against the provider's allowedAudiences/issuerUri. Never prints
+# the token, the sub, or the signature.
+python3 - <<'PY'
+import os, base64, json
+seg = os.environ["BITBUCKET_STEP_OIDC_TOKEN"].split('.')[1]
+seg += '=' * (-len(seg) % 4)
+claims = json.loads(base64.urlsafe_b64decode(seg))
+print("DEBUG token aud =", claims.get("aud"))
+print("DEBUG token iss =", claims.get("iss"))
+PY
+
 token_file="$(mktemp)"
 cred_file="$(mktemp)"
 # The token is written to a file (not passed on the CLI) so it never lands in a process list.
