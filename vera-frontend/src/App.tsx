@@ -28,6 +28,7 @@ import { IvrPlaybooks } from "@/pages/IvrPlaybooks"
 import { FormSchemas } from "@/pages/FormSchemas"
 import { LlmConfig } from "@/pages/LlmConfig"
 import { CallHistory } from "@/pages/CallHistory"
+import { Analytics } from "@/pages/Analytics"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -89,7 +90,7 @@ function App() {
             />
             <Route
               path="analytics"
-              element={<RequireNavRoute to="/analytics"><Placeholder title="Analytics" /></RequireNavRoute>}
+              element={<RequireNavRoute to="/analytics"><Analytics /></RequireNavRoute>}
             />
             <Route path="tenant-access" element={<TenantAccess />} />
             {/* Super-admin-only platform-operator roster. */}
