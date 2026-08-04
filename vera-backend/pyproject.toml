@@ -22,6 +22,8 @@ dev = [
     "fakeredis>=2.26",
     "qrcode>=7.4",
     "types-openpyxl",
+    # PEP 440 comparison in tests/unit/test_dependency_floors.py (arrives via pytest anyway)
+    "packaging>=24",
 ]
 
 # ---------------------------------------------------------------------------
