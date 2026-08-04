@@ -49,7 +49,7 @@ Set under **Repo settings → Repository variables** (none are secret — OIDC i
 
 | Variable | Meaning | Example |
 |---|---|---|
-| `GCP_WIF_PROVIDER` | full WIF provider resource (from Terraform output) | `//iam.googleapis.com/projects/…/providers/bitbucket` |
+| `GCP_WIF_PROVIDER` | WIF provider resource, **bare** — no `//iam.googleapis.com/` scheme (`create-cred-config` adds it; including it doubles the audience and STS rejects the exchange) | `projects/…/providers/bitbucket` |
 | `GCP_DEPLOYER_SA` | deployer SA email | `gh-deployer-dev@vera-123456.iam.gserviceaccount.com` |
 | `GCP_PROJECT_ID` | test project id | `vera-123456` |
 | `GCP_REGION` | region | `us-central1` |
@@ -99,7 +99,7 @@ standard names the shared scripts expect (so the dev `GCP_*` variables are never
 
 | Variable | Meaning |
 |---|---|
-| `UAT_GCP_WIF_PROVIDER` | WIF provider resource for the UAT project |
+| `UAT_GCP_WIF_PROVIDER` | WIF provider resource for the UAT project — **bare**, no `//iam.googleapis.com/` (see `GCP_WIF_PROVIDER`) |
 | `UAT_GCP_DEPLOYER_SA` | UAT builder SA email |
 | `UAT_GCP_PROJECT_ID` | UAT project id |
 | `UAT_GCP_REGION` | region |
@@ -111,7 +111,10 @@ The backend image steps set `MOVING_TAG=uat`, so the moving tag (`:uat`) never c
 filter) so every uat commit produces a complete image set + a fresh frontend.
 
 **Prerequisite (infra repo / Terraform):** in the UAT project — a Bitbucket OIDC provider on a WIF
-pool locked to this repo + the `uat` branch; a builder SA with **`roles/artifactregistry.writer`**
-(backend images) **and `roles/storage.objectAdmin`** on the frontend bucket (the GCS sync prunes
-stale objects, so it needs delete); an Artifact Registry repo; and a GCS bucket fronted by an HTTPS
-LB that routes `/api/*` to the control-plane. Feed the Terraform outputs into the `UAT_` variables.
+pool trusting this workspace/repo; a **dedicated** builder SA (not the Terraform-apply SA — least
+privilege) that grants **`roles/iam.workloadIdentityUser`** to the app repo's principalSet
+(`principalSet://…/workloadIdentityPools/<pool>/attribute.repository/{<app-repo-uuid>}`, so the `uat`
+pipeline can impersonate it) and holds **`roles/artifactregistry.writer`** (backend images) **and
+`roles/storage.objectAdmin`** on the frontend bucket (the GCS sync prunes stale objects, so it needs
+delete); an Artifact Registry repo; and a GCS bucket fronted by an HTTPS LB that routes `/api/*` to
+the control-plane. Feed the Terraform outputs into the `UAT_` variables.
