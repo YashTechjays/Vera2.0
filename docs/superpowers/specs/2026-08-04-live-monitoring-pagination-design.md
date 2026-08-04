@@ -53,8 +53,9 @@ disagree with the table):
 
 `src/pages/LiveMonitoring.tsx`:
 
-- One `page` state; reset to 1 on every tab change.
-- Active/Critical: poll unchanged; `rows` slices the current 20-row window
+- One `page` state; reset to 1 on every tab change. Page size 10 (Azad's
+  call during manual testing; Call History keeps its 20).
+- Active/Critical: poll unchanged; `rows` slices the current 10-row window
   from the full in-memory list.
 - Completed: fetch the current server page; a page change refetches, and the
   8 s poll re-reads the current page.

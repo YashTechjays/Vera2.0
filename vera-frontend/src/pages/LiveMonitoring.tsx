@@ -49,7 +49,7 @@ import type { CallCategory } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
-const PAGE_SIZE = 20
+const PAGE_SIZE = 10
 
 type TabKey = "active" | "critical" | "completed"
 const TABS: { key: TabKey; label: string }[] = [
