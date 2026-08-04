@@ -39,8 +39,10 @@ import { elapsed } from "@/lib/monitoring/liveTimer"
 import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
 import { humanizeSegment } from "@/lib/patient-forms/display"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
+import { QueueLimitCard } from "@/components/monitoring/QueueLimitCard"
 import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
 import { shortCallRef, type OpenCallNavState } from "@/lib/notifications/store"
+import { getQueueStatus, type QueueStatus } from "@/lib/api/analytics"
 import type { CallCategory } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
@@ -125,6 +127,7 @@ export function LiveMonitoring() {
   const [calls, setCalls] = useState<CallSummary[]>([])
   const [history, setHistory] = useState<CallSummary[]>([])
   const [stats, setStats] = useState<CallStats | null>(null)
+  const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<TabKey>("active")
   const [now, setNow] = useState(() => Date.now())
@@ -151,10 +154,11 @@ export function LiveMonitoring() {
     let cancelled = false
     async function load() {
       // allSettled: a stats/history hiccup must not stall the live list (and vice versa).
-      const [items, counts, past] = await Promise.allSettled([
+      const [items, counts, past, queue] = await Promise.allSettled([
         listCalls(),
         getCallStats(),
         tab === "completed" ? listCalls("history") : Promise.resolve(null),
+        getQueueStatus(),
       ])
       if (cancelled) return
       if (items.status === "fulfilled") {
@@ -173,6 +177,7 @@ export function LiveMonitoring() {
       hasLoadedOnce.current = true
       if (counts.status === "fulfilled") setStats(counts.value)
       if (past.status === "fulfilled" && past.value) setHistory(past.value)
+      if (queue.status === "fulfilled") setQueueStatus(queue.value)
     }
     void load()
     const id = setInterval(() => {
@@ -309,6 +314,8 @@ export function LiveMonitoring() {
           </Card>
         ))}
       </div>
+
+      <QueueLimitCard status={queueStatus} />
 
       <h2 className="text-lg font-semibold tracking-tight">Patient Call Status</h2>
 
