@@ -53,7 +53,7 @@ function FormPanel({
 }: {
   formId: string | undefined
   progress: number
-  verified: number
+  verified: number | null
   onExpand: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -71,7 +71,10 @@ function FormPanel({
         <button type="button" onClick={toggleExpanded} className="flex items-center gap-3">
           <span className="font-semibold text-foreground">Patient Information Form</span>
           <span className="text-sm font-semibold text-foreground">
-            {progress}% <span className="text-muted-foreground">· Verified {verified}%</span>
+            {progress}%
+            {verified !== null && (
+              <span className="text-muted-foreground"> · Verified {verified}%</span>
+            )}
           </span>
         </button>
         <div className="flex items-center gap-2">
@@ -178,8 +181,10 @@ export function LiveCallModal({
   }
   // Prefer the live SSE completion; fall back to the polled list value until the first frame.
   const progress = Math.round(liveCompletion ?? call?.formProgress ?? 0)
-  // Verified % is post-call only (0/null during a live call) — no SSE source yet.
-  const verified = Math.round(call?.verifiedProgress ?? 0)
+  // Verified % is post-call only — null during a live/pre-eval call (no SSE source yet),
+  // rendered as no label rather than a misleading 0%.
+  const verified =
+    call?.verifiedProgress != null ? Math.round(call.verifiedProgress) : null
 
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null

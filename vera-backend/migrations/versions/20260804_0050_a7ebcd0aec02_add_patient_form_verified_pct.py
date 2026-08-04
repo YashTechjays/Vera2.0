@@ -17,10 +17,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE patient_form ADD COLUMN IF NOT EXISTS verified_pct "
-        "numeric(5, 2) NOT NULL DEFAULT 0"
-    )
+    # Nullable, no default: existing rows (and any form not yet post-call-evaluated)
+    # read NULL = "not evaluated", never a misleading 0. Diverges from completion_pct
+    # deliberately — see the model comment.
+    op.execute("ALTER TABLE patient_form ADD COLUMN IF NOT EXISTS verified_pct numeric(5, 2)")
+    # A DB provisioned from this migration's earlier (NOT NULL DEFAULT 0) revision already
+    # has the column — ADD COLUMN no-ops there — so bring it to the nullable, no-default
+    # shape explicitly. Both ALTERs are harmless no-ops where the column is already nullable
+    # (fresh CI: 0001 create_all builds it from the current model).
+    op.execute("ALTER TABLE patient_form ALTER COLUMN verified_pct DROP NOT NULL")
+    op.execute("ALTER TABLE patient_form ALTER COLUMN verified_pct DROP DEFAULT")
 
 
 def downgrade() -> None:

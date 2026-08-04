@@ -1313,7 +1313,43 @@ async def test_threshold_met_routes_to_review_not_retry(
     assert outcome.status == FormStatus.EXCEPTION_REVIEW
     form = await ctx.reload_form()
     assert form.review_reason == ReviewReason.FILL_THRESHOLD_MET.value
-    assert form.verified_pct > 0  # persisted
+    # 1 of 2 required verified → exactly 50%, persisted as a percentage (not the 0-1 fraction).
+    assert form.verified_pct is not None
+    assert float(form.verified_pct) == 50.0
+
+
+async def test_verified_fraction_exactly_at_threshold_is_suppressed(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Boundary: verified fraction == threshold suppresses the retry (the gate is
+    `>=`, not `>`). Guards against a silent flip at the schema-default 0.50."""
+    ctx = seeded_ai_processing_form
+    await _require_notes_and_set_threshold(ctx, 0.5)
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    await ctx.session.flush()
+
+    # 1 of 2 required verified → fraction 0.5, exactly the threshold.
+    turns = [TranscriptTurn(0, "user", "yes in network")]
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[JudgeVerdict(ctx.collection_path, True, 90, "yes in network")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == ReviewReason.FILL_THRESHOLD_MET.value
 
 
 async def test_below_threshold_still_retries(

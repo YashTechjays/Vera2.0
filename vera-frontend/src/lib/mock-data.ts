@@ -18,8 +18,9 @@ export type LiveCall = {
   confidence: number
   formProgress: number
   /** Verified-field percentage (0-100) shown beside the filled %; post-call only in the
-   *  real API — mock rows give it a placeholder value. */
-  verifiedProgress: number
+   *  real API (null until evaluated — live/pre-eval calls hide the label). Mock rows give
+   *  it a placeholder value. */
+  verifiedProgress: number | null
   /** The patient form this call fills — the inline panel loads it and live AI answers
    *  from SSE are applied to it. Absent on mock rows. */
   formId?: string

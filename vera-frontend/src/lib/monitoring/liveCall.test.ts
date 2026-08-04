@@ -44,8 +44,8 @@ describe("toLiveCall", () => {
     expect(live.verifiedProgress).toBe(40)
   })
 
-  it("falls back to 0 when verified_pct is null", () => {
+  it("preserves null verified_pct (live/pre-eval renders no Verified label, not 0%)", () => {
     const live = toLiveCall(callSummary({ verified_pct: null }), Date.parse("2026-08-04T00:01:00Z"))
-    expect(live.verifiedProgress).toBe(0)
+    expect(live.verifiedProgress).toBeNull()
   })
 })

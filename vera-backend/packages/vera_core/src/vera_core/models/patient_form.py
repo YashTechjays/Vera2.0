@@ -84,7 +84,9 @@ class PatientForm(Base, TenantScopedMixin):
     # Verified completion: fraction (0-100) of applicable-required fields the judge
     # confirmed (supported + confidence >= floor), NOT mere presence like
     # completion_pct. Set post-call by evaluate_call; drives the retry-fill gate.
-    verified_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
+    # Nullable (unlike completion_pct): NULL means "not yet evaluated" — a real 0
+    # would misread as "0% verified" on the review surface for pre-eval/live forms.
+    verified_pct: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Why the pipeline sent this form to EXCEPTION_REVIEW (ReviewReason values).
     # NULL outside review and for manual transitions — a pipeline artifact, not
