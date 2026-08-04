@@ -1,4 +1,4 @@
-import { allLeaves, createRequiredPaths, isApplicable, isRequired } from "./schema"
+import { allLeaves, createRequiredPaths, isApplicable, isRequired, leafByPath } from "./schema"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -9,6 +9,68 @@ const NUMERIC_TYPES = new Set(["currency", "percent", "integer"])
 /** Parse a transcribed money/percent string ("$1,500.50", "20%") to a number. */
 function parseNumeric(value: string): number {
   return Number(value.replace(/[$,%\s]/g, ""))
+}
+
+function formatMoney(n: number): string {
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+/**
+ * Cross-field money-triplet checks (`numeric_consistencies`): met/remaining must
+ * not exceed total and met + remaining must equal total (±$0.01, compared in
+ * whole cents). Mirrors vera_core.forms.consistency — keep semantics in sync.
+ */
+function numericConsistencyErrors(schema: FormSchema, values: FormValues): ValidationErrors {
+  const errors: ValidationErrors = {}
+  const leaves = leafByPath(schema)
+  for (const rule of schema.numeric_consistencies ?? []) {
+    const totalPath = `${rule.triplet}.total`
+    const metPath = `${rule.triplet}.met_amount`
+    const remainingPath = `${rule.triplet}.remaining`
+    const parse = (path: string): number | undefined => {
+      const raw = (values[path] ?? "").trim()
+      if (raw === "") return undefined
+      const n = parseNumeric(raw)
+      return Number.isNaN(n) ? undefined : n
+    }
+    const title = (path: string): string => leaves.get(path)?.field.title ?? path
+    const total = parse(totalPath)
+    const met = parse(metPath)
+    const remaining = parse(remainingPath)
+
+    const clauses: string[] = []
+    const flagged = new Set<string>()
+    if (total !== undefined && met !== undefined && met > total) {
+      clauses.push(
+        `${title(metPath)} (${formatMoney(met)}) exceeds ${title(totalPath)} (${formatMoney(total)})`
+      )
+      flagged.add(metPath).add(totalPath)
+    }
+    if (total !== undefined && remaining !== undefined && remaining > total) {
+      clauses.push(
+        `${title(remainingPath)} (${formatMoney(remaining)}) exceeds ${title(totalPath)} (${formatMoney(total)})`
+      )
+      flagged.add(remainingPath).add(totalPath)
+    }
+    if (
+      clauses.length === 0 &&
+      total !== undefined &&
+      met !== undefined &&
+      remaining !== undefined &&
+      Math.abs(Math.round((met + remaining - total) * 100)) > 1
+    ) {
+      clauses.push(
+        `${title(metPath)} (${formatMoney(met)}) plus ${title(remainingPath)} ` +
+          `(${formatMoney(remaining)}) must equal ${title(totalPath)} (${formatMoney(total)})`
+      )
+      flagged.add(totalPath).add(metPath).add(remainingPath)
+    }
+    if (clauses.length > 0) {
+      const message = clauses.join("; ")
+      for (const path of flagged) errors[path] ??= message
+    }
+  }
+  return errors
 }
 
 // The DSL date_format token vocabulary (M/D allow 1-2 digits; MM/DD demand 2).
@@ -125,6 +187,9 @@ export function validateAll(schema: FormSchema, values: FormValues): ValidationE
     if (!isApplicable(schema, leaf.gates, values)) continue
     const message = validateLeaf(schema, leaf, values)
     if (message) errors[leaf.path] = message
+  }
+  for (const [path, message] of Object.entries(numericConsistencyErrors(schema, values))) {
+    errors[path] ??= message
   }
   return errors
 }
