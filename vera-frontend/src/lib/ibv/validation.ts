@@ -1,4 +1,4 @@
-import { allLeaves, createRequiredPaths, isApplicable, isRequired, leafByPath } from "./schema"
+import { allLeaves, createRequiredPaths, isApplicable, isRequired, titleOf } from "./schema"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -22,18 +22,17 @@ function formatMoney(n: number): string {
  */
 function numericConsistencyErrors(schema: FormSchema, values: FormValues): ValidationErrors {
   const errors: ValidationErrors = {}
-  const leaves = leafByPath(schema)
+  const parse = (path: string): number | undefined => {
+    const raw = (values[path] ?? "").trim()
+    if (raw === "") return undefined
+    const n = parseNumeric(raw)
+    return Number.isNaN(n) ? undefined : n
+  }
+  const title = (path: string): string => titleOf(schema, path)
   for (const rule of schema.numeric_consistencies ?? []) {
     const totalPath = `${rule.triplet}.total`
     const metPath = `${rule.triplet}.met_amount`
     const remainingPath = `${rule.triplet}.remaining`
-    const parse = (path: string): number | undefined => {
-      const raw = (values[path] ?? "").trim()
-      if (raw === "") return undefined
-      const n = parseNumeric(raw)
-      return Number.isNaN(n) ? undefined : n
-    }
-    const title = (path: string): string => leaves.get(path)?.field.title ?? path
     const total = parse(totalPath)
     const met = parse(metPath)
     const remaining = parse(remainingPath)

@@ -140,8 +140,8 @@ export function createRequiredPaths(schema: FormSchema): Set<string> {
 
 const _titlesBySchema = new WeakMap<FormSchema, Map<string, string>>()
 
-/** The title of the leaf at `path`, for describing a gate in human terms. */
-function titleOf(schema: FormSchema, path: string): string {
+/** The title of the leaf at `path`, for gate and validation messages in human terms. */
+export function titleOf(schema: FormSchema, path: string): string {
   let titles = _titlesBySchema.get(schema)
   if (!titles) {
     titles = new Map(allLeaves(schema).map((l) => [l.path, l.field.title]))

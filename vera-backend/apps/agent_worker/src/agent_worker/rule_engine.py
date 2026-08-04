@@ -35,13 +35,13 @@ class RuleEngine:
     def __init__(self, plan: CallPlan) -> None:
         self._flow_rules = plan.flow_rules
         self._contradictions = plan.contradictions
-        self._numeric = plan.numeric_consistencies
+        self._numeric = [(rule, triplet_paths(rule.triplet)) for rule in plan.numeric_consistencies]
         self._shared = plan.shared_conditions
-        # Flow rules never re-fire; contradictions re-fire only when their fields'
-        # values differ from the combination that last triggered them.
+        # Flow rules never re-fire; contradictions and numeric rules re-fire only when
+        # their fields' values differ from the combination that last triggered them —
+        # one shared map, since rule_keys are validator-unique across both kinds.
         self._fired_flow: set[str] = set()
-        self._contradiction_snapshots: dict[str, tuple[Any, ...]] = {}
-        self._numeric_snapshots: dict[str, tuple[Any, ...]] = {}
+        self._reask_snapshots: dict[str, tuple[Any, ...]] = {}
 
     def evaluate(self, answers: Mapping[str, Any]) -> Directive | None:
         for rule in self._flow_rules:
@@ -55,23 +55,23 @@ class RuleEngine:
 
         for contradiction in self._contradictions:
             snapshot = tuple(answers.get(field) for field in contradiction.fields)
-            if snapshot == self._contradiction_snapshots.get(contradiction.rule_key):
+            if snapshot == self._reask_snapshots.get(contradiction.rule_key):
                 continue  # same conflicting values we already pushed back on
             if evaluate(contradiction.when, answers, self._shared):
-                self._contradiction_snapshots[contradiction.rule_key] = snapshot
+                self._reask_snapshots[contradiction.rule_key] = snapshot
                 return ReAsk(
                     rule_key=contradiction.rule_key,
                     reason=contradiction.reason,
                     clarify=contradiction.clarify,
                 )
 
-        for consistency in self._numeric:
-            snapshot = tuple(answers.get(path) for path in triplet_paths(consistency.triplet))
-            if snapshot == self._numeric_snapshots.get(consistency.rule_key):
+        for consistency, paths in self._numeric:
+            snapshot = tuple(answers.get(path) for path in paths)
+            if snapshot == self._reask_snapshots.get(consistency.rule_key):
                 continue  # same impossible values we already pushed back on
             reason = check_triplet(consistency.triplet, answers)
             if reason is not None:
-                self._numeric_snapshots[consistency.rule_key] = snapshot
+                self._reask_snapshots[consistency.rule_key] = snapshot
                 return ReAsk(
                     rule_key=consistency.rule_key,
                     reason=reason,
