@@ -35,6 +35,7 @@ from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import FormStatus, InsuranceType
 from vera_core.services import queue_dispatcher
 from vera_core.services.queue_dispatcher import try_dispatch
+from vera_core.telephony import LiveKitUnavailable
 
 _DIALABLE_PHONE = "+15551234567"
 
@@ -710,6 +711,85 @@ async def hol_form_ids(
                 yield closed_id, open_id
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_room_creation_failure_parks_without_spending_the_retry_budget(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_configured: None,
+    queue_form_id: UUID,
+) -> None:
+    """A LiveKit that rejects create_call_room must not redial forever — and must not
+    charge an infrastructure failure to the tenant's clinical retry budget.
+
+    The form parks in CALL_FAILED on the FIRST failure with retry_count untouched,
+    the same rule the plan-prep failure path already follows. max_retries is set to 2
+    so the budget is demonstrably available and still not spent. Recovery is an
+    operator's manual requeue, which resets the budget — covered by
+    test_manual_requeue_from_call_failed_bypasses_cap_and_resets_budget.
+
+    Run on real Postgres because the failure path reads the form AFTER a savepoint
+    rollback — the unit suite's fake session has a no-op begin_nested and so cannot
+    show whether SQLAlchemy expired those attributes.
+    """
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(_requeue(queue_form_id, provider=None, minutes_ago=1))
+        await session.execute(
+            update(PatientForm).where(PatientForm.id == queue_form_id).values(retry_count=0)
+        )
+        old_max = (
+            await session.execute(
+                select(Tenant.max_retries).where(Tenant.id == rbac_world.tenant_id)
+            )
+        ).scalar_one()
+        await session.execute(
+            update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_retries=2)
+        )
+
+    fake = FakeLiveKit()
+    fake.room_error = LiveKitUnavailable("create_call_room failed", code="internal", status=500)
+
+    async def _one_pass() -> None:
+        async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
+            assert (
+                await try_dispatch(
+                    session,
+                    rbac_world.tenant_id,
+                    fake,
+                    LocalDevKMS(master_key=b"a" * 32),
+                    dial_pacing_s=0,
+                )
+            ) == 0
+
+    async def _form_state() -> tuple[str, int]:
+        async with admin_sessionmaker() as session:
+            return (
+                (
+                    await session.execute(
+                        select(PatientForm.status, PatientForm.retry_count).where(
+                            PatientForm.id == queue_form_id
+                        )
+                    )
+                )
+                .tuples()
+                .one()
+            )
+
+    try:
+        # One failure is enough to park it, and the retry budget stays untouched.
+        await _one_pass()
+        assert await _form_state() == (FormStatus.CALL_FAILED.value, 0)
+
+        # Parked means parked: the next pass must not pick it up at all.
+        await _one_pass()
+        assert await _form_state() == (FormStatus.CALL_FAILED.value, 0)
+        assert fake.sip_calls == []  # nothing was ever dialed
+    finally:
+        async with admin_sessionmaker() as session, session.begin():
+            await session.execute(
+                update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_retries=old_max)
+            )
 
 
 @pytest.mark.asyncio

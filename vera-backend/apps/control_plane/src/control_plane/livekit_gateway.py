@@ -15,7 +15,7 @@ from livekit.api.twirp_client import TwirpError
 from vera_core.config import SecretProvider
 from vera_core.config.settings import Settings
 from vera_core.observability.correlation import SIP_CALLEE_IDENTITY
-from vera_core.telephony import LiveKitUnavailable, OutboundDialError
+from vera_core.telephony import LiveKitUnavailable, OutboundDialError, TelephonyError
 
 __all__ = ["LiveKitGateway", "LiveKitUnavailable", "OutboundDialError", "build_livekit_gateway"]
 
@@ -28,8 +28,25 @@ _ROOM_EMPTY_TIMEOUT_S = 300
 _ROOM_DEPARTURE_TIMEOUT_S = 120
 
 # Transport-level SDK failures, re-raised as domain errors so SDK exception types
-# never leak to the routers.
-_LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError)
+# never leak to the routers. TwirpError is a deprecated alias of the SDK's
+# ServerError, so this covers both application-level rejections and transport loss.
+# TimeoutError is separate: the SDK re-raises a bare total-timeout, which is not a
+# aiohttp.ClientError (only ServerTimeoutError is).
+_LIVEKIT_TRANSPORT_ERRORS = (TwirpError, aiohttp.ClientError, TimeoutError)
+
+
+def _seam_error[E: TelephonyError](cls: type[E], op: str, exc: Exception) -> E:
+    """Build *cls* for a failed LiveKit call, carrying only PHI-safe diagnostics.
+
+    A ServerError's code/status are a fixed server-authored vocabulary; its message
+    and metadata can echo the request body (agent_context, the dialed number) and are
+    dropped. A transport error never reached LiveKit, so its type name stands in.
+    Raise with `from None` — the SDK error's message would otherwise ride the chain.
+    """
+    if isinstance(exc, TwirpError):
+        return cls(op, code=exc.code, status=exc.status)
+    return cls(op, code=type(exc).__name__)
+
 
 # Terminal-failure egress statuses used by get_egress_status. Members are plain
 # ints at runtime (protobuf enum wrapper); frozenset gives O(1) membership tests.
@@ -102,27 +119,36 @@ class LiveKitGateway:
         try:
             yield lk
         finally:
-            await lk.aclose()  # type: ignore[no-untyped-call]  # livekit-api missing return annotation
+            await lk.aclose()
 
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
     ) -> None:
-        async with self._client() as lk:
-            await lk.room.create_room(
-                api.CreateRoomRequest(
-                    name=room_name,
-                    empty_timeout=_ROOM_EMPTY_TIMEOUT_S,
-                    departure_timeout=_ROOM_DEPARTURE_TIMEOUT_S,
+        """Create the room and dispatch the agent worker into it.
+
+        Raises LiveKitUnavailable carrying LiveKit's own rejection code — the
+        message is dropped because `metadata` holds agent_context (raw PHI) and a
+        rejection can quote the request body back.
+        """
+        try:
+            async with self._client() as lk:
+                await lk.room.create_room(
+                    api.CreateRoomRequest(
+                        name=room_name,
+                        empty_timeout=_ROOM_EMPTY_TIMEOUT_S,
+                        departure_timeout=_ROOM_DEPARTURE_TIMEOUT_S,
+                    )
                 )
-            )
-            # metadata rides on the dispatch as a JSON string the worker parses.
-            await lk.agent_dispatch.create_dispatch(
-                api.CreateAgentDispatchRequest(
-                    agent_name=self._agent_name,
-                    room=room_name,
-                    metadata=json.dumps(metadata) if metadata else "",
+                # metadata rides on the dispatch as a JSON string the worker parses.
+                await lk.agent_dispatch.create_dispatch(
+                    api.CreateAgentDispatchRequest(
+                        agent_name=self._agent_name,
+                        room=room_name,
+                        metadata=json.dumps(metadata) if metadata else "",
+                    )
                 )
-            )
+        except _LIVEKIT_TRANSPORT_ERRORS as e:
+            raise _seam_error(LiveKitUnavailable, "create_call_room failed", e) from None
 
     async def outbound_trunk_exists(self, trunk_id: str) -> bool:
         """True if an outbound SIP trunk with this id exists on the LiveKit SIP service.
@@ -136,7 +162,7 @@ class LiveKitGateway:
                     api.ListSIPOutboundTrunkRequest(trunk_ids=[trunk_id])
                 )
         except _LIVEKIT_TRANSPORT_ERRORS as e:
-            raise LiveKitUnavailable(str(e)) from e
+            raise _seam_error(LiveKitUnavailable, "list_outbound_trunk failed", e) from None
         return len(resp.items) > 0
 
     async def create_sip_participant(
@@ -164,7 +190,7 @@ class LiveKitGateway:
                     )
                 )
         except _LIVEKIT_TRANSPORT_ERRORS as e:
-            raise OutboundDialError(str(e)) from e
+            raise _seam_error(OutboundDialError, "create_sip_participant failed", e) from None
 
     async def existing_rooms(self, room_names: list[str]) -> set[str]:
         """The subset of *room_names* that currently exist on the LiveKit server.

@@ -6,8 +6,10 @@ insurance-provider working hours, and initiates calls. Invoked on two events:
 
 Mostly PHI-free — it operates on form IDs, statuses, and tenant/provider config. The one
 exception is the dispatch `metadata`, which carries `agent_context` (raw patient/provider
-identifiers) into LiveKit; never log the `metadata` dict, and the `create_call_room` failure is
-re-raised PHI-free so the exception handler can't leak it.
+identifiers) into LiveKit; never log the `metadata` dict, and never log a traceback from the
+dispatch-failure handler — a SQLAlchemy/redis error raised while staging the plan embeds the
+statement params. Log the exception type, or for a LiveKit rejection `TelephonyError.diagnostic`
+— enough to tell a stale trunk from a downed SIP service without quoting the request back.
 """
 
 from __future__ import annotations
@@ -71,7 +73,7 @@ from vera_core.services.ivr_selection import (
 )
 from vera_core.services.model_config import add_llm_model_override_metadata
 from vera_core.services.recordings import start_recording_for_call
-from vera_core.telephony import LiveKitUnavailable, OutboundDialError
+from vera_core.telephony import OutboundDialError, TelephonyError
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -483,16 +485,7 @@ async def try_dispatch(
                     # Unlike the two calls above, this one never raises — a broken config-table
                     # read degrades to the hardcoded default instead of failing the dispatch.
                     await add_llm_model_override_metadata(session, metadata)
-                    try:
-                        await livekit.create_call_room(room_name, metadata=metadata)
-                    except Exception as exc:
-                        # metadata carries agent_context (raw PHI); a raised SDK/Twirp error
-                        # could embed the request body, and the outer handler logs the
-                        # traceback — re-raise PHI-free (chain suppressed) so no PHI can leak
-                        # into logs.
-                        raise LiveKitUnavailable(
-                            f"create_call_room failed: {type(exc).__name__}"
-                        ) from None
+                    await livekit.create_call_room(room_name, metadata=metadata)
                     session.add(
                         CallEvent(
                             tenant_id=tenant_id,
@@ -510,18 +503,24 @@ async def try_dispatch(
                                 retry_call_id=call.id,
                             )
                         )
-        except Exception:
-            logger.exception(
-                "dispatch: failed to dispatch form %s — reverting to IN_QUEUE", form.id
-            )
+        except Exception as exc:
+            # Never the traceback: a SQLAlchemy/redis error raised while staging the
+            # plan embeds the statement params (raw intake values).
+            detail = exc.diagnostic if isinstance(exc, TelephonyError) else type(exc).__name__
             # The savepoint rolled back the Call; the staged plan (Redis, non-
             # transactional) did NOT roll back — clear it so a failed dispatch
             # leaves no orphan plan key behind (best-effort; the TTL is the backstop).
             if plan_service is not None and staged_plan_room is not None:
                 with contextlib.suppress(Exception):
                     await plan_service.clear(staged_plan_room)
-            # Revert the in-memory form to IN_QUEUE so it retries next pass.
-            form.status = FormStatus.IN_QUEUE.value
+            # Park without spending the retry budget: reverting to IN_QUEUE redialed
+            # forever, and charging a clinical retry for an infra blip retires the form.
+            sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
+            logger.error(
+                "dispatch: form %s failed to dispatch (%s) — parked in CALL_FAILED",
+                form.id,
+                detail,
+            )
             continue
 
         # 4d. Dial OUTSIDE the savepoint: a failed dial keeps the Call row as
@@ -535,8 +534,9 @@ async def try_dispatch(
             await livekit.create_sip_participant(
                 room_name, form.insurance_provider_phone_number, trunk_id
             )
-        except OutboundDialError:
-            logger.warning("dispatch: outbound dial failed for call %s", call.id)
+        except OutboundDialError as exc:
+            # str(exc), not .diagnostic: keeps the detail when there is no code to render.
+            logger.warning("dispatch: outbound dial failed for call %s: %s", call.id, exc)
             with contextlib.suppress(Exception):  # room teardown is best-effort
                 await livekit.delete_room(room_name)
             requeued = apply_terminal_call_status(
