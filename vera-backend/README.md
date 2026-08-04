@@ -56,7 +56,7 @@ Needs Vertex ADC (`gcloud auth application-default login`) and a seeded Postgres
 (`just up && just migrate && just seed`) — the plan comes from the published `schema_version` row.
 
 ```bash
-# full: 3 scenarios over all 7 tasks / 182 fields (~12 min). Drop VERA_EVALS_FULL for a ~3-min
+# full: 3 scenarios over all 9 tasks / 182 fields (~12 min). Drop VERA_EVALS_FULL for a ~3-min
 # focused loop; add -k inactive for one scenario; VERA_EVALS_JUDGE_STRICT=1 to gate on the verdict.
 VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
 ```

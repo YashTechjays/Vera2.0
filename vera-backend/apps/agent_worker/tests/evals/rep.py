@@ -5,9 +5,10 @@ plain LLM chat loop — deliberately NOT an `Agent`, because it must not partici
 AgentSession under test; it only turns VERA's last utterance into a rep-style reply.
 
 The fact sheet states RULES, not 184 answers, because the plan's field space is repeating
-structure: `coverage`/`male_partner` are `Covered → Copay → Coinsurance → Prior Auth` quads per
-CPT code, and `financial` is `Total → Met → Remaining` triples per bucket. Enumerating them
-would be unmaintainable; the rules cover any code or bucket VERA happens to ask about.
+structure: the coverage and `male_partner_coverage` sections are `Covered → Copay → Coinsurance →
+Prior Auth` quads per CPT code, and `financial` is `Total → Met → Remaining` triples per bucket.
+Enumerating them would be unmaintainable; the rules cover any code or bucket VERA happens to ask
+about.
 
 Answers are improvised within those rules, so evals built on this may assert on conversational
 FLOW (handoffs, carried context, re-asking) but never on extracted values — value correctness
@@ -128,7 +129,7 @@ class SimulatedRep:
 # The default FACT_SHEET deliberately fires NO rule (out-of-network IS covered; the mandate and
 # infertility coverage agree), so a rule scenario has to supply its own facts.
 
-# ibv_standard.py:1316 `mandate_requires_infertility_coverage` — a plan mandate obliges coverage,
+# `mandate_requires_infertility_coverage` (ibv_standard.py) — a plan mandate obliges coverage,
 # so claiming it is not covered is self-contradictory. This is the push-back seen in the reference
 # call: "With a mandate, infertility services should be covered. Could you double-check…"
 MANDATE_CONTRADICTION_FACTS = """\
@@ -142,7 +143,7 @@ You are looking at the member's plan in your system.
 - Your name is Martha Reed. Your call reference number is 841026.
 """
 
-# ibv_standard.py:1265 `insurance_not_active` — an inactive policy ends the call, so the plan
+# `insurance_not_active` (ibv_standard.py) — an inactive policy ends the call, so the plan
 # skips straight to wrap_up instead of collecting benefits nobody can use.
 INACTIVE_POLICY_FACTS = """\
 You are looking at the member's plan in your system.

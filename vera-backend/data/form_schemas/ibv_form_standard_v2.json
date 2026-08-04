@@ -5132,14 +5132,32 @@
       ]
     },
     {
-      "task_key": "coverage",
-      "title": "Coverage Verification",
-      "intro": "Now I'd like to verify some coverage details.",
-      "outro": "Thank you, that's really helpful. One moment while I organize these coverage details.",
-      "prompt": "Work through infertility treatment, diagnostic testing and general coverage. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered.",
+      "task_key": "infertility_coverage",
+      "title": "Infertility Coverage",
+      "intro": "Now I'd like to verify some infertility coverage details.",
+      "outro": "Thank you, that's really helpful. One moment while I organize these details.",
+      "prompt": "Work through infertility treatment. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered.",
       "sections": [
-        "infertility_treatment",
-        "diagnostic_testing",
+        "infertility_treatment"
+      ]
+    },
+    {
+      "task_key": "diagnostic_coverage",
+      "title": "Diagnostic Coverage",
+      "intro": "Now I'd like to verify some diagnostic coverage details.",
+      "outro": "Thank you. One moment while I organize these details.",
+      "prompt": "Work through diagnostic details. Ask all the CPT codes at once unless the representative asks for them one at a time. Fan answers out to the CPT codes the representative confirms, and skip sub-questions for CPT codes that are not covered.",
+      "sections": [
+        "diagnostic_testing"
+      ]
+    },
+    {
+      "task_key": "general_office_coverage",
+      "title": "General Office Coverage",
+      "intro": "Now I'd like to verify some general office visits coverage.",
+      "outro": "Thanks. One moment while I organize these details.",
+      "prompt": "Work through general office visits details. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered.",
+      "sections": [
         "general_coverage"
       ]
     },

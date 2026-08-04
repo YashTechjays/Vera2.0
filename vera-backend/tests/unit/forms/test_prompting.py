@@ -110,7 +110,8 @@ class TestTaskText:
     def test_flow_rules_attach_to_firing_task(self) -> None:
         assert "TERMINATION RULE — insurance_not_active" in task("introduction").prompt
         assert "TERMINATION RULE — no_out_of_network_coverage" in task("insurance_basics").prompt
-        assert "TERMINATION RULE" not in task("coverage").prompt
+        firing = {t.task_key for t in RENDERED.tasks if "TERMINATION RULE" in t.prompt}
+        assert firing == {"introduction", "insurance_basics"}
 
     def test_contradictions_attach_to_last_field_task(self) -> None:
         assert (
@@ -118,7 +119,8 @@ class TestTaskText:
             in task("insurance_basics").prompt
         )
         assert (
-            "CONSISTENCY CHECK — mandate_requires_infertility_coverage" in task("coverage").prompt
+            "CONSISTENCY CHECK — mandate_requires_infertility_coverage"
+            in task("infertility_coverage").prompt
         )
 
     def test_derive_note_renders(self) -> None:
@@ -137,18 +139,17 @@ class TestTaskText:
             assert "sections." not in t.prompt, t.task_key
 
     def test_multi_gate_or_condition_parenthesized(self) -> None:
-        coverage = task("coverage").prompt
-        assert " and (" in coverage
-        assert " or " in coverage.split(" and (", 1)[1]
+        infertility = task("infertility_coverage").prompt
+        assert " and (" in infertility
+        assert " or " in infertility.split(" and (", 1)[1]
 
     def test_numeric_range_note_renders(self) -> None:
-        coverage = task("coverage").prompt
-        assert "Expected numeric range: 0 to 100." in coverage
-        assert "Expected numeric range: at least 0." in coverage
+        infertility = task("infertility_coverage").prompt
+        assert "Expected numeric range: 0 to 100." in infertility
+        assert "Expected numeric range: at least 0." in infertility
 
     def test_icd10_codes_render_for_speak_sections(self) -> None:
-        coverage = task("coverage").prompt
-        assert "ICD-10 Z31.41" in coverage
+        assert "ICD-10 Z31.41" in task("diagnostic_coverage").prompt
 
 
 class TestSnapshots:
