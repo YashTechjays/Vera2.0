@@ -440,6 +440,9 @@ export function LiveCallModal({
                   <CallTranscript
                     key={`t-${call.id}`}
                     callId={call.id}
+                    // A completed call opens at the first turn (read from the top); a live
+                    // call still follows new turns to the bottom.
+                    autoScroll={call.category !== "completed"}
                     onCallStatus={onCallStatus}
                     onTextChange={setTranscript}
                     onHealth={setLiveHealth}
