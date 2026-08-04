@@ -5,12 +5,11 @@ which is what exempts it from the PHI display-path audit (precedent: calls.py::c
 """
 
 from datetime import date, datetime, timedelta
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Response
 from pydantic import BaseModel
-from sqlalchemy import and_, func, select
+from sqlalchemy import ColumnElement, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.api.v1.calls import ACTIVE_CALL_STATUSES
@@ -200,8 +199,8 @@ def _call_window(
     date_to: datetime,
     provider_id: UUID | None,
     va_id: UUID | None,
-) -> list[Any]:
-    conds: list[Any] = [Call.created_at >= date_from, Call.created_at < date_to]
+) -> list[ColumnElement[bool]]:
+    conds: list[ColumnElement[bool]] = [Call.created_at >= date_from, Call.created_at < date_to]
     if provider_id is not None:
         conds.append(Call.insurance_provider_id == provider_id)
     if va_id is not None:
@@ -209,7 +208,7 @@ def _call_window(
     return conds
 
 
-async def _window_metrics(session: AsyncSession, conds: list[Any]) -> ReportMetrics:
+async def _window_metrics(session: AsyncSession, conds: list[ColumnElement[bool]]) -> ReportMetrics:
     volume, avg_duration, avg_completion = (
         await session.execute(
             select(
