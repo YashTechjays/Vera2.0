@@ -29,6 +29,18 @@ print("DEBUG token aud =", claims.get("aud"))
 print("DEBUG token iss =", claims.get("iss"))
 PY
 
+# TEMP DEBUG (remove): do the raw STS token-exchange with curl to surface the FULL error_description
+# (gcloud truncates it). Prints only the STS *response* body — the token is in the request, never logged.
+echo "DEBUG raw STS response:"
+curl -s -X POST "https://sts.googleapis.com/v1/token" \
+  --data-urlencode "audience=$GCP_WIF_PROVIDER" \
+  --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  --data-urlencode "requested_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  --data-urlencode "scope=https://www.googleapis.com/auth/cloud-platform" \
+  --data-urlencode "subject_token_type=urn:ietf:params:oauth:token-type:jwt" \
+  --data-urlencode "subject_token=$BITBUCKET_STEP_OIDC_TOKEN" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); d.pop("access_token",None); print(json.dumps(d))'
+
 token_file="$(mktemp)"
 cred_file="$(mktemp)"
 # The token is written to a file (not passed on the CLI) so it never lands in a process list.
