@@ -27,7 +27,7 @@ export function TranscriptDialog({
           </DialogTitle>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {call && <CallTranscript key={call.id} callId={call.id} />}
+          {call && <CallTranscript key={call.id} callId={call.id} autoScroll={false} />}
         </div>
       </DialogContent>
     </Dialog>
