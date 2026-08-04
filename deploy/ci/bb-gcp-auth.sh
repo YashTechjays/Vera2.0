@@ -54,6 +54,10 @@ gcloud iam workload-identity-pools create-cred-config "$GCP_WIF_PROVIDER" \
   --credential-source-file="$token_file" \
   --output-file="$cred_file"
 
+# TEMP DEBUG (remove): the cred config holds no secret (token is in a separate file) — print it to
+# compare the audience/subject_token_type gcloud sends against the raw STS call that just succeeded.
+echo "DEBUG cred config:"; cat "$cred_file"
+
 gcloud auth login --cred-file="$cred_file" --quiet
 gcloud config set project "$GCP_PROJECT_ID" --quiet
 
