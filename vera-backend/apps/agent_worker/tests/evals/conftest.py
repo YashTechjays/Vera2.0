@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from agent_worker.agent import build_agent
+from agent_worker.cascade import resolve_thinking_config
 from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
@@ -42,8 +43,6 @@ from vera_core.forms.prompting import PromptDocument
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.models.authoring import FormSchema, PromptVersion, SchemaVersion
 from vera_core.models.enums import VersionStatus
-from agent_worker.cascade import resolve_thinking_config
-
 
 INSURANCE_TYPE = "infertility_treatment"
 
