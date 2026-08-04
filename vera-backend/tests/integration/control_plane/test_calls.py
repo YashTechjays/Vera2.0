@@ -394,11 +394,12 @@ async def test_list_calls_history_scope_returns_terminal_calls_only(
         headers=_auth(rbac_world.admin_token),
     )
     assert history.status_code == 200, history.text
-    ids = [c["id"] for c in history.json()["data"]]
+    items = history.json()["data"]["items"]
+    ids = [c["id"] for c in items]
     assert str(done_id) in ids
     assert str(live_id) not in ids
     # Summaries carry ended_at so the UI can render a fixed duration.
-    assert "ended_at" in history.json()["data"][0]
+    assert "ended_at" in items[0]
 
     live = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
     live_ids = [c["id"] for c in live.json()["data"]]
@@ -506,12 +507,16 @@ async def test_list_calls_sets_no_store_and_audits_phi_disclosure(
     row = (
         (
             await admin_session.execute(
-                select(AuditLog).where(
+                select(AuditLog)
+                .where(
                     AuditLog.event_type == "phi.access",
                     AuditLog.resource_type == "call",
                     AuditLog.resource_id == "list",
                     AuditLog.actor_user_id == rbac_world.admin_id,
                 )
+                # rbac_world is session-scoped, so other tests leave matching rows;
+                # newest-first picks the one this request just wrote.
+                .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
             )
         )
         .scalars()
@@ -582,7 +587,7 @@ async def test_ownerless_terminal_call_hidden_from_non_owners(
         params={"scope": "history"},
         headers=_auth(rbac_world.supervisor_token),
     )
-    ids = [c["id"] for c in history.json()["data"]]
+    ids = [c["id"] for c in history.json()["data"]["items"]]
     assert str(done_id) not in ids
     assert str(published_id) in ids
 
@@ -1879,3 +1884,128 @@ async def test_call_history_ownerless_terminal_call_does_not_500(
     assert resp.status_code == 200, resp.text
     by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
     assert by_id[str(ownerless)]["transcript_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_history_scope_returns_paginated_envelope(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = {
+        str(
+            await seed_call(
+                admin_sessionmaker,
+                rbac_world.tenant_id,
+                seeded_form_id,
+                initiated_by_id=rbac_world.admin_id,
+                status=CallStatus.COMPLETED.value,
+            )
+        )
+        for _ in range(3)
+    }
+
+    first = await client.get(
+        "/api/v1/calls",
+        params={"scope": "history", "page": 1, "page_size": 2},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert first.status_code == 200, first.text
+    data = first.json()["data"]
+    assert data["page"] == 1
+    assert data["page_size"] == 2
+    assert data["total"] >= 3
+    assert len(data["items"]) == 2
+
+    second = await client.get(
+        "/api/v1/calls",
+        params={"scope": "history", "page": 2, "page_size": 2},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert second.status_code == 200, second.text
+    ids_first = {c["id"] for c in data["items"]}
+    ids_second = {c["id"] for c in second.json()["data"]["items"]}
+    assert not ids_first & ids_second  # no row repeats across pages
+    assert seeded <= ids_first | ids_second
+
+
+@pytest.mark.asyncio
+async def test_history_scope_orders_newest_first(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    older = str(
+        await seed_call(
+            admin_sessionmaker,
+            rbac_world.tenant_id,
+            seeded_form_id,
+            initiated_by_id=rbac_world.admin_id,
+            status=CallStatus.COMPLETED.value,
+        )
+    )
+    newer = str(
+        await seed_call(
+            admin_sessionmaker,
+            rbac_world.tenant_id,
+            seeded_form_id,
+            initiated_by_id=rbac_world.admin_id,
+            status=CallStatus.COMPLETED.value,
+        )
+    )
+    resp = await client.get(
+        "/api/v1/calls",
+        params={"scope": "history", "page": 1, "page_size": 50},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    ids = [c["id"] for c in resp.json()["data"]["items"]]
+    assert ids.index(newer) < ids.index(older)
+
+
+@pytest.mark.asyncio
+async def test_history_scope_past_the_end_page_is_empty_with_total(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+    resp = await client.get(
+        "/api/v1/calls",
+        params={"scope": "history", "page": 999, "page_size": 20},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["items"] == []
+    assert data["total"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_live_scope_response_shape_unchanged(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    live_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.ACTIVE.value,
+    )
+    resp = await client.get("/api/v1/calls", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert isinstance(data, list)  # live stays a bare array, not the paginated envelope
+    assert str(live_id) in [c["id"] for c in data]
