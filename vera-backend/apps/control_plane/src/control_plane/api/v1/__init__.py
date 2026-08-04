@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from control_plane.api.v1.analytics import router as analytics_router
 from control_plane.api.v1.api_keys import router as api_keys_router
 from control_plane.api.v1.auth import router as auth_router
 from control_plane.api.v1.calls import router as calls_router
@@ -22,6 +23,7 @@ from control_plane.api.v1.users import router as users_router
 from control_plane.api.v1.voice_lab import router as voice_lab_router
 
 router = APIRouter(prefix="/api/v1")
+router.include_router(analytics_router)
 router.include_router(auth_router)
 router.include_router(calls_router)
 router.include_router(coaching_router)
