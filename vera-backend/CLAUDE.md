@@ -79,6 +79,12 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   Generate once: `python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"`.
   In production, set `VERA_KMS_KEY_NAME` to the Cloud KMS key resource path instead (see `adr/devops-todo.md`).
 - `just api` / `just worker` — run the control plane / agent worker.
+- **Building the agent-worker image locally needs `--platform linux/amd64`** (see the header of
+  `docker/agent_worker.Dockerfile`). The native arm64 build aborts in `download-files` with a
+  livekit Rust panic on teardown; amd64 — what CI builds — is fine. Nothing in `just check` or
+  the fast CI lane builds an image, so a green pipeline can still ship a broken container:
+  when you touch `uv.lock`, `docker/*`, or anything the image bakes, build both images before
+  claiming done.
 - **Call-flow eval harness** (`apps/agent_worker/tests/evals/`) — replays a whole call end to end
   (real entrypoint, real compiled CallPlan, a second Gemini as the rep) and an evaluator LLM grades
   the transcript. Use it for changes to handoffs, prompts, the rule engine or the gap pass. Needs

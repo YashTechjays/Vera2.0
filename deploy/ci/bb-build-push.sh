@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build one component image and push it to Artifact Registry — the Bitbucket port of the
 # GitHub _build-image.yml reusable. Tags the image with the immutable commit SHA (what the
-# deploy pins) plus a moving `dev` tag, then runs a Trivy scan.
+# deploy pins) plus a moving tag ($MOVING_TAG, default `dev`; the uat build sets `uat`), then
+# runs a Trivy scan.
 #
 #   bb-build-push.sh <component> <context> <dockerfile> [build_args]
 #     component   AR image name / GitHub "component": control-plane | agent-worker | frontend
@@ -24,6 +25,7 @@ build_args="${4:-}"
 : "${AR_REPO:?repository variable AR_REPO is required}"
 : "${BITBUCKET_COMMIT:?BITBUCKET_COMMIT not set}"
 TRIVY_EXIT_CODE="${TRIVY_EXIT_CODE:-0}"   # warn by default; flip to 1 once the CVE backlog is triaged
+MOVING_TAG="${MOVING_TAG:-dev}"           # moving tag alongside the immutable SHA; uat build sets `uat`
 
 # google/cloud-sdk:slim ships neither jq nor docker. verify-config.sh needs jq; install it up
 # front (no-op if present). Ports the GitHub verify-* pre-build jobs, run here as a fail-closed
@@ -53,8 +55,8 @@ fi
 
 gcloud auth configure-docker "$registry_host" --quiet
 
-# Registry-tag cache: Bitbucket has no GHA layer cache, so warm from the last pushed :dev image.
-docker pull "$image:dev" 2>/dev/null || echo "no :dev cache yet — cold build"
+# Registry-tag cache: Bitbucket has no GHA layer cache, so warm from the last pushed moving-tag image.
+docker pull "$image:$MOVING_TAG" 2>/dev/null || echo "no :$MOVING_TAG cache yet — cold build"
 
 # shellcheck disable=SC2086  # build_args is intentionally word-split into repeated --build-arg
 ba_flags=""
@@ -62,16 +64,16 @@ for kv in $build_args; do ba_flags="$ba_flags --build-arg $kv"; done
 
 # shellcheck disable=SC2086
 docker build \
-  --cache-from "$image:dev" \
+  --cache-from "$image:$MOVING_TAG" \
   -f "$dockerfile" \
   -t "$image:$BITBUCKET_COMMIT" \
-  -t "$image:dev" \
+  -t "$image:$MOVING_TAG" \
   $ba_flags \
   "$context"
 
 docker push "$image:$BITBUCKET_COMMIT"
-docker push "$image:dev"
-echo "Pushed $image:$BITBUCKET_COMMIT and $image:dev"
+docker push "$image:$MOVING_TAG"
+echo "Pushed $image:$BITBUCKET_COMMIT and $image:$MOVING_TAG"
 
 # Scan the image we just built. Trivy reads the local docker daemon (DOCKER_HOST from the
 # service). Warn mode by default to match the repo's staged scanner rollout.

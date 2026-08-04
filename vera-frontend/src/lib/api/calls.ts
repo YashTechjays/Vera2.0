@@ -38,6 +38,8 @@ export type CallSummary = {
   /** Form completion 0-100; null = never projected. Drives the live progress bar's
    *  fallback when no answer has streamed yet this call (e.g. a late retry). */
   completion_pct: number | null
+  /** Verified-field percentage 0-100; post-call only — 0/null during a live call. */
+  verified_pct: number | null
 }
 
 /** LiveKit join details for a call room. */

@@ -4,7 +4,13 @@ version = "0.1.0"
 description = "Vera agent worker — LiveKit Agents worker, dispatched to rooms by agent_name"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "livekit-agents[deepgram,google,cartesia,silero,turn-detector]>=1.5.17",
+    # >=1.6.7 carries TWO floors, neither housekeeping. Correctness: below 1.6.4 a handoff
+    # desynchronizes the STT clock from the audio anchor and a quiet turn's reply is
+    # generated but never spoken (tests/unit/test_turn_commit.py). Security: the root
+    # override-dependencies that forced json-repair>=0.60.1 is gone, and 1.6.4/1.6.5 pin
+    # json-repair==0.59.10 (GHSA-xf7x-x43h-rpqh) — 1.6.6 is the first patched pin
+    # (tests/unit/test_dependency_floors.py). Do not relax it.
+    "livekit-agents[deepgram,google,cartesia,silero,turn-detector]>=1.6.7",
     "redis>=5.2",
     "vera-core",
 ]

@@ -80,3 +80,38 @@ warn, matching the repo's staged scanner rollout).
   a frontend-only change deploys only the frontend.
 - **Rollback:** re-run a previous green pipeline, or `deploy-dev-all` after checking out an
   earlier `dev` commit (per-SHA image tags are immutable in AR).
+
+## UAT (CI only — build + push, no deploy)
+
+The `uat` branch runs a **CI-only** pipeline (`pipelines.branches.uat`): the full DB-backed gate,
+then build the **backend** (control-plane, agent-worker) as images → the **UAT project's** Artifact
+Registry, and build the **frontend** as a static Vite bundle → **synced to a GCS bucket** (no image,
+no VM). There is **no deploy step** — UAT CD is owned by the infra repo. Auth is the same keyless
+OIDC → WIF path.
+
+The frontend keeps `VITE_API_BASE_URL="/api/v1"` (relative). That works on GCS only if the bucket is
+fronted by a **GCP HTTPS load balancer that routes `/api/*` to the control-plane** — i.e. the LB
+replays what nginx does in the dev image, so the browser stays same-origin (no CORS on PHI APIs).
+
+Because a repository variable holds a single value (already the dev/test project), UAT's GCP config
+lives in a parallel **`UAT_`-prefixed** variable set, remapped inline in each uat step onto the
+standard names the shared scripts expect (so the dev `GCP_*` variables are never touched):
+
+| Variable | Meaning |
+|---|---|
+| `UAT_GCP_WIF_PROVIDER` | WIF provider resource for the UAT project |
+| `UAT_GCP_DEPLOYER_SA` | UAT builder SA email |
+| `UAT_GCP_PROJECT_ID` | UAT project id |
+| `UAT_GCP_REGION` | region |
+| `UAT_AR_REPO` | UAT Artifact Registry repo (backend images) |
+| `UAT_FRONTEND_BUCKET` | GCS bucket name for the static frontend |
+
+The backend image steps set `MOVING_TAG=uat`, so the moving tag (`:uat`) never collides with dev's
+`:dev`; `VITE_API_BASE_URL` is reused (relative `/api/v1`). Builds are unconditional (no changeset
+filter) so every uat commit produces a complete image set + a fresh frontend.
+
+**Prerequisite (infra repo / Terraform):** in the UAT project — a Bitbucket OIDC provider on a WIF
+pool locked to this repo + the `uat` branch; a builder SA with **`roles/artifactregistry.writer`**
+(backend images) **and `roles/storage.objectAdmin`** on the frontend bucket (the GCS sync prunes
+stale objects, so it needs delete); an Artifact Registry repo; and a GCS bucket fronted by an HTTPS
+LB that routes `/api/*` to the control-plane. Feed the Terraform outputs into the `UAT_` variables.

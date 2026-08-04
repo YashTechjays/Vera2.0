@@ -295,3 +295,85 @@ def test_default_agent_name_stays_vera_agent(monkeypatch: pytest.MonkeyPatch) ->
     settings = Settings(livekit_url="ws://x", _env_file=None)
     secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})
     assert build_livekit_gateway(settings, secrets)._agent_name == "vera-agent"
+
+
+class _TimingOutSeam:
+    """Every LiveKit seam call raises the bare total-timeout the SDK re-raises.
+
+    livekit-api's failover loop catches (aiohttp.ClientError, asyncio.TimeoutError)
+    and `raise transport_exc` re-raises the ORIGINAL (twirp_client.py), so a total
+    timeout leaves the SDK untranslated — unlike ServerTimeoutError, which is an
+    aiohttp.ClientError and was already covered.
+    """
+
+    async def create_room(self, req: object) -> None:
+        raise TimeoutError
+
+    async def create_dispatch(self, req: object) -> None:
+        raise TimeoutError
+
+    async def list_outbound_trunk(self, req: object) -> None:
+        raise TimeoutError
+
+    async def create_sip_participant(self, req: object) -> None:
+        raise TimeoutError
+
+
+def _gateway_that_times_out(monkeypatch: pytest.MonkeyPatch) -> LiveKitGateway:
+    from livekit import api
+
+    seam = _TimingOutSeam()
+
+    class _FakeLkApi:
+        room = seam
+        sip = seam
+        agent_dispatch = seam
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(api, "LiveKitAPI", lambda *a, **k: _FakeLkApi())
+    return LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+
+
+def test_create_call_room_translates_a_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timeout must reach the dispatcher as a domain error, not a bare TimeoutError."""
+    import asyncio
+
+    from control_plane.livekit_gateway import LiveKitUnavailable
+
+    gw = _gateway_that_times_out(monkeypatch)
+    with pytest.raises(LiveKitUnavailable) as caught:
+        asyncio.run(gw.create_call_room("call--t--c"))
+    assert caught.value.diagnostic == "transport=TimeoutError"
+
+
+def test_outbound_trunk_exists_translates_a_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trunk validation fails closed on a timeout — an untranslated escape turns the
+    integrations router's 502 into a 500."""
+    import asyncio
+
+    from control_plane.livekit_gateway import LiveKitUnavailable
+
+    gw = _gateway_that_times_out(monkeypatch)
+    with pytest.raises(LiveKitUnavailable) as caught:
+        asyncio.run(gw.outbound_trunk_exists("trunk-1"))
+    assert caught.value.diagnostic == "transport=TimeoutError"
+
+
+def test_create_sip_participant_translates_a_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dial timeout must be an OutboundDialError: escaping `except OutboundDialError`
+    rolls the transaction back, orphaning the room and the dispatched worker with no
+    Call row for the sweeper to find."""
+    import asyncio
+
+    from control_plane.livekit_gateway import OutboundDialError
+
+    gw = _gateway_that_times_out(monkeypatch)
+    with pytest.raises(OutboundDialError) as caught:
+        asyncio.run(gw.create_sip_participant("call--t--c", "+15550001111", "trunk-1"))
+    assert caught.value.diagnostic == "transport=TimeoutError"
