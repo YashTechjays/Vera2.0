@@ -13,6 +13,7 @@ import { useLocation, useNavigate } from "react-router-dom"
 
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { PaginationFooter } from "@/components/ui/pagination-footer"
 import { Switch } from "@/components/ui/switch"
 import {
   Table,
@@ -29,15 +30,18 @@ import { usePermission } from "@/lib/auth/permissions"
 import {
   getCallStats,
   listCalls,
+  listCompletedCalls,
   publishCall,
   type CallStats,
   type CallSummary,
+  type Paginated,
 } from "@/lib/api/calls"
 import { ApiError } from "@/lib/api/client"
 import { categoryOf, toLiveCall } from "@/lib/monitoring/liveCall"
 import { elapsed } from "@/lib/monitoring/liveTimer"
 import { healthDisplay, healthToneClass } from "@/lib/monitoring/health"
 import { humanizeSegment } from "@/lib/patient-forms/display"
+import { lastPageOf, slicePage } from "@/lib/pagination"
 import { LiveCallModal } from "@/components/monitoring/LiveCallModal"
 import { NOTIFICATION_EVENT } from "@/components/notifications/NotificationsProvider"
 import { shortCallRef, type OpenCallNavState } from "@/lib/notifications/store"
@@ -45,6 +49,7 @@ import type { CallCategory } from "@/lib/mock-data"
 
 // Re-poll the active list so a VA learns about newly published calls.
 const POLL_MS = 8000
+const PAGE_SIZE = 10
 
 type TabKey = "active" | "critical" | "completed"
 const TABS: { key: TabKey; label: string }[] = [
@@ -123,10 +128,11 @@ export function LiveMonitoring() {
   const navigate = useNavigate()
   // PHI (patient_name) stays in component state so it's discarded on unmount.
   const [calls, setCalls] = useState<CallSummary[]>([])
-  const [history, setHistory] = useState<CallSummary[]>([])
+  const [history, setHistory] = useState<Paginated<CallSummary> | null>(null)
   const [stats, setStats] = useState<CallStats | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<TabKey>("active")
+  const [page, setPage] = useState(1)
   const [now, setNow] = useState(() => Date.now())
   const [publishing, setPublishing] = useState<string | null>(null)
   const [selected, setSelected] = useState<CallSummary | null>(null)
@@ -154,7 +160,9 @@ export function LiveMonitoring() {
       const [items, counts, past] = await Promise.allSettled([
         listCalls(),
         getCallStats(),
-        tab === "completed" ? listCalls("history") : Promise.resolve(null),
+        tab === "completed"
+          ? listCompletedCalls({ page, page_size: PAGE_SIZE })
+          : Promise.resolve(null),
       ])
       if (cancelled) return
       if (items.status === "fulfilled") {
@@ -185,7 +193,7 @@ export function LiveMonitoring() {
       clearInterval(id)
       window.removeEventListener(NOTIFICATION_EVENT, onNotification)
     }
-  }, [tab])
+  }, [tab, page])
 
   // Deep link from a notification (bell item / toast "View"): open that exact
   // call's modal once it shows up in the polled list. `state` is cleared via a
@@ -236,11 +244,24 @@ export function LiveMonitoring() {
     return () => clearInterval(id)
   }, [])
 
-  const rows = useMemo(() => {
-    if (tab === "critical") return calls.filter((c) => categoryOf(c.status) === "critical")
-    if (tab === "completed") return history
-    return calls
-  }, [tab, calls, history])
+  // Completed is already a server page; the live tabs slice their full in-memory list.
+  const { rows, total } = useMemo(() => {
+    if (tab === "completed") {
+      return { rows: history?.items ?? [], total: history?.total ?? 0 }
+    }
+    const live =
+      tab === "critical" ? calls.filter((c) => categoryOf(c.status) === "critical") : calls
+    return { rows: slicePage(live, page, PAGE_SIZE), total: live.length }
+  }, [tab, calls, history, page])
+
+  // Clamp when rows vanish between polls (e.g. watching page 3 of Active as calls end).
+  // Wrapped in a function so react-hooks/set-state-in-effect doesn't flag this convergent clamp.
+  useEffect(() => {
+    function clampPage(): void {
+      setPage((p) => Math.min(p, lastPageOf(total, PAGE_SIZE)))
+    }
+    clampPage()
+  }, [total])
 
   // Stat cards from GET /calls/stats; zeros until it loads. total_today is personal
   // (calls the user initiated or intervened in — VR2-63); live/critical match the list.
@@ -326,7 +347,10 @@ export function LiveMonitoring() {
               <button
                 key={t.key}
                 type="button"
-                onClick={() => setTab(t.key)}
+                onClick={() => {
+                  setTab(t.key)
+                  setPage(1)
+                }}
                 className={cn(
                   "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                   tab === t.key
@@ -422,6 +446,14 @@ export function LiveMonitoring() {
             )}
           </TableBody>
         </Table>
+        <PaginationFooter
+          page={page}
+          pageSize={PAGE_SIZE}
+          total={total}
+          loaded={tab !== "completed" || history !== null}
+          noun="call"
+          onPageChange={setPage}
+        />
       </Card>
 
       <LiveCallModal
