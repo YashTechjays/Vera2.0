@@ -103,7 +103,6 @@ than a fabricated spouse name.
 | Catalog | `catalog/ibv_standard.py`, `catalog/disease_only.py` | Component 2 |
 | Prompt compiler | `forms/prompting.py` | Component 3 |
 | Plan compiler / fuser | `forms/call_plan.py` | Components 4, 5, 6 |
-| Condition evaluator | `forms/conditions.py` | Component 5 (new helper only) |
 | Agent runtime | `agent_worker/plan_runtime.py` | Component 5 |
 | Intake | `forms/intake.py`, `control_plane/api/v1/patient_forms.py` | Component 7 |
 | Intake sheet | `data/ibv_infertility_appscript.js` | Component 7 |
@@ -233,18 +232,17 @@ correctly.
 `# Values already on file` (`plan_runtime.py:164-170`) stays as it is. It remains useful
 background; it is simply no longer the only channel carrying the value.
 
-## Component 5 — Three-state gating (`forms/conditions.py`, `agent_worker/plan_runtime.py`)
+## Component 5 — Three-state gating (`agent_worker/plan_runtime.py`)
 
-Add one helper to `conditions.py`:
+**No new condition helper is needed.** `dsl.condition_field_paths(cond, shared, depth=0) ->
+Iterator[str]` (`dsl.py:106-122`) already yields every leaf path a condition references with
+shared `ref`s expanded and a recursion guard, and is already used for exactly this kind of
+reachability question by the `confirm_immediate` anchor validator (`dsl.py:679`) and by
+`prompting.py:266,286`. Reuse it.
 
-```python
-def condition_fields(cond: Condition, shared: SharedConditions) -> set[str]:
-    """Every leaf path `cond` reads, resolving `ref` through `shared`."""
-```
-
-It walks the same tree `evaluate` walks (`conditions.py:43-64`). `evaluate`'s semantics are
-untouched, so **no mirroring is needed** in `vera-frontend/src/lib/ibv/conditions.ts` — the
-helper is backend-only and the UI never renders a gating block.
+So `conditions.py` is **not** modified: `evaluate` semantics are untouched and no mirroring is
+needed in `vera-frontend/src/lib/ibv/conditions.ts`. The whole of this component lands in
+`plan_runtime.py`.
 
 `PlanRunController` then partitions a task's fields three ways instead of two
 (`plan_runtime.py:778-799`):
