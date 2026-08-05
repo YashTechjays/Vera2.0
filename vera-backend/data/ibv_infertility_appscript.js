@@ -618,7 +618,7 @@ function readCellFields(sheet, timeZone, fieldsMap) {
 
   // coverage type based validation
   const cellValue = sheet.getRange("AD19").getValue().toString().trim();
-  if (cellValue.toLowerCase() === "pt/spouse".toLowerCase()) {
+  if (cellValue.toLowerCase() === "family") {
     let spouse_name = sheet.getRange("J12").getValue();
     let spouse_dob = sheet.getRange("J13").getValue();
     let spouse_gender = sheet.getRange("J14").getValue();
