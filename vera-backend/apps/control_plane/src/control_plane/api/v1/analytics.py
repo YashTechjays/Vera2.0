@@ -17,6 +17,7 @@ from control_plane.api.v1.common import TenantId, TenantSession
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import require
 from control_plane.call_authz import visible_to
+from control_plane.call_closeout import TERMINAL_VALUES
 from control_plane.exceptions import CustomAPIException, CustomAPIResponse, DefaultExceptionCode
 from control_plane.responses import ResponseModel, ok
 from vera_core.models import (
@@ -27,7 +28,6 @@ from vera_core.models import (
     PatientForm,
     Tenant,
 )
-from vera_core.models.call import TERMINAL_CALL_STATUSES
 from vera_core.models.enums import FormStatus, ProviderStatus
 from vera_core.services.queue_dispatcher import DISPATCH_ACTIVE_FORM_STATUSES
 
@@ -94,7 +94,7 @@ class LivePanel(BaseModel):
 )
 async def live_panel(
     response: Response,
-    tenant_id: TenantId,
+    _tenant_id: TenantId,
     session: TenantSession,
     caller: VerifiedIdentity = require("reports:dashboard"),
 ) -> ResponseModel[LivePanel]:
@@ -155,7 +155,6 @@ async def live_panel(
     return ok(LivePanel(rows=rows))
 
 
-_TERMINAL_VALUES = [s.value for s in TERMINAL_CALL_STATUSES]
 _MAX_RANGE = timedelta(days=366)
 
 
@@ -218,7 +217,7 @@ async def _window_metrics(session: AsyncSession, conds: list[ColumnElement[bool]
                 ),
                 # Completion is frozen onto the call at terminal status (call_lifecycle);
                 # live calls still read the 0 default, so average terminals only.
-                func.avg(Call.completion_pct).filter(Call.current_status.in_(_TERMINAL_VALUES)),
+                func.avg(Call.completion_pct).filter(Call.current_status.in_(TERMINAL_VALUES)),
             )
             .select_from(Call)
             .where(*conds)
@@ -252,7 +251,7 @@ async def _window_metrics(session: AsyncSession, conds: list[ColumnElement[bool]
 )
 async def history_report(
     response: Response,
-    tenant_id: TenantId,
+    _tenant_id: TenantId,
     session: TenantSession,
     date_from: datetime,
     date_to: datetime,
@@ -319,7 +318,7 @@ async def history_report(
 )
 async def report_filters(
     response: Response,
-    tenant_id: TenantId,
+    _tenant_id: TenantId,
     session: TenantSession,
     _caller: VerifiedIdentity = require("reports:dashboard"),
 ) -> ResponseModel[ReportFilterOptions]:

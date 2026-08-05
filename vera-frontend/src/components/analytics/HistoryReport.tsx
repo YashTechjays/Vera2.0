@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 
 import { MetricCard } from "@/components/analytics/MetricCard"
@@ -18,6 +18,7 @@ import {
   formatDuration,
   formatPct,
   presetRange,
+  type DateRange,
   type PresetKey,
 } from "@/lib/analytics/report"
 
@@ -31,6 +32,28 @@ const PRESETS: { key: PresetKey; label: string }[] = [
 ]
 
 const BAR_COLOR = "#34B2B2" // brand teal, same literal Live Monitoring uses
+
+function selectedRange(preset: PresetKey, customFrom: string, customTo: string): DateRange | null {
+  if (preset !== "custom") return presetRange(preset, new Date())
+  if (!customFrom || !customTo) return null
+  // UTC-day widening, same convention as CallHistory's date filters.
+  return { date_from: `${customFrom}T00:00:00Z`, date_to: `${customTo}T23:59:59Z` }
+}
+
+function ChartCard({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="h-64">
+        <ResponsiveContainer width="100%" height="100%">
+          {children}
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  )
+}
 
 /** VR2-45: historical metrics with previous-period deltas and charts. */
 export function HistoryReport() {
@@ -48,15 +71,9 @@ export function HistoryReport() {
   }, [])
 
   useEffect(() => {
-    let cancelled = false
-    const range =
-      preset === "custom"
-        ? customFrom && customTo
-          ? // UTC-day widening, same convention as CallHistory's date filters.
-            { date_from: `${customFrom}T00:00:00Z`, date_to: `${customTo}T23:59:59Z` }
-          : null
-        : presetRange(preset, new Date())
+    const range = selectedRange(preset, customFrom, customTo)
     if (!range) return
+    let cancelled = false
     getHistoryReport({
       ...range,
       provider_id: providerId || undefined,
@@ -171,38 +188,37 @@ export function HistoryReport() {
       )}
       {report && (
         <div className="grid gap-4 lg:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle>Calls per day</CardTitle>
-            </CardHeader>
-            <CardContent className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={report.calls_per_day}>
-                  <CartesianGrid vertical={false} strokeOpacity={0.3} />
-                  <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={12} />
-                  <YAxis allowDecimals={false} tickLine={false} axisLine={false} fontSize={12} />
-                  <Tooltip cursor={{ fillOpacity: 0.1 }} />
-                  <Bar dataKey="calls" fill={BAR_COLOR} radius={[3, 3, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Interventions by type</CardTitle>
-            </CardHeader>
-            <CardContent className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={report.interventions_by_type} layout="vertical">
-                  <CartesianGrid horizontal={false} strokeOpacity={0.3} />
-                  <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} fontSize={12} />
-                  <YAxis type="category" dataKey="type" width={90} tickLine={false} axisLine={false} fontSize={12} />
-                  <Tooltip cursor={{ fillOpacity: 0.1 }} />
-                  <Bar dataKey="count" fill={BAR_COLOR} radius={[0, 3, 3, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
+          <ChartCard title="Calls per day">
+            <BarChart data={report.calls_per_day}>
+              <CartesianGrid vertical={false} strokeOpacity={0.3} />
+              <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={12} />
+              <YAxis allowDecimals={false} tickLine={false} axisLine={false} fontSize={12} />
+              <Tooltip cursor={{ fillOpacity: 0.1 }} />
+              <Bar dataKey="calls" fill={BAR_COLOR} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ChartCard>
+          <ChartCard title="Interventions by type">
+            <BarChart data={report.interventions_by_type} layout="vertical">
+              <CartesianGrid horizontal={false} strokeOpacity={0.3} />
+              <XAxis
+                type="number"
+                allowDecimals={false}
+                tickLine={false}
+                axisLine={false}
+                fontSize={12}
+              />
+              <YAxis
+                type="category"
+                dataKey="type"
+                width={90}
+                tickLine={false}
+                axisLine={false}
+                fontSize={12}
+              />
+              <Tooltip cursor={{ fillOpacity: 0.1 }} />
+              <Bar dataKey="count" fill={BAR_COLOR} radius={[0, 3, 3, 0]} />
+            </BarChart>
+          </ChartCard>
         </div>
       )}
       {error && (

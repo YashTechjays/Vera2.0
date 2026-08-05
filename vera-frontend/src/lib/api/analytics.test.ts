@@ -13,7 +13,9 @@ vi.mock("@/lib/api/client", () => ({ apiRequest: vi.fn() }))
 const mocked = vi.mocked(apiRequest)
 
 describe("analytics api", () => {
-  beforeEach(() => mocked.mockReset())
+  beforeEach(() => {
+    mocked.mockReset()
+  })
 
   it("GETs the queue status", async () => {
     const status = { limit: 3, active: 3, in_queue: 2 }

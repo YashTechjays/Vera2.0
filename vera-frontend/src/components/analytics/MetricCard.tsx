@@ -13,7 +13,7 @@ type Props = {
 
 export function MetricCard({ label, value, deltaPct, invert = false }: Props) {
   const up = deltaPct !== null && deltaPct >= 0
-  const good = deltaPct === null ? true : up !== invert
+  const good = up !== invert
   return (
     <Card size="sm">
       <CardContent>

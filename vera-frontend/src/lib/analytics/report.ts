@@ -1,12 +1,11 @@
 export type PresetKey = "7d" | "30d" | "90d" | "week" | "month" | "custom"
 
+export type DateRange = { date_from: string; date_to: string }
+
 const DAY_MS = 86_400_000
 
 /** UTC ranges so the buckets line up with the backend's UTC day convention. */
-export function presetRange(
-  preset: Exclude<PresetKey, "custom">,
-  now: Date,
-): { date_from: string; date_to: string } {
+export function presetRange(preset: Exclude<PresetKey, "custom">, now: Date): DateRange {
   const date_to = now.toISOString()
   switch (preset) {
     case "7d":
