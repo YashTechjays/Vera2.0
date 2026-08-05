@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from agent_worker.directives import Terminate
+from agent_worker.directives import ReAsk, Terminate
 from agent_worker.observer import (
     ExtractedAnswer,
     ObserverManager,
@@ -20,7 +20,7 @@ from agent_worker.observer import (
 from vera_core.call_stream import TYPE_CALL_STATUS, TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
-from vera_core.forms.dsl import Comparison, FlowRule
+from vera_core.forms.dsl import Comparison, FlowRule, NumericConsistency
 from vera_core.llm import LLMUnavailableError
 from vera_core.observability.otel_testing import assert_no_phi_values
 
@@ -31,7 +31,12 @@ def _field(path: str) -> PlanFieldDescriptor:
     return PlanFieldDescriptor(path=path, title=path.split(".")[-1], type="text", role="ask")
 
 
-def _plan(*, flow_rules: list[FlowRule] | None = None) -> CallPlan:
+def _plan(
+    *,
+    flow_rules: list[FlowRule] | None = None,
+    numeric_consistencies: list[NumericConsistency] | None = None,
+    prefilled: dict[str, Any] | None = None,
+) -> CallPlan:
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -39,10 +44,22 @@ def _plan(*, flow_rules: list[FlowRule] | None = None) -> CallPlan:
         schema_version_id=uuid.uuid4(),
         session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
         tasks=[
-            PlanTask(task_key="t1", title="T1", prompt=".", fields=[_field("sections.a.x")]),
+            PlanTask(
+                task_key="t1",
+                title="T1",
+                prompt=".",
+                fields=[
+                    _field("sections.a.x"),
+                    _field("sections.a.total"),
+                    _field("sections.a.met_amount"),
+                    _field("sections.a.remaining"),
+                ],
+            ),
             PlanTask(task_key="t2", title="T2", prompt=".", fields=[_field("sections.b.y")]),
         ],
         flow_rules=flow_rules or [],
+        numeric_consistencies=numeric_consistencies or [],
+        prefilled=prefilled or {},
     )
 
 
@@ -601,3 +618,94 @@ class TestParsing:
             ' {"field_path": "a.d", "value": "No"}]'
         )
         assert out == [ExtractedAnswer("a.d", "No", None)]
+
+
+TRIPLET_RULE = NumericConsistency(rule_key="a_triplet", triplet="sections.a")
+TOTAL, MET, REMAINING = "sections.a.total", "sections.a.met_amount", "sections.a.remaining"
+
+
+class TestDerivedRemaining:
+    @pytest.mark.asyncio
+    async def test_derives_remaining_when_total_and_met_are_recorded(self) -> None:
+        extractor = FakeExtractor(
+            [ExtractedAnswer(TOTAL, "$25,000", 90), ExtractedAnswer(MET, "$5,000", 80)]
+        )
+        manager, run_state, bus, controller = _manager(
+            _plan(numeric_consistencies=[TRIPLET_RULE]), extractor
+        )
+        await _feed(manager, _rep("Total is 25k, met 5k."))
+        recorded = {path: value for _, path, value, _ in run_state.records}
+        assert recorded[REMAINING] == "$20,000.00"
+        assert controller.answers[REMAINING] == "$20,000.00"
+        derived_events = [e for e in bus.events if e.field_path == REMAINING]
+        assert len(derived_events) == 1
+        assert derived_events[0].confidence == 80  # inherited from the triggering answer
+        assert controller.applied == []  # a derived value never fires the triplet's ReAsk
+
+    @pytest.mark.asyncio
+    async def test_rep_stated_remaining_wins_and_stops_derivation(self) -> None:
+        extractor = FakeExtractor(
+            [
+                ExtractedAnswer(TOTAL, "$25,000", 90),
+                ExtractedAnswer(MET, "$5,000", 90),
+                ExtractedAnswer(REMAINING, "$20,000", 90),
+            ]
+        )
+        manager, _, _, controller = _manager(_plan(numeric_consistencies=[TRIPLET_RULE]), extractor)
+        await _feed(manager, _rep("All three amounts."))
+        assert controller.answers[REMAINING] == "$20,000"  # spoken value is current
+        # A later Met correction must NOT recompute over the rep-stated value.
+        extractor.answers = [ExtractedAnswer(MET, "$6,000", 90)]
+        await _feed(manager, _rep("Correction: met is 6k.", ts=2))
+        assert controller.answers[REMAINING] == "$20,000"
+
+    @pytest.mark.asyncio
+    async def test_recomputes_when_inputs_change_and_remaining_is_still_derived(self) -> None:
+        extractor = FakeExtractor(
+            [ExtractedAnswer(TOTAL, "$25,000", 90), ExtractedAnswer(MET, "$5,000", 90)]
+        )
+        manager, _, _, controller = _manager(_plan(numeric_consistencies=[TRIPLET_RULE]), extractor)
+        await _feed(manager, _rep("Total 25k, met 5k."))
+        assert controller.answers[REMAINING] == "$20,000.00"
+        extractor.answers = [ExtractedAnswer(MET, "$6,000", 90)]
+        await _feed(manager, _rep("Correction: met is 6k.", ts=2))
+        assert controller.answers[REMAINING] == "$19,000.00"
+
+    @pytest.mark.asyncio
+    async def test_prefilled_remaining_blocks_derivation(self) -> None:
+        extractor = FakeExtractor(
+            [ExtractedAnswer(TOTAL, "$25,000", 90), ExtractedAnswer(MET, "$5,000", 90)]
+        )
+        manager, run_state, _, controller = _manager(
+            _plan(
+                numeric_consistencies=[TRIPLET_RULE],
+                prefilled={REMAINING: "$1,000"},
+            ),
+            extractor,
+        )
+        await _feed(manager, _rep("Total 25k, met 5k."))
+        assert controller.answers[REMAINING] == "$1,000"
+        assert not any(path == REMAINING for _, path, _, _ in run_state.records)
+
+    @pytest.mark.asyncio
+    async def test_impossible_inputs_derive_nothing_and_reask_fires(self) -> None:
+        extractor = FakeExtractor(
+            [ExtractedAnswer(TOTAL, "$100", 90), ExtractedAnswer(MET, "$300", 90)]
+        )
+        manager, run_state, _, controller = _manager(
+            _plan(numeric_consistencies=[TRIPLET_RULE]), extractor
+        )
+        await _feed(manager, _rep("Total 100, met 300."))
+        assert not any(path == REMAINING for _, path, _, _ in run_state.records)
+        assert any(isinstance(d, ReAsk) for d in controller.applied)
+
+    @pytest.mark.asyncio
+    async def test_repeated_passes_record_the_derived_value_once(self) -> None:
+        extractor = FakeExtractor(
+            [ExtractedAnswer(TOTAL, "$25,000", 90), ExtractedAnswer(MET, "$5,000", 90)]
+        )
+        manager, run_state, _, _ = _manager(_plan(numeric_consistencies=[TRIPLET_RULE]), extractor)
+        await _feed(manager, _rep("Total 25k, met 5k."))
+        await _feed(manager, _rep("Same again.", ts=2))
+        derived = [r for r in run_state.records if r[1] == REMAINING]
+        assert len(derived) == 1

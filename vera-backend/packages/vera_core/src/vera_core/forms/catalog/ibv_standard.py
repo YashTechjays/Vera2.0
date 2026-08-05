@@ -1370,5 +1370,37 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "services, how much of it has been met, and how much remains?"
                 ),
             ),
+            NumericConsistency(
+                rule_key="deductible_individual_triplet_consistency",
+                triplet="sections.deductibles.individual",
+                clarify=(
+                    "Could you double-check the total individual deductible, how much "
+                    "of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="deductible_family_triplet_consistency",
+                triplet="sections.deductibles.family",
+                clarify=(
+                    "Could you double-check the total family deductible, how much of "
+                    "it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="oop_individual_triplet_consistency",
+                triplet="sections.out_of_pocket.individual",
+                clarify=(
+                    "Could you double-check the total individual out-of-pocket "
+                    "maximum, how much of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="oop_family_triplet_consistency",
+                triplet="sections.out_of_pocket.family",
+                clarify=(
+                    "Could you double-check the total family out-of-pocket maximum, "
+                    "how much of it has been met, and how much remains?"
+                ),
+            ),
         ],
     )

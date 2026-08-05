@@ -143,6 +143,42 @@ You are looking at the member's plan in your system.
 - Your name is Martha Reed. Your call reference number is 841026.
 """
 
+# `lifetime_maximum_triplet_consistency` (ibv_standard.py) — the rep misreads the screen into an
+# arithmetically impossible pair (met > total) and sticks to it if asked again, so the numeric
+# rule's ReAsk is the only thing that can challenge it.
+TRIPLET_MISQUOTE_FACTS = """\
+You are looking at the member's plan in your system.
+
+- Plan: UnitedHealthcare Choice Plus, plan type PPO, active, effective January 1 2026.
+- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
+- There IS an infertility plan mandate on this policy. Infertility treatment IS covered.
+- Infertility lifetime maximum: the total is $10,000, with $12,000 met so far. Quote exactly
+  those two numbers whenever asked. If the assistant questions the numbers or asks you to
+  double-check them, apologize and correct yourself: the total is $10,000 and exactly $1,000
+  has been met. Never quote $12,000 again after correcting yourself.
+- You CANNOT see the remaining lifetime maximum amount in your system. If asked what remains,
+  say you don't have that figure in front of you. Never state a remaining amount and never do
+  the subtraction yourself.
+- The lifetime maximum applies to DIAGNOSTIC AND INFERTILITY TREATMENT.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""
+
+# The Observer's auto-derived remaining — the rep gives a consistent total and met amount but can
+# never state the remaining, so only the worker's own Total - Met derivation can fill it.
+DERIVED_REMAINING_FACTS = """\
+You are looking at the member's plan in your system.
+
+- Plan: UnitedHealthcare Choice Plus, plan type PPO, active, effective January 1 2026.
+- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
+- There IS an infertility plan mandate on this policy. Infertility treatment IS covered.
+- Infertility lifetime maximum: the total is $10,000, and exactly $1,000 has been met so far.
+- You CANNOT see the remaining lifetime maximum amount in your system. If asked what remains,
+  say you don't have that figure in front of you. Never state a remaining amount and never do
+  the subtraction yourself.
+- The lifetime maximum applies to DIAGNOSTIC AND INFERTILITY TREATMENT.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""
+
 # `insurance_not_active` (ibv_standard.py) — an inactive policy ends the call, so the plan
 # skips straight to wrap_up instead of collecting benefits nobody can use.
 INACTIVE_POLICY_FACTS = """\

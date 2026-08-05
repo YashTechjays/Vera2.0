@@ -37,6 +37,11 @@ def _amount(answers: Mapping[str, Any], path: str) -> float | None:
     return None if value is None else parse_currency(str(value))
 
 
+def _money(amount: float) -> str:
+    """Format a parsed amount the way the agent speaks it ("$1,234.56")."""
+    return f"${amount:,.2f}"
+
+
 def check_triplet(base: str, answers: Mapping[str, Any]) -> str | None:
     """Reason text when the triplet's recorded amounts are impossible, else None.
 
@@ -51,10 +56,10 @@ def check_triplet(base: str, answers: Mapping[str, Any]) -> str | None:
 
     clauses: list[str] = []
     if total is not None and met is not None and met > total:
-        clauses.append(f"the met amount (${met:,.2f}) exceeds the total (${total:,.2f})")
+        clauses.append(f"the met amount ({_money(met)}) exceeds the total ({_money(total)})")
     if total is not None and remaining is not None and remaining > total:
         clauses.append(
-            f"the remaining amount (${remaining:,.2f}) exceeds the total (${total:,.2f})"
+            f"the remaining amount ({_money(remaining)}) exceeds the total ({_money(total)})"
         )
     if (
         not clauses
@@ -64,9 +69,18 @@ def check_triplet(base: str, answers: Mapping[str, Any]) -> str | None:
         and abs(round((met + remaining - total) * 100)) > 1
     ):
         clauses.append(
-            f"the met amount (${met:,.2f}) plus the remaining amount (${remaining:,.2f}) "
-            f"does not match the total (${total:,.2f})"
+            f"the met amount ({_money(met)}) plus the remaining amount ({_money(remaining)}) "
+            f"does not match the total ({_money(total)})"
         )
     if not clauses:
         return None
     return "The recorded amounts are inconsistent: " + " and ".join(clauses) + "."
+
+
+def derive_remaining(total_raw: str, met_raw: str) -> str | None:
+    """Remaining = total - met as a "$1,234.56" string; None unless 0 <= met <= total."""
+    total = parse_currency(total_raw)
+    met = parse_currency(met_raw)
+    if total is None or met is None or met < 0 or met > total:
+        return None
+    return _money(total - met)
