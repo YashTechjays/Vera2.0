@@ -322,7 +322,7 @@ def _question_lines(
     # ask/confirm coherence is validator-enforced (dsl.py Leaf._coherent), so an
     # ask/confirm-role leaf always carries the matching prompt text.
     assert prompt is not None, f"{path}: {leaf.role} leaf missing prompt text"
-    text = prompt.ask if leaf.role == "ask" else prompt.confirm
+    text = prompt.ask if leaf.role == "ask" else _confirm_slot(path)
     lines = [f"{idx}. {text}"]
     if leaf.values:
         lines.append(f"   - Answers: {' | '.join(leaf.values)}")

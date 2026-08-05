@@ -284,19 +284,21 @@ class PrefillFuser:
         # Confirm-role leaves: prefilled values the agent must READ BACK to confirm
         # (their prompt is a {{value}} confirmation). Without this block the agent has
         # no value to confirm and degrades to an open ask (risking a conflicting answer).
-        self._confirm_leaves = [
-            (path, leaf.title) for path, leaf in doc.leaf_items() if leaf.role == "confirm"
-        ]
-        # Sentences for the {{confirm:path}} slots: the compiler emits one per
-        # confirm_in_task leaf and the per-form value decides which is spoken.
+        # Sentences for the {{confirm:path}} slots live alongside: the compiler emits
+        # one per confirm-role leaf and the per-form value decides which is spoken.
+        # A confirm-role leaf always carries both texts (dsl.py's Leaf._coherent
+        # enforces it), so one pass over leaf_items() builds both structures.
+        self._confirm_leaves: list[tuple[str, str]] = []
         self._confirm_prompts: dict[str, tuple[str, str]] = {}
         for path, leaf in doc.leaf_items():
-            if leaf.confirm_in_task is None or leaf.prompt is None:
+            if leaf.role != "confirm":
                 continue
-            self._confirm_prompts[path] = (
-                leaf.prompt.confirm or leaf.title,
-                leaf.prompt.ask or leaf.title,
-            )
+            self._confirm_leaves.append((path, leaf.title))
+            if leaf.prompt is not None:
+                self._confirm_prompts[path] = (
+                    leaf.prompt.confirm or leaf.title,
+                    leaf.prompt.ask or leaf.title,
+                )
 
     def fuse(self, values: Mapping[str, Any], *, current_year: int) -> CallPlan:
         """Fuse one form's intake-prefilled values into the template (pure — the

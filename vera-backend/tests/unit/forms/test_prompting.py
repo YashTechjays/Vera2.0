@@ -207,11 +207,5 @@ class TestSnapshots:
     def test_fused_insurance_basics_without_spouse(self) -> None:
         plan = fuse_prefill(IBV, PLAN, {}, current_year=2026)
         text = plan_task(plan, "insurance_basics").prompt
-        assert "{{confirm:" not in text
-        # sections.insurance_information.policy_number is a plain confirm-role leaf
-        # (no confirm_in_task) whose "{{value}}" is the pre-existing runtime sentinel
-        # this task does not touch (see PrefillFuser.fuse's docstring) — so this
-        # proof is scoped to the spouse confirm slot under test, not the whole task.
-        assert "the spouse listed as {{value}}" not in text
-        assert "date of birth I have is {{value}}" not in text
+        assert "{{" not in text
         self._check("ibv_insurance_basics.fused_without_spouse.prompt.txt", text)
