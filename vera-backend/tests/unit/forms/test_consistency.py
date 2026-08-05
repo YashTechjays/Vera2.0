@@ -1,6 +1,11 @@
 """Money-triplet consistency: currency parsing, partial data, violation reasons."""
 
-from vera_core.forms.consistency import check_triplet, parse_currency, triplet_paths
+from vera_core.forms.consistency import (
+    check_triplet,
+    derive_remaining,
+    parse_currency,
+    triplet_paths,
+)
 
 BASE = "sections.lifetime_maximum"
 TOTAL, MET, REMAINING = triplet_paths(BASE)
@@ -66,3 +71,27 @@ class TestCheckTriplet:
     def test_special_values_do_not_participate(self) -> None:
         assert check_triplet(BASE, {TOTAL: "No Limit", MET: "$300", REMAINING: "$300"}) is None
         assert check_triplet(BASE, {TOTAL: "$100", MET: "$50", REMAINING: "Met"}) is None
+
+
+class TestDeriveRemaining:
+    def test_computes_and_formats_total_minus_met(self) -> None:
+        assert derive_remaining("$25,000", "$5,000") == "$20,000.00"
+        assert derive_remaining("100", "49.50") == "$50.50"
+
+    def test_met_equal_to_total_gives_zero(self) -> None:
+        assert derive_remaining("$500", "$500") == "$0.00"
+
+    def test_zero_total_and_zero_met(self) -> None:
+        assert derive_remaining("$0", "$0") == "$0.00"
+
+    def test_met_exceeding_total_is_not_derived(self) -> None:
+        assert derive_remaining("$100", "$300") is None
+
+    def test_negative_met_is_not_derived(self) -> None:
+        assert derive_remaining("$100", "-50") is None
+
+    def test_unparseable_inputs_are_not_derived(self) -> None:
+        assert derive_remaining("No Limit", "$300") is None
+        assert derive_remaining("$100", "") is None
+        assert derive_remaining("", "$50") is None
+        assert derive_remaining("Unlimited", "Met") is None

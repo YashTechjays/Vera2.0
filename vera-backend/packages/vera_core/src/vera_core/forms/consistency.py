@@ -70,3 +70,12 @@ def check_triplet(base: str, answers: Mapping[str, Any]) -> str | None:
     if not clauses:
         return None
     return "The recorded amounts are inconsistent: " + " and ".join(clauses) + "."
+
+
+def derive_remaining(total_raw: str, met_raw: str) -> str | None:
+    """Remaining = total - met as a "$1,234.56" string; None unless 0 <= met <= total."""
+    total = parse_currency(total_raw)
+    met = parse_currency(met_raw)
+    if total is None or met is None or met < 0 or met > total:
+        return None
+    return f"${total - met:,.2f}"
