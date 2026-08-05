@@ -687,6 +687,12 @@ class FormSchemaDoc(_Model):
             for attr in ("intro", "outro", "prompt"):
                 text: str | None = getattr(task, attr)
                 for token in PLACEHOLDER_RE.findall(text or ""):
+                    if token == "value":
+                        errors.append(
+                            f"task {task.task_key}.{attr}: {{{{value}}}} is only valid in a "
+                            "confirm-role leaf's prompt.confirm"
+                        )
+                        continue
                     if (
                         token not in RESERVED_PLACEHOLDER_TOKENS
                         and token not in (self.system_fields or {})

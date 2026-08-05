@@ -495,6 +495,12 @@ class TestDocumentValidation:
         }
         FormSchemaDoc.model_validate(doc)
 
+    def test_value_token_rejected_in_task_prompt(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["prompt"] = "Please confirm {{value}} with the rep."
+        with pytest.raises(ValidationError, match=r"only valid in a confirm-role"):
+            FormSchemaDoc.model_validate(doc)
+
 
 class TestParseDateFormat:
     """`parse_date_format` — the display/entry `date_format` fallback parser used
