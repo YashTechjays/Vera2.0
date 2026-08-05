@@ -39,6 +39,7 @@ from vera_core.forms.dsl import (
     FormSchemaDoc,
     Group,
     Leaf,
+    NumericConsistency,
     PromotedFields,
     RequiredWhen,
     Section,
@@ -1357,6 +1358,16 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "but infertility treatment is showing as not covered — with a mandate, "
                     "infertility services should be covered. Could you double-check whether "
                     "infertility treatment is covered under this plan?"
+                ),
+            ),
+        ],
+        numeric_consistencies=[
+            NumericConsistency(
+                rule_key="lifetime_maximum_triplet_consistency",
+                triplet="sections.lifetime_maximum",
+                clarify=(
+                    "Could you double-check the total lifetime maximum for infertility "
+                    "services, how much of it has been met, and how much remains?"
                 ),
             ),
         ],

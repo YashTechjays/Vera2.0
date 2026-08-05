@@ -14,6 +14,9 @@ Two rule kinds, from the compiled CallPlan:
 * `contradictions` **re-arm**: they push back once per distinct set of values for their
   `fields`, so a rep who restates the same conflicting answer isn't re-challenged, but a
   genuinely new conflicting combination is.
+* `numeric_consistencies` re-arm the same way, but their `when` is computed —
+  the money-triplet checks in vera_core.forms.consistency — and their ReAsk
+  reason embeds the actual recorded amounts.
 
 Flow rules are evaluated before contradictions so a call that should end or jump wins over
 a mere clarification when both would fire on the same turn.
@@ -25,17 +28,20 @@ from typing import Any
 from agent_worker.directives import Directive, ReAsk, SkipToTask, Terminate
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.conditions import evaluate
+from vera_core.forms.consistency import check_triplet, triplet_paths
 
 
 class RuleEngine:
     def __init__(self, plan: CallPlan) -> None:
         self._flow_rules = plan.flow_rules
         self._contradictions = plan.contradictions
+        self._numeric = [(rule, triplet_paths(rule.triplet)) for rule in plan.numeric_consistencies]
         self._shared = plan.shared_conditions
-        # Flow rules never re-fire; contradictions re-fire only when their fields'
-        # values differ from the combination that last triggered them.
+        # Flow rules never re-fire; contradictions and numeric rules re-fire only when
+        # their fields' values differ from the combination that last triggered them —
+        # one shared map, since rule_keys are validator-unique across both kinds.
         self._fired_flow: set[str] = set()
-        self._contradiction_snapshots: dict[str, tuple[Any, ...]] = {}
+        self._reask_snapshots: dict[str, tuple[Any, ...]] = {}
 
     def evaluate(self, answers: Mapping[str, Any]) -> Directive | None:
         for rule in self._flow_rules:
@@ -49,13 +55,26 @@ class RuleEngine:
 
         for contradiction in self._contradictions:
             snapshot = tuple(answers.get(field) for field in contradiction.fields)
-            if snapshot == self._contradiction_snapshots.get(contradiction.rule_key):
+            if snapshot == self._reask_snapshots.get(contradiction.rule_key):
                 continue  # same conflicting values we already pushed back on
             if evaluate(contradiction.when, answers, self._shared):
-                self._contradiction_snapshots[contradiction.rule_key] = snapshot
+                self._reask_snapshots[contradiction.rule_key] = snapshot
                 return ReAsk(
                     rule_key=contradiction.rule_key,
                     reason=contradiction.reason,
                     clarify=contradiction.clarify,
+                )
+
+        for consistency, paths in self._numeric:
+            snapshot = tuple(answers.get(path) for path in paths)
+            if snapshot == self._reask_snapshots.get(consistency.rule_key):
+                continue  # same impossible values we already pushed back on
+            reason = check_triplet(consistency.triplet, answers)
+            if reason is not None:
+                self._reask_snapshots[consistency.rule_key] = snapshot
+                return ReAsk(
+                    rule_key=consistency.rule_key,
+                    reason=reason,
+                    clarify=consistency.clarify,
                 )
         return None

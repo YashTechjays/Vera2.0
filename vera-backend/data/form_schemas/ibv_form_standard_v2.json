@@ -5294,5 +5294,12 @@
       "reason": "If the plan or state mandates infertility benefits, infertility services must be covered under the plan.",
       "clarify": "Earlier you mentioned there is an infertility plan mandate on this policy, but infertility treatment is showing as not covered — with a mandate, infertility services should be covered. Could you double-check whether infertility treatment is covered under this plan?"
     }
+  ],
+  "numeric_consistencies": [
+    {
+      "rule_key": "lifetime_maximum_triplet_consistency",
+      "triplet": "sections.lifetime_maximum",
+      "clarify": "Could you double-check the total lifetime maximum for infertility services, how much of it has been met, and how much remains?"
+    }
   ]
 }

@@ -25,6 +25,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from vera_core.forms.consistency import TRIPLET_KEYS
+
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # {{token}} placeholders in task-level text; token = a system_fields key or the
 # root-anchored path of a context-role leaf (2026-07-08 spec §4).
@@ -433,6 +435,15 @@ class Contradiction(_Model):
     clarify: str | None = None
 
 
+class NumericConsistency(_Model):
+    """Money-triplet consistency rule: met/remaining must not exceed total and
+    met + remaining must equal total; a violation pushes back and re-clarifies."""
+
+    rule_key: str
+    triplet: str
+    clarify: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Document
 # ---------------------------------------------------------------------------
@@ -491,6 +502,7 @@ class FormSchemaDoc(_Model):
     tasks: list[Task]
     flow_rules: list[FlowRule] | None = None
     contradictions: list[Contradiction] | None = None
+    numeric_consistencies: list[NumericConsistency] | None = None
 
     # -- documented walk helpers -------------------------------------------------
 
@@ -805,6 +817,20 @@ class FormSchemaDoc(_Model):
                         f"contradiction {rk}: {member!r} has role {leaves[member].role!r} — "
                         "only ask/confirm fields can be re-clarified"
                     )
+
+        # numeric consistencies
+        for consistency in self.numeric_consistencies or []:
+            rk = consistency.rule_key
+            check_key(f"numeric_consistency {rk}", rk)
+            if rk in rule_keys:
+                errors.append(f"duplicate rule_key {rk!r}")
+            rule_keys.add(rk)
+            for child in TRIPLET_KEYS:
+                path = f"{consistency.triplet}.{child}"
+                if path not in leaves:
+                    errors.append(f"numeric_consistency {rk}: {path!r} is not a leaf field")
+                elif leaves[path].type != "currency":
+                    errors.append(f"numeric_consistency {rk}: {path!r} must be a currency leaf")
 
         if errors:
             raise ValueError(
