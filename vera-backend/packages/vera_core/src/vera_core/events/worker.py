@@ -107,10 +107,10 @@ class CallHealthEvent(BaseModel):
 type WorkerEvent = (
     CallFailedEvent
     | CallAnsweredEvent
+    | IvrExitedEvent
     | CallEndedEvent
     | CallAnswerRecordedEvent
     | CallHealthEvent
-    | IvrExitedEvent
 )
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
     Annotated[WorkerEvent, Field(discriminator="type")]
