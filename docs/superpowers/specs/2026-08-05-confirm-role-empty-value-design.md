@@ -3,7 +3,7 @@
 **Date:** 2026-08-05
 **Status:** approved for planning
 **Scope:** backend (`vera_core.forms`, `agent_worker`, one control-plane intake call site)
-plus the intake App Script's `coverage_type` vocabulary. No frontend change.
+plus a dead guard in the intake App Script. No frontend change.
 
 ## Problem
 
@@ -92,8 +92,9 @@ than a fabricated spouse name.
    An earlier draft added a "never speak text inside `{{ }}`" ground rule to `SCOPE_DISCIPLINE`
    as a backstop for forms pinned to an older `schema_version`; that justification is gone, so
    the rule is **dropped** rather than carried as prompt bloat.
-5. **Enum vocabulary:** the App Script sheet is fixed at source **and** intake gains enum
-   membership validation. See Component 7.
+5. **Intake-side guard:** the App Script's spouse-required check is revived (it is currently
+   dead code) **and** intake gains enum membership validation as defense in depth. See
+   Component 7, which was corrected after seeing the live sheet.
 
 ## Blast radius
 
@@ -105,7 +106,7 @@ than a fabricated spouse name.
 | Plan compiler / fuser | `forms/call_plan.py` | Components 4, 5, 6 |
 | Agent runtime | `agent_worker/plan_runtime.py` | Component 5 |
 | Intake | `forms/intake.py`, `control_plane/api/v1/patient_forms.py` | Component 7 |
-| Intake sheet | `data/ibv_infertility_appscript.js` | Component 7 |
+| Intake sheet | `data/ibv_infertility_appscript.js` | Component 7 (revive the dead guard) |
 | Generated | `data/form_schemas/*.json`, prompt snapshots | `just compile-schemas`, re-record |
 
 No frontend change (see Component 1, rule 2).
@@ -306,36 +307,59 @@ and the declared `default` — so no legitimate read-back is suppressed.
 It also affects `known_information` and `on_file_values` (`call_plan.py:323-331`), where an
 `"N/A"` line is noise. Dropping it there is correct too.
 
-## Component 7 — Enum vocabulary: sheet fix plus intake validation
+## Component 7 — The dead spouse-required guard, plus intake enum validation
 
-The intake sheet's coverage-type dropdown uses `PT/Spouse` — `ibv_infertility_appscript.js:621`
-compares cell `AD19` against `"pt/spouse"` — while the schema declares
-`values=["Individual", "Family"]` (`catalog/ibv_standard.py:423-427`) and the gate is
-`eq(coverage_type, "Family")` (`ibv_standard.py:1103`). Line 38 maps `AD19` straight into
-`coverage_type` with no translation, and `getFormattedValue` performs none.
+**Corrected 2026-08-05 from a screenshot of the live sheet.** An earlier draft of this spec
+asserted that AD19's dropdown used `PT/Spouse` and therefore never matched the schema's
+`"Family"`. That is wrong: the dropdown offers exactly **`Individual`** and **`Family`**, which
+are precisely the leaf's declared `values` (`catalog/ibv_standard.py:423-427`). There is no
+vocabulary mismatch, and `getFormattedValue` needs no mapping.
 
-Today that is merely a gate that never opens. **Under Component 5 it becomes worse:**
-`coverage_type` *is* answered, so the gate is decidably false and the spouse questions are
-hard-**excluded** rather than landing in `conditional`. The garbage prefill would be more
-damaging after the fix than before it, so this cannot stay out of scope.
+The real defect is worse. `ibv_infertility_appscript.js:621` guards the spouse-required check
+with:
+
+```js
+  const cellValue = sheet.getRange("AD19").getValue().toString().trim();
+  if (cellValue.toLowerCase() === "pt/spouse".toLowerCase()) {
+```
+
+`"pt/spouse"` occurs exactly once in the whole file, and AD19 can only ever hold `Individual`
+or `Family`. **The comparison can never be true, so the entire spouse-required block
+(lines 619-641) is dead code.** The one guard meant to stop a Family form reaching a call with
+empty spouse cells has never run.
+
+That is the upstream half of the reported bug, and it explains how the form in the transcript
+was created at all.
 
 Two changes:
 
-1. **Fix the sheet at source.** Map `AD19` to the declared enum in
-   `data/ibv_infertility_appscript.js` — the field map at line 38 and the `"pt/spouse"`
-   comparison at line 621. This eliminates the known instance and needs no backend change.
+1. **Revive the guard.** Change the comparison at line 621 to `=== "family"`. The clinic is
+   then told to fill J12/J13/J14 before submitting whenever they pick Family — the existing
+   alert and `throw` at lines 636-640 already do this correctly once reached.
+
+   This **narrows** the hole; it does not close it. AD19 is declared optional
+   (`coverage_type: ["AD19", false]`, line 38), so a clinic that does not yet know the coverage
+   type leaves it blank and submits — no `field_answer` row, gate undecided, and the rep may
+   still say "Family" on the call. Component 4's ask fallback is what covers that path, and it
+   remains the primary fix.
+
 2. **Add enum membership validation at intake.** There is none today: `intake.py` never reads
-   `leaf.values`, and the intake pipeline
-   (`control_plane/api/v1/patient_forms.py:224-235`) validates unknown paths → 422, phone
-   prefix → normalised, dates → parsed or 422, and nothing else. So `"PT/Spouse"` currently
-   lands in a `field_answer` row as a legal-looking answer.
+   `leaf.values`, and the intake pipeline (`control_plane/api/v1/patient_forms.py:224-235`)
+   validates unknown paths → 422, phone prefix → normalised, dates → parsed or 422, and
+   nothing else.
+
+   With the dropdown confirmed correct this is **defense in depth rather than a fix for a known
+   live instance** — its justification is that Google Sheets data validation can be configured
+   to warn rather than reject, that AD19 is only one of many enum leaves, and that a schema
+   which declares `values` and then accepts anything is a validator gap. Ordering no longer
+   matters relative to change 1.
 
    Add `validate_enum_answers(answers, doc)` to `intake.py` beside `normalize_phone_answers`
    and `normalize_date_answers`, wired into `patient_forms.py` as a **422** next to
-   `_normalize_date_answers_or_422`. An enum leaf's value must be one of its declared `values`
-   or `special_values`. Rejecting rather than silently dropping is the right default now that
-   there are no production clinics to break: a schema that declares `values` and then accepts
-   anything is a validator gap, and it is why this bug could reach a live call at all.
+   `_normalize_date_answers_or_422`. Accepted values are the leaf's declared `values`, its
+   `special_values`, its own `default`, and its `inapplicable_value` — the last two matter
+   because several enum leaves declare `default="N/A"` (e.g. `pcp_referral_required`,
+   `ibv_standard.py:430`) and would otherwise be rejected.
 
    Per `intake.py`'s module docstring, validation errors carry **paths only, never values** —
    an out-of-enum value may be PHI.

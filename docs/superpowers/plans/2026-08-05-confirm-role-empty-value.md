@@ -35,7 +35,7 @@
 | `apps/agent_worker/src/agent_worker/plan_runtime.py` | Three-state gating block | 5 |
 | `packages/vera_core/src/vera_core/forms/intake.py` | Enum membership validation | 6 |
 | `apps/control_plane/src/control_plane/api/v1/patient_forms.py` | Wire the enum check as a 422 | 6 |
-| `data/ibv_infertility_appscript.js` | Map the sheet's coverage-type vocabulary to the declared enum | 7 |
+| `data/ibv_infertility_appscript.js` | Revive the dead spouse-required guard | 7 |
 | `data/form_schemas/*.json` | Generated — `just compile-schemas` only | 1, 4 |
 | `tests/unit/forms/snapshots/*.prompt.txt` | Generated — re-recorded | 4 |
 
@@ -1026,7 +1026,9 @@ coverage was Family. Undecided gates are now their own state."
 
 ### Task 6: Reject out-of-enum values at intake
 
-There is no enum membership check anywhere in the intake path today, so a sheet value like `"PT/Spouse"` lands in a `field_answer` row as a legal-looking answer for a leaf declaring `["Individual", "Family"]`. Under Task 5 that value is *answered*, so the gate is decidably false and the spouse questions get hard-excluded — worse than before.
+There is no enum membership check anywhere in the intake path today: `intake.py` never reads `leaf.values`, and the pipeline validates unknown paths → 422, phone prefix → normalised, dates → parsed or 422, and nothing else. Any out-of-enum string lands in a `field_answer` row as a legal-looking answer, and under Task 5 an out-of-enum value counts as *answered* — making the gate decidably false and hard-excluding the questions behind it.
+
+**This is defense in depth, not a fix for a known live instance.** The AD19 dropdown is confirmed correct (see Task 7), so there is no reproducer today. It earns its place because Sheets validation can be configured to warn rather than reject, AD19 is one of many enum leaves, and a schema that declares `values` and then accepts anything is a validator gap.
 
 **Careful:** many enum leaves declare `default="N/A"` (e.g. `pcp_referral_required`) and gated leaves declare `inapplicable_value`. Both must count as accepted, or this task 422s legitimate intakes.
 
@@ -1036,7 +1038,7 @@ There is no enum membership check anywhere in the intake path today, so a sheet 
 - Test: `tests/unit/forms/test_intake.py`
 
 **Interfaces:**
-- Consumes: nothing.
+- Consumes: nothing. (Independent of Task 7 — the earlier draft ordered these two; that dependency is gone.)
 - Produces: `intake.validate_enum_answers(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> None`, raising `InvalidIntakeValue(path, reason)`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1160,69 +1162,70 @@ git add packages/vera_core/src/vera_core/forms/intake.py \
         tests/unit/forms/test_intake.py
 git commit -m "feat(intake): reject enum answers outside a leaf's declared options
 
-Nothing validated enum membership, so a sheet value like \"PT/Spouse\" was
-stored as a legal answer for a leaf declaring Individual/Family and silently
-poisoned every gate reading it. Paths only in the error — never the value."
+Nothing validated enum membership, so any out-of-enum string was stored as a
+legal answer and silently poisoned every gate reading it. Defense in depth:
+no reproducer today, but a declared values list should be authoritative.
+Paths only in the error — never the value."
 ```
 
 ---
 
-### Task 7: Map the sheet's coverage-type vocabulary
+### Task 7: Revive the dead spouse-required guard in the sheet
 
-The sheet's AD19 dropdown uses `PT/Spouse` (`ibv_infertility_appscript.js:621`) and line 38 maps AD19 straight into `coverage_type` with no translation. Map it at payload construction.
+**No vocabulary mapping is needed.** A screenshot of the live sheet confirms AD19's dropdown offers exactly `Individual` and `Family` — precisely the leaf's declared `values`.
 
-Leave the spouse-required check at line 621 alone — it reads the **raw cell**, so the sheet's own vocabulary is correct there.
+The real defect: the spouse-required block at `ibv_infertility_appscript.js:619-641` is gated on `AD19.toLowerCase() === "pt/spouse"`. That string occurs **once** in the entire file, and AD19 can only ever hold `Individual` or `Family`, so the comparison is never true and the whole block is dead code. The one check meant to stop a Family form reaching a call with empty spouse cells has never run — which is how the form in the reported transcript was created.
+
+This **narrows** the hole rather than closing it: AD19 is optional (`coverage_type: ["AD19", false]`, line 38), so a clinic that does not yet know the coverage type still submits blank and the rep may still say "Family" on the call. Task 4 is what covers that path and remains the primary fix.
 
 **Files:**
-- Modify: `data/ibv_infertility_appscript.js` (`getFormattedValue`, near line 865)
+- Modify: `data/ibv_infertility_appscript.js:620-621`
 
 **Interfaces:**
-- Consumes: Task 6 (an unmapped value now fails loudly at intake instead of silently mis-gating).
-- Produces: intake payloads carry `coverage_type` as `"Individual"` or `"Family"`.
+- Consumes: nothing.
+- Produces: nothing consumed by other tasks.
 
-- [ ] **Step 1: Confirm the dropdown's real options**
+- [ ] **Step 1: Fix the comparison**
 
-Open the live intake sheet and read cell AD19's data-validation list. `PT/Spouse` is confirmed from line 621; the other member(s) are not. Record the exact strings before editing — a wrong guess here is silently wrong until Task 6's 422 fires.
-
-- [ ] **Step 2: Add the mapping**
-
-In `getFormattedValue` (line 865), before the final `return value`:
+Replace lines 620-621:
 
 ```js
-  // AD19's dropdown uses the clinic's wording; the schema enum is Individual/Family.
-  // An unmapped value passes through and is rejected at intake, naming the field.
-  if (jsonKey === "coverage_type") {
-    const COVERAGE_TYPE_MAP = {
-      "pt/spouse": "Family",
-      "patient only": "Individual",
-    };
-    const mapped = COVERAGE_TYPE_MAP[String(value).trim().toLowerCase()];
-    return mapped !== undefined ? mapped : value;
-  }
+  // AD19's dropdown is Individual | Family. This read compares the raw cell, so it
+  // must use the sheet's own wording — it read "pt/spouse" and never fired.
+  const cellValue = sheet.getRange("AD19").getValue().toString().trim();
+  if (cellValue.toLowerCase() === "family") {
 ```
 
-Replace the `COVERAGE_TYPE_MAP` keys with the exact lowercased dropdown strings recorded in Step 1, keeping `"pt/spouse": "Family"`.
+Change nothing else in the block — the alert and `throw` at lines 636-640 already behave correctly once reached.
 
-- [ ] **Step 3: Verify by submitting a form**
+- [ ] **Step 2: Verify both branches by hand**
 
-There is no test harness for the App Script. Submit one intake from the sheet with AD19 = the family option and confirm the created form's `coverage_type` answer is `"Family"`:
+There is no test harness for Apps Script, so exercise it in the sheet directly.
+
+1. Set AD19 = `Family`, clear J12/J13/J14, run the submit action. Expected: the alert lists all three missing spouse cells and submission is blocked.
+2. Fill J12/J13/J14, submit again. Expected: submission proceeds.
+3. Set AD19 = `Individual`, clear J12/J13/J14, submit. Expected: submission proceeds with no alert.
+4. Clear AD19 entirely, submit. Expected: submission proceeds with no alert (the coverage type is unknown at intake — this is the case Task 4 covers on the call).
+
+- [ ] **Step 3: Confirm the stored answer is unchanged**
+
+The mapping is untouched, so `coverage_type` should already store the dropdown string verbatim. From case 2 above, confirm the created form's `coverage_type` answer is exactly `"Family"` and that Task 6's new 422 did not fire.
 
 ```bash
 just up && just migrate && just api
 ```
 
-Then submit from the sheet and check the stored answer (branch-specific dev DB — confirm which one this branch uses before querying).
-
-Expected: `coverage_type` = `"Family"`, and no 422.
+Query the branch's own dev database — this repo uses per-branch DBs, so confirm which one this branch points at before querying rather than assuming `vera`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add data/ibv_infertility_appscript.js
-git commit -m "fix(intake): map the sheet's coverage-type wording to the schema enum
+git commit -m "fix(intake): revive the dead spouse-required check
 
-AD19's dropdown says PT/Spouse while the schema declares Individual/Family,
-so the family-coverage gate could never open."
+The block was gated on AD19 == \"pt/spouse\", but that dropdown only ever
+holds Individual or Family — so the check never ran and a Family form could
+be submitted with the spouse cells empty."
 ```
 
 ---
