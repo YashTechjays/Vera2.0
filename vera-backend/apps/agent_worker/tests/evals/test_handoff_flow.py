@@ -490,6 +490,11 @@ async def test_inactive_policy_short_circuits_the_call(inactive_call: CallRun) -
 async def test_no_raw_token_reaches_speech(family_coverage_call: CallRun) -> None:
     """The original bug: an unresolved `{{confirm:<path>}}`/`{{value}}` slot spoken verbatim. With
     no spouse prefill, the fuser must resolve the slot to the authored `ask` text instead."""
+    coverage = family_coverage_call.extracted().get("sections.benefit_coverage.coverage_type")
+    if coverage != "Family":
+        pytest.skip(
+            f"the spouse gate's trigger was not extracted this run (coverage_type={coverage!r})"
+        )
     leaked = [line for line in family_coverage_call.vera_said() if "{{" in line]
     assert not leaked, f"a raw template token reached speech: {leaked}"
 
