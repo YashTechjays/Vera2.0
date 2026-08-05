@@ -654,6 +654,7 @@ class TestNormalizeDateAnswers:
 
 _COVERAGE_TYPE_PATH = "sections.benefit_coverage.coverage_type"
 _PCP_REFERRAL_PATH = "sections.benefit_coverage.pcp_referral_required"
+_OI_PRIOR_AUTH_PATH = "sections.infertility_treatment.ovulation_induction.prior_auth"
 
 
 class TestValidateEnumAnswers:
@@ -669,6 +670,12 @@ class TestValidateEnumAnswers:
     def test_the_leafs_own_default_is_accepted(self) -> None:
         """pcp_referral_required declares default="N/A", so intake may send it."""
         validate_enum_answers([(_PCP_REFERRAL_PATH, "N/A")], IBV)
+
+    def test_a_special_value_disjoint_from_values_is_accepted(self) -> None:
+        """ovulation_induction.prior_auth declares values=["Yes","No","N/A"] plus
+        special_values=["Prior auth department"] — the special value must be
+        accepted even though it isn't in `values`."""
+        validate_enum_answers([(_OI_PRIOR_AUTH_PATH, "Prior auth department")], IBV)
 
     def test_blank_value_passes_through(self) -> None:
         validate_enum_answers([(_COVERAGE_TYPE_PATH, "")], IBV)
