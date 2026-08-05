@@ -100,6 +100,10 @@ class Call(Base, TenantScopedMixin):
     completion_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # IVR Success (VR2-45): both stamped once and never rewritten — frozen history,
+    # same posture as completion_pct.
+    ivr_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ivr_exited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Visibility axis, orthogonal to current_status. One-way: once True it never
     # returns to False. False = private to initiated_by_id.
     published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
