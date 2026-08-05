@@ -12,7 +12,7 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
    - Also accepted: PPO, HMO, EPO, POS
 5. For coordination of benefits, is this plan primary, secondary, or tertiary?
    - Answers: Primary | Secondary | Tertiary
-6. {{confirm:sections.insurance_information.policy_number}}
+6. {{confirm_bare:sections.insurance_information.policy_number}}
 7. What is the group name?
 8. What is the group number?
 9. What is the policy state or contract state?

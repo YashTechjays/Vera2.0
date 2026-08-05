@@ -223,7 +223,10 @@ def bookend_paths(plan: CallPlan, reference_field: str) -> list[str]:
     return [f.path for f in keep]
 
 
-CONFIRM_SLOT_RE = re.compile(r"\{\{confirm:([\w.]+)\}\}")
+# Two slot forms share one pattern: `{{confirm:<path>}}` keeps the confirm/ask verb label,
+# `{{confirm_bare:<path>}}` resolves to the same sentence without it (prompting._confirm_slot
+# decides which context emits which).
+CONFIRM_SLOT_RE = re.compile(r"\{\{confirm(?P<bare>_bare)?:(?P<path>[\w.]+)\}\}")
 _VALUE_TOKEN = "{{value}}"
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -322,17 +325,21 @@ class PrefillFuser:
         def expand_slots(text: str) -> str:
             def repl(match: re.Match[str]) -> str:
                 nonlocal unbacked
-                path = match.group(1)
+                bare = match.group("bare") is not None
+                path = match.group("path")
                 sentences = self._confirm_prompts.get(path)
                 if sentences is None:
                     # Fail safe: an open ask is never wrong, a fabricated read-back is.
                     unbacked += 1
-                    return f"ask — {self._titles.get(path, path)}"
-                confirm_text, ask_text = sentences
-                rendered = _render_value(values.get(path))
-                if rendered is None:
-                    return f"ask — {ask_text}"
-                return f"confirm — {confirm_text.replace(_VALUE_TOKEN, rendered)}"
+                    verb, sentence = "ask", self._titles.get(path, path)
+                else:
+                    confirm_text, ask_text = sentences
+                    rendered = _render_value(values.get(path))
+                    if rendered is None:
+                        verb, sentence = "ask", ask_text
+                    else:
+                        verb, sentence = "confirm", confirm_text.replace(_VALUE_TOKEN, rendered)
+                return sentence if bare else f"{verb} — {sentence}"
 
             return CONFIRM_SLOT_RE.sub(repl, text)
 

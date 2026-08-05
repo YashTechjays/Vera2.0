@@ -150,10 +150,14 @@ logger = logging.getLogger(__name__)
 _QuestionItem = tuple[str, Leaf, tuple[Condition, ...]]
 
 
-def _confirm_slot(path: str) -> str:
+def _confirm_slot(path: str, *, bare: bool = False) -> str:
     """The fuse-time slot for a confirm leaf's spoken line — sentence and confirm/ask
-    verb are chosen per form, once the prefilled value is known."""
-    return f"{{{{confirm:{path}}}}}"
+    verb are chosen per form, once the prefilled value is known. `bare` drops the
+    `confirm — `/`ask — ` label for the numbered-question list, whose numbering already
+    marks it as a question; the bullet contexts keep it because they mix confirms and
+    asks, and the label is what disambiguates them."""
+    token = "confirm_bare" if bare else "confirm"
+    return f"{{{{{token}:{path}}}}}"
 
 
 def _join_gates(gates: tuple[Condition, ...], render_cond: Callable[[Condition], str]) -> str:
@@ -322,7 +326,7 @@ def _question_lines(
     # ask/confirm coherence is validator-enforced (dsl.py Leaf._coherent), so an
     # ask/confirm-role leaf always carries the matching prompt text.
     assert prompt is not None, f"{path}: {leaf.role} leaf missing prompt text"
-    text = prompt.ask if leaf.role == "ask" else _confirm_slot(path)
+    text = prompt.ask if leaf.role == "ask" else _confirm_slot(path, bare=True)
     lines = [f"{idx}. {text}"]
     if leaf.values:
         lines.append(f"   - Answers: {' | '.join(leaf.values)}")

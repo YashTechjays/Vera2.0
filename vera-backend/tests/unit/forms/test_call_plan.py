@@ -371,6 +371,7 @@ class TestBookendPaths:
 
 SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
 SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
+MEMBER_ID = "sections.insurance_information.policy_number"
 
 
 class TestConfirmSlot:
@@ -405,3 +406,14 @@ class TestConfirmSlot:
         focused = focus_call_plan(plan, [SPOUSE_NAME])
         assert focused.on_file_values is None
         assert "Jane Doe" in plan_task(focused, "insurance_basics").prompt
+
+    def test_numbered_question_confirm_branch_is_bare(self) -> None:
+        """The numbered-question list never carried the confirm/ask label — only the
+        two bullet contexts (immediate/end-of-task) do."""
+        plan = fuse_prefill(IBV, PLAN, {MEMBER_ID: "ABC123"}, current_year=2026)
+        line = next(
+            line
+            for line in plan_task(plan, "insurance_basics").prompt.splitlines()
+            if line.startswith("6.")
+        )
+        assert line == "6. I have the member ID as ABC123 — can you confirm that is correct?"
