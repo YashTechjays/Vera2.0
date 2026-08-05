@@ -143,6 +143,7 @@
           "role": "confirm",
           "required": true,
           "prompt": {
+            "ask": "Can I get the member ID for this policy?",
             "confirm": "I have the member ID as {{value}} — can you confirm that is correct?"
           }
         },

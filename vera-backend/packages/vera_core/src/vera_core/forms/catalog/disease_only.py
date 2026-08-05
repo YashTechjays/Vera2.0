@@ -162,7 +162,8 @@ def _policy_details() -> Section:
                 role="confirm",
                 required=True,
                 prompt=FieldPrompt(
-                    confirm="I have the member ID as {{value}} — can you confirm that is correct?"
+                    confirm="I have the member ID as {{value}} — can you confirm that is correct?",
+                    ask="Can I get the member ID for this policy?",
                 ),
             ),
             "plan_name": text_ask(

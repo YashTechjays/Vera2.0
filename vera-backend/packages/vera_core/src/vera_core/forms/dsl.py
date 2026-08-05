@@ -319,12 +319,15 @@ class Leaf(_Model):
         if self.prompt is not None:
             if self.prompt.confirm is not None and self.role != "confirm":
                 raise ValueError("prompt.confirm on non-confirm role")
-            if self.prompt.ask is not None and self.role != "ask":
+            if self.prompt.ask is not None and self.role not in ("ask", "confirm"):
                 raise ValueError(f"prompt.ask on role {self.role}")
         if self.role == "ask" and not (self.prompt and self.prompt.ask):
             raise ValueError("ask field needs prompt.ask")
         if self.role == "confirm" and not (self.prompt and self.prompt.confirm):
             raise ValueError("confirm field needs prompt.confirm")
+        if self.role == "confirm" and not (self.prompt and self.prompt.ask):
+            # The open question spoken when no value is on file to read back.
+            raise ValueError("confirm field needs prompt.ask")
         if self.confirm_in_task is not None and self.role != "confirm":
             raise ValueError("confirm_in_task only valid on role=confirm")
         if self.tags is not None and not all(KEY_RE.match(t) for t in self.tags):

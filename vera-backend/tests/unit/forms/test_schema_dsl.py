@@ -9,7 +9,9 @@ from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
 from vera_core.forms.dsl import (
+    FieldPrompt,
     FormSchemaDoc,
+    Leaf,
     PromotedFields,
     Validation,
     compile_document,
@@ -325,7 +327,10 @@ class TestDocumentValidation:
                         "value": "PPO",
                     },
                     "confirm_in_task": cit,
-                    "prompt": {"confirm": "Spouse is {{value}} — correct?"},
+                    "prompt": {
+                        "confirm": "Spouse is {{value}} — correct?",
+                        "ask": "Can I get the spouse's name?",
+                    },
                 }
             },
         }
@@ -403,7 +408,10 @@ class TestDocumentValidation:
                         "value": "x",
                     },
                     "confirm_in_task": {"task_key": "main", "confirm_immediate": True},
-                    "prompt": {"confirm": "Spouse is {{value}}?"},
+                    "prompt": {
+                        "confirm": "Spouse is {{value}}?",
+                        "ask": "Can I get the spouse's name?",
+                    },
                 }
             },
         }
@@ -545,6 +553,40 @@ class TestDateFormatRequiresOneOfEachToken:
     def test_repeated_day_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="date_format"):
             Validation(date_format="D/DD/YYYY")
+
+
+def test_confirm_leaf_accepts_prompt_ask() -> None:
+    leaf = Leaf(
+        type="text",
+        title="Policy / Member ID",
+        role="confirm",
+        prompt=FieldPrompt(
+            confirm="I have the member ID as {{value}} — can you confirm that is correct?",
+            ask="Can I get the member ID for this policy?",
+        ),
+    )
+    assert leaf.prompt is not None
+    assert leaf.prompt.ask == "Can I get the member ID for this policy?"
+
+
+def test_confirm_leaf_without_prompt_ask_is_rejected() -> None:
+    with pytest.raises(ValidationError, match=r"confirm field needs prompt\.ask"):
+        Leaf(
+            type="text",
+            title="Policy / Member ID",
+            role="confirm",
+            prompt=FieldPrompt(confirm="I have the member ID as {{value}} — right?"),
+        )
+
+
+def test_prompt_ask_still_rejected_on_context_role() -> None:
+    with pytest.raises(ValidationError, match=r"prompt\.ask on role context"):
+        Leaf(
+            type="text",
+            title="Spouse Gender",
+            role="context",
+            prompt=FieldPrompt(ask="What is the spouse's gender?"),
+        )
 
 
 class TestPromotedColumnParity:

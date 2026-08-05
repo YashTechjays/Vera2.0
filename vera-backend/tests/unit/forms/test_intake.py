@@ -121,7 +121,10 @@ V2_SCHEMA = {
                     "title": "Policy Number",
                     "role": "confirm",
                     "required": True,
-                    "prompt": {"confirm": "I have {{value}} — can you confirm?"},
+                    "prompt": {
+                        "confirm": "I have {{value}} — can you confirm?",
+                        "ask": "Can I get the policy number?",
+                    },
                 },
             },
         },
