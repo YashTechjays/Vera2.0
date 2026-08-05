@@ -91,20 +91,23 @@ def _owning_segment(path: str) -> str:
     return parts[-2] if len(parts) > 1 else path
 
 
+def _field_line(field: PlanFieldDescriptor, title_counts: Counter[str]) -> str:
+    """One field, disambiguated when its title repeats in the list it's rendered into.
+
+    Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title
+    line names nothing the agent could act on; every field-list renderer shares this."""
+    line = f"- {field.title}"
+    if title_counts[field.title] > 1:
+        line += f" ({_owning_segment(field.path)})"
+    if field.values:
+        line += f" (expected one of: {', '.join(field.values)})"
+    return line
+
+
 def _field_lines(fields: list[PlanFieldDescriptor]) -> str:
     """Questions as a bulleted list, naming the expected values where the schema fixes them."""
-    # Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title list
-    # would read "- Covered" four times and name nothing the agent could ask about.
     title_counts = Counter(field.title for field in fields)
-    lines: list[str] = []
-    for field in fields:
-        line = f"- {field.title}"
-        if title_counts[field.title] > 1:
-            line += f" ({_owning_segment(field.path)})"
-        if field.values:
-            line += f" (expected one of: {', '.join(field.values)})"
-        lines.append(line)
-    return "\n".join(lines)
+    return "\n".join(_field_line(field, title_counts) for field in fields)
 
 
 def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
@@ -153,8 +156,15 @@ def _gating_block(
 
 
 def _conditional_lines(fields: list[PlanFieldDescriptor]) -> str:
+    """Same per-field disambiguation as `_field_lines`, plus the condition that gates it —
+    an undisambiguated "- Covered" repeated for every CPT code names nothing the agent could
+    act on, and this bucket tells the agent to ASK, so an unidentifiable field here is worse
+    than one merely omitted from the excluded bucket."""
+    title_counts = Counter(field.title for field in fields)
     return "\n".join(
-        f"- {field.title} — only if {field.gate_text}" if field.gate_text else f"- {field.title}"
+        f"{_field_line(field, title_counts)} — only if {field.gate_text}"
+        if field.gate_text
+        else _field_line(field, title_counts)
         for field in fields
     )
 

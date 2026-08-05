@@ -24,6 +24,7 @@ from agent_worker.plan_runtime import (
     PlanRunController,
     PlanTaskAgent,
     WrapUpAgent,
+    _conditional_lines,
     _field_lines,
     _gating_block,
 )
@@ -765,6 +766,7 @@ def _field(
     required: bool | RequiredWhen = True,
     gates: tuple[Comparison, ...] = (),
     values: list[str] | None = None,
+    gate_text: str | None = None,
 ) -> PlanFieldDescriptor:
     return PlanFieldDescriptor(
         path=path,
@@ -774,6 +776,7 @@ def _field(
         required=required,
         gates=gates,
         values=values,
+        gate_text=gate_text,
     )
 
 
@@ -834,11 +837,17 @@ _CLOSER = 3  # index of closing_task in _gap_plan()
 
 _COVERAGE = "sections.benefit_coverage.coverage_type"
 _SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+# A two-gate field mirroring the real IBV schema's `ovulation_induction.copay`, gated on
+# `infertility_tx_covered` AND `ovulation_induction.covered` — used to prove ONE decided-false
+# gate excludes the field even while its sibling gate's own path is still unanswered.
+_INFERTILITY_TX_COVERED = "sections.benefit_coverage.infertility_tx_covered"
+_OVULATION_COVERED = "sections.ovulation_induction.covered"
+_OVULATION_COPAY = "sections.ovulation_induction.copay"
 
 
 def _gating_plan() -> CallPlan:
     """Mirrors the real IBV schema's insurance_basics task: an ungated coverage-type
-    question and a spouse-name field gated on it being Family."""
+    question, a spouse-name field gated on it being Family, and a two-gate copay field."""
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -856,6 +865,14 @@ def _gating_plan() -> CallPlan:
                         _SPOUSE_NAME,
                         "Spouse / Partner Name",
                         gates=(Comparison(field=_COVERAGE, op="eq", value="Family"),),
+                    ),
+                    _field(
+                        _OVULATION_COPAY,
+                        "Copay",
+                        gates=(
+                            Comparison(field=_INFERTILITY_TX_COVERED, op="eq", value="Yes"),
+                            Comparison(field=_OVULATION_COVERED, op="eq", value="Yes"),
+                        ),
                     ),
                 ],
             ),
@@ -888,6 +905,19 @@ def test_answered_true_gate_is_applicable() -> None:
     controller.update_answers({_COVERAGE: "Family"})
     idx = _task_index(controller, "insurance_basics")
     assert _SPOUSE_NAME in {f.path for f in controller.applicable_fields(idx)}
+
+
+def test_one_decided_false_gate_excludes_despite_an_unanswered_sibling_gate() -> None:
+    """`is_applicable` is `all(gates)`, so ONE decidably-false gate settles the whole chain.
+    A naive implementation that required EVERY gate's referenced paths to be answered (not
+    just the deciding gate's own) would wrongly call this conditional: infertility_tx_covered
+    is answered "No" (decided false, its own path answered), but the sibling gate's own path
+    (ovulation_induction.covered) is never answered here."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_INFERTILITY_TX_COVERED: "No"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _OVULATION_COPAY in {f.path for f in controller.excluded_fields(idx)}
+    assert _OVULATION_COPAY not in {f.path for f in controller.conditional_fields(idx)}
 
 
 def test_gating_block_lists_conditional_fields_with_their_condition() -> None:
@@ -1079,6 +1109,45 @@ class TestFieldLines:
     def test_a_unique_title_is_left_alone(self) -> None:
         lines = _field_lines([_field("sections.intro.rep_name", "Representative name")])
         assert lines == "- Representative name"
+
+
+class TestConditionalLines:
+    """The conditional bucket tells the agent to ASK these — an unidentifiable field there
+    is worse than one merely omitted from the excluded bucket, so it needs the same
+    disambiguation as `_field_lines` (regression: the real IBV schema has 4 title
+    collisions, the worst being 14 byte-identical "Covered" fields)."""
+
+    def test_duplicated_titles_are_qualified_like_field_lines(self) -> None:
+        lines = _conditional_lines(
+            [
+                _field(
+                    "sections.diag.labs.cpt_58340.covered",
+                    "Covered",
+                    values=["Yes", "No"],
+                    gate_text='"Diagnostic Testing Covered" is "Yes"',
+                ),
+                _field(
+                    "sections.diag.labs.cpt_82670.covered",
+                    "Covered",
+                    values=["Yes", "No"],
+                    gate_text='"Diagnostic Testing Covered" is "Yes"',
+                ),
+            ]
+        )
+        assert (
+            "- Covered (cpt_58340) (expected one of: Yes, No) — only if "
+            '"Diagnostic Testing Covered" is "Yes"' in lines
+        )
+        assert (
+            "- Covered (cpt_82670) (expected one of: Yes, No) — only if "
+            '"Diagnostic Testing Covered" is "Yes"' in lines
+        )
+
+    def test_a_unique_title_is_left_alone(self) -> None:
+        lines = _conditional_lines(
+            [_field("sections.intro.rep_name", "Representative name", gate_text='"X" is "Y"')]
+        )
+        assert lines == '- Representative name — only if "X" is "Y"'
 
 
 class TestGapDetection:
@@ -1810,6 +1879,24 @@ class TestGatedOutTask:
             "CPT 89320",
         ]
         assert controller.conditional_fields(1) == []
+
+    @pytest.mark.asyncio
+    async def test_an_undecided_gated_task_runs_instead_of_skipping_silently(self) -> None:
+        # THE regression fence for the bug this task fixes: spouse_gender is genuinely
+        # unanswered here (conditional, not excluded), so the task must run rather than be
+        # silently handed on. Every other test in this class supplies a decided answer, so
+        # without the `or conditional_fields(...)` clause in `_skip_when_nothing_applies`
+        # this is the only test that would catch a revert of that fix.
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")  # the call has already opened
+        gated = controller.agents[1]
+        mock_session = MagicMock()
+        with _session_patch(gated, mock_session):
+            await gated.on_enter()
+        mock_session.say.assert_called_once_with(
+            "Now I'd like to ask about male partner fertility coverage."
+        )
+        mock_session.update_agent.assert_not_called()  # never handed on to closing_task
 
     @pytest.mark.asyncio
     async def test_a_fully_gated_task_is_skipped_without_speaking(self) -> None:
