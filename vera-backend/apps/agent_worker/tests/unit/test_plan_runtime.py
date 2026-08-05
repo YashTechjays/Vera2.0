@@ -25,6 +25,7 @@ from agent_worker.plan_runtime import (
     PlanTaskAgent,
     WrapUpAgent,
     _field_lines,
+    _gating_block,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, RequiredWhen
@@ -830,6 +831,98 @@ def _gap_plan() -> CallPlan:
 
 
 _CLOSER = 3  # index of closing_task in _gap_plan()
+
+_COVERAGE = "sections.benefit_coverage.coverage_type"
+_SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+
+
+def _gating_plan() -> CallPlan:
+    """Mirrors the real IBV schema's insurance_basics task: an ungated coverage-type
+    question and a spouse-name field gated on it being Family."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="insurance_basics",
+                title="Insurance Basics",
+                prompt="Ask about coverage.",
+                fields=[
+                    _field(_COVERAGE, "Coverage Type", values=["Individual", "Family"]),
+                    _field(
+                        _SPOUSE_NAME,
+                        "Spouse / Partner Name",
+                        gates=(Comparison(field=_COVERAGE, op="eq", value="Family"),),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _task_index(controller: PlanRunController, task_key: str) -> int:
+    return next(i for i, t in enumerate(controller.plan.tasks) if t.task_key == task_key)
+
+
+def test_unanswered_gate_is_conditional_not_excluded() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({})
+    idx = _task_index(controller, "insurance_basics")
+    assert _SPOUSE_NAME in {f.path for f in controller.conditional_fields(idx)}
+    assert _SPOUSE_NAME not in {f.path for f in controller.excluded_fields(idx)}
+
+
+def test_answered_false_gate_is_excluded() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Individual"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _SPOUSE_NAME in {f.path for f in controller.excluded_fields(idx)}
+    assert _SPOUSE_NAME not in {f.path for f in controller.conditional_fields(idx)}
+
+
+def test_answered_true_gate_is_applicable() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _SPOUSE_NAME in {f.path for f in controller.applicable_fields(idx)}
+
+
+def test_gating_block_lists_conditional_fields_with_their_condition() -> None:
+    block = _gating_block(
+        applicable=[],
+        excluded=[],
+        conditional=[
+            PlanFieldDescriptor(
+                path=_SPOUSE_NAME,
+                title="Spouse / Partner Name",
+                type="text",
+                role="confirm",
+                gate_text='"Coverage Type" is "Family"',
+            )
+        ],
+    )
+    assert "# Conditional on this call" in block
+    assert 'Spouse / Partner Name — only if "Coverage Type" is "Family"' in block
+    assert "do NOT ask these" not in block
+
+
+def test_conditional_field_is_never_also_excluded() -> None:
+    """The three buckets partition the task's fields — no field in two, none dropped."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family"})
+    idx = _task_index(controller, "insurance_basics")
+    buckets = [
+        {f.path for f in controller.applicable_fields(idx)},
+        {f.path for f in controller.excluded_fields(idx)},
+        {f.path for f in controller.conditional_fields(idx)},
+    ]
+    assert buckets[0] & buckets[1] == set()
+    assert buckets[0] & buckets[2] == set()
+    assert buckets[1] & buckets[2] == set()
+    assert set().union(*buckets) == {f.path for f in controller.plan.tasks[idx].fields}
 
 
 class TestGating:
@@ -1691,22 +1784,39 @@ class TestGatedOutTask:
     have been given — which is how the eval judge caught VERA asking all of them."""
 
     def test_applicable_fields_drops_the_gated_ones(self) -> None:
+        # spouse_gender is unanswered, not decided false — the two gated fields are
+        # CONDITIONAL, not excluded (that would misreport an undecided gate as settled).
         controller, _ = _controller(_gated_task_plan())
         assert controller.applicable_fields(1) == []
-        assert [f.title for f in controller.inapplicable_fields(1)] == [
+        assert [f.title for f in controller.conditional_fields(1)] == [
             "Male partner covered",
             "CPT 89320",
         ]
+        assert controller.excluded_fields(1) == []
 
     def test_the_gate_holding_makes_them_applicable_again(self) -> None:
         controller, _ = _controller(_gated_task_plan())
         controller.update_answers({"sections.patient.spouse_gender": "Male"})
         assert len(controller.applicable_fields(1)) == 2
-        assert controller.inapplicable_fields(1) == []
+        assert controller.conditional_fields(1) == []
+        assert controller.excluded_fields(1) == []
+
+    def test_a_decided_false_gate_is_excluded(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Female"})
+        assert controller.applicable_fields(1) == []
+        assert [f.title for f in controller.excluded_fields(1)] == [
+            "Male partner covered",
+            "CPT 89320",
+        ]
+        assert controller.conditional_fields(1) == []
 
     @pytest.mark.asyncio
     async def test_a_fully_gated_task_is_skipped_without_speaking(self) -> None:
+        # The gate must be DECIDED false — an unanswered spouse_gender is conditional, not
+        # excluded, and must not skip the task silently (that was the bug this fixes).
         controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Female"})
         controller.opening_line("Hello rep.")  # the call has already opened
         gated = controller.agents[1]
         mock_session = MagicMock()
@@ -1721,6 +1831,7 @@ class TestGatedOutTask:
         # It speaks no outro, so the flag `note_task_outro` sets must not be left True by the
         # task before it — otherwise wrap-up closes silently and nobody says goodbye.
         controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Female"})
         controller.opening_line("Hello rep.")
         basics = controller.agents[0]
         with _session_patch(basics, MagicMock()):

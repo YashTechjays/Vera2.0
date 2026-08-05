@@ -49,7 +49,7 @@ from vera_core.forms.dsl import (
     RequiredWhen,
     Validation,
 )
-from vera_core.forms.prompting import PromptDocument, render_task_prompts
+from vera_core.forms.prompting import PromptDocument, render_gate_chains, render_task_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,7 @@ class PlanFieldDescriptor(_Model):
     validation: Validation | None = None
     required: bool | RequiredWhen = False
     gates: tuple[Condition, ...] = ()
+    gate_text: str | None = None
     inapplicable_value: str | None = None
 
 
@@ -131,6 +132,7 @@ def compile_call_plan(
     """
     rendered = render_task_prompts(doc, prompt_doc)
     section_to_task = doc.section_to_task()
+    gate_texts = render_gate_chains(doc)
     fields_by_task: dict[str, list[PlanFieldDescriptor]] = {}
     for path, leaf, gates in leaf_gates(doc):
         if leaf.role not in COLLECTABLE_ROLES:
@@ -151,6 +153,7 @@ def compile_call_plan(
                 validation=leaf.validation,
                 required=leaf.required,
                 gates=gates,
+                gate_text=gate_texts.get(path),
                 inapplicable_value=leaf.inapplicable_value,
             )
         )

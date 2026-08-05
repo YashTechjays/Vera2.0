@@ -172,6 +172,15 @@ def _join_gates(gates: tuple[Condition, ...], render_cond: Callable[[Condition],
     return " and ".join(parts)
 
 
+def render_gate_chains(doc: FormSchemaDoc) -> dict[str, str]:
+    """Rendered gate-chain prose per gated leaf path — the same words the compiled
+    task prompt uses, so a runtime consumer states a condition identically."""
+    render_cond = build_condition_renderer(doc)
+    return {
+        path: _join_gates(gates, render_cond) for path, _leaf, gates in leaf_gates(doc) if gates
+    }
+
+
 def render_task_prompts(
     doc: FormSchemaDoc, prompt_doc: PromptDocument | None = None
 ) -> RenderedPrompts:

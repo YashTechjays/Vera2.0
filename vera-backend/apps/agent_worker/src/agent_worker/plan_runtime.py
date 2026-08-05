@@ -46,6 +46,7 @@ from agent_worker.prompt import (
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
+from vera_core.forms.dsl import condition_field_paths
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -116,16 +117,21 @@ def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
 
 
 def _gating_block(
-    applicable: list[PlanFieldDescriptor], excluded: list[PlanFieldDescriptor]
+    applicable: list[PlanFieldDescriptor],
+    excluded: list[PlanFieldDescriptor],
+    conditional: list[PlanFieldDescriptor],
 ) -> str:
-    """This call's narrowed question list, or "" when the gates exclude nothing.
+    """This call's narrowed question list, or "" when the gates settle nothing.
 
     Leads with what DOES apply. An exclusions-only list was read as "the whole task is
     excluded" — the financial task announced itself and completed in the same turn, claiming
     every question was gated out while its deductible fields were still open. A positive
     enumeration cannot be over-generalized into an empty task.
+
+    A gate whose own input is unanswered is CONDITIONAL, never excluded: reporting it as
+    excluded contradicted the task prompt's own condition and the agent improvised.
     """
-    if not excluded:
+    if not excluded and not conditional:
         return ""
     sections: list[str] = []
     if applicable:
@@ -133,11 +139,24 @@ def _gating_block(
             "# Questions that apply on THIS call — ask every one of them\n"
             f"{_field_lines(applicable)}"
         )
-    sections.append(
-        "# Excluded by the plan's gates — do NOT ask these, whatever the task list says\n"
-        f"{_field_lines(excluded)}"
-    )
+    if conditional:
+        sections.append(
+            "# Conditional on this call — ask only if the condition holds\n"
+            f"{_conditional_lines(conditional)}"
+        )
+    if excluded:
+        sections.append(
+            "# Excluded by the plan's gates — do NOT ask these, whatever the task list says\n"
+            f"{_field_lines(excluded)}"
+        )
     return "\n\n".join(sections)
+
+
+def _conditional_lines(fields: list[PlanFieldDescriptor]) -> str:
+    return "\n".join(
+        f"- {field.title} — only if {field.gate_text}" if field.gate_text else f"- {field.title}"
+        for field in fields
+    )
 
 
 def _is_message(item: ChatItem, role: str) -> bool:
@@ -235,7 +254,11 @@ class PlanTaskAgent(Agent):
         partner coverage… Thanks, that covers the male partner benefits.") sounds broken, and
         asking those questions anyway is worse. A task with NO fields at all is a different thing
         — it carries only speech, so it still runs."""
-        if not self._task.fields or self._controller.applicable_fields(self._task_index):
+        if (
+            not self._task.fields
+            or self._controller.applicable_fields(self._task_index)
+            or self._controller.conditional_fields(self._task_index)
+        ):
             return False
         if not self._controller.opened:
             # The call's greeting and recording disclosure ride on the opening task's intro;
@@ -263,7 +286,8 @@ class PlanTaskAgent(Agent):
         re-entry (a ReAsk directive) re-narrows against fresher answers instead of stacking."""
         gating = _gating_block(
             self._controller.applicable_fields(self._task_index),
-            self._controller.inapplicable_fields(self._task_index),
+            self._controller.excluded_fields(self._task_index),
+            self._controller.conditional_fields(self._task_index),
         )
         if not gating:
             return
@@ -777,26 +801,46 @@ class PlanRunController:
 
     def applicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
         """A task's questions whose gates hold, so they are askable on THIS call."""
-        shared = self.plan.shared_conditions
-        return [
-            field
-            for field in self.plan.tasks[task_index].fields
-            if is_applicable(field.gates, self._answers, shared)
-        ]
+        return self._classify_fields(task_index)[0]
 
-    def inapplicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
-        """The complement: questions the compiled prompt still lists but the gates exclude.
+    def excluded_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """Questions a gate rules out decidably — some gate is false with every path it
+        reads already answered, so no later answer can turn it back on."""
+        return self._classify_fields(task_index)[1]
 
-        The prompt is rendered per schema, before any answer exists, so it enumerates every
-        question and can only express a gate as prose the model must evaluate itself — often
-        against a value it was never given. Naming the exclusions live is the only signal it has.
-        """
+    def conditional_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """Questions whose gates are not yet decidable — a referenced answer is still
+        missing, so the compiled prompt's own condition governs them."""
+        return self._classify_fields(task_index)[2]
+
+    def _classify_fields(
+        self, task_index: int
+    ) -> tuple[list[PlanFieldDescriptor], list[PlanFieldDescriptor], list[PlanFieldDescriptor]]:
+        """One pass over a task's fields into (applicable, excluded, conditional) — the
+        partition `applicable_fields`/`excluded_fields`/`conditional_fields` share, so each
+        field's gates are evaluated once per call instead of once per accessor."""
         shared = self.plan.shared_conditions
-        return [
-            field
-            for field in self.plan.tasks[task_index].fields
-            if not is_applicable(field.gates, self._answers, shared)
-        ]
+        applicable: list[PlanFieldDescriptor] = []
+        excluded: list[PlanFieldDescriptor] = []
+        conditional: list[PlanFieldDescriptor] = []
+        for field in self.plan.tasks[task_index].fields:
+            if is_applicable(field.gates, self._answers, shared):
+                applicable.append(field)
+            elif self._has_decided_false_gate(field):
+                excluded.append(field)
+            else:
+                conditional.append(field)
+        return applicable, excluded, conditional
+
+    def _has_decided_false_gate(self, field: PlanFieldDescriptor) -> bool:
+        """`is_applicable` is `all(gates)`, so ONE decidably-false gate settles the
+        whole chain — regardless of other gates reading unanswered paths."""
+        shared = self.plan.shared_conditions
+        return any(
+            not evaluate(gate, self._answers, shared)
+            and all(self._is_answered(ref) for ref in condition_field_paths(gate, shared))
+            for gate in field.gates
+        )
 
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
         """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,

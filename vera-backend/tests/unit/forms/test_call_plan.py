@@ -417,3 +417,9 @@ class TestConfirmSlot:
             if line.startswith("6.")
         )
         assert line == "6. I have the member ID as ABC123 — can you confirm that is correct?"
+
+
+def test_gate_text_carries_the_condition_prose() -> None:
+    fields = {f.path: f for t in PLAN.tasks for f in t.fields}
+    assert fields[SPOUSE_NAME].gate_text == '"Coverage Type" is "Family"'
+    assert fields["sections.benefit_coverage.coverage_type"].gate_text is None
