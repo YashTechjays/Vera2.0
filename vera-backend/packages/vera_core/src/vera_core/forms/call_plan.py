@@ -234,7 +234,12 @@ def _render_value(raw: Any) -> str | None:
     """Prompt-text rendering of a prefilled raw value; None = not renderable
     (absent, or a shape with no sensible spoken form — dict/None)."""
     if isinstance(raw, str):
-        return _speak_iso_date(raw)
+        text = raw.strip()
+        # Mirrors ivr_selection._spoken_value: "N/A" is the intake default and the
+        # inapplicable marker, never a value worth speaking.
+        if not text or text.upper() == "N/A":
+            return None
+        return _speak_iso_date(text)
     if isinstance(raw, bool | int | float):
         return str(raw)
     if isinstance(raw, list):

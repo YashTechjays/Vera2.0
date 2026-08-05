@@ -4,6 +4,8 @@ render_task_prompts, field descriptors from leaf_gates; nothing is recompiled he
 
 import uuid
 
+import pytest
+
 from vera_core.forms.call_plan import (
     CallPlan,
     PlanTask,
@@ -260,6 +262,14 @@ class TestRenderCosmetics:
         assert fused.known_information is not None
         assert "April 12, 1991" in fused.known_information
         assert "1991-04-12" not in fused.known_information
+
+    @pytest.mark.parametrize("raw", ["N/A", "n/a", " N/A ", "", "   "])
+    def test_render_value_drops_placeholder_strings(self, raw: str) -> None:
+        assert _render_value(raw) is None
+
+    def test_render_value_keeps_real_values(self) -> None:
+        assert _render_value("Jane Doe") == "Jane Doe"
+        assert _render_value("1991-04-12") == "April 12, 1991"
 
 
 class TestFieldDescriptors:
