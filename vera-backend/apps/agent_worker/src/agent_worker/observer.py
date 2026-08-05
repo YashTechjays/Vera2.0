@@ -499,8 +499,7 @@ class ObserverManager:
             if trigger.field_path not in (total_path, met_path):
                 continue
             current = self._answers.get(remaining_path)
-            occupied = current is not None and str(current).strip() != ""
-            if occupied and current != self._derived.get(remaining_path):
+            if not is_blank_answer(current) and current != self._derived.get(remaining_path):
                 continue  # a rep-stated or prefilled remaining wins — never overwrite it
             value = derive_remaining(
                 str(self._answers.get(total_path) or ""),
