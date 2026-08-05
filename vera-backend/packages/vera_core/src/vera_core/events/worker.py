@@ -53,6 +53,15 @@ class CallAnsweredEvent(BaseModel):
     ts: int  # epoch milliseconds
 
 
+class IvrExitedEvent(BaseModel):
+    """Emitted when the IVR navigator hands off to the verification agent —
+    the navigator reached a live human (VR2-45 IVR Success numerator)."""
+
+    type: Literal["ivr.exited"] = "ivr.exited"
+    room_name: str
+    ts: int  # epoch milliseconds
+
+
 class CallEndedEvent(BaseModel):
     """Emitted from the worker's shutdown callback — the session finished after
     the call was live (hangup by either side, or the agent's end_call tool).
@@ -96,7 +105,12 @@ class CallHealthEvent(BaseModel):
 
 
 type WorkerEvent = (
-    CallFailedEvent | CallAnsweredEvent | CallEndedEvent | CallAnswerRecordedEvent | CallHealthEvent
+    CallFailedEvent
+    | CallAnsweredEvent
+    | CallEndedEvent
+    | CallAnswerRecordedEvent
+    | CallHealthEvent
+    | IvrExitedEvent
 )
 _ADAPTER: TypeAdapter[WorkerEvent] = TypeAdapter(
     Annotated[WorkerEvent, Field(discriminator="type")]
