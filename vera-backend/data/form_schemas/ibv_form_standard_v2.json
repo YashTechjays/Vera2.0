@@ -952,7 +952,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the copay amount for this service?"
+                "ask": "What is the copay amount for ovulation induction?"
               }
             },
             "coinsurance": {
@@ -973,7 +973,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
+                "ask": "What coinsurance percentage applies to ovulation induction?"
               }
             },
             "prior_auth": {
@@ -999,7 +999,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                "ask": "And for ovulation induction, is prior authorization required? Please answer Yes, No, or N/A."
               }
             },
             "cycle_limit": {
@@ -1017,7 +1017,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for ovulation induction?"
               }
             },
             "additional_notes": {
@@ -1031,7 +1031,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for ovulation induction?"
               },
               "ui": {
                 "widget": "textarea"
@@ -1078,7 +1078,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 58323 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58323 for IUI covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1102,7 +1102,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 58323 under IUI?"
                   }
                 },
                 "coinsurance": {
@@ -1123,7 +1123,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 58323 under IUI?"
                   }
                 },
                 "prior_auth": {
@@ -1149,7 +1149,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58323 under IUI, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -1178,7 +1178,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 58322 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with IUI, is CPT code 58322 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1202,7 +1202,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 58322 under IUI?"
                   }
                 },
                 "coinsurance": {
@@ -1223,7 +1223,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 58322 under IUI, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -1249,7 +1249,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 58322 under IUI? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -1278,7 +1278,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89261 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "And for IUI, does the plan cover CPT code 89261? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1302,7 +1302,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "And for CPT code 89261 under IUI, what is the copay amount?"
                   }
                 },
                 "coinsurance": {
@@ -1323,7 +1323,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What is the coinsurance percentage for CPT code 89261 under IUI?"
                   }
                 },
                 "prior_auth": {
@@ -1349,7 +1349,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 89261 under IUI require prior authorization? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -1383,7 +1383,7 @@
                 ]
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for IUI?"
               }
             },
             "additional_notes": {
@@ -1411,7 +1411,7 @@
                 ]
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for IUI?"
               },
               "ui": {
                 "widget": "textarea"
@@ -1458,7 +1458,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 58970 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58970 for IVF covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1482,7 +1482,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 58970 under IVF?"
                   }
                 },
                 "coinsurance": {
@@ -1503,7 +1503,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 58970 under IVF?"
                   }
                 },
                 "prior_auth": {
@@ -1529,7 +1529,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58970 under IVF, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -1558,7 +1558,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89280 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with IVF, is CPT code 89280 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1582,7 +1582,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 89280 under IVF?"
                   }
                 },
                 "coinsurance": {
@@ -1603,7 +1603,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 89280 under IVF, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -1629,7 +1629,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 89280 under IVF? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -1658,7 +1658,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89253 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "And for IVF, does the plan cover CPT code 89253? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1682,7 +1682,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "And for CPT code 89253 under IVF, what is the copay amount?"
                   }
                 },
                 "coinsurance": {
@@ -1703,7 +1703,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What is the coinsurance percentage for CPT code 89253 under IVF?"
                   }
                 },
                 "prior_auth": {
@@ -1729,7 +1729,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 89253 under IVF require prior authorization? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -1763,7 +1763,7 @@
                 ]
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for IVF?"
               }
             },
             "additional_notes": {
@@ -1791,7 +1791,7 @@
                 ]
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for IVF?"
               },
               "ui": {
                 "widget": "textarea"
@@ -1838,7 +1838,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89258 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89258 for embryo cryopreservation covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1862,7 +1862,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 89258 under embryo cryopreservation?"
                   }
                 },
                 "coinsurance": {
@@ -1883,7 +1883,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 89258 under embryo cryopreservation?"
                   }
                 },
                 "prior_auth": {
@@ -1909,7 +1909,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89258 under embryo cryopreservation, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -1938,7 +1938,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89342 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with embryo cryopreservation, is CPT code 89342 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -1962,7 +1962,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 89342 under embryo cryopreservation?"
                   }
                 },
                 "coinsurance": {
@@ -1983,7 +1983,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 89342 under embryo cryopreservation, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -2009,7 +2009,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 89342 under embryo cryopreservation? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -2038,7 +2038,7 @@
                 ]
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for embryo cryopreservation?"
               }
             },
             "additional_notes": {
@@ -2061,7 +2061,7 @@
                 ]
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for embryo cryopreservation?"
               },
               "ui": {
                 "widget": "textarea"
@@ -2108,7 +2108,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89337 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89337 for elective egg cryopreservation covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -2132,7 +2132,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 89337 under elective egg cryopreservation?"
                   }
                 },
                 "coinsurance": {
@@ -2153,7 +2153,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 89337 under elective egg cryopreservation?"
                   }
                 },
                 "prior_auth": {
@@ -2179,7 +2179,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89337 under elective egg cryopreservation, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -2199,7 +2199,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for elective egg cryopreservation?"
               }
             },
             "additional_notes": {
@@ -2213,7 +2213,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for elective egg cryopreservation?"
               },
               "ui": {
                 "widget": "textarea"
@@ -2256,7 +2256,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89337 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89337 for egg cryopreservation related to cancer treatment covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -2280,7 +2280,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 89337 under egg cryopreservation related to cancer treatment?"
                   }
                 },
                 "coinsurance": {
@@ -2301,7 +2301,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 89337 under egg cryopreservation related to cancer treatment?"
                   }
                 },
                 "prior_auth": {
@@ -2327,7 +2327,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89337 under egg cryopreservation related to cancer treatment, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -2347,7 +2347,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for egg cryopreservation related to cancer treatment?"
               }
             },
             "additional_notes": {
@@ -2361,7 +2361,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for egg cryopreservation related to cancer treatment?"
               },
               "ui": {
                 "widget": "textarea"
@@ -2408,7 +2408,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 58974 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58974 for frozen embryo transfer covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -2432,7 +2432,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 58974 under frozen embryo transfer?"
                   }
                 },
                 "coinsurance": {
@@ -2453,7 +2453,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 58974 under frozen embryo transfer?"
                   }
                 },
                 "prior_auth": {
@@ -2479,7 +2479,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58974 under frozen embryo transfer, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -2499,7 +2499,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for frozen embryo transfer?"
               }
             },
             "additional_notes": {
@@ -2513,7 +2513,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for frozen embryo transfer?"
               },
               "ui": {
                 "widget": "textarea"
@@ -2560,7 +2560,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89290 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89290 for embryo biopsy covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -2584,7 +2584,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 89290 under embryo biopsy?"
                   }
                 },
                 "coinsurance": {
@@ -2605,7 +2605,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 89290 under embryo biopsy?"
                   }
                 },
                 "prior_auth": {
@@ -2631,7 +2631,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89290 under embryo biopsy, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -2660,7 +2660,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89291 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with embryo biopsy, is CPT code 89291 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -2684,7 +2684,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 89291 under embryo biopsy?"
                   }
                 },
                 "coinsurance": {
@@ -2705,7 +2705,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 89291 under embryo biopsy, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -2731,7 +2731,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 89291 under embryo biopsy? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -2760,7 +2760,7 @@
                 ]
               },
               "prompt": {
-                "ask": "What is the cycle limit for this service?"
+                "ask": "What is the cycle limit for embryo biopsy?"
               }
             },
             "additional_notes": {
@@ -2783,7 +2783,7 @@
                 ]
               },
               "prompt": {
-                "ask": "Are there any additional notes or limitations for this service?"
+                "ask": "Are there any additional notes or limitations for embryo biopsy?"
               },
               "ui": {
                 "widget": "textarea"
@@ -2839,7 +2839,7 @@
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.coinsurance",
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.coinsurance"
           ],
-          "ask": "What is the coinsurance percentage for diagnostic testing?"
+          "ask": "What coinsurance percentage applies to diagnostic testing?"
         },
         {
           "fields": [
@@ -2852,7 +2852,7 @@
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.prior_auth",
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.prior_auth"
           ],
-          "ask": "Is prior authorization required for diagnostic testing? Please answer Yes, No, or N/A."
+          "ask": "And for diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
         }
       ],
       "alternatives": [
@@ -2960,7 +2960,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 58340 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58340 for diagnostic testing covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -2984,7 +2984,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 58340 under diagnostic testing?"
                   }
                 },
                 "coinsurance": {
@@ -3005,7 +3005,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 58340 under diagnostic testing?"
                   }
                 },
                 "prior_auth": {
@@ -3031,7 +3031,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58340 under diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3062,7 +3062,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 82670 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with diagnostic testing, is CPT code 82670 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3086,7 +3086,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 82670 under diagnostic testing?"
                   }
                 },
                 "coinsurance": {
@@ -3107,7 +3107,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 82670 under diagnostic testing, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -3133,7 +3133,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 82670 under diagnostic testing? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3164,7 +3164,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 83001 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "And for diagnostic testing, does the plan cover CPT code 83001? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3188,7 +3188,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "And for CPT code 83001 under diagnostic testing, what is the copay amount?"
                   }
                 },
                 "coinsurance": {
@@ -3209,7 +3209,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What is the coinsurance percentage for CPT code 83001 under diagnostic testing?"
                   }
                 },
                 "prior_auth": {
@@ -3235,7 +3235,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 83001 under diagnostic testing require prior authorization? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3266,7 +3266,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 83002 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 83002 for diagnostic testing covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3290,7 +3290,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 83002 under diagnostic testing?"
                   }
                 },
                 "coinsurance": {
@@ -3311,7 +3311,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 83002 under diagnostic testing?"
                   }
                 },
                 "prior_auth": {
@@ -3337,7 +3337,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 83002 under diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3368,7 +3368,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 84146 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with diagnostic testing, is CPT code 84146 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3392,7 +3392,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 84146 under diagnostic testing?"
                   }
                 },
                 "coinsurance": {
@@ -3413,7 +3413,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 84146 under diagnostic testing, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -3439,7 +3439,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 84146 under diagnostic testing? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3470,7 +3470,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 84443 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "And for diagnostic testing, does the plan cover CPT code 84443? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3494,7 +3494,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "And for CPT code 84443 under diagnostic testing, what is the copay amount?"
                   }
                 },
                 "coinsurance": {
@@ -3515,7 +3515,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What is the coinsurance percentage for CPT code 84443 under diagnostic testing?"
                   }
                 },
                 "prior_auth": {
@@ -3541,7 +3541,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 84443 under diagnostic testing require prior authorization? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3572,7 +3572,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 84144 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 84144 for diagnostic testing covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3596,7 +3596,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 84144 under diagnostic testing?"
                   }
                 },
                 "coinsurance": {
@@ -3617,7 +3617,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 84144 under diagnostic testing?"
                   }
                 },
                 "prior_auth": {
@@ -3643,7 +3643,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 84144 under diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3674,7 +3674,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 76830 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with diagnostic testing, is CPT code 76830 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3698,7 +3698,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 76830 under diagnostic testing?"
                   }
                 },
                 "coinsurance": {
@@ -3719,7 +3719,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 76830 under diagnostic testing, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -3745,7 +3745,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 76830 under diagnostic testing? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3822,7 +3822,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 99211 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 99211 for office visits covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3846,7 +3846,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 99211 under office visits?"
                   }
                 },
                 "coinsurance": {
@@ -3867,7 +3867,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 99211 under office visits?"
                   }
                 },
                 "prior_auth": {
@@ -3893,7 +3893,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 99211 under office visits, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -3935,7 +3935,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 58555 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58555 for ambulatory surgical center professional services covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -3959,7 +3959,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 58555 under ambulatory surgical center professional services?"
                   }
                 },
                 "coinsurance": {
@@ -3980,7 +3980,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 58555 under ambulatory surgical center professional services?"
                   }
                 },
                 "prior_auth": {
@@ -4006,7 +4006,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58555 under ambulatory surgical center professional services, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -4048,7 +4048,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 58555 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58555 for the ambulatory surgical center facility covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -4072,7 +4072,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 58555 under the ambulatory surgical center facility?"
                   }
                 },
                 "coinsurance": {
@@ -4093,7 +4093,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 58555 under the ambulatory surgical center facility?"
                   }
                 },
                 "prior_auth": {
@@ -4119,7 +4119,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58555 under the ambulatory surgical center facility, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -4585,7 +4585,7 @@
                   ],
                   "inapplicable_value": "N/A",
                   "prompt": {
-                    "ask": "Is CPT code 89320 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89320 for semen analysis covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -4609,7 +4609,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 89320 under semen analysis?"
                   }
                 },
                 "coinsurance": {
@@ -4630,7 +4630,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 89320 under semen analysis?"
                   }
                 },
                 "prior_auth": {
@@ -4656,7 +4656,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89320 under semen analysis, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -4704,7 +4704,7 @@
                   ],
                   "inapplicable_value": "N/A",
                   "prompt": {
-                    "ask": "Is CPT code 89259 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89259 for sperm cryopreservation covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -4728,7 +4728,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 89259 under sperm cryopreservation?"
                   }
                 },
                 "coinsurance": {
@@ -4749,7 +4749,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 89259 under sperm cryopreservation?"
                   }
                 },
                 "prior_auth": {
@@ -4775,7 +4775,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89259 under sperm cryopreservation, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }

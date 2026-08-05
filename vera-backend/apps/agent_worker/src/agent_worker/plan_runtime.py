@@ -41,6 +41,7 @@ from agent_worker.prompt import (
     CARTESIA_MARKUP_GUIDE,
     CLOSING_DISCIPLINE,
     HANDOFF_DISCIPLINE,
+    PHRASING_VARIETY,
     SCOPE_DISCIPLINE,
     TOOL_REASON_ARG,
 )
@@ -150,10 +151,12 @@ def _instructions(
 ) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
-    the scope-discipline guardrail + the Cartesia TTS markup guide — fused once, at
+    the discipline guardrails + the Cartesia TTS markup guide — fused once, at
     build time. The scope guardrail keeps the LLM on the compiled question list (no
     invented off-script questions); the markup guide keeps CPT codes `<spell>`-wrapped
-    (the compiled prompts carry no TTS guidance)."""
+    (the compiled prompts carry no TTS guidance). The phrasing guardrail is added only
+    for a task whose list actually runs through procedure codes — the tasks without one
+    would pay for it on every inference and have nothing for it to govern."""
     parts = [
         f"# Persona\n{plan.session.persona}",
         f"# Goal\n{plan.session.goal}",
@@ -176,6 +179,8 @@ def _instructions(
         # per-reply directive — the latter lives for one inference only (see _apply_gating).
         parts.append(gating)
     parts.append(SCOPE_DISCIPLINE)
+    if "CPT code" in task_block:
+        parts.append(PHRASING_VARIETY)
     parts.append(HANDOFF_DISCIPLINE)
     parts.append(CLOSING_DISCIPLINE)
     parts.append(CARTESIA_MARKUP_GUIDE)

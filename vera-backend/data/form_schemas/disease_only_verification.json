@@ -352,7 +352,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 77067 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 77067 for the cancer diagnosis benefit covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -376,7 +376,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 77067 under the cancer diagnosis benefit?"
                   }
                 },
                 "coinsurance": {
@@ -397,7 +397,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 77067 under the cancer diagnosis benefit?"
                   }
                 },
                 "prior_auth": {
@@ -423,7 +423,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 77067 under the cancer diagnosis benefit, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -452,7 +452,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 85025 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Staying with the cancer diagnosis benefit, is CPT code 85025 covered? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -476,7 +476,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What copay applies to CPT code 85025 under the cancer diagnosis benefit?"
                   }
                 },
                 "coinsurance": {
@@ -497,7 +497,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "And for CPT code 85025 under the cancer diagnosis benefit, what is the coinsurance percentage?"
                   }
                 },
                 "prior_auth": {
@@ -523,7 +523,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 85025 under the cancer diagnosis benefit? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -592,7 +592,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 93000 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 93000 for the cardiac disease benefit covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -616,7 +616,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 93000 under the cardiac disease benefit?"
                   }
                 },
                 "coinsurance": {
@@ -637,7 +637,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 93000 under the cardiac disease benefit?"
                   }
                 },
                 "prior_auth": {
@@ -663,7 +663,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 93000 under the cardiac disease benefit, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -732,7 +732,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 70450 covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 70450 for the stroke benefit covered under this plan? Please answer Yes, No, or N/A."
                   }
                 },
                 "copay": {
@@ -756,7 +756,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the copay amount for this service?"
+                    "ask": "What is the copay amount for CPT code 70450 under the stroke benefit?"
                   }
                 },
                 "coinsurance": {
@@ -777,7 +777,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "What is the coinsurance percentage for this service?"
+                    "ask": "What coinsurance percentage applies to CPT code 70450 under the stroke benefit?"
                   }
                 },
                 "prior_auth": {
@@ -803,7 +803,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 70450 under the stroke benefit, is prior authorization required? Please answer Yes, No, or N/A."
                   }
                 }
               }
@@ -883,7 +883,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the copay amount for this service?"
+                "ask": "What is the copay amount for the kidney failure benefit?"
               }
             },
             "coinsurance": {
@@ -904,7 +904,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "What is the coinsurance percentage for this service?"
+                "ask": "What coinsurance percentage applies to the kidney failure benefit?"
               }
             },
             "prior_auth": {
@@ -930,7 +930,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "Is prior authorization required for this service? Please answer Yes, No, or N/A."
+                "ask": "And for the kidney failure benefit, is prior authorization required? Please answer Yes, No, or N/A."
               }
             },
             "notes": {
