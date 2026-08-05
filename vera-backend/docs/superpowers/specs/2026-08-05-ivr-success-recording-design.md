@@ -86,8 +86,9 @@ events). Payload carries no PHI — room name (tenant/call UUIDs) and timestamp 
 1. `parse_room_name` → `None` ⇒ skip (foreign/console room, existing behavior).
 2. Load the `Call` in a tenant session; missing row ⇒ existing
    retry-young-or-drop helper (event raced the Call commit).
-3. If `call.ivr_exited_at` is `NULL`, set it from the event `ts`; otherwise no-op
-   (idempotent under Redis redelivery, matching the other handlers).
+3. If `call.ivr_exited_at` is `NULL`, set it from the DB clock (`func.now()`),
+   consistent with `started_at`; otherwise no-op (idempotent under Redis
+   redelivery, matching the other handlers).
 
 ### 5. The metric (documented now, dashboard card later)
 
@@ -122,7 +123,8 @@ spec is the definition of record.
 - Unit (worker): `transfer_to_verification` publishes `ivr.exited` for the room.
 - Integration: seeded calls covering all four cells (exited / not-exited ×
   enabled / disabled) plus a cancelled-in-IVR call; assert the documented SQL
-  returns the expected percentage and the cancelled call is excluded.
+  returns the expected percentage and the cancelled call is excluded. Ships
+  with the dashboard-card PR (§5), where the SQL becomes code.
 
 ## Out of scope
 

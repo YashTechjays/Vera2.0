@@ -36,6 +36,7 @@ from vera_core.events import (
     CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
+    IvrExitedEvent,
 )
 from vera_core.models import Call, PatientForm, SchemaVersion, Tenant
 from vera_core.models.audit_log import AuditEvent
@@ -541,6 +542,36 @@ async def test_call_answered_activates_call_and_stamps_started_at(
     assert wired.dispatch_calls == []  # not a terminal event — no refill
     assert wired.call_stream.cleared == []  # not a closeout — finalizer never runs
     assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_ivr_exited_stamps_timestamp_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=_FakeSession(call=call))
+
+    event = IvrExitedEvent(room_name=room, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    stamped = call.ivr_exited_at
+    assert stamped is not None
+
+    # Redelivery is a no-op: the first stamp survives.
+    await wired.consumer._process("1-1", {"event": event.model_dump_json()})
+    assert call.ivr_exited_at is stamped
+    assert redis.acked == ["1-0", "1-1"]
+
+
+@pytest.mark.asyncio
+async def test_ivr_exited_ignores_non_vera_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)
+    event = IvrExitedEvent(room_name="console-room", ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+    assert wired.session.queried == []  # short-circuited before any DB hit
+    assert redis.acked == ["1-0"]  # acked (nothing to retry)
 
 
 @pytest.mark.asyncio
