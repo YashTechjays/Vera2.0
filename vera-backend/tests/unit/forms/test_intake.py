@@ -19,7 +19,10 @@ from vera_core.forms.intake import (
     promote_columns,
     required_intake_fields,
     resolve_path,
+    validate_enum_answers,
 )
+
+from .test_call_plan import IBV
 
 # A minimal stand-in for schema_version.schema_json — only the bits the helpers read.
 SCHEMA = {
@@ -647,3 +650,28 @@ class TestNormalizeDateAnswers:
         with pytest.raises(InvalidIntakeValue) as exc:
             normalize_date_answers(answers, doc)
         assert exc.value.field_path == _SPOUSE_DOB_PATH
+
+
+_COVERAGE_TYPE_PATH = "sections.benefit_coverage.coverage_type"
+_PCP_REFERRAL_PATH = "sections.benefit_coverage.pcp_referral_required"
+
+
+class TestValidateEnumAnswers:
+    def test_raises_with_the_offending_path_and_no_value(self) -> None:
+        with pytest.raises(InvalidIntakeValue) as exc:
+            validate_enum_answers([(_COVERAGE_TYPE_PATH, "PT/Spouse")], IBV)
+        assert exc.value.field_path == _COVERAGE_TYPE_PATH
+        assert "PT/Spouse" not in str(exc.value)
+
+    def test_declared_value_is_accepted(self) -> None:
+        validate_enum_answers([(_COVERAGE_TYPE_PATH, "Family")], IBV)
+
+    def test_the_leafs_own_default_is_accepted(self) -> None:
+        """pcp_referral_required declares default="N/A", so intake may send it."""
+        validate_enum_answers([(_PCP_REFERRAL_PATH, "N/A")], IBV)
+
+    def test_blank_value_passes_through(self) -> None:
+        validate_enum_answers([(_COVERAGE_TYPE_PATH, "")], IBV)
+
+    def test_non_enum_path_is_ignored(self) -> None:
+        validate_enum_answers([("sections.insurance_information.group_name", "Anything")], IBV)
