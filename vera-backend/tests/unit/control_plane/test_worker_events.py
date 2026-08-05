@@ -575,6 +575,24 @@ async def test_ivr_exited_ignores_non_vera_room(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_young_ivr_exited_with_no_row_is_retried_not_acked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same race as call.answered/call.ended: an ivr.exited for a room with no Call
+    row yet, timestamped "now", must be left unacked (redelivered later) instead of
+    being treated as a voice-lab room."""
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit)  # default session: call=None
+
+    event = IvrExitedEvent(room_name=_VALID_ROOM, ts=_now_ms())
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert redis.acked == []  # left pending for XAUTOCLAIM to redeliver
+    assert wired.session.added == []  # no DB mutation
+    assert wired.dispatch_calls == []
+
+
+@pytest.mark.asyncio
 async def test_call_ended_routes_form_through_ai_processing_to_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

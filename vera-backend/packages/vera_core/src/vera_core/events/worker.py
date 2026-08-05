@@ -3,8 +3,8 @@
 The agent worker is DB-less; this is its first-class channel to signal domain
 events (call failures, the answered/ended call-status transitions that drive
 the consumer's closeout, the answers extracted from the live call by the
-Observer runtime, and the call-health observer's periodic assessments) to the
-control plane.
+Observer runtime, the IVR navigator's handoff signal to a human, and the
+call-health observer's periodic assessments) to the control plane.
 
 Most events are PHI-free by construction: only a room_name (tenant+call UUIDs),
 an enum, and a timestamp. Two exceptions carry PHI and rely on the stream

@@ -94,16 +94,18 @@ events). Payload carries no PHI — room name (tenant/call UUIDs) and timestamp 
 
 ```sql
 ivr_success_pct =
-  COUNT(*) FILTER (WHERE ivr_exited_at IS NOT NULL)
+  COUNT(*) FILTER (WHERE ivr_exited_at IS NOT NULL AND ivr_enabled AND started_at IS NOT NULL)
   / COUNT(*) FILTER (
       WHERE ivr_enabled
         AND started_at IS NOT NULL
         AND NOT (current_status = 'canceled' AND ivr_exited_at IS NULL))
 ```
 
-Numerator rows are always a subset of denominator rows (an exited call is never
-excluded). Lives in `api/v1/analytics.py` when the card ships; until then this
-spec is the definition of record.
+The numerator repeats the denominator's `ivr_enabled AND started_at IS NOT NULL`
+conditions, so a lost best-effort `call.answered` event that still delivers a
+matching `ivr.exited` can never push the ratio above 100%. Lives in
+`api/v1/analytics.py` when the card ships; until then this spec is the
+definition of record.
 
 ## Error handling
 
