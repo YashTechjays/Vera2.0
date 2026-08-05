@@ -260,4 +260,17 @@ describe("validateAll — numeric consistency (lifetime maximum triplet)", () =>
     expect(partial[TOTAL]).toBeUndefined()
     expect(partial[MET]).toBeUndefined()
   })
+
+  // Parity with backend parse_currency: a string that is only currency symbols
+  // (no digits) is "absent", not 0 — Number("") is 0, which the backend rejects.
+  it("treats symbol-only values as absent, not zero", () => {
+    const errors = validateAll(schema, { [TOTAL]: "$", [MET]: "$300", [REMAINING]: "$50" })
+    for (const path of [TOTAL, MET, REMAINING]) expect(errors[path]).toBeUndefined()
+  })
+
+  // Parity with backend math.isfinite guard: non-finite amounts are "absent".
+  it("treats non-finite values as absent", () => {
+    const errors = validateAll(schema, { [TOTAL]: "Infinity", [MET]: "$50", [REMAINING]: "$50" })
+    for (const path of [TOTAL, MET, REMAINING]) expect(errors[path]).toBeUndefined()
+  })
 })

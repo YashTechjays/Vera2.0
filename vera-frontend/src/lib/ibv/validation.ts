@@ -6,9 +6,11 @@ export type ValidationErrors = Record<string, string>
 
 const NUMERIC_TYPES = new Set(["currency", "percent", "integer"])
 
+const CURRENCY_STRIP_RE = /[$,%\s]/g
+
 /** Parse a transcribed money/percent string ("$1,500.50", "20%") to a number. */
 function parseNumeric(value: string): number {
-  return Number(value.replace(/[$,%\s]/g, ""))
+  return Number(value.replace(CURRENCY_STRIP_RE, ""))
 }
 
 function formatMoney(n: number): string {
@@ -23,10 +25,12 @@ function formatMoney(n: number): string {
 function numericConsistencyErrors(schema: FormSchema, values: FormValues): ValidationErrors {
   const errors: ValidationErrors = {}
   const parse = (path: string): number | undefined => {
-    const raw = (values[path] ?? "").trim()
-    if (raw === "") return undefined
-    const n = parseNumeric(raw)
-    return Number.isNaN(n) ? undefined : n
+    // Mirror backend parse_currency: strip symbols, treat an empty result
+    // (symbol-only like "$") as absent — Number("") is 0 — and reject non-finite.
+    const cleaned = (values[path] ?? "").replace(CURRENCY_STRIP_RE, "")
+    if (cleaned === "") return undefined
+    const n = Number(cleaned)
+    return Number.isFinite(n) ? n : undefined
   }
   const title = (path: string): string => titleOf(schema, path)
   for (const rule of schema.numeric_consistencies ?? []) {
