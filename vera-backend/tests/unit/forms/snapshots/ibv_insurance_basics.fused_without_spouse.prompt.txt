@@ -25,14 +25,14 @@ Ask together on the first pass: "What is the group name and group number?" (cove
    - Answers: Calendar Year | Plan Year
 11. What is the effective date for this coverage?
    - Expected date format: M/D/YYYY
-   - When "Benefit Year Type" is "Calendar Year": record "01/01/{{current_year}}" without asking.
+   - When "Benefit Year Type" is "Calendar Year": record "01/01/2026" without asking.
 12. What are the start and end dates of the plan year?
-   - When "Benefit Year Type" is "Calendar Year": record "01/01/{{current_year}} - 12/31/{{current_year}}" without asking.
+   - When "Benefit Year Type" is "Calendar Year": record "01/01/2026 - 12/31/2026" without asking.
 13. Is this an individual or a family policy? Please answer Individual or Family.
    - Answers: Individual | Family
    - Immediately after this answer:
-     * If "Coverage Type" is "Family": {{confirm:sections.patient_information.spouse_partner_name}}
-     * If "Coverage Type" is "Family": {{confirm:sections.patient_information.spouse_partner_dob}}
+     * If "Coverage Type" is "Family": ask — Can we also check the spouse on the plan? Can I get the spouse's full name?
+     * If "Coverage Type" is "Family": ask — And what is the spouse's date of birth?
 14. Does this plan require a PCP referral?
    - Answers: Yes | No
    - Ask only if "Health Plan Type" is "HMO".

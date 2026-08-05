@@ -150,6 +150,12 @@ logger = logging.getLogger(__name__)
 _QuestionItem = tuple[str, Leaf, tuple[Condition, ...]]
 
 
+def _confirm_slot(path: str) -> str:
+    """The fuse-time slot for a confirm leaf's spoken line — sentence and confirm/ask
+    verb are chosen per form, once the prefilled value is known."""
+    return f"{{{{confirm:{path}}}}}"
+
+
 def _join_gates(gates: tuple[Condition, ...], render_cond: Callable[[Condition], str]) -> str:
     """Join gate conditions with " and ", parenthesizing any individual gate whose
     rendered text already contains " or " — `build_condition_renderer` only wraps a
@@ -357,10 +363,9 @@ def _question_lines(
             lines.append(f"   - Codes: {codes_text}")
     if immediate:
         lines.append("   - Immediately after this answer:")
-        for _cpath, cleaf, cgates in immediate:
+        for cpath, _cleaf, cgates in immediate:
             cond_txt = _join_gates(cgates, render_cond)
-            ctext = cleaf.prompt.confirm if cleaf.prompt else cleaf.title
-            lines.append(f"     * If {cond_txt}: confirm — {ctext}")
+            lines.append(f"     * If {cond_txt}: {_confirm_slot(cpath)}")
     return lines
 
 
@@ -417,11 +422,10 @@ def _task_text(
         blocks.append("\n".join(lines))
 
     if end_confirms:
-        lines = ["Before finishing this task, confirm:"]
-        for _path, leaf, gates in end_confirms:
-            text = leaf.prompt.confirm if leaf.prompt else leaf.title
+        lines = ["Before finishing this task:"]
+        for cpath, _leaf, gates in end_confirms:
             only = f" (only if {_join_gates(gates, render_cond)})" if gates else ""
-            lines.append(f"- {text}{only}")
+            lines.append(f"- {_confirm_slot(cpath)}{only}")
         blocks.append("\n".join(lines))
 
     for rule in flow_rules:

@@ -223,6 +223,9 @@ def bookend_paths(plan: CallPlan, reference_field: str) -> list[str]:
     return [f.path for f in keep]
 
 
+CONFIRM_SLOT_RE = re.compile(r"\{\{confirm:([\w.]+)\}\}")
+_VALUE_TOKEN = "{{value}}"
+
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # "Dr. Dr. Jane" → "Dr. Jane": a title on both the template ("Dr. {{doctor_name}}")
@@ -284,6 +287,16 @@ class PrefillFuser:
         self._confirm_leaves = [
             (path, leaf.title) for path, leaf in doc.leaf_items() if leaf.role == "confirm"
         ]
+        # Sentences for the {{confirm:path}} slots: the compiler emits one per
+        # confirm_in_task leaf and the per-form value decides which is spoken.
+        self._confirm_prompts: dict[str, tuple[str, str]] = {}
+        for path, leaf in doc.leaf_items():
+            if leaf.confirm_in_task is None or leaf.prompt is None:
+                continue
+            self._confirm_prompts[path] = (
+                leaf.prompt.confirm or leaf.title,
+                leaf.prompt.ask or leaf.title,
+            )
 
     def fuse(self, values: Mapping[str, Any], *, current_year: int) -> CallPlan:
         """Fuse one form's intake-prefilled values into the template (pure — the
@@ -302,6 +315,24 @@ class PrefillFuser:
           answers seed for applicability gates and the Phase-2 rule engine.
         """
         unresolved = 0
+        unbacked = 0
+
+        def expand_slots(text: str) -> str:
+            def repl(match: re.Match[str]) -> str:
+                nonlocal unbacked
+                path = match.group(1)
+                sentences = self._confirm_prompts.get(path)
+                if sentences is None:
+                    # Fail safe: an open ask is never wrong, a fabricated read-back is.
+                    unbacked += 1
+                    return f"ask — {self._titles.get(path, path)}"
+                confirm_text, ask_text = sentences
+                rendered = _render_value(values.get(path))
+                if rendered is None:
+                    return f"ask — {ask_text}"
+                return f"confirm — {confirm_text.replace(_VALUE_TOKEN, rendered)}"
+
+            return CONFIRM_SLOT_RE.sub(repl, text)
 
         def hydrate(text: str | None) -> str | None:
             if text is None:
@@ -348,7 +379,7 @@ class PrefillFuser:
                         update={
                             "intro": hydrate(task.intro),
                             "outro": hydrate(task.outro),
-                            "prompt": hydrate(task.prompt) or "",
+                            "prompt": hydrate(expand_slots(task.prompt)) or "",
                         }
                     )
                     for task in plan.tasks
@@ -364,6 +395,12 @@ class PrefillFuser:
                 "call plan %s: %d unresolvable placeholder(s) passed through verbatim",
                 plan.insurance_type,
                 unresolved,
+            )
+        if unbacked:
+            logger.warning(
+                "call plan %s: %d confirm slot(s) had no sentence; asked openly instead",
+                plan.insurance_type,
+                unbacked,
             )
         return fused
 

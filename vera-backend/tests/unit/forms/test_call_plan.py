@@ -367,3 +367,47 @@ class TestBookendPaths:
         keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
         assert "introduction" in keys
         assert "wrap_up" in keys
+
+
+SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
+
+
+class TestConfirmSlot:
+    # NOTE: assertions scope "{{value}}" absence to the spouse confirm/ask sentences
+    # under test, not the whole task prompt. `insurance_basics` also renders
+    # sections.insurance_information.policy_number — a plain confirm-role leaf
+    # (no confirm_in_task) whose "{{value}}" is the pre-existing, deliberately
+    # untouched runtime sentinel (see PrefillFuser.fuse's docstring and
+    # test_only_the_value_sentinel_survives) — out of this task's scope.
+    def test_expands_to_confirm_when_value_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "confirm — Can we also check the spouse on the plan?" in text
+        assert "I have the spouse listed as Jane Doe" in text
+        assert "the spouse listed as {{value}}" not in text
+        assert "{{confirm:" not in text
+
+    def test_expands_to_ask_when_nothing_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "ask — Can we also check the spouse on the plan?" in text
+        assert "Can I get the spouse's full name?" in text
+        assert "the spouse listed as {{value}}" not in text
+        assert "{{confirm:" not in text
+
+    def test_treats_na_as_nothing_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "N/A"}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "ask — Can we also check the spouse on the plan?" in text
+
+    def test_speaks_iso_date_in_confirm_variant(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_DOB: "1991-04-12"}, current_year=2026)
+        assert "April 12, 1991" in plan_task(plan, "insurance_basics").prompt
+
+    def test_focused_retry_still_reads_back_the_value(self) -> None:
+        """focus_call_plan clears on_file_values; the value must survive inline."""
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
+        focused = focus_call_plan(plan, [SPOUSE_NAME])
+        assert focused.on_file_values is None
+        assert "Jane Doe" in plan_task(focused, "insurance_basics").prompt
