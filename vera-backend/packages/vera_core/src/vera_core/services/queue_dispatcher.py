@@ -426,6 +426,7 @@ async def try_dispatch(
                     # Whoever enqueued the form owns the call, however late dispatch runs.
                     initiated_by_id=form.enqueued_by_id,
                     insurance_provider_id=provider.id if provider else None,
+                    ivr_enabled=form.ivr_navigation_enabled,
                 )
                 session.add(call)
                 await session.flush()
