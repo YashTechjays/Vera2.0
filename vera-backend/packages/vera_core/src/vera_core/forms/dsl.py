@@ -635,6 +635,38 @@ class FormSchemaDoc(_Model):
         # tasks: every collect section in exactly one task
         assigned: list[str] = []
         context_paths = {p for p, leaf in leaves.items() if leaf.role == "context"}
+
+        def check_leaf_prompt(path: str, leaf: Leaf) -> None:
+            for attr in ("ask", "confirm"):
+                text = getattr(leaf.prompt, attr, None) if leaf.prompt else None
+                if text is None:
+                    continue
+                for token in PLACEHOLDER_RE.findall(text):
+                    if token == "value":
+                        if not (attr == "confirm" and leaf.role == "confirm"):
+                            errors.append(
+                                f"{path}.prompt.{attr}: {{{{value}}}} is only valid in a "
+                                "confirm-role leaf's prompt.confirm"
+                            )
+                        continue
+                    if (
+                        token not in RESERVED_PLACEHOLDER_TOKENS
+                        and token not in (self.system_fields or {})
+                        and token not in context_paths
+                    ):
+                        errors.append(
+                            f"{path}.prompt.{attr}: unknown placeholder {{{{{token}}}}} "
+                            "(not a system_fields key or context-leaf path)"
+                        )
+                for snippet in malformed_placeholders(text or ""):
+                    errors.append(
+                        f"{path}.prompt.{attr}: malformed placeholder {snippet!r} "
+                        "(use {{token}} — word characters and dots only, no spaces)"
+                    )
+
+        for path, leaf in leaves.items():
+            check_leaf_prompt(path, leaf)
+
         for task in self.tasks:
             check_key(f"task {task.task_key}", task.task_key)
             if task.applicable_when is not None:

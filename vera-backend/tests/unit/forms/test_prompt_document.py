@@ -13,6 +13,8 @@ from vera_core.forms.prompting import (
     validate_prompt_document,
 )
 
+from .test_call_plan import IBV
+
 SESSION: dict[str, Any] = {
     "persona": "You are VERA.",
     "goal": "Verify benefits.",
@@ -108,11 +110,10 @@ class TestContentValidation:
         assert validate_prompt_document(doc, schema_doc()) == []
 
     def test_reserved_runtime_tokens_are_exempt(self) -> None:
-        # {{value}} and {{current_year}} are resolved by the call-plan fuse, not
-        # field lookup — the validator must accept what the runtime hydrates.
-        doc = prompt_doc(
-            task_overrides={"main": {"intro": "It is {{current_year}}; I have {{value}}."}}
-        )
+        # {{current_year}} is resolved by the call-plan fuse, not field lookup —
+        # the validator must accept what the runtime hydrates. {{value}} is only
+        # valid in schema field prompts (prompt.confirm), not in tenant documents.
+        doc = prompt_doc(task_overrides={"main": {"intro": "It is {{current_year}}."}})
         assert validate_prompt_document(doc, schema_doc()) == []
 
     def test_unknown_task_key(self) -> None:
@@ -127,8 +128,8 @@ class TestContentValidation:
         doc = prompt_doc(session={**SESSION, "persona": "I serve {{patietn_name}}."})
         assert any("unknown placeholder" in e for e in validate_prompt_document(doc, schema_doc()))
 
-    def test_value_token_exempt(self) -> None:
-        doc = prompt_doc(task_overrides={"main": {"prompt": "Confirm {{value}} politely."}})
+    def test_current_year_token_exempt(self) -> None:
+        doc = prompt_doc(task_overrides={"main": {"prompt": "It is {{current_year}}."}})
         assert validate_prompt_document(doc, schema_doc()) == []
 
     def test_malformed_placeholder_with_spaces_flagged(self) -> None:
@@ -146,3 +147,14 @@ class TestContentValidation:
     def test_unclosed_braces_still_pass(self) -> None:
         doc = prompt_doc(task_overrides={"main": {"prompt": "A literal {{ stays legal."}})
         assert validate_prompt_document(doc, schema_doc()) == []
+
+    def test_value_token_rejected_in_task_override(self) -> None:
+        doc = prompt_doc(
+            session={
+                "persona": "p",
+                "goal": "g",
+                "base_instructions": "Confirm {{value}} with the rep.",
+            }
+        )
+        errors = validate_prompt_document(doc, IBV)
+        assert any("only valid in a schema field" in e for e in errors)

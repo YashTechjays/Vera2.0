@@ -460,6 +460,41 @@ class TestDocumentValidation:
         with pytest.raises(ValidationError, match="does not resolve to a leaf"):
             FormSchemaDoc.model_validate(doc)
 
+    def test_leaf_prompt_unknown_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["plan_type"]["prompt"]["ask"] = (
+            "What is the {{not_a_token}}?"
+        )
+        with pytest.raises(ValidationError, match="unknown placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_leaf_prompt_malformed_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["plan_type"]["prompt"]["ask"] = (
+            "What is the {{ value }}?"
+        )
+        with pytest.raises(ValidationError, match="malformed placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_value_token_rejected_in_prompt_ask(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["plan_type"]["prompt"]["ask"] = "Is it {{value}}?"
+        with pytest.raises(ValidationError, match=r"only valid in a confirm-role"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_value_token_allowed_in_confirm_prompt(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["member_id"] = {
+            "type": "text",
+            "title": "Policy / Member ID",
+            "role": "confirm",
+            "prompt": {
+                "confirm": "I have the member ID as {{value}} — right?",
+                "ask": "Can I get the member ID?",
+            },
+        }
+        FormSchemaDoc.model_validate(doc)
+
 
 class TestParseDateFormat:
     """`parse_date_format` — the display/entry `date_format` fallback parser used

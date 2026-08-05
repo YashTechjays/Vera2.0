@@ -454,8 +454,8 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
 
     Shape errors are pydantic's job; this checks the parts that need the schema:
     task keys exist, no override entry is entirely empty, placeholders resolve.
-    Reserved runtime tokens ({{value}}, {{current_year}}) are exempt — the
-    call-plan fuse handles them, not field lookup."""
+    Reserved runtime tokens ({{current_year}}) are exempt — the call-plan fuse
+    handles them, not field lookup."""
     errors: list[str] = []
     valid_tokens = (
         set(schema_doc.system_fields or {})
@@ -479,6 +479,12 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
         )
     for where, text in texts:
         for token in PLACEHOLDER_RE.findall(text or ""):
+            if token == "value":
+                errors.append(
+                    f"{where}: {{{{value}}}} is only valid in a schema field's "
+                    "prompt.confirm, not in session or task text"
+                )
+                continue
             if token not in valid_tokens:
                 errors.append(f"{where}: unknown placeholder {{{{{token}}}}}")
         for snippet in malformed_placeholders(text or ""):
