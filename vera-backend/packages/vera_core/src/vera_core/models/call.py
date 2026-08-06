@@ -64,6 +64,8 @@ class Call(Base, TenantScopedMixin):
         Index("ix_call_initiated_by", "initiated_by_id", "created_at"),
         Index("ix_call_provider_status", "insurance_provider_id", "current_status"),
         Index("ix_call_tenant_published", "tenant_id", "published"),
+        # The analytics history report: tenant's calls over a created_at window.
+        Index("ix_call_tenant_created", "tenant_id", "created_at"),
     )
 
     form_id: Mapped[UUID] = mapped_column(
