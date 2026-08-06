@@ -168,7 +168,7 @@ def _instructions(
 ) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
-    the scope-discipline guardrail + the Cartesia TTS markup guide — fused once, at
+    the discipline guardrails + the Cartesia TTS markup guide — fused once, at
     build time. The scope guardrail keeps the LLM on the compiled question list (no
     invented off-script questions); the markup guide keeps CPT codes `<spell>`-wrapped
     (the compiled prompts carry no TTS guidance)."""

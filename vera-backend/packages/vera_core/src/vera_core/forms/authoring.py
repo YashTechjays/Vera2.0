@@ -35,9 +35,54 @@ YES_NO_NA = ["Yes", "No", "N/A"]
 # `text_ask(type_="date")` applies it automatically, raw Leaf sites use the constant.
 DATE_VALIDATION = Validation(date_format="M/D/YYYY")
 
-PRIOR_AUTH_ASK = "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-COPAY_ASK = "What is the copay amount for this service?"
-COINSURANCE_ASK = "What is the coinsurance percentage for this service?"
+# Service-item question phrasing. Each service item picks one shape by its position within
+# the parent group, so a run of CPT codes does not read as one sentence repeated — a task
+# prompt carries up to 27 of these. The shapes name their subject rather than saying "this
+# service": the compiled prompt is one flat numbered list, so "this service" has no
+# antecedent, and one CPT code (89337) appears under two different services.
+_COVERED_ASKS = (
+    "Is CPT code {code} for {service} covered under this plan?",
+    "Staying with {service}, is CPT code {code} covered?",
+    "And for {service}, does the plan cover CPT code {code}?",
+)
+_COPAY_ASKS = (
+    "What is the copay amount for {referent}?",
+    "What copay applies to {referent}?",
+    "And for {referent}, what is the copay amount?",
+)
+_COINSURANCE_ASKS = (
+    "What is the coinsurance percentage for {referent}?",
+    "What coinsurance percentage applies to {referent}?",
+    "And for {referent}, what is the coinsurance percentage?",
+)
+_PRIOR_AUTH_ASKS = (
+    "Is prior authorization required for {referent}?",
+    "Does {referent} require prior authorization?",
+    "And for {referent}, is prior authorization required?",
+)
+
+
+def _shape(shapes: tuple[str, ...], variant: int, **fmt: str) -> str:
+    return shapes[variant % len(shapes)].format(**fmt)
+
+
+def coverage_ask(service: str) -> str:
+    """The standard service-level coverage question."""
+    return f"Can you provide coverage and benefit details for {service}?"
+
+
+def service_asks(referent: str, variant: int = 0) -> tuple[str, str, str]:
+    """The copay / coinsurance / prior-auth questions naming ``referent``.
+
+    ``variant`` rotates the sentence shape, staggered across the three so one service
+    item never opens three consecutive questions the same way.
+    """
+    return (
+        _shape(_COPAY_ASKS, variant, referent=referent),
+        _shape(_COINSURANCE_ASKS, variant + 1, referent=referent),
+        _shape(_PRIOR_AUTH_ASKS, variant + 2, referent=referent),
+    )
+
 
 Flavor = Literal["treatment", "male", "plain"]
 _INAPPLICABLE: dict[Flavor, dict[str, str]] = {
@@ -71,11 +116,17 @@ def service_fields(
     base: str,
     covered_ask: str,
     flavor: Flavor,
+    *,
+    referent: str,
+    variant: int = 0,
 ) -> dict[str, FormField]:
     """The standard covered/copay/coinsurance/prior_auth service item.
 
     ``base`` is the root-anchored path of the containing group; sub-field gates are
-    wired to ``{base}.covered``. ``flavor`` picks the skip-fill defaults.
+    wired to ``{base}.covered``. ``flavor`` picks the skip-fill defaults. ``referent``
+    is how the copay/coinsurance/prior-auth questions name their subject aloud (a CPT
+    code, or the service itself where there is no code); ``variant`` rotates their
+    phrasing.
 
     ``"plain"`` flavor omits a ``covered`` inapplicable default because plain sections
     may have no ancestor ``applicable_when`` gate — a DSL invariant enforced by
@@ -84,6 +135,7 @@ def service_fields(
     """
     inapplicable = _INAPPLICABLE[flavor]
     gate = eq(f"{base}.covered", "Yes")
+    copay_ask, coinsurance_ask, prior_auth_ask = service_asks(referent, variant)
     return {
         "covered": Leaf(
             type="enum",
@@ -103,7 +155,7 @@ def service_fields(
             inapplicable_value=inapplicable.get("copay"),
             validation=Validation(range=Range(min=0)),
             applicable_when=gate,
-            prompt=ask(COPAY_ASK),
+            prompt=ask(copay_ask),
         ),
         "coinsurance": Leaf(
             type="percent",
@@ -113,7 +165,7 @@ def service_fields(
             inapplicable_value=inapplicable.get("coinsurance"),
             validation=Validation(range=Range(min=0, max=100)),
             applicable_when=gate,
-            prompt=ask(COINSURANCE_ASK),
+            prompt=ask(coinsurance_ask),
         ),
         "prior_auth": Leaf(
             type="enum",
@@ -125,31 +177,63 @@ def service_fields(
             tags=["prior_auth"],
             inapplicable_value=inapplicable.get("prior_auth"),
             applicable_when=gate,
-            prompt=ask(PRIOR_AUTH_ASK),
+            prompt=ask(prior_auth_ask),
         ),
     }
 
 
 def cpt_group(
-    parent_base: str, code: str, flavor: Flavor, *, applicable_when: Condition | None = None
+    parent_base: str,
+    code: str,
+    flavor: Flavor,
+    *,
+    service: str,
+    variant: int = 0,
+    applicable_when: Condition | None = None,
 ) -> Group:
-    """A per-CPT-code service item under ``parent_base`` (group key = ``cpt_<code>``)."""
+    """A per-CPT-code service item under ``parent_base`` (group key = ``cpt_<code>``).
+
+    ``service`` is the spoken name of the service the code belongs to, said alongside the
+    code; ``variant`` picks the sentence shape (rotate it across a parent's codes).
+    """
     base = f"{parent_base}.cpt_{code}"
     return Group(
         type="group",
         title=f"CPT {code}",
         codes=Codes(cpt=[code]),
         applicable_when=applicable_when,
+        # Never rendered into a task prompt — `prompting._task_text` reads section intros,
+        # leaf prompts, ask_groups and alternatives only. This documents the group; the
+        # spoken questions are the leaf asks below.
         prompt=ask(f"Can you provide coverage details for CPT code {code}?"),
         fields=service_fields(
             base,
-            f"Is CPT code {code} covered under this plan? Please answer Yes, No, or N/A.",
+            _shape(_COVERED_ASKS, variant, code=code, service=service),
             flavor,
+            referent=f"CPT code {code} under {service}",
+            variant=variant,
         ),
     )
 
 
-def treatment_tail(gate: Condition) -> dict[str, FormField]:
+def cpt_groups(
+    parent_base: str,
+    codes: list[str],
+    flavor: Flavor,
+    *,
+    service: str,
+    applicable_when: Condition | None = None,
+) -> dict[str, FormField]:
+    """One `cpt_group` per code, rotating the sentence shape across the run."""
+    return {
+        f"cpt_{code}": cpt_group(
+            parent_base, code, flavor, service=service, variant=i, applicable_when=applicable_when
+        )
+        for i, code in enumerate(codes)
+    }
+
+
+def treatment_tail(gate: Condition, *, service: str) -> dict[str, FormField]:
     """Treatment-level cycle_limit + additional_notes, gated on the service being covered."""
     return {
         "cycle_limit": Leaf(
@@ -160,7 +244,7 @@ def treatment_tail(gate: Condition) -> dict[str, FormField]:
             inapplicable_value="N/A",
             special_values=["No Limit"],
             applicable_when=gate,
-            prompt=ask("What is the cycle limit for this service?"),
+            prompt=ask(f"What is the cycle limit for {service}?"),
         ),
         "additional_notes": Leaf(
             type="text",
@@ -168,7 +252,7 @@ def treatment_tail(gate: Condition) -> dict[str, FormField]:
             role="ask",
             ui=Ui(widget="textarea"),
             applicable_when=gate,
-            prompt=ask("Are there any additional notes or limitations for this service?"),
+            prompt=ask(f"Are there any additional notes or limitations for {service}?"),
             inapplicable_value="N/A",
         ),
     }
@@ -181,14 +265,16 @@ def treatment_group(
     icd10: str | None,
     cpt_codes: list[str],
     group_ask: str,
+    *,
+    service: str,
 ) -> Group:
     """An infertility treatment: per-CPT service items + cycle limit + notes."""
     base = f"sections.{section}.{key}"
-    fields: dict[str, FormField] = {
-        f"cpt_{code}": cpt_group(base, code, "treatment") for code in cpt_codes
-    }
+    fields: dict[str, FormField] = cpt_groups(base, cpt_codes, "treatment", service=service)
     covered = [eq(f"{base}.cpt_{code}.covered", "Yes") for code in cpt_codes]
-    fields.update(treatment_tail(covered[0] if len(covered) == 1 else any_of(*covered)))
+    fields.update(
+        treatment_tail(covered[0] if len(covered) == 1 else any_of(*covered), service=service)
+    )
     return Group(
         type="group",
         title=title,

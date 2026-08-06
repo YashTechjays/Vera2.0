@@ -30,6 +30,21 @@ def task(key: str) -> RenderedTaskPrompt:
     return next(t for t in RENDERED.tasks if t.task_key == key)
 
 
+def disease_only_prompts() -> RenderedPrompts:
+    doc = load_document(
+        (FORM_SCHEMA_DIR / "disease_only_verification.json").read_text(encoding="utf-8")
+    )
+    return render_task_prompts(doc)
+
+
+def tasks_with_phrasing_guidance(rendered: RenderedPrompts) -> set[str]:
+    return {
+        t.task_key
+        for t in rendered.tasks
+        if "vary how you" in t.prompt.lower() and "That is wording only" in t.prompt
+    }
+
+
 class TestSession:
     def test_factory_fallback_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
@@ -128,10 +143,7 @@ class TestTaskText:
         assert 'record "01/01/{{current_year}}" without asking' in basics
 
     def test_every_catalog_schema_renders(self) -> None:
-        disease = load_document(
-            (FORM_SCHEMA_DIR / "disease_only_verification.json").read_text(encoding="utf-8")
-        )
-        out = render_task_prompts(disease)
+        out = disease_only_prompts()
         assert out.tasks and all(t.prompt for t in out.tasks)
 
     def test_no_raw_paths_leak_into_any_prompt(self) -> None:
@@ -150,6 +162,26 @@ class TestTaskText:
 
     def test_icd10_codes_render_for_speak_sections(self) -> None:
         assert "ICD-10 Z31.41" in task("diagnostic_coverage").prompt
+
+    def test_phrasing_guidance_rides_on_the_cpt_tasks_only(self) -> None:
+        # Authored per task in the schema, so it never depends on the runtime spotting
+        # "CPT code" in the rendered question list.
+        assert tasks_with_phrasing_guidance(RENDERED) == {
+            "infertility_coverage",
+            "diagnostic_coverage",
+            "general_office_coverage",
+            "male_partner",
+        }
+
+    def test_disease_only_coverage_task_carries_phrasing_guidance(self) -> None:
+        assert tasks_with_phrasing_guidance(disease_only_prompts()) == {"disease_coverage"}
+
+    def test_cpt_questions_carry_no_answer_instruction(self) -> None:
+        # The rendered "- Answers: Yes | No | N/A" line already states the vocabulary.
+        for t in RENDERED.tasks:
+            for line in t.prompt.splitlines():
+                if "CPT code" in line:
+                    assert "Please answer" not in line, (t.task_key, line)
 
 
 class TestSnapshots:
