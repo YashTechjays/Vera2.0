@@ -718,11 +718,49 @@ class FormSchemaDoc(_Model):
                     if member in seen_ag:
                         errors.append(f"{where}: member {member!r} in more than one ask group")
                     seen_ag.add(member)
+                # The prompt compiler collapses an ask group into ONE spoken question and
+                # gives each distinct member TITLE its own answer line. Members may differ in
+                # type (a "TPA Exists / TPA Name" pair is one question by design), but two
+                # members sharing a title must share their answer shape — only the first
+                # one's vocabulary and bounds would be spoken for both.
+                shapes: dict[str, set[str]] = {}
+                for member in ag.fields:
+                    leaf = leaves.get(member)
+                    if leaf is None:
+                        continue
+                    shapes.setdefault(leaf.title, set()).add(
+                        json.dumps(
+                            [
+                                leaf.type,
+                                leaf.values,
+                                leaf.special_values,
+                                leaf.validation.model_dump(mode="json", exclude_none=True)
+                                if leaf.validation
+                                else None,
+                            ],
+                            sort_keys=True,
+                        )
+                    )
+                for title, distinct in shapes.items():
+                    if len(distinct) > 1:
+                        errors.append(
+                            f"{where}: members titled {title!r} have different answer shapes; "
+                            "they collapse into one spoken option and only the first would be "
+                            "described"
+                        )
             seen_alt: set[str] = set()
             for i, alt in enumerate(section.alternatives or []):
                 where = f"section {skey}.alternatives[{i}]"
                 if len(alt.members) < 2:
                     errors.append(f"{where}: needs at least 2 members")
+                # An either/or between GROUPS is spoken as a routing question that picks which
+                # panel applies; there is no leaf prompt to fall back on, so it needs its own
+                # wording rather than a synthesized sentence.
+                if len([m for m in alt.members if m in groups]) >= 2 and not alt.ask:
+                    errors.append(
+                        f"{where}: an alternatives set over groups needs an `ask` — it is "
+                        "spoken as a question choosing between them"
+                    )
                 for member in alt.members:
                     if member not in leaves and member not in groups:
                         errors.append(f"{where}: member {member!r} is not a field or group")

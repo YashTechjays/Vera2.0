@@ -310,17 +310,18 @@ def _codes_text(codes: Codes) -> str:
     return "; ".join(parts)
 
 
-def _panel_lines(
-    panel: PromptPanel,
-    doc: FormSchemaDoc,
-    immediate_by_anchor: dict[str, list[_QuestionItem]],
-    depth: int,
-) -> list[str]:
-    """One panel: heading, codes, its gate stated once, then its numbered questions.
+def render_panels(panels: list[PromptPanel]) -> str:
+    """The question list for a set of panels.
 
-    Conditions render scoped to this panel — the heading already supplies the breadcrumb a
-    global label would have to spell out."""
-    render_cond = build_condition_renderer(doc, panel.scope)
+    Pure string assembly over an already-resolved tree — every condition was rendered to
+    text in `build_question_plan`, so the DB-free worker can call this to re-render the list
+    with entry-decided gates applied, and can never render the tree differently than the
+    compiler did."""
+    return "\n\n".join("\n".join(_panel_lines(panel, depth=0)) for panel in panels)
+
+
+def _panel_lines(panel: PromptPanel, depth: int) -> list[str]:
+    """One panel: heading, codes, its gate stated once, then its numbered questions."""
     lines: list[str] = []
     if panel.title is not None:
         lines.append(f"{'#' * (3 + depth)} {panel.title}")
@@ -329,57 +330,29 @@ def _panel_lines(
     if panel.codes is not None and (codes := _codes_text(panel.codes)):
         speak = "Read these codes aloud when asking" if panel.codes.speak_cpt else "Codes"
         lines.append(f"{speak}: {codes}.")
-    if panel.gate is not None:
-        lines.append(f"Ask only if {render_cond(panel.gate)}.")
+    if panel.gate_text is not None:
+        lines.append(f"Ask only if {panel.gate_text}.")
     number = 1
     for item in panel.items:
         if isinstance(item, PromptPanel):
             lines.append("")
-            lines.extend(_panel_lines(item, doc, immediate_by_anchor, depth + 1))
+            lines.extend(_panel_lines(item, depth + 1))
             continue
         if item.routes_between:
-            # Unnumbered: it routes between the panels below rather than recording an
-            # answer of its own — the choice shows up as which panel's Covered is "Yes".
+            # Unnumbered: it routes between the panels below rather than recording an answer
+            # of its own — the choice shows up as which panel's Covered is "Yes".
             lines.append(f"Ask first: {item.text}")
             lines.append(
                 "Then take only the matching panel below — "
                 f"{' or '.join(item.routes_between)} — and skip the other."
             )
             continue
-        lines.extend(
-            _numbered_question(number, item, render_cond, immediate_by_anchor, doc, panel.scope)
-        )
+        lines.extend(_numbered_question(number, item))
         number += 1
     return lines
 
 
-def _gate_text(
-    question: PromptQuestion,
-    render_cond: Callable[[Condition], str],
-    doc: FormSchemaDoc,
-    scope: str,
-) -> str:
-    """A gate that only asks "is the thing this question is about covered?" says exactly
-    that. Rendered field-by-field it reads `"Covered" is "Yes"`, which inside a panel has no
-    antecedent — and on a fanned-out question there is no single field it could name."""
-    refs = {
-        ref
-        for gate in question.gates
-        for ref in condition_field_paths(gate, doc.shared_conditions or {})
-    }
-    if refs and all(r.endswith(".covered") and r.startswith(f"{scope}.") for r in refs):
-        return "the codes above are covered" if len(refs) > 1 else "this service is covered"
-    return _join_gates(question.gates, render_cond)
-
-
-def _numbered_question(
-    number: int,
-    question: PromptQuestion,
-    render_cond: Callable[[Condition], str],
-    immediate_by_anchor: dict[str, list[_QuestionItem]],
-    doc: FormSchemaDoc,
-    scope: str,
-) -> list[str]:
+def _numbered_question(number: int, question: PromptQuestion) -> list[str]:
     lines = [f"{number}. {question.text}"]
     for option in question.options:
         if option.label is None:
@@ -392,15 +365,12 @@ def _numbered_question(
             lines.append(f"   - Expected date format: {option.date_format}")
     for hint in question.hints:
         lines.append(f"   - Hint: {hint}")
-    if question.gates:
-        lines.append(f"   - Ask only if {_gate_text(question, render_cond, doc, scope)}.")
-    if question.derive_when is not None:
-        lines.append(
-            f"   - When {render_cond(question.derive_when)}: record "
-            f'"{question.derive_value}" without asking.'
-        )
-    if question.required_when is not None:
-        lines.append(f"   - Required only when {render_cond(question.required_when)}.")
+    if question.gate_text is not None:
+        lines.append(f"   - Ask only if {question.gate_text}.")
+    if question.derive_text is not None:
+        lines.append(f"   - {question.derive_text}")
+    if question.required_text is not None:
+        lines.append(f"   - {question.required_text}")
     elif question.optional:
         lines.append("   - Optional; move on if the representative has nothing.")
     if len(question.fanned_codes) > 1:
@@ -408,12 +378,9 @@ def _numbered_question(
             "   - One question for all of these codes; apply the answer to every code the "
             f"representative confirms: {', '.join(question.fanned_codes)}."
         )
-    immediate = [c for path in question.target_paths for c in immediate_by_anchor.get(path, [])]
-    if immediate:
+    if question.immediate_confirms:
         lines.append("   - Immediately after this answer:")
-        for _path, leaf, gates in immediate:
-            text = leaf.prompt.confirm if leaf.prompt else leaf.title
-            lines.append(f"     * If {_join_gates(gates, render_cond)}: confirm — {text}")
+        lines.extend(f"     * {line}" for line in question.immediate_confirms)
     return lines
 
 
@@ -436,8 +403,15 @@ def _task_text(
     if instructions:
         blocks.append(instructions)
 
-    for panel in build_question_plan(doc, task):
-        blocks.append("\n".join(_panel_lines(panel, doc, immediate_by_anchor, depth=0)))
+    confirm_lines = {
+        anchor: [
+            f"If {_join_gates(gates, render_cond)}: confirm — "
+            f"{leaf.prompt.confirm if leaf.prompt else leaf.title}"
+            for _path, leaf, gates in items
+        ]
+        for anchor, items in immediate_by_anchor.items()
+    }
+    blocks.append(render_panels(build_question_plan(doc, task, confirm_lines)))
 
     if end_confirms:
         lines = ["Before finishing this task, confirm:"]

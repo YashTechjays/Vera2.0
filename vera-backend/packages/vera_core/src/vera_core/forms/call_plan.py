@@ -51,6 +51,7 @@ from vera_core.forms.dsl import (
     Validation,
 )
 from vera_core.forms.prompting import PromptDocument, render_task_prompts
+from vera_core.forms.question_plan import PromptPanel, build_question_plan
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,10 @@ class PlanTask(_Model):
     prompt: str  # compiled instruction text
     applicable_when: Condition | None = None
     fields: list[PlanFieldDescriptor] = Field(default_factory=list)
+    # The question tree `prompt` was rendered from. The worker re-renders it at task entry
+    # with the entry-decided gates resolved, so a question the gates rule out is DROPPED from
+    # the list rather than listed and then retracted underneath it.
+    panels: list[PromptPanel] = Field(default_factory=list)
 
 
 class CallPlan(_Model):
@@ -166,6 +171,7 @@ def compile_call_plan(
             prompt=rendered_task.prompt,
             applicable_when=task.applicable_when,
             fields=fields_by_task.get(rendered_task.task_key, []),
+            panels=build_question_plan(doc, task),
         )
         for task, rendered_task in zip(doc.tasks, rendered.tasks, strict=True)
     ]

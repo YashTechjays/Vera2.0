@@ -30,6 +30,7 @@ from agent_worker.plan_runtime import (
 from agent_worker.prompt import SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, RequiredWhen
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
 ROOM = "call--t--c"
 
@@ -116,6 +117,14 @@ async def _enter(controller: PlanRunController, index: int) -> Agent:
         await agent.on_enter()
         await controller.drain_cursor_writes()
     return agent
+
+
+def _question(text: str, *paths: str, gate_text: str | None = None) -> PromptQuestion:
+    return PromptQuestion(
+        text=text,
+        options=[PromptOption(target_paths=list(paths))],
+        gate_text=gate_text,
+    )
 
 
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
@@ -848,6 +857,20 @@ def _gap_plan() -> CallPlan:
                         gates=(Comparison(field="sections.a.in_network", op="eq", value="No"),),
                     ),
                 ],
+                panels=[
+                    PromptPanel(
+                        scope="sections.cov",
+                        title="Coverage",
+                        items=[
+                            _question("Has the deductible been met?", "sections.cov.deductible"),
+                            _question(
+                                "Any out-of-network note?",
+                                "sections.cov.oon_note",
+                                gate_text='"Doctor Inside Network" is "No"',
+                            ),
+                        ],
+                    )
+                ],
             ),
             PlanTask(
                 task_key="closing_task",
@@ -939,15 +962,15 @@ class TestEntryDecidability:
         assert "TPA Name" not in [f.title for f in controller.gap_fields(1)]
 
     @pytest.mark.asyncio
-    async def test_the_instructions_never_forbid_a_same_task_follow_up(self) -> None:
-        # The bug: at entry `tpa_exists` is unanswered, so the old block listed TPA Name under
-        # "do NOT ask these" and never withdrew it when the rep said yes.
+    async def test_a_same_task_follow_up_is_never_dropped_from_the_list(self) -> None:
+        # At entry `tpa_exists` is unanswered. The old block listed TPA Name under "do NOT ask
+        # these" and never withdrew it when the rep said yes; dropping it from the list now
+        # would be the same bug in a new shape.
         controller, _ = _controller(_intra_task_gate_plan())
         controller.update_answers({"sections.cov.prior_auth": "No"})
-        agent = await _enter(controller, 1)
-        excluded_block = agent.instructions.split("# Excluded by the plan's gates")[1]
-        assert "TPA Name" not in excluded_block
-        assert "Authorization Department Name" in excluded_block
+        askable, excluded = controller.entry_gate_split(1)
+        assert "TPA Name" in [f.title for f in askable]
+        assert [f.title for f in excluded] == ["Authorization Department Name"]
 
     @pytest.mark.asyncio
     async def test_a_task_whose_only_failing_gates_are_undecided_gets_no_block(self) -> None:
@@ -1023,25 +1046,28 @@ class TestGating:
     (deductible) plus one the gates exclude (oon_note, gated on in_network == "No")."""
 
     @pytest.mark.asyncio
-    async def test_gating_lands_in_the_instructions_not_a_one_shot_directive(self) -> None:
-        # The defect: the list was a generate_reply directive, which LiveKit staples to a COPY
-        # of the chat ctx and discards — so from turn 2 the agent asked the excluded question.
-        # Instructions persist for every turn of the task, which is the whole fix.
+    async def test_a_gated_out_question_is_absent_rather_than_retracted(self) -> None:
+        # The old shape listed every question and appended "do NOT ask these" underneath,
+        # leaving the agent to reconcile two contradictory lists while SCOPE_DISCIPLINE told
+        # it the first one was complete. Now the list it reads IS the list it should ask.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
         agent = await _enter(controller, 2)
-        assert "OON note" in agent.instructions
-        assert "Deductible" in agent.instructions
+        assert "Any out-of-network note?" not in agent.instructions
+        assert "Has the deductible been met?" in agent.instructions
+        assert "do NOT ask these" not in agent.instructions
 
     @pytest.mark.asyncio
-    async def test_the_applicable_questions_are_named_before_the_excluded_ones(self) -> None:
-        # An exclusions-only list read as "the whole task is excluded" and the task completed
-        # itself immediately. Leading with what DOES apply is what prevents that reading.
+    async def test_the_narrowing_lands_in_the_instructions_not_a_one_shot_directive(
+        self,
+    ) -> None:
+        # A generate_reply directive is stapled to a COPY of the chat ctx and discarded, so
+        # from turn 2 the agent could no longer see it and asked the excluded question anyway.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
         agent = await _enter(controller, 2)
-        assert agent.instructions.index("Deductible") < agent.instructions.index("OON note")
-        assert "apply on THIS call" in agent.instructions
+        assert "Has the deductible been met?" in agent.instructions
+        assert "Coverage details." in agent.instructions  # the authored lead-in survives
 
     @pytest.mark.asyncio
     async def test_a_task_with_nothing_excluded_keeps_its_original_instructions(self) -> None:
@@ -1052,13 +1078,13 @@ class TestGating:
         assert agent.instructions == before
 
     @pytest.mark.asyncio
-    async def test_a_gate_on_a_field_no_task_collects_still_excludes(self) -> None:
+    async def test_a_gate_on_a_field_no_task_collects_still_narrows(self) -> None:
         # `in_network` is prefilled context, not a question, so its value is final at entry —
-        # the decidability split must not weaken the case the block exists for.
+        # the decidability split must not weaken the case the narrowing exists for.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
         agent = await _enter(controller, 2)
-        assert "OON note" in agent.instructions.split("# Excluded by the plan's gates")[1]
+        assert "Any out-of-network note?" not in agent.instructions
 
     @pytest.mark.asyncio
     async def test_re_entry_re_narrows_instead_of_stacking(self) -> None:
@@ -2084,19 +2110,17 @@ class TestGatedOutTask:
         mock_session.update_agent.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_a_partly_gated_task_excludes_only_the_gated_question(self) -> None:
-        # The other half of the same defect: the task runs, but the model must be told which of
-        # its listed questions are out of scope this call — and only those. See TestGating for
-        # why this lives in the instructions rather than the per-reply lead.
+    async def test_a_partly_gated_task_drops_only_the_gated_question(self) -> None:
+        # The other half of the same defect: the task runs, but its list must carry only the
+        # questions that apply on this call.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})  # gates out `oon_note`
         controller.opening_line("Hello rep.")
         coverage = controller.agents[2]
         with _session_patch(coverage, MagicMock()):
             await coverage.on_enter()
-        excluded_section = coverage.instructions.split("do NOT ask these")[1]
-        assert "OON note" in excluded_section
-        assert "Deductible" not in excluded_section  # the applicable one is not excluded
+        assert "Any out-of-network note?" not in coverage.instructions
+        assert "Has the deductible been met?" in coverage.instructions
 
     @pytest.mark.asyncio
     async def test_an_ungated_task_keeps_the_plain_lead(self) -> None:

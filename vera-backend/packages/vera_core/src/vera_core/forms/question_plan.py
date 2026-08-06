@@ -39,6 +39,7 @@ from vera_core.forms.dsl import (
     Task,
     condition_field_paths,
 )
+from vera_core.forms.prompt_text import build_condition_renderer
 
 
 class _Model(BaseModel):
@@ -62,8 +63,15 @@ class PromptQuestion(_Model):
     text: str
     options: list[PromptOption] = Field(default_factory=list)
     # Residual gate conjuncts only: those the enclosing panel does not already assert, and
-    # that the runtime cannot decide at task entry (see `_entry_decided`).
+    # that the runtime cannot decide at task entry (see `_entry_decided`). Kept structured
+    # for the runtime; `gate_text` is the spoken form, resolved here because the worker is
+    # DB-free and has no document to render conditions against.
     gates: tuple[Condition, ...] = ()
+    gate_text: str | None = None
+    derive_text: str | None = None
+    required_text: str | None = None
+    # Pre-rendered "confirm this immediately after the answer" lines (confirm_in_task).
+    immediate_confirms: list[str] = Field(default_factory=list)
     # CPT codes this one question fans out across, when there is more than one.
     fanned_codes: list[str] = Field(default_factory=list)
     hints: list[str] = Field(default_factory=list)
@@ -90,6 +98,7 @@ class PromptPanel(_Model):
     intro: str | None = None
     # Printed once in the header rather than on every question inside it.
     gate: Condition | None = None
+    gate_text: str | None = None
     # True for a section-level panel, whose heading renders one level shallower.
     is_section: bool = False
     # Questions and child panels in ONE list because their order is meaningful: a routing
@@ -118,9 +127,17 @@ def iter_questions(panels: list[PromptPanel]) -> Iterator[PromptQuestion]:
                 yield from iter_questions([item])
 
 
-def build_question_plan(doc: FormSchemaDoc, task: Task) -> list[PromptPanel]:
-    """One panel per collect section of `task`, each holding its spoken questions."""
-    return _Builder(doc, task).build()
+def build_question_plan(
+    doc: FormSchemaDoc,
+    task: Task,
+    immediate_by_anchor: dict[str, list[str]] | None = None,
+) -> list[PromptPanel]:
+    """One panel per collect section of `task`, each holding its spoken questions.
+
+    `immediate_by_anchor` maps an anchor path to already-rendered confirmation lines
+    (`confirm_in_task` with `confirm_immediate`), attached to whichever question answers
+    that path."""
+    return _Builder(doc, task, immediate_by_anchor or {}).build()
 
 
 def _answers_text(leaf: Leaf) -> str:
@@ -143,9 +160,12 @@ def _answers_text(leaf: Leaf) -> str:
 
 
 class _Builder:
-    def __init__(self, doc: FormSchemaDoc, task: Task) -> None:
+    def __init__(
+        self, doc: FormSchemaDoc, task: Task, immediate_by_anchor: dict[str, list[str]]
+    ) -> None:
         self.doc = doc
         self.task = task
+        self.immediate_by_anchor = immediate_by_anchor
         self.shared = doc.shared_conditions or {}
         self.leaves = dict(doc.leaf_items())
         self.gates = {path: chain for path, _leaf, chain in leaf_gates(doc)}
@@ -176,6 +196,11 @@ class _Builder:
                 codes=section.codes,
                 intro=section.prompt.intro if section.prompt is not None else None,
                 gate=section.applicable_when,
+                gate_text=(
+                    self._render(section.applicable_when, base)
+                    if section.applicable_when is not None
+                    else None
+                ),
                 is_section=True,
             )
             asserted = [section.applicable_when] if section.applicable_when is not None else []
@@ -338,7 +363,7 @@ class _Builder:
                 continue
             question = self.question_at.get(path)
             if question is not None:
-                panel.items.append(self._scoped(question, asserted))
+                panel.items.append(self._scoped(question, asserted, scope))
 
     def _fill_group(
         self,
@@ -375,25 +400,70 @@ class _Builder:
                 break
             top, bottom = nxt
         codes = _merge_codes(group.codes, self._harvest_codes(path, group.fields))
+        gate = _conjoin(gates)
         child = PromptPanel(
             scope=top,
             title=group.title,
             codes=codes,
             intro=group.prompt.ask if group.prompt is not None and group.prompt.ask else None,
-            gate=_conjoin(gates),
+            gate=gate,
+            gate_text=self._render(gate, scope) if gate is not None else None,
         )
         panel.items.append(child)
         self._fill(child, top, bottom.fields, top, inner, frozenset(codes.cpt or ()))
 
-    def _scoped(self, question: PromptQuestion, asserted: list[Condition]) -> PromptQuestion:
+    def _scoped(
+        self, question: PromptQuestion, asserted: list[Condition], scope: str
+    ) -> PromptQuestion:
         """Rules 10 + 12: drop conjuncts the panel already states, and those the runtime
-        resolves at task entry."""
+        resolves at task entry. Everything the renderer needs is resolved to text here — the
+        worker re-renders this tree and has no document to render conditions against."""
         residual = tuple(
             gate
             for gate in question.gates
             if gate not in asserted and not self._entry_decided(gate)
         )
-        return question.model_copy(update={"gates": residual})
+        confirms = [
+            line
+            for path in question.target_paths
+            for line in self.immediate_by_anchor.get(path, [])
+        ]
+        return question.model_copy(
+            update={
+                "gates": residual,
+                "gate_text": self._gate_text(residual, question, scope) if residual else None,
+                "derive_text": (
+                    f"When {self._render(question.derive_when, scope)}: record "
+                    f'"{question.derive_value}" without asking.'
+                    if question.derive_when is not None
+                    else None
+                ),
+                "required_text": (
+                    f"Required only when {self._render(question.required_when, scope)}."
+                    if question.required_when is not None
+                    else None
+                ),
+                "immediate_confirms": confirms,
+            }
+        )
+
+    def _gate_text(
+        self, residual: tuple[Condition, ...], question: PromptQuestion, scope: str
+    ) -> str:
+        """A gate that only asks "is the thing this question is about covered?" says exactly
+        that. Field-by-field it reads `"Covered" is "Yes"`, which inside a panel has no
+        antecedent — and on a fanned-out question no single field it could name."""
+        refs = {ref for gate in residual for ref in condition_field_paths(gate, self.shared)}
+        if refs and all(r.endswith(".covered") and r.startswith(f"{scope}.") for r in refs):
+            return "the codes above are covered" if len(refs) > 1 else "this service is covered"
+        parts: list[str] = []
+        for gate in residual:
+            text = self._render(gate, scope)
+            parts.append(f"({text})" if len(residual) > 1 and " or " in text else text)
+        return " and ".join(parts)
+
+    def _render(self, cond: Condition, scope: str) -> str:
+        return build_condition_renderer(self.doc, scope)(cond)
 
     def _entry_decided(self, gate: Condition) -> bool:
         """Every path this conjunct references is collected by an EARLIER task, so its value
@@ -476,3 +546,27 @@ def _conjoin(gates: list[Condition]) -> Condition | None:
 
 
 PromptPanel.model_rebuild()
+
+
+def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[PromptPanel]:
+    """The tree minus every question whose targets are ALL in `excluded`, and minus any
+    panel left with nothing to ask.
+
+    A question keeping even one askable target stays whole: its options name their own
+    paths, and pruning an option would leave the spoken sentence promising an answer slot
+    that is no longer listed. A routing question has no targets and survives as long as the
+    panels it routes between do."""
+    out: list[PromptPanel] = []
+    for panel in panels:
+        items: list[PromptItem] = []
+        for item in panel.items:
+            if isinstance(item, PromptPanel):
+                items.extend(drop_questions([item], excluded))
+            elif not item.target_paths or not set(item.target_paths) <= excluded:
+                items.append(item)
+        # A routing question with no surviving panel to route into says nothing useful.
+        if not any(isinstance(i, PromptPanel) for i in items):
+            items = [i for i in items if not (isinstance(i, PromptQuestion) and i.routes_between)]
+        if items:
+            out.append(panel.model_copy(update={"items": items}))
+    return out

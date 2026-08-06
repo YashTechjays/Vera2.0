@@ -47,6 +47,8 @@ from agent_worker.prompt import (
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.forms.dsl import Condition, condition_field_paths
+from vera_core.forms.prompting import render_panels
+from vera_core.forms.question_plan import drop_questions
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -134,28 +136,6 @@ def _field_lines(fields: list[PlanFieldDescriptor], *, numbered: bool = False) -
     return "\n".join(lines)
 
 
-def _gating_block(askable: list[PlanFieldDescriptor], excluded: list[PlanFieldDescriptor]) -> str:
-    """This call's narrowed question list, or "" when no decided gate excludes anything.
-
-    Leads with what DOES apply. An exclusions-only list was read as "the whole task is
-    excluded" — the financial task announced itself and completed in the same turn, claiming
-    every question was gated out while its deductible fields were still open. A positive
-    enumeration cannot be over-generalized into an empty task.
-    """
-    if not excluded:
-        return ""
-    sections: list[str] = []
-    if askable:
-        sections.append(
-            f"# Questions that apply on THIS call — ask every one of them\n{_field_lines(askable)}"
-        )
-    sections.append(
-        "# Excluded by the plan's gates — do NOT ask these, whatever the task list says\n"
-        f"{_field_lines(excluded)}"
-    )
-    return "\n\n".join(sections)
-
-
 def _is_message(item: ChatItem, role: str) -> bool:
     """Whether `item` is a spoken message from `role` — a function call or its output is not."""
     return item.type == "message" and item.role == role
@@ -212,14 +192,22 @@ class PlanTaskAgent(Agent):
         self._rep_turns = 0
         super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
 
-    def _build_instructions(self, gating: str = "") -> str:
-        """This task's full instruction text, narrowed by `gating` when the gates exclude some."""
+    def _build_instructions(self, question_list: str | None = None) -> str:
+        """This task's full instruction text; `question_list` replaces the compiled one when
+        the gates rule some questions out on this call."""
+        block = self._task_block if question_list is None else self._narrowed_block(question_list)
         return _instructions(
             self._controller.plan,
-            self._task_block,
+            block,
             extra_instructions=self._controller.extra_instructions,
-            gating=gating,
         )
+
+    def _narrowed_block(self, question_list: str) -> str:
+        """The task block with its question list swapped for the narrowed one. Everything
+        before the first heading is the authored task instruction; everything from the first
+        heading on is the compiled list."""
+        head = self._task.prompt.split("\n###", 1)[0].rstrip()
+        return f"# Current task: {self._task.title}\n{head}\n\n{question_list}"
 
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
@@ -270,27 +258,24 @@ class PlanTaskAgent(Agent):
         return True
 
     async def _apply_gating(self) -> None:
-        """Narrow this task's question list against the live answers, in the INSTRUCTIONS.
+        """Re-render this task's question list without the questions the gates rule out.
 
-        `SCOPE_DISCIPLINE` tells the agent its task list is "the complete set of questions for
-        this call", which is what makes a gated-out question look mandatory; this is the only
-        place that list gets narrowed. It has to live in the instructions: a `generate_reply`
-        directive is stapled to a COPY of the chat context and discarded after that one
-        inference, so from the task's second turn on the agent could no longer see it and asked
-        the excluded questions anyway.
+        The list the agent reads IS the list it should ask, so a gated-out question is simply
+        absent. The old shape — list every question, then append "do NOT ask these" underneath
+        — needed the agent to reconcile two contradictory lists, and `SCOPE_DISCIPLINE` tells
+        it the list is complete.
 
-        Rebuilt from `_task_block` rather than appended to the current instructions, so a
-        re-entry (a ReAsk directive) re-narrows against fresher answers instead of stacking.
+        Judged on ENTRY-DECIDED gates only (`entry_gate_split`): a question gated on a field
+        this task itself asks is undecided here, so it stays in the list carrying its own prose
+        gate, which the agent re-evaluates every turn.
 
-        Judged on ENTRY-DECIDED gates only (`entry_gate_split`). A question gated on a field this
-        task itself asks is undecided here, and listing it as excluded told the agent not to ask
-        the follow-up it needed one turn later — 131 of ibv_standard's 149 gated questions are
-        that shape. Those are left to the prose gate in the task prompt, which the agent re-reads
-        every turn; this block only ever names questions a settled answer has ruled out."""
-        gating = _gating_block(*self._controller.entry_gate_split(self._task_index))
-        if not gating:
+        Rebuilt from the compiled tree rather than edited in place, so a re-entry (a ReAsk
+        directive) re-narrows against fresher answers instead of stacking."""
+        _askable, excluded = self._controller.entry_gate_split(self._task_index)
+        if not excluded or not self._task.panels:
             return
-        await self.update_instructions(self._build_instructions(gating))
+        kept = drop_questions(self._task.panels, {f.path for f in excluded})
+        await self.update_instructions(self._build_instructions(render_panels(kept)))
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
