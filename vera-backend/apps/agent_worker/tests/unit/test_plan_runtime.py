@@ -27,6 +27,7 @@ from agent_worker.plan_runtime import (
     WrapUpAgent,
     _field_lines,
 )
+from agent_worker.prompt import SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, RequiredWhen
 
@@ -153,6 +154,18 @@ class TestConstruction:
         controller, _ = _controller()
         for agent in [*controller.agents, controller.wrap_up_agent]:
             assert "never say goodbye" in agent.instructions.lower()
+
+    def test_guardrails_never_vary_with_the_task_text(self) -> None:
+        # Task-specific phrasing guidance belongs in the schema's task prompt: a guardrail
+        # picked by matching the rendered question list silently skipped the gap pass.
+        plan = _plan()
+        plan.tasks[0].prompt = "Is CPT code 58323 for IUI covered under this plan?"
+        controller, _ = _controller(plan)
+        tails = [
+            agent.instructions.split(SCOPE_DISCIPLINE, 1)[1]
+            for agent in [*controller.agents, controller.wrap_up_agent]
+        ]
+        assert all(tail == tails[0] for tail in tails)
 
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")

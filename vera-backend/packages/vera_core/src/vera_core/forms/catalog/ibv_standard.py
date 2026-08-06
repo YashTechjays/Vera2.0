@@ -7,17 +7,21 @@ the compiled JSON is the runtime artifact.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from vera_core.forms.authoring import (
     DATE_VALIDATION,
     YES_NO,
     YES_NO_NA,
     ask,
     cost_pair,
-    cpt_group,
+    coverage_ask,
+    cpt_groups,
     enum_ask,
     eq,
     money_triplet,
     ref,
+    service_asks,
     service_fields,
     text_ask,
     treatment_group,
@@ -56,92 +60,110 @@ _DEDUCTIBLE_NOOPS = ["$0", "None", "No Deductible", "Unlimited", "No Limit"]
 _OOP_NOOPS = ["$0", "None", "Unlimited", "No Limit"]
 _NO_LIMIT = ["No Limit", "Unlimited"]
 
-_TREATMENTS: list[tuple[str, str, str | None, list[str], str]] = [
-    # key, title, icd10, cpt codes, group ask
-    (
+
+class _Treatment(NamedTuple):
+    """A service with its own CPT code list. `service` is the spoken name, said alongside
+    each code; `group_ask` defaults to the standard `coverage_ask(service)` sentence and is
+    set only where the spoken question carries an alias the service name does not."""
+
+    key: str
+    title: str
+    icd10: str | None
+    cpt_codes: list[str]
+    service: str
+    group_ask: str | None = None
+
+    @property
+    def ask(self) -> str:
+        return self.group_ask or coverage_ask(self.service)
+
+
+class _CodeService(NamedTuple):
+    """A service billed under a single CPT code. Fields as `_Treatment`."""
+
+    key: str
+    title: str
+    code: str
+    service: str
+    group_ask: str | None = None
+
+    @property
+    def ask(self) -> str:
+        return self.group_ask or coverage_ask(self.service)
+
+
+_TREATMENTS = [
+    _Treatment(
         "intrauterine_insemination",
         "Intrauterine Insemination (IUI)",
         "Z31.89",
         ["58323", "58322", "89261"],
+        "IUI",
         "Can you provide coverage and benefit details for intrauterine insemination, or IUI?",
     ),
-    (
+    _Treatment(
         "in_vitro_fertilization",
         "In Vitro Fertilization (IVF)",
         "Z31.83",
         ["58970", "89280", "89253"],
+        "IVF",
         "Can you provide coverage and benefit details for in vitro fertilization, or IVF?",
     ),
-    (
+    _Treatment(
         "embryo_cryopreservation",
         "Embryo Cryopreservation",
         "Z31.83",
         ["89258", "89342"],
-        "Can you provide coverage and benefit details for embryo cryopreservation?",
+        "embryo cryopreservation",
     ),
-    (
+    _Treatment(
         "egg_cryopreservation_elective",
         "Egg Cryopreservation Elective",
         "Z31.83",
         ["89337"],
-        "Can you provide coverage and benefit details for elective egg cryopreservation?",
+        "elective egg cryopreservation",
     ),
-    (
+    _Treatment(
         "egg_cryopreservation_cancer",
         "Egg Cryopreservation Cancer",
         None,
         ["89337"],
-        "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?",
+        "egg cryopreservation related to cancer treatment",
     ),
-    (
+    _Treatment(
         "frozen_embryo_transfer",
         "Frozen Embryo Transfer (FET)",
         "Z31.83",
         ["58974"],
+        "frozen embryo transfer",
         "Can you provide coverage and benefit details for frozen embryo transfer, or FET?",
     ),
-    (
+    _Treatment(
         "embryo_biopsy",
         "Embryo Biopsy",
         "Z31.83",
         ["89290", "89291"],
-        "Can you provide coverage and benefit details for embryo biopsy?",
+        "embryo biopsy",
     ),
 ]
 _DIAG_CODES = ["58340", "82670", "83001", "83002", "84146", "84443", "84144", "76830"]
-_GENERAL: list[tuple[str, str, str, str]] = [
-    # key, title, cpt code, group ask
-    (
-        "office_visits",
-        "Office Visits",
-        "99211",
-        "Can you provide coverage and benefit details for office visits?",
-    ),
-    (
+_DIAG_SERVICE = "diagnostic testing"
+_GENERAL = [
+    _CodeService("office_visits", "Office Visits", "99211", "office visits"),
+    _CodeService(
         "asc_professional",
         "ASC Professional Services",
         "58555",
-        "Can you provide coverage and benefit details for ambulatory surgical center professional services?",
+        "ambulatory surgical center professional services",
     ),
-    (
-        "asc_facility",
-        "ASC Facility",
-        "58555",
-        "Can you provide coverage and benefit details for the ambulatory surgical center facility?",
+    _CodeService(
+        "asc_facility", "ASC Facility", "58555", "the ambulatory surgical center facility"
     ),
 ]
-_MALE: list[tuple[str, str, str, str]] = [
-    (
-        "semen_analysis",
-        "Semen Analysis",
-        "89320",
-        "Can you provide coverage and benefit details for semen analysis?",
-    ),
-    (
-        "sperm_cryopreservation",
-        "Sperm Cryopreservation",
-        "89259",
-        "Can you provide coverage and benefit details for sperm cryopreservation?",
+_MALE = [
+    _CodeService("semen_analysis", "Semen Analysis", "89320", "semen analysis"),
+    _CodeService(
+        "sperm_cryopreservation", "Sperm Cryopreservation", "89259", "sperm cryopreservation"
     ),
 ]
 
@@ -469,8 +491,9 @@ def _infertility_treatment() -> Section:
         oi_base,
         "Is ovulation induction covered under this plan? Please answer Yes, No, or N/A.",
         "treatment",
+        referent="ovulation induction",
     )
-    oi_fields.update(treatment_tail(eq(f"{oi_base}.covered", "Yes")))
+    oi_fields.update(treatment_tail(eq(f"{oi_base}.covered", "Yes"), service="ovulation induction"))
 
     fields: dict[str, FormField] = {
         "infertility_tx_covered": enum_ask(
@@ -483,12 +506,14 @@ def _infertility_treatment() -> Section:
             title="Ovulation Induction/Timed Intercourse (OI/TI)",
             applicable_when=ref("infertility_covered"),
             codes=Codes(icd10=["Z31.89"]),
-            prompt=ask("Can you provide coverage and benefit details for ovulation induction?"),
+            prompt=ask(coverage_ask("ovulation induction")),
             fields=oi_fields,
         ),
     }
-    for key, title, icd10, codes, group_ask in _TREATMENTS:
-        fields[key] = treatment_group("infertility_treatment", key, title, icd10, codes, group_ask)
+    for t in _TREATMENTS:
+        fields[t.key] = treatment_group(
+            "infertility_treatment", t.key, t.title, t.icd10, t.cpt_codes, t.ask, service=t.service
+        )
 
     alternatives = [
         Alternatives(
@@ -503,7 +528,7 @@ def _infertility_treatment() -> Section:
         ),
         cost_pair(oi_base),
     ]
-    for key, _title, _icd10, codes, _ask_text in _TREATMENTS:
+    for key, codes in ((t.key, t.cpt_codes) for t in _TREATMENTS):
         alternatives.extend(
             cost_pair(f"sections.infertility_treatment.{key}.cpt_{code}") for code in codes
         )
@@ -517,14 +542,15 @@ def _infertility_treatment() -> Section:
 
 def _diagnostic_testing() -> Section:
     group_base = "sections.diagnostic_testing.labs_xray_ultrasound"
+    copay_ask, coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
     panel_asks = {
         "covered": (
             "Are diagnostic labs, X-ray and ultrasound services covered under this plan? "
             "Please answer Yes, No, or N/A."
         ),
-        "copay": "What is the copay amount for diagnostic testing?",
-        "coinsurance": "What is the coinsurance percentage for diagnostic testing?",
-        "prior_auth": "Is prior authorization required for diagnostic testing? Please answer Yes, No, or N/A.",
+        "copay": copay_ask,
+        "coinsurance": coinsurance_ask,
+        "prior_auth": prior_auth_ask,
     }
     return Section(
         title="Diagnostic Testing (Labs, X-ray & Ultrasound)",
@@ -549,12 +575,13 @@ def _diagnostic_testing() -> Section:
                     "Can you provide coverage and benefit details for diagnostic labs, "
                     "X-ray and ultrasound services?"
                 ),
-                fields={
-                    f"cpt_{c}": cpt_group(
-                        group_base, c, "plain", applicable_when=ref("diagnostic_testing_covered")
-                    )
-                    for c in _DIAG_CODES
-                },
+                fields=cpt_groups(
+                    group_base,
+                    _DIAG_CODES,
+                    "plain",
+                    service=_DIAG_SERVICE,
+                    applicable_when=ref("diagnostic_testing_covered"),
+                ),
             ),
         },
     )
@@ -573,17 +600,17 @@ def _general_coverage() -> Section:
                     "center services — is that billed as professional or facility?"
                 ),
             ),
-            *(cost_pair(f"{base}.{key}.cpt_{code}") for key, _t, code, _a in _GENERAL),
+            *(cost_pair(f"{base}.{g.key}.cpt_{g.code}") for g in _GENERAL),
         ],
         fields={
-            key: Group(
+            g.key: Group(
                 type="group",
-                title=title,
+                title=g.title,
                 codes=Codes(icd10=["Z31.41"]),
-                prompt=ask(group_ask),
-                fields={f"cpt_{code}": cpt_group(f"{base}.{key}", code, "plain")},
+                prompt=ask(g.ask),
+                fields=cpt_groups(f"{base}.{g.key}", [g.code], "plain", service=g.service),
             )
-            for key, title, code, group_ask in _GENERAL
+            for g in _GENERAL
         },
     )
 
@@ -720,7 +747,7 @@ def _male_partner_coverage() -> Section:
         title="Male Partner Coverage",
         ui=Ui(layout="table"),
         applicable_when=ref("male_partner_in_scope"),
-        alternatives=[cost_pair(f"{base}.{key}.cpt_{code}") for key, _t, code, _a in _MALE],
+        alternatives=[cost_pair(f"{base}.{m.key}.cpt_{m.code}") for m in _MALE],
         fields={
             "male_partner_covered": enum_ask(
                 "Male Partner Services Covered",
@@ -728,15 +755,15 @@ def _male_partner_coverage() -> Section:
                 YES_NO,
             ),
             **{
-                key: Group(
+                m.key: Group(
                     type="group",
-                    title=title,
+                    title=m.title,
                     codes=Codes(icd10=["Z31.84"]),
                     applicable_when=eq(f"{base}.male_partner_covered", "Yes"),
-                    prompt=ask(group_ask),
-                    fields={f"cpt_{code}": cpt_group(f"{base}.{key}", code, "male")},
+                    prompt=ask(m.ask),
+                    fields=cpt_groups(f"{base}.{m.key}", [m.code], "male", service=m.service),
                 )
-                for key, title, code, group_ask in _MALE
+                for m in _MALE
             },
         },
     )
@@ -1180,7 +1207,12 @@ def build_ibv_standard() -> FormSchemaDoc:
                 prompt=(
                     "Work through infertility treatment. Ask per service panel, fan answers "
                     "out to the CPT codes the representative confirms, and skip sub-questions "
-                    "for services that are not covered."
+                    "for services that are not covered. The list below runs through many "
+                    "procedure codes in a row, so vary how you open each question instead of "
+                    "reusing one pattern, keep the service name beside the code the way each "
+                    "listed question does, and move between codes with a short transition "
+                    "rather than restating what you are verifying. That is wording only — "
+                    "which questions you ask, and in what grouping, is set by the list."
                 ),
                 intro="Now I'd like to verify some infertility coverage details.",
                 outro=(
@@ -1195,7 +1227,10 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "Work through diagnostic details. Ask all the CPT codes at once unless the "
                     "representative asks for them one at a time. Fan answers out to the CPT "
                     "codes the representative confirms, and skip sub-questions for CPT codes "
-                    "that are not covered."
+                    "that are not covered. The codes below differ only in the number, so vary "
+                    "how you introduce a batch and read the codes as a natural group rather "
+                    "than reciting one identical sentence per code. That is wording only — "
+                    "which questions you ask, and in what grouping, is set by the list."
                 ),
                 intro="Now I'd like to verify some diagnostic coverage details.",
                 outro="Thank you. One moment while I organize these details.",
@@ -1207,7 +1242,11 @@ def build_ibv_standard() -> FormSchemaDoc:
                 prompt=(
                     "Work through general office visits details. Ask per service panel, fan "
                     "answers out to the CPT codes the representative confirms, and skip "
-                    "sub-questions for services that are not covered."
+                    "sub-questions for services that are not covered. Each service below "
+                    "carries a single code, so vary how you open each one instead of repeating "
+                    "one sentence shape, and keep the service name beside the code the way each "
+                    "listed question does. That is wording only — which questions you ask, and "
+                    "in what grouping, is set by the list."
                 ),
                 intro="Now I'd like to verify some general office visits coverage.",
                 outro="Thanks. One moment while I organize these details.",
@@ -1236,7 +1275,10 @@ def build_ibv_standard() -> FormSchemaDoc:
                 prompt=(
                     "Only reached for family plans with a male spouse. Establish whether "
                     "male partner fertility services are covered before asking any "
-                    "per-service question."
+                    "per-service question. Vary how you open each service's questions "
+                    "instead of repeating one sentence shape, and keep the service name "
+                    "beside the code the way each listed question does. That is wording "
+                    "only — which questions you ask is set by the list."
                 ),
                 intro="Now I'd like to ask about male partner fertility coverage.",
                 outro="Thanks, that covers the male partner benefits. Just a moment.",

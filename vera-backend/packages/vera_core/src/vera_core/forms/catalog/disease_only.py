@@ -13,7 +13,8 @@ from vera_core.forms.authoring import (
     DATE_VALIDATION,
     YES_NO,
     ask,
-    cpt_group,
+    coverage_ask,
+    cpt_groups,
     enum_ask,
     eq,
     ref,
@@ -41,29 +42,11 @@ from vera_core.forms.dsl import (
 
 _GROUP_PLAN = eq("sections.policy_details.plan_type", "Group")
 
+# key, title, icd10, cpt codes, spoken service name (the group ask derives from it)
 _DISEASES: list[tuple[str, str, str, list[str], str]] = [
-    # key, title, icd10, cpt codes, group ask
-    (
-        "cancer",
-        "Cancer",
-        "C80.1",
-        ["77067", "85025"],
-        "Can you provide coverage and benefit details for the cancer diagnosis benefit?",
-    ),
-    (
-        "cardiac",
-        "Cardiac Disease",
-        "I25.10",
-        ["93000"],
-        "Can you provide coverage and benefit details for the cardiac disease benefit?",
-    ),
-    (
-        "stroke",
-        "Stroke",
-        "I63.9",
-        ["70450"],
-        "Can you provide coverage and benefit details for the stroke benefit?",
-    ),
+    ("cancer", "Cancer", "C80.1", ["77067", "85025"], "the cancer diagnosis benefit"),
+    ("cardiac", "Cardiac Disease", "I25.10", ["93000"], "the cardiac disease benefit"),
+    ("stroke", "Stroke", "I63.9", ["70450"], "the stroke benefit"),
 ]
 _WAITING_PERIODS = ["None", "30 days", "90 days"]
 
@@ -268,10 +251,10 @@ def _notes_leaf(benefit_label: str) -> Leaf:
 def _covered_diseases() -> Section:
     base = "sections.covered_diseases"
     fields: dict[str, FormField] = {}
-    for key, title, icd10, cpt_codes, group_ask in _DISEASES:
-        disease_fields: dict[str, FormField] = {
-            f"cpt_{code}": cpt_group(f"{base}.{key}", code, "treatment") for code in cpt_codes
-        }
+    for key, title, icd10, cpt_codes, service in _DISEASES:
+        disease_fields: dict[str, FormField] = cpt_groups(
+            f"{base}.{key}", cpt_codes, "treatment", service=service
+        )
         disease_fields["waiting_period"] = text_ask(
             "Waiting Period",
             f"Is there a waiting period for the {title.lower()} benefit?",
@@ -283,7 +266,7 @@ def _covered_diseases() -> Section:
             type="group",
             title=title,
             codes=Codes(icd10=[icd10]),
-            prompt=ask(group_ask),
+            prompt=ask(coverage_ask(service)),
             fields=disease_fields,
         )
     # Leaf-only group: the service item leaves sit directly on the disease group.
@@ -292,6 +275,7 @@ def _covered_diseases() -> Section:
         kf_base,
         "Is the kidney failure benefit covered under this plan? Please answer Yes, No, or N/A.",
         "plain",
+        referent="the kidney failure benefit",
     )
     kf_fields["notes"] = _notes_leaf("kidney failure")
     fields["kidney_failure"] = Group(
@@ -449,7 +433,10 @@ def build_disease_only() -> FormSchemaDoc:
                 prompt=(
                     "Go disease by disease. Establish coverage first, then benefits per "
                     "covered condition; skip sub-questions for conditions that are not "
-                    "covered."
+                    "covered. Vary how you open each condition's questions instead of "
+                    "repeating one sentence shape, and keep the benefit name beside the code "
+                    "the way each listed question does. That is wording only — which "
+                    "questions you ask is set by the list."
                 ),
                 intro="Now I'd like to verify the covered disease benefits.",
                 outro="Thank you, that covers the disease benefits. Just a moment.",
