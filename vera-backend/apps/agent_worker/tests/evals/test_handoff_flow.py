@@ -51,6 +51,8 @@ from livekit.agents.voice.run_result import mock_tools
 from rep import (
     DERIVED_REMAINING_FACTS,
     FACT_SHEET,
+    FAMILY_COVERAGE_FACTS,
+    FAMILY_SPOUSE_NAME,
     INACTIVE_POLICY_FACTS,
     MANDATE_CONTRADICTION_FACTS,
     TRIPLET_MISQUOTE_FACTS,
@@ -102,6 +104,18 @@ INACTIVE_SCENARIO = Scenario(
     facts=INACTIVE_POLICY_FACTS,
     expect_rule="insurance_not_active",
     focus_fields=("sections.patient_verification.is_insurance_active",),
+)
+
+# The spouse fields only apply once coverage_type is "Family", so narrow to those three plus the
+# closer.
+FAMILY_COVERAGE_SCENARIO = Scenario(
+    label="family coverage, no spouse on file",
+    facts=FAMILY_COVERAGE_FACTS,
+    focus_fields=(
+        "sections.benefit_coverage.coverage_type",
+        "sections.patient_information.spouse_partner_name",
+        "sections.patient_information.spouse_partner_dob",
+    ),
 )
 
 TRIPLET_RULE = "lifetime_maximum_triplet_consistency"
@@ -357,6 +371,11 @@ async def inactive_call() -> CallRun:
 
 
 @pytest.fixture(scope="module")
+async def family_coverage_call() -> CallRun:
+    return await _run_call(FAMILY_COVERAGE_SCENARIO)
+
+
+@pytest.fixture(scope="module")
 async def triplet_call() -> CallRun:
     return await _run_call(TRIPLET_SCENARIO)
 
@@ -535,6 +554,35 @@ async def test_inactive_policy_short_circuits_the_call(inactive_call: CallRun) -
             f"the rule's trigger was not extracted this run (is_insurance_active={active!r})"
         )
     assert isinstance(inactive_call.landed, WrapUpAgent), "an inactive policy must reach wrap-up"
+
+
+async def test_no_raw_token_reaches_speech(family_coverage_call: CallRun) -> None:
+    """The original bug: an unresolved `{{confirm:<path>}}`/`{{value}}` slot spoken verbatim. With
+    no spouse prefill, the fuser must resolve the slot to the authored `ask` text instead."""
+    coverage = family_coverage_call.extracted().get("sections.benefit_coverage.coverage_type")
+    if coverage != "Family":
+        pytest.skip(
+            f"the spouse gate's trigger was not extracted this run (coverage_type={coverage!r})"
+        )
+    leaked = [line for line in family_coverage_call.vera_said() if "{{" in line]
+    assert not leaked, f"a raw template token reached speech: {leaked}"
+
+
+async def test_vera_never_fabricates_the_spouse_name(family_coverage_call: CallRun) -> None:
+    """With no spouse on file, VERA must ask rather than invent a name — the other half of the
+    original bug. Proven by ordering: the rep's turn is the first place the name can legitimately
+    appear, so no earlier VERA turn may contain it."""
+    turns = family_coverage_call.turns
+    first_rep_turn = next((i for i, t in enumerate(turns) if FAMILY_SPOUSE_NAME in t.rep), None)
+    if first_rep_turn is None:
+        pytest.skip(f"the rep never supplied the spouse name {FAMILY_SPOUSE_NAME!r} this run")
+
+    fabricated = [
+        line
+        for line in family_coverage_call.vera_said(turns[:first_rep_turn])
+        if FAMILY_SPOUSE_NAME in line
+    ]
+    assert not fabricated, f"VERA said the spouse name before the rep supplied it: {fabricated}"
 
 
 @pytest.mark.skipif(not full_walk_enabled(), reason="the gap pass needs the unfocused plan")

@@ -314,6 +314,7 @@
             "confirm_immediate": true
           },
           "prompt": {
+            "ask": "Can we also check the spouse on the plan? Can I get the spouse's full name?",
             "confirm": "Can we also check the spouse on the plan? I have the spouse listed as {{value}} — can you confirm that is correct?"
           }
         },
@@ -338,6 +339,7 @@
             "confirm_immediate": true
           },
           "prompt": {
+            "ask": "And what is the spouse's date of birth?",
             "confirm": "And the spouse's date of birth I have is {{value}} — is that right?"
           }
         },
@@ -603,6 +605,7 @@
           "role": "confirm",
           "required": true,
           "prompt": {
+            "ask": "Can I get the member ID for this policy?",
             "confirm": "I have the member ID as {{value}} — can you confirm that is correct?"
           }
         },

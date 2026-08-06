@@ -214,7 +214,11 @@ def _context_sections() -> dict[str, Section]:
                         confirm=(
                             "Can we also check the spouse on the plan? I have the spouse listed "
                             "as {{value}} — can you confirm that is correct?"
-                        )
+                        ),
+                        ask=(
+                            "Can we also check the spouse on the plan? "
+                            "Can I get the spouse's full name?"
+                        ),
                     ),
                 ),
                 "spouse_partner_dob": Leaf(
@@ -227,7 +231,8 @@ def _context_sections() -> dict[str, Section]:
                     applicable_when=_FAMILY,
                     required=_REQUIRED_WHEN_FAMILY,
                     prompt=FieldPrompt(
-                        confirm="And the spouse's date of birth I have is {{value}} — is that right?"
+                        confirm="And the spouse's date of birth I have is {{value}} — is that right?",
+                        ask="And what is the spouse's date of birth?",
                     ),
                 ),
                 "spouse_gender": Leaf(
@@ -387,7 +392,8 @@ def _insurance_information() -> Section:
                 role="confirm",
                 required=True,
                 prompt=FieldPrompt(
-                    confirm="I have the member ID as {{value}} — can you confirm that is correct?"
+                    confirm="I have the member ID as {{value}} — can you confirm that is correct?",
+                    ask="Can I get the member ID for this policy?",
                 ),
             ),
             "group_name": text_ask(

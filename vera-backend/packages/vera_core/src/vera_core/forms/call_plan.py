@@ -50,7 +50,7 @@ from vera_core.forms.dsl import (
     RequiredWhen,
     Validation,
 )
-from vera_core.forms.prompting import PromptDocument, render_task_prompts
+from vera_core.forms.prompting import PromptDocument, render_gate_chains, render_task_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ class PlanFieldDescriptor(_Model):
     validation: Validation | None = None
     required: bool | RequiredWhen = False
     gates: tuple[Condition, ...] = ()
+    gate_text: str | None = None
     inapplicable_value: str | None = None
 
 
@@ -133,6 +134,7 @@ def compile_call_plan(
     """
     rendered = render_task_prompts(doc, prompt_doc)
     section_to_task = doc.section_to_task()
+    gate_texts = render_gate_chains(doc)
     fields_by_task: dict[str, list[PlanFieldDescriptor]] = {}
     for path, leaf, gates in leaf_gates(doc):
         if leaf.role not in COLLECTABLE_ROLES:
@@ -153,6 +155,7 @@ def compile_call_plan(
                 validation=leaf.validation,
                 required=leaf.required,
                 gates=gates,
+                gate_text=gate_texts.get(path),
                 inapplicable_value=leaf.inapplicable_value,
             )
         )
@@ -226,6 +229,12 @@ def bookend_paths(plan: CallPlan, reference_field: str) -> list[str]:
     return [f.path for f in keep]
 
 
+# Two slot forms share one pattern: `{{confirm:<path>}}` keeps the confirm/ask verb label,
+# `{{confirm_bare:<path>}}` resolves to the same sentence without it (prompting._confirm_slot
+# decides which context emits which).
+CONFIRM_SLOT_RE = re.compile(r"\{\{confirm(?P<bare>_bare)?:(?P<path>[\w.]+)\}\}")
+_VALUE_TOKEN = "{{value}}"
+
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # "Dr. Dr. Jane" → "Dr. Jane": a title on both the template ("Dr. {{doctor_name}}")
@@ -237,7 +246,12 @@ def _render_value(raw: Any) -> str | None:
     """Prompt-text rendering of a prefilled raw value; None = not renderable
     (absent, or a shape with no sensible spoken form — dict/None)."""
     if isinstance(raw, str):
-        return _speak_iso_date(raw)
+        text = raw.strip()
+        # Mirrors ivr_selection._spoken_value: "N/A" is the intake default and the
+        # inapplicable marker, never a value worth speaking.
+        if not text or text.upper() == "N/A":
+            return None
+        return _speak_iso_date(text)
     if isinstance(raw, bool | int | float):
         return str(raw)
     if isinstance(raw, list):
@@ -279,9 +293,21 @@ class PrefillFuser:
         # Confirm-role leaves: prefilled values the agent must READ BACK to confirm
         # (their prompt is a {{value}} confirmation). Without this block the agent has
         # no value to confirm and degrades to an open ask (risking a conflicting answer).
-        self._confirm_leaves = [
-            (path, leaf.title) for path, leaf in doc.leaf_items() if leaf.role == "confirm"
-        ]
+        # Sentences for the {{confirm:path}} slots live alongside: the compiler emits
+        # one per confirm-role leaf and the per-form value decides which is spoken.
+        # A confirm-role leaf always carries both texts (dsl.py's Leaf._coherent
+        # enforces it), so one pass over leaf_items() builds both structures.
+        self._confirm_leaves: list[tuple[str, str]] = []
+        self._confirm_prompts: dict[str, tuple[str, str]] = {}
+        for path, leaf in doc.leaf_items():
+            if leaf.role != "confirm":
+                continue
+            self._confirm_leaves.append((path, leaf.title))
+            if leaf.prompt is not None:
+                self._confirm_prompts[path] = (
+                    leaf.prompt.confirm or leaf.title,
+                    leaf.prompt.ask or leaf.title,
+                )
 
     def fuse(self, values: Mapping[str, Any], *, current_year: int) -> CallPlan:
         """Fuse one form's intake-prefilled values into the template (pure — the
@@ -300,6 +326,28 @@ class PrefillFuser:
           answers seed for applicability gates and the Phase-2 rule engine.
         """
         unresolved = 0
+        unbacked = 0
+
+        def expand_slots(text: str) -> str:
+            def repl(match: re.Match[str]) -> str:
+                nonlocal unbacked
+                bare = match.group("bare") is not None
+                path = match.group("path")
+                sentences = self._confirm_prompts.get(path)
+                if sentences is None:
+                    # Fail safe: an open ask is never wrong, a fabricated read-back is.
+                    unbacked += 1
+                    verb, sentence = "ask", self._titles.get(path, path)
+                else:
+                    confirm_text, ask_text = sentences
+                    rendered = _render_value(values.get(path))
+                    if rendered is None:
+                        verb, sentence = "ask", ask_text
+                    else:
+                        verb, sentence = "confirm", confirm_text.replace(_VALUE_TOKEN, rendered)
+                return sentence if bare else f"{verb} — {sentence}"
+
+            return CONFIRM_SLOT_RE.sub(repl, text)
 
         def hydrate(text: str | None) -> str | None:
             if text is None:
@@ -346,7 +394,7 @@ class PrefillFuser:
                         update={
                             "intro": hydrate(task.intro),
                             "outro": hydrate(task.outro),
-                            "prompt": hydrate(task.prompt) or "",
+                            "prompt": hydrate(expand_slots(task.prompt)) or "",
                         }
                     )
                     for task in plan.tasks
@@ -362,6 +410,12 @@ class PrefillFuser:
                 "call plan %s: %d unresolvable placeholder(s) passed through verbatim",
                 plan.insurance_type,
                 unresolved,
+            )
+        if unbacked:
+            logger.warning(
+                "call plan %s: %d confirm slot(s) had no sentence; asked openly instead",
+                plan.insurance_type,
+                unbacked,
             )
         return fused
 

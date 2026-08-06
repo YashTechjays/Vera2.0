@@ -4,6 +4,8 @@ render_task_prompts, field descriptors from leaf_gates; nothing is recompiled he
 
 import uuid
 
+import pytest
+
 from vera_core.forms.call_plan import (
     CallPlan,
     PlanTask,
@@ -261,6 +263,14 @@ class TestRenderCosmetics:
         assert "April 12, 1991" in fused.known_information
         assert "1991-04-12" not in fused.known_information
 
+    @pytest.mark.parametrize("raw", ["N/A", "n/a", " N/A ", "", "   "])
+    def test_render_value_drops_placeholder_strings(self, raw: str) -> None:
+        assert _render_value(raw) is None
+
+    def test_render_value_keeps_real_values(self) -> None:
+        assert _render_value("Jane Doe") == "Jane Doe"
+        assert _render_value("1991-04-12") == "April 12, 1991"
+
 
 class TestFieldDescriptors:
     def test_only_collectable_roles_in_document_order(self) -> None:
@@ -366,3 +376,59 @@ class TestBookendPaths:
         keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
         assert "introduction" in keys
         assert "wrap_up" in keys
+
+
+SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
+MEMBER_ID = "sections.insurance_information.policy_number"
+
+
+class TestConfirmSlot:
+    def test_expands_to_confirm_when_value_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "confirm — Can we also check the spouse on the plan?" in text
+        assert "I have the spouse listed as Jane Doe" in text
+        assert "{{value}}" not in text
+        assert "{{confirm:" not in text
+
+    def test_expands_to_ask_when_nothing_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "ask — Can we also check the spouse on the plan?" in text
+        assert "Can I get the spouse's full name?" in text
+        assert "{{value}}" not in text
+        assert "{{confirm:" not in text
+
+    def test_treats_na_as_nothing_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "N/A"}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "ask — Can we also check the spouse on the plan?" in text
+
+    def test_speaks_iso_date_in_confirm_variant(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_DOB: "1991-04-12"}, current_year=2026)
+        assert "April 12, 1991" in plan_task(plan, "insurance_basics").prompt
+
+    def test_focused_retry_still_reads_back_the_value(self) -> None:
+        """focus_call_plan clears on_file_values; the value must survive inline."""
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
+        focused = focus_call_plan(plan, [SPOUSE_NAME])
+        assert focused.on_file_values is None
+        assert "Jane Doe" in plan_task(focused, "insurance_basics").prompt
+
+    def test_numbered_question_confirm_branch_is_bare(self) -> None:
+        """The numbered-question list never carried the confirm/ask label — only the
+        two bullet contexts (immediate/end-of-task) do."""
+        plan = fuse_prefill(IBV, PLAN, {MEMBER_ID: "ABC123"}, current_year=2026)
+        line = next(
+            line
+            for line in plan_task(plan, "insurance_basics").prompt.splitlines()
+            if line.startswith("6.")
+        )
+        assert line == "6. I have the member ID as ABC123 — can you confirm that is correct?"
+
+
+def test_gate_text_carries_the_condition_prose() -> None:
+    fields = {f.path: f for t in PLAN.tasks for f in t.fields}
+    assert fields[SPOUSE_NAME].gate_text == '"Coverage Type" is "Family"'
+    assert fields["sections.benefit_coverage.coverage_type"].gate_text is None
