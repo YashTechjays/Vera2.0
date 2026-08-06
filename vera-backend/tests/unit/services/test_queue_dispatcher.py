@@ -273,6 +273,7 @@ def _tenant(**overrides: Any) -> Tenant:
         "queue_expiry_hours": 48,
         "persona_tweak": {},
         "observer_enabled": True,
+        "auto_retry_enabled": True,
     }
     defaults.update(overrides)
     return Tenant(**defaults)
@@ -570,6 +571,25 @@ async def test_dial_failure_marks_call_failed_and_requeues_form(
     assert livekit.deleted == livekit.created  # the room was torn down
     assert form.status == FormStatus.IN_QUEUE.value
     assert form.retry_count == 1
+
+
+async def test_dial_failure_does_not_requeue_when_tenant_auto_retry_disabled(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """Tenant auto-retry OFF suppresses the failed-dial redial: the call is
+    recorded FAILED and the form parks in CALL_FAILED with its budget intact."""
+    tenant = _tenant(auto_retry_enabled=False)
+    form = _form(tenant.id, retry_count=0)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.dial_error = OutboundDialError("fake provider rejected the call")
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 0
+    assert session.calls_added()[0].current_status == CallStatus.FAILED.value
+    assert form.status == FormStatus.CALL_FAILED.value
+    assert form.retry_count == 0
 
 
 async def test_dials_are_paced_one_second_apart(

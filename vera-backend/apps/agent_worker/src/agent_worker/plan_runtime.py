@@ -68,20 +68,42 @@ _OPENING_DIRECTIVE = (
     "confirm those instead."
 )
 
+# Starts a gap sweep. Only a lead-in: the questions themselves live in the instructions,
+# where they survive past this one inference (see _gap_block).
+_GAP_REASK_DIRECTIVE = (
+    "Begin the follow-up questions now: ask the first question on the current task's numbered "
+    "list, naturally and without implying the call is ending."
+)
 
-def _gap_block(title: str) -> str:
-    """Static instruction block for a gap agent (built up front, so only the task
-    title is known). The specific still-missing fields are injected live in
-    `on_enter` — the answer snapshot is only known once the call is running."""
+# Consecutive gap_complete refusals that shrink nothing before the guard gives up.
+_GAP_FRUITLESS_REFUSALS = 2
+
+
+def _gap_block(title: str, fields: list[PlanFieldDescriptor]) -> str:
+    """Instruction block for a gap agent, listing every question it still owes."""
+    if fields:
+        count = len(fields)
+        subject = "question is" if count == 1 else "questions are"
+        owed = (
+            f"{count} required {subject} still unanswered from earlier in the call. Re-ask ONLY "
+            "the questions on this numbered list, politely, one at a time, and keep going until "
+            "every item on it has been asked — the list is the complete set:\n"
+            f"{_field_lines(fields, numbered=True)}"
+        )
+    else:
+        owed = (
+            "Required questions from earlier in the call are still unanswered. When the list "
+            "arrives, re-ask ONLY those specific questions, politely, one at a time."
+        )
     return (
         f"# Current task: Follow-up questions ({title})\n"
-        "A few required questions from earlier in the call are still unanswered. "
-        "When prompted, re-ask ONLY those specific questions — concisely, politely, "
-        "one at a time. If the representative cannot answer, accept it and move on; "
+        f"{owed}\n"
+        "Keep each question brief, but do not shorten the LIST — every question on it is owed. "
+        "If the representative cannot answer one, accept it and move to the next one on the list; "
         "never press or repeat. This is a mid-call follow-up, NOT the end of the call: "
         "do NOT say goodbye, do NOT thank the representative as if finishing, and do NOT "
-        "claim you have everything you need — more questions may still follow. Once you "
-        "have re-asked the listed questions, simply call gap_complete."
+        "claim you have everything you need — more questions may still follow. Once every "
+        "question on the list has been asked, call gap_complete."
     )
 
 
@@ -91,12 +113,14 @@ def _owning_segment(path: str) -> str:
     return parts[-2] if len(parts) > 1 else path
 
 
-def _field_line(field: PlanFieldDescriptor, title_counts: Counter[str]) -> str:
+def _field_line(
+    field: PlanFieldDescriptor, title_counts: Counter[str], *, marker: str = "-"
+) -> str:
     """One field, disambiguated when its title repeats in the list it's rendered into.
 
     Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title
     line names nothing the agent could act on; every field-list renderer shares this."""
-    line = f"- {field.title}"
+    line = f"{marker} {field.title}"
     if title_counts[field.title] > 1:
         line += f" ({_owning_segment(field.path)})"
     if field.values:
@@ -104,18 +128,16 @@ def _field_line(field: PlanFieldDescriptor, title_counts: Counter[str]) -> str:
     return line
 
 
-def _field_lines(fields: list[PlanFieldDescriptor]) -> str:
-    """Questions as a bulleted list, naming the expected values where the schema fixes them."""
+def _field_lines(fields: list[PlanFieldDescriptor], *, numbered: bool = False) -> str:
+    """Questions as a list, naming the expected values where the schema fixes them.
+
+    `numbered` ordinals give the agent something to check itself against: a CPT-heavy task
+    renders a run of near-identical lines, and a bulleted run of fourteen carries no signal
+    that fourteen is how many were owed."""
     title_counts = Counter(field.title for field in fields)
-    return "\n".join(_field_line(field, title_counts) for field in fields)
-
-
-def _gap_reask_instruction(fields: list[PlanFieldDescriptor]) -> str:
-    """Live re-ask directive listing the still-missing required fields."""
-    return (
-        "I have a couple of quick follow-up questions. Re-ask the representative for these "
-        "still-missing required details, briefly and naturally — do not imply the call is "
-        f"ending:\n{_field_lines(fields)}"
+    return "\n".join(
+        _field_line(field, title_counts, marker=f"{position}." if numbered else "-")
+        for position, field in enumerate(fields, start=1)
     )
 
 
@@ -179,7 +201,7 @@ def _instructions(
 ) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
-    the scope-discipline guardrail + the Cartesia TTS markup guide — fused once, at
+    the discipline guardrails + the Cartesia TTS markup guide — fused once, at
     build time. The scope guardrail keeps the LLM on the compiled question list (no
     invented off-script questions); the markup guide keeps CPT codes `<spell>`-wrapped
     (the compiled prompts carry no TTS guidance)."""
@@ -436,12 +458,21 @@ class GapTaskAgent(Agent):
         self._controller = controller
         self._task_index = task_index
         self._task = controller.plan.tasks[task_index]
-        super().__init__(
-            instructions=_instructions(
-                controller.plan,
-                _gap_block(self._task.title),
-                extra_instructions=controller.extra_instructions,
-            ),
+        # Questions owed on entry (0 until on_enter, where the answer snapshot exists) and the
+        # list currently in the instructions, rewritten whenever that set shrinks.
+        self._questions_owed = 0
+        self._listed_paths: tuple[str, ...] = ()
+        self._rep_turns = 0
+        self._outstanding_at_last_refusal: int | None = None
+        self._fruitless_refusals = 0
+        super().__init__(instructions=self._build_instructions([]))
+
+    def _build_instructions(self, fields: list[PlanFieldDescriptor]) -> str:
+        """This sweep's full instruction text, listing the questions it still owes."""
+        return _instructions(
+            self._controller.plan,
+            _gap_block(self._task.title, fields),
+            extra_instructions=self._controller.extra_instructions,
         )
 
     @property
@@ -459,12 +490,29 @@ class GapTaskAgent(Agent):
             await self._controller.prepare_successor(self, successor)
             self.session.update_agent(successor)
             return
-        self.session.generate_reply(instructions=_gap_reask_instruction(fields))
+        self._questions_owed = len(fields)
+        await self._apply_gap_list(fields)
+        self.session.generate_reply(instructions=_GAP_REASK_DIRECTIVE)
+
+    async def _apply_gap_list(self, fields: list[PlanFieldDescriptor]) -> None:
+        """Put this sweep's outstanding questions in the INSTRUCTIONS, where they outlive the
+        turn that named them — the `_apply_gating` seam, and rebuilt not appended for the
+        reason given there."""
+        paths = tuple(field.path for field in fields)
+        if paths == self._listed_paths:
+            return
+        self._listed_paths = paths
+        await self.update_instructions(self._build_instructions(fields))
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
+        self._rep_turns += 1
+        # The Observer keeps writing during the pass, so re-narrow as answers land. Not when the
+        # set empties: the agent's next move is then gap_complete, which the guard passes.
+        if outstanding := self._controller.gap_fields(self._task_index):
+            await self._apply_gap_list(outstanding)
 
     @llm.function_tool(
         name="gap_complete",
@@ -478,9 +526,62 @@ class GapTaskAgent(Agent):
     async def _gap_complete(self, reason: str) -> Agent | str:
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
+        if (refusal := self._refuse_premature_gap_complete()) is not None:
+            return refusal
         successor = await self._controller.advance_gap_from(self._task_index)
         await self._controller.prepare_successor(self, successor)
         return successor
+
+    def _refuse_premature_gap_complete(self) -> str | None:
+        """Send the sweep back for the questions it has not asked yet, re-listing them.
+
+        The prompt can only make full coverage likely; this is what enforces it. The main pass
+        refuses at most ONCE (see `_refuse_premature_completion`) because this pass backstops it
+        — but nothing backstops this one, and it runs once, so whatever it leaves unasked is
+        unreachable for the rest of the call.
+
+        Two bounds, because a rep who cannot answer never empties `gap_fields` and an
+        unconditional guard would strand the call here:
+
+        * a turn ceiling, for the rep with no answer to give — N questions cannot be asked in
+          fewer than N rep exchanges, so once the sweep has had as many turns as it owed, stop
+          second-guessing it. Coarse until an answer records WHICH question was asked: the
+          Observer attributes answers to a task, but nothing tracks what the bot actually spoke;
+        * a fruitless-refusal budget, for the model that calls gap_complete straight back off the
+          forced follow-up with no rep turn in between. Progress resets it, so a sweep that is
+          still landing answers keeps its runway.
+        """
+        outstanding = self._controller.gap_fields(self._task_index)
+        if not outstanding:
+            return None
+        owed = self._questions_owed or len(outstanding)
+        if self._rep_turns >= owed:
+            return None
+        shrank = (
+            self._outstanding_at_last_refusal is None
+            or len(outstanding) < self._outstanding_at_last_refusal
+        )
+        self._fruitless_refusals = 0 if shrank else self._fruitless_refusals + 1
+        if self._fruitless_refusals >= _GAP_FRUITLESS_REFUSALS:
+            logger.info(
+                "gap sweep of task %s advancing with %d question(s) still open",
+                self._task.task_key,
+                len(outstanding),
+            )
+            return None
+        self._outstanding_at_last_refusal = len(outstanding)
+        logger.info(
+            "gap sweep of task %s: completion refused, %d of %d question(s) still open",
+            self._task.task_key,
+            len(outstanding),
+            owed,
+        )
+        return (
+            f"Not yet — {len(outstanding)} of the follow-up questions you were given still have "
+            "no answer on file. Ask the representative for them now, one at a time, and call "
+            "gap_complete only once every one of them has been asked:\n"
+            f"{_field_lines(outstanding, numbered=True)}"
+        )
 
 
 class PlanRunController:

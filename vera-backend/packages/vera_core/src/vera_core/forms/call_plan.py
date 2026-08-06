@@ -46,6 +46,7 @@ from vera_core.forms.dsl import (
     FlowRule,
     FormSchemaDoc,
     LeafType,
+    NumericConsistency,
     RequiredWhen,
     Validation,
 )
@@ -107,6 +108,7 @@ class CallPlan(_Model):
     tasks: list[PlanTask]
     flow_rules: list[FlowRule] = Field(default_factory=list)
     contradictions: list[Contradiction] = Field(default_factory=list)
+    numeric_consistencies: list[NumericConsistency] = Field(default_factory=list)
     shared_conditions: dict[str, Condition] = Field(default_factory=dict)
     stt_key_terms: list[str] | None = None
     # Per-form stage (fuse_prefill) — empty/None on the compile_call_plan template:
@@ -185,6 +187,7 @@ def compile_call_plan(
         tasks=tasks,
         flow_rules=list(doc.flow_rules or []),
         contradictions=list(doc.contradictions or []),
+        numeric_consistencies=list(doc.numeric_consistencies or []),
         shared_conditions=dict(doc.shared_conditions or {}),
         stt_key_terms=doc.stt_key_terms,
     )

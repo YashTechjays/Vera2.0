@@ -540,7 +540,11 @@ async def try_dispatch(
             with contextlib.suppress(Exception):  # room teardown is best-effort
                 await livekit.delete_room(room_name)
             requeued = apply_terminal_call_status(
-                call, form, CallStatus.FAILED, tenant_max_retries=tenant.max_retries
+                call,
+                form,
+                CallStatus.FAILED,
+                tenant_max_retries=tenant.max_retries,
+                auto_retry_enabled=tenant.auto_retry_enabled,
             )
             call.ended_at = func.now()
             if requeued:

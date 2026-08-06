@@ -654,3 +654,50 @@ class TestPromotedColumnParity:
         from vera_core.models.patient_form import PatientForm
 
         assert {c.name for c in PatientForm.__table__.columns} >= self.EXPECTED
+
+
+def triplet_doc(**overrides: Any) -> dict[str, Any]:
+    """minimal_doc plus a currency triplet section and one NumericConsistency rule."""
+    money = {"type": "currency", "title": "Money", "role": "ask", "prompt": {"ask": "How much?"}}
+    doc = minimal_doc()
+    doc["sections"]["ltm"] = {
+        "title": "LTM",
+        "fields": {
+            "total": dict(money, title="Total"),
+            "met_amount": dict(money, title="Met Amount"),
+            "remaining": dict(money, title="Remaining"),
+        },
+    }
+    doc["tasks"][0]["sections"].append("ltm")
+    doc["numeric_consistencies"] = [{"rule_key": "ltm_consistency", "triplet": "sections.ltm"}]
+    doc.update(overrides)
+    return doc
+
+
+class TestNumericConsistencyValidation:
+    def test_valid_triplet_rule_is_accepted(self) -> None:
+        doc = FormSchemaDoc.model_validate(triplet_doc())
+        assert doc.numeric_consistencies is not None
+        assert doc.numeric_consistencies[0].rule_key == "ltm_consistency"
+
+    def test_missing_triplet_child_is_rejected(self) -> None:
+        doc = triplet_doc()
+        del doc["sections"]["ltm"]["fields"]["remaining"]
+        with pytest.raises(ValidationError, match=r"sections\.ltm\.remaining.*not a leaf"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_non_currency_child_is_rejected(self) -> None:
+        doc = triplet_doc()
+        doc["sections"]["ltm"]["fields"]["met_amount"]["type"] = "text"
+        with pytest.raises(ValidationError, match=r"sections\.ltm\.met_amount.*currency"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_duplicate_rule_key_is_rejected(self) -> None:
+        doc = triplet_doc()
+        doc["numeric_consistencies"].append(dict(doc["numeric_consistencies"][0]))
+        with pytest.raises(ValidationError, match=r"duplicate.*ltm_consistency"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_round_trips_through_compile_and_load(self) -> None:
+        doc = FormSchemaDoc.model_validate(triplet_doc())
+        assert load_document(compile_document(doc)) == doc

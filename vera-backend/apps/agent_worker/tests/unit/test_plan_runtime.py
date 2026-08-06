@@ -17,6 +17,7 @@ from agent_worker.directives import ReAsk, SkipToTask, Terminate
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import TakeoverState, push_coaching_note
 from agent_worker.plan_runtime import (
+    _GAP_FRUITLESS_REFUSALS,
     _OPENING_DIRECTIVE,
     _WRAP_UP_DIRECTIVE,
     WRAP_UP_TASK_KEY,
@@ -28,6 +29,7 @@ from agent_worker.plan_runtime import (
     _field_lines,
     _gating_block,
 )
+from agent_worker.prompt import SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import AllCondition, Comparison, RefCondition, RequiredWhen
 
@@ -102,7 +104,7 @@ def _tool(agent: Agent, name: str) -> Callable[[], Awaitable[Any]]:
     return functools.partial(tool, reason="the task's questions are all answered")
 
 
-async def _rep_turn(agent: PlanTaskAgent, said: str = "Pat") -> None:
+async def _rep_turn(agent: Agent, said: str = "Pat") -> None:
     """One completed rep turn, as the session would deliver it."""
     await agent.on_user_turn_completed(
         agent.chat_ctx.copy(), new_message=ChatMessage(role="user", content=[said])
@@ -154,6 +156,18 @@ class TestConstruction:
         controller, _ = _controller()
         for agent in [*controller.agents, controller.wrap_up_agent]:
             assert "never say goodbye" in agent.instructions.lower()
+
+    def test_guardrails_never_vary_with_the_task_text(self) -> None:
+        # Task-specific phrasing guidance belongs in the schema's task prompt: a guardrail
+        # picked by matching the rendered question list silently skipped the gap pass.
+        plan = _plan()
+        plan.tasks[0].prompt = "Is CPT code 58323 for IUI covered under this plan?"
+        controller, _ = _controller(plan)
+        tails = [
+            agent.instructions.split(SCOPE_DISCIPLINE, 1)[1]
+            for agent in [*controller.agents, controller.wrap_up_agent]
+        ]
+        assert all(tail == tails[0] for tail in tails)
 
     def test_extra_instructions_overlay_every_agent(self) -> None:
         controller, _ = _controller(extra_instructions="Confirm the member ID twice.")
@@ -1011,6 +1025,51 @@ def test_conditional_field_is_never_also_excluded() -> None:
     assert set().union(*buckets) == {f.path for f in controller.plan.tasks[idx].fields}
 
 
+def _multi_gap_plan() -> CallPlan:
+    """A sweepable task with FIVE required-and-unanswered fields — the shape one field per
+    task cannot express. Two share the title "Covered" (the CPT shape), so its list exercises
+    numbering and path qualification together."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="intake_task",
+                title="Intake",
+                intro="Hello rep.",
+                prompt="Intake.",
+                fields=[
+                    _field("sections.intake.rep_name", "Representative name"),
+                    _field("sections.intake.call_ref", "Call reference"),
+                    _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
+                    _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
+                    _field("sections.intake.deductible", "Deductible", values=["Met", "Not met"]),
+                ],
+            ),
+            PlanTask(task_key="coverage_task", title="Coverage", prompt="Coverage."),
+            PlanTask(
+                task_key="closing_task",
+                title="Wrap Up",
+                prompt="Collect the reference number, then end the call.",
+                fields=[_field("sections.close.ref_number", "Reference number")],
+            ),
+        ],
+    )
+
+
+# Every question `_multi_gap_plan()`'s intake task owes, as `_field_lines` renders it.
+_INTAKE_GAPS = (
+    "Representative name",
+    "Call reference",
+    "Covered (cpt_58340)",
+    "Covered (cpt_82670)",
+    "Deductible",
+)
+
+
 class TestGating:
     """`coverage_task` is the shape that failed on a live eval: one applicable question
     (deductible) plus one the gates exclude (oon_note, gated on in_network == "No")."""
@@ -1165,6 +1224,23 @@ class TestFieldLines:
     def test_a_unique_title_is_left_alone(self) -> None:
         lines = _field_lines([_field("sections.intro.rep_name", "Representative name")])
         assert lines == "- Representative name"
+
+    def test_numbering_gives_the_model_an_arithmetic_handle(self) -> None:
+        # A run of near-identical lines is nothing the agent can check itself against; the
+        # ordinals are what let it tell "3 of 5 asked" from "all of them".
+        lines = _field_lines(
+            [
+                _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
+                _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
+                _field("sections.intro.rep_name", "Representative name"),
+            ],
+            numbered=True,
+        )
+        assert lines == (
+            "1. Covered (cpt_58340) (expected one of: Yes, No)\n"
+            "2. Covered (cpt_82670) (expected one of: Yes, No)\n"
+            "3. Representative name"
+        )
 
 
 class TestConditionalLines:
@@ -1395,11 +1471,13 @@ class TestGapAgent:
         # cursor points at the OWNING task index so the Observer captures the answer
         assert controller.active_task_index == 0
         assert state.cursor_writes == [(ROOM, "intro_task")]
-        instructions = mock_session.generate_reply.call_args.kwargs["instructions"]
-        assert "Representative name" in instructions
+        # The list lives in the INSTRUCTIONS, so it is still there on the pass's later turns
+        # (see TestGapCoverage); the directive is only the lead-in that starts the re-asking.
+        assert "Representative name" in agent.instructions
+        directive = mock_session.generate_reply.call_args.kwargs["instructions"]
         # neutral follow-up framing — must not imply the call is ending
-        assert "follow-up" in instructions
-        assert "wrapping up" not in instructions
+        assert "follow-up" in directive
+        assert "wrapping up" not in directive
 
     @pytest.mark.asyncio
     async def test_gap_complete_advances_forward_then_to_the_closer(self) -> None:
@@ -1407,14 +1485,19 @@ class TestGapAgent:
         controller.update_answers({"sections.a.in_network": "Yes"})
         for i in (0, 1, 2):  # intro, gated, coverage all visited with gaps
             controller.note_task_entered(i)
+        # One rep turn per gap agent: each owes one question, and the coverage guard refuses a
+        # gap_complete from an agent that has not yet had a turn to ask it.
         first = controller.gap_agents[0]
         with _session_patch(first, MagicMock()):
+            await _rep_turn(first)
             second = await _tool(first, "gap_complete")()
         assert second is controller.gap_agents[1]
         with _session_patch(second, MagicMock()):
+            await _rep_turn(second)
             third = await _tool(second, "gap_complete")()
         assert third is controller.gap_agents[2]
         with _session_patch(third, MagicMock()):
+            await _rep_turn(third)
             after = await _tool(third, "gap_complete")()
         assert after is controller.agents[_CLOSER]  # closer, not wrap-up
 
@@ -1427,6 +1510,7 @@ class TestGapAgent:
         # rep answers the coverage gap while the intro gap is being handled
         controller.update_answers({"sections.cov.deductible": "Met"})
         with _session_patch(first, MagicMock()):
+            await _rep_turn(first)
             successor = await _tool(first, "gap_complete")()
         assert successor is controller.agents[_CLOSER]
 
@@ -1472,6 +1556,108 @@ class TestGapAgent:
             result = await _tool(agent, "gap_complete")()
         assert isinstance(result, str)
         assert "supervisor" in result.lower()
+
+
+class TestGapCoverage:
+    """The pass must re-ask EVERY missing question of the task it sweeps. It asked two or three
+    of fourteen because the list reached the model once, in a `generate_reply` directive that
+    the SDK staples to a chat-context COPY — so from the second turn on the agent was
+    reconstructing "the list" from the one or two questions it had already spoken."""
+
+    async def _enter(self, controller: PlanRunController) -> GapTaskAgent:
+        agent = controller.gap_agents[0]
+        await agent.on_enter()
+        await controller.drain_cursor_writes()
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_every_missing_question_lands_in_the_instructions(self) -> None:
+        controller, _ = _controller(_multi_gap_plan())
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+        for title in _INTAKE_GAPS:
+            assert title in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_list_survives_the_second_turn(self) -> None:
+        controller, _ = _controller(_multi_gap_plan())
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+            await _rep_turn(agent, "I can't find that one.")
+        for title in _INTAKE_GAPS:
+            assert title in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_instructions_state_the_real_count_and_number_the_list(self) -> None:
+        controller, _ = _controller(_multi_gap_plan())
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+        assert "5 required questions" in agent.instructions
+        assert "5. Deductible (expected one of: Met, Not met)" in agent.instructions
+        # "a couple" is idiomatically 2 and "a few" is 3 — either caps the sweep on its own.
+        assert "a couple" not in agent.instructions
+        assert "A few" not in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_answers_landing_mid_pass_re_narrow_the_list(self) -> None:
+        # The Observer keeps writing while the pass runs, so the list has to re-narrow or the
+        # agent re-asks what the rep just answered.
+        controller, _ = _controller(_multi_gap_plan())
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+            controller.update_answers(
+                {"sections.intake.rep_name": "Pat", "sections.intake.call_ref": "A1"}
+            )
+            await _rep_turn(agent)
+        assert "3 required questions" in agent.instructions
+        assert "Representative name" not in agent.instructions
+        assert "Call reference" not in agent.instructions
+        assert "Deductible" in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_gap_complete_is_refused_while_questions_remain(self) -> None:
+        controller, _ = _controller(_multi_gap_plan())
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+            result = await _tool(agent, "gap_complete")()
+        # A str is a tool result, so the pass parks here; an Agent would have moved on.
+        assert isinstance(result, str)
+        for title in _INTAKE_GAPS:
+            assert title in result
+
+    @pytest.mark.asyncio
+    async def test_repeated_gap_complete_advances_even_with_questions_open(self) -> None:
+        # THE no-deadlock property. A rep who cannot answer never empties gap_fields, so the
+        # guard has to run out rather than strand the call on this task forever.
+        controller, _ = _controller(_multi_gap_plan())
+        controller.note_task_entered(1)
+        results: list[Any] = []
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+            for _ in range(_GAP_FRUITLESS_REFUSALS + 3):
+                results.append(await _tool(agent, "gap_complete")())
+                if isinstance(results[-1], Agent):
+                    break
+        assert isinstance(results[-1], Agent), results[-1]
+        # ...but it refused first; a guard that never refuses would pass the line above vacuously
+        assert any(isinstance(r, str) for r in results)
+
+    @pytest.mark.asyncio
+    async def test_a_swept_task_with_nothing_left_open_is_never_refused(self) -> None:
+        controller, _ = _controller(_multi_gap_plan())
+        controller.note_task_entered(1)
+        controller.update_answers(
+            {
+                "sections.intake.rep_name": "Pat",
+                "sections.intake.call_ref": "A1",
+                "sections.labs.cpt_58340.covered": "Yes",
+                "sections.labs.cpt_82670.covered": "No",
+                "sections.intake.deductible": "Met",
+            }
+        )
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            result = await _tool(controller.gap_agents[0], "gap_complete")()
+        assert isinstance(result, Agent)
 
 
 class TestGapAgentConstruction:
@@ -1654,6 +1840,7 @@ class TestPreviousTaskWindow:
         assert isinstance(gap, GapTaskAgent)
         gap._chat_ctx.add_message(role="assistant", content="re-ask from the gap pass")
         with _session_patch(gap, MagicMock()):
+            await _rep_turn(gap)  # the rep answers the re-ask, so the coverage guard lets go
             successor = cast(Agent, await _tool(gap, "gap_complete")())
         texts = chat_ctx_texts(successor)
         assert "turn-from-task2" in texts  # the substantive task it came from
@@ -1798,6 +1985,7 @@ class TestOpeningAnchor:
         assert isinstance(gap, GapTaskAgent)
         gap._chat_ctx.add_message(role="assistant", content="re-ask from the gap pass")
         with _session_patch(gap, MagicMock()):
+            await _rep_turn(gap)  # the rep answers the re-ask, so the coverage guard lets go
             successor = cast(Agent, await _tool(gap, "gap_complete")())
         assert controller._anchor_items == []
         assert _OPENING not in chat_ctx_texts(successor)

@@ -32,7 +32,7 @@ _FORM_EDGE: dict[CallStatus, FormStatus] = {
 }
 
 
-def fail_and_requeue(form: Any, *, tenant_max_retries: int) -> bool:
+def fail_and_requeue(form: Any, *, tenant_max_retries: int, auto_retry_enabled: bool) -> bool:
     """Park *form* in CALL_FAILED, then auto-retry it while retries remain.
 
     Returns True when the form was requeued — the caller owns `form.enqueued_at`
@@ -41,22 +41,27 @@ def fail_and_requeue(form: Any, *, tenant_max_retries: int) -> bool:
     a clinical decision and spends the tenant's budget. A dispatch-prep failure never
     dialed and deliberately does NOT come here — it parks without spending
     (`queue_dispatcher`), so an infrastructure blip cannot retire a patient's form.
+
+    *auto_retry_enabled* is the tenant's own toggle (not the deployment kill-switch):
+    OFF means no redial of any kind, so the form parks in CALL_FAILED without
+    spending budget — mirroring the post-call eval path's tenant gate.
     """
     sm = FormStateMachine()
     sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant_max_retries)
-    if not sm.can_retry(form, tenant_max_retries=tenant_max_retries):
+    if not auto_retry_enabled or not sm.can_retry(form, tenant_max_retries=tenant_max_retries):
         return False
     sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant_max_retries)
     return True
 
 
 def apply_terminal_call_status(
-    call: Any, form: Any, status: CallStatus, *, tenant_max_retries: int
+    call: Any, form: Any, status: CallStatus, *, tenant_max_retries: int, auto_retry_enabled: bool
 ) -> bool:
     """Record *status* on *call* and drive *form*'s lifecycle edge.
 
     Returns True when the form was auto-requeued for retry — the caller owns
-    `form.enqueued_at` (DB clock) in that case.
+    `form.enqueued_at` (DB clock) in that case. *auto_retry_enabled* is the tenant's
+    toggle; OFF suppresses the failed-call redial (see `fail_and_requeue`).
     """
     if status not in _FORM_EDGE:
         raise ValueError(f"{status.value} is not a terminal call status")
@@ -64,7 +69,9 @@ def apply_terminal_call_status(
     requeued = False
     try:
         if _FORM_EDGE[status] is FormStatus.CALL_FAILED:
-            requeued = fail_and_requeue(form, tenant_max_retries=tenant_max_retries)
+            requeued = fail_and_requeue(
+                form, tenant_max_retries=tenant_max_retries, auto_retry_enabled=auto_retry_enabled
+            )
         else:
             FormStateMachine().transition(
                 form, _FORM_EDGE[status], tenant_max_retries=tenant_max_retries
