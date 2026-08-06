@@ -22,6 +22,7 @@ from vera_core.forms.dsl import (
     NotCondition,
     RefCondition,
     RequiredWhen,
+    condition_field_paths,
 )
 
 Values = Mapping[str, Any]
@@ -104,3 +105,29 @@ def is_required(field: HasRequired, values: Values, shared: SharedConditions) ->
     if isinstance(field.required, bool):
         return field.required
     return evaluate(field.required.when, values, shared)
+
+
+def decided_at_entry(
+    gate: Condition,
+    task_of_path: Mapping[str, int],
+    task_index: int,
+    shared: SharedConditions,
+) -> bool:
+    """Is this gate conjunct's answer already final when `task_index` is entered?
+
+    True when every field it references is collected by an EARLIER task — answered, or
+    never answered because it was gated out upstream — or by no task at all (a
+    context/prefilled leaf). A conjunct referencing this task or a later one is undecided:
+    its gate question has not been asked yet, so evaluating it reads false and would
+    forbid a follow-up the agent is about to need.
+
+    Shared by the prompt compiler (which omits a decided conjunct's prose, since the
+    runtime resolves it) and the worker (which drops the question outright). One
+    implementation because the two disagreeing means the compiler keeps a gate the worker
+    has already acted on, or the reverse — the `HasRequired` precedent above.
+
+    A conjunct referencing NO path is treated as undecided: there is nothing whose answer
+    could settle it, so the safe reading is "leave it to the live prose".
+    """
+    refs = set(condition_field_paths(gate, dict(shared)))
+    return bool(refs) and all(task_of_path.get(ref, -1) < task_index for ref in refs)

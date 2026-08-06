@@ -45,8 +45,13 @@ from agent_worker.prompt import (
     TOOL_REASON_ARG,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
-from vera_core.forms.conditions import evaluate, is_applicable, is_required
-from vera_core.forms.dsl import Condition, condition_field_paths
+from vera_core.forms.conditions import (
+    decided_at_entry,
+    evaluate,
+    is_applicable,
+    is_required,
+)
+from vera_core.forms.dsl import Condition
 from vera_core.forms.prompting import render_panels
 from vera_core.forms.question_plan import drop_questions
 from vera_core.plan_store import PlanRunStateService
@@ -203,11 +208,12 @@ class PlanTaskAgent(Agent):
         )
 
     def _narrowed_block(self, question_list: str) -> str:
-        """The task block with its question list swapped for the narrowed one. Everything
-        before the first heading is the authored task instruction; everything from the first
-        heading on is the compiled list."""
-        head = self._task.prompt.split("\n###", 1)[0].rstrip()
-        return f"# Current task: {self._task.title}\n{head}\n\n{question_list}"
+        """The task block with its question list swapped for the narrowed one, reassembled
+        from the pieces the compiler shipped — recovering them by splitting `prompt` dropped
+        the TERMINATION RULE and CONSISTENCY CHECK blocks that follow the list."""
+        task = self._task
+        body = "\n\n".join(p for p in (task.lead_in, question_list, task.trailing) if p)
+        return f"# Current task: {task.title}\n{body}"
 
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
@@ -868,26 +874,17 @@ class PlanRunController:
 
     # -- gap-pass API -------------------------------------------------------------
 
-    def _decided_before(self, path: str, task_index: int) -> bool:
-        owner = self._task_of_path.get(path)  # absent: context/prefilled, so always final
-        return owner is None or owner < task_index
-
     def _decidable_gates(
         self, field: PlanFieldDescriptor, task_index: int
     ) -> tuple[Condition, ...]:
-        """The conjuncts of `field`'s gate chain whose answer is already final at task entry.
+        """The conjuncts of `field`'s gate chain already settled when this task is entered.
 
-        A conjunct referencing a path THIS task (or a later one) collects is undecided —
-        evaluating it reads false and would forbid a follow-up the agent is about to need. A
-        mixed conjunct (`any(earlier, this_task)`) counts as undecided whole: descending into an
-        OR to salvage its decidable half would be unsound."""
-        shared = self.plan.shared_conditions
+        A mixed conjunct (`any(earlier, this_task)`) counts as undecided whole: descending
+        into an OR to salvage its decidable half would be unsound."""
         return tuple(
             gate
             for gate in field.gates
-            if all(
-                self._decided_before(ref, task_index) for ref in condition_field_paths(gate, shared)
-            )
+            if decided_at_entry(gate, self._task_of_path, task_index, self.plan.shared_conditions)
         )
 
     def entry_gate_split(

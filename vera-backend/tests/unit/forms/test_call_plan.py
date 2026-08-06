@@ -3,6 +3,7 @@ the agent worker builds PlanTaskAgents from. Pure fusion — prompt text comes f
 render_task_prompts, field descriptors from leaf_gates; nothing is recompiled here."""
 
 import uuid
+from uuid import uuid4
 
 from vera_core.forms.call_plan import (
     CallPlan,
@@ -13,6 +14,7 @@ from vera_core.forms.call_plan import (
     focus_call_plan,
     fuse_prefill,
 )
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc, Leaf, load_document
 from vera_core.forms.prompting import (
@@ -20,8 +22,10 @@ from vera_core.forms.prompting import (
     PromptDocument,
     SessionBlock,
     TaskTextOverride,
+    render_panels,
     render_task_prompts,
 )
+from vera_core.forms.question_plan import iter_questions
 
 from .test_prompting import FORM_SCHEMA_DIR
 
@@ -366,3 +370,35 @@ class TestBookendPaths:
         keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
         assert "introduction" in keys
         assert "wrap_up" in keys
+
+
+class TestPanelsMatchThePrompt:
+    """The plan carries the prompt twice — as text and as the tree the worker re-renders.
+    Anything that transforms one must transform the other, or narrowing a task silently
+    changes what it says."""
+
+    def _plan(self) -> CallPlan:
+        return compile_call_plan(
+            build_ibv_standard(), None, schema_version_id=uuid4(), prompt_version_id=None
+        )
+
+    def test_every_task_reassembles_from_its_pieces(self) -> None:
+        for task in self._plan().tasks:
+            parts = (task.lead_in, render_panels(task.panels), task.trailing)
+            assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
+
+    def test_the_stored_tree_keeps_the_immediate_confirmations(self) -> None:
+        # Built once and shared: building it a second time without the confirm lines gave the
+        # worker a tree whose re-render dropped every "Immediately after this answer" block.
+        plan = self._plan()
+        confirms = sum(
+            len(q.immediate_confirms) for t in plan.tasks for q in iter_questions(t.panels)
+        )
+        assert confirms > 0
+
+    def test_fusing_hydrates_the_tree_as_well_as_the_text(self) -> None:
+        # A task-entry re-render must not speak a raw {{token}}.
+        doc = build_ibv_standard()
+        fused = fuse_prefill(doc, self._plan(), {}, current_year=2026)
+        for task in fused.tasks:
+            assert "{{current_year}}" not in render_panels(task.panels), task.task_key

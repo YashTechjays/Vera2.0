@@ -51,7 +51,7 @@ from vera_core.forms.dsl import (
     Validation,
 )
 from vera_core.forms.prompting import PromptDocument, render_task_prompts
-from vera_core.forms.question_plan import PromptPanel, build_question_plan
+from vera_core.forms.question_plan import PromptPanel, hydrate_panels
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +92,16 @@ class PlanTask(_Model):
     title: str
     intro: str | None = None  # AgentTask entry speech — verbatim
     outro: str | None = None  # AgentTask exit speech — verbatim
-    prompt: str  # compiled instruction text
+    prompt: str  # compiled instruction text: lead_in + the question list + trailing
     applicable_when: Condition | None = None
     fields: list[PlanFieldDescriptor] = Field(default_factory=list)
-    # The question tree `prompt` was rendered from. The worker re-renders it at task entry
-    # with the entry-decided gates resolved, so a question the gates rule out is DROPPED from
-    # the list rather than listed and then retracted underneath it.
+    # `prompt` in its three pieces. The worker re-renders the question list at task entry with
+    # the entry-decided gates resolved — a question the gates rule out is DROPPED rather than
+    # listed and then retracted — and reassembles it around these, so the flow-rule and
+    # contradiction blocks that follow the list survive the narrowing.
+    lead_in: str = ""
     panels: list[PromptPanel] = Field(default_factory=list)
+    trailing: str = ""
 
 
 class CallPlan(_Model):
@@ -171,7 +174,9 @@ def compile_call_plan(
             prompt=rendered_task.prompt,
             applicable_when=task.applicable_when,
             fields=fields_by_task.get(rendered_task.task_key, []),
-            panels=build_question_plan(doc, task),
+            lead_in=rendered_task.lead_in,
+            panels=rendered_task.panels,
+            trailing=rendered_task.trailing,
         )
         for task, rendered_task in zip(doc.tasks, rendered.tasks, strict=True)
     ]
@@ -353,6 +358,12 @@ class PrefillFuser:
                             "intro": hydrate(task.intro),
                             "outro": hydrate(task.outro),
                             "prompt": hydrate(task.prompt) or "",
+                            # The pieces carry the same tokens as `prompt`; hydrating only
+                            # the assembled text would leave a task-entry re-render speaking
+                            # a raw {{value}}.
+                            "lead_in": hydrate(task.lead_in) or "",
+                            "panels": hydrate_panels(task.panels, hydrate),
+                            "trailing": hydrate(task.trailing) or "",
                         }
                     )
                     for task in plan.tasks

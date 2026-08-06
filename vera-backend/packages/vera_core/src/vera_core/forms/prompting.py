@@ -139,7 +139,14 @@ class RenderedTaskPrompt(_Doc):
     title: str
     intro: str | None = None  # AgentTask entry speech — verbatim
     outro: str | None = None  # AgentTask exit speech — verbatim
-    prompt: str  # compiled instruction text
+    prompt: str  # compiled instruction text: lead_in + the question list + trailing
+    # The same text in its three pieces, so a consumer that re-renders the question list
+    # (the worker, narrowing against the live gates) reassembles the rest instead of
+    # recovering it by splitting the compiled string — which silently dropped the
+    # TERMINATION RULE / CONSISTENCY CHECK blocks that follow the list.
+    lead_in: str = ""
+    panels: list[PromptPanel] = Field(default_factory=list)
+    trailing: str = ""
 
 
 class RenderedPrompts(_Doc):
@@ -194,7 +201,6 @@ def render_task_prompts(
     titles = {path: field.title for path, field in doc._iter_fields()}
     task_titles = {t.task_key: t.title for t in doc.tasks}
 
-    questions: dict[str, list[_QuestionItem]] = {}
     immediate_by_anchor: dict[str, list[_QuestionItem]] = {}
     end_confirms: dict[str, list[_QuestionItem]] = {}
     for path, leaf, gates in leaf_gates(doc):
@@ -205,8 +211,6 @@ def render_task_prompts(
                 immediate_by_anchor.setdefault(anchor, []).append((path, leaf, gates))
             else:
                 end_confirms.setdefault(cit.task_key, []).append((path, leaf, gates))
-        elif leaf.role in ("ask", "confirm"):
-            questions.setdefault(path.split(".")[1], []).append((path, leaf, gates))
 
     flow_by_task: dict[str, list[FlowRule]] = {}
     for rule in doc.flow_rules or []:
@@ -222,24 +226,28 @@ def render_task_prompts(
     tasks_out: list[RenderedTaskPrompt] = []
     for task in doc.tasks:
         override = overrides.get(task.task_key, TaskTextOverride())
+        text = _task_text(
+            doc,
+            task,
+            override,
+            render_cond,
+            immediate_by_anchor,
+            end_confirms.get(task.task_key, []),
+            flow_by_task.get(task.task_key, []),
+            contra_by_task.get(task.task_key, []),
+            titles,
+            task_titles,
+        )
         tasks_out.append(
             RenderedTaskPrompt(
                 task_key=task.task_key,
                 title=task.title,
                 intro=task.intro if override.intro is None else override.intro,
                 outro=task.outro if override.outro is None else override.outro,
-                prompt=_task_text(
-                    doc,
-                    task,
-                    override,
-                    render_cond,
-                    immediate_by_anchor,
-                    end_confirms.get(task.task_key, []),
-                    flow_by_task.get(task.task_key, []),
-                    contra_by_task.get(task.task_key, []),
-                    titles,
-                    task_titles,
-                ),
+                prompt=text.prompt,
+                lead_in=text.lead_in,
+                panels=text.panels,
+                trailing=text.trailing,
             )
         )
     return RenderedPrompts(
@@ -384,6 +392,18 @@ def _numbered_question(number: int, question: PromptQuestion) -> list[str]:
     return lines
 
 
+class _TaskText(_Doc):
+    lead_in: str
+    panels: list[PromptPanel]
+    trailing: str
+
+    @property
+    def prompt(self) -> str:
+        return "\n\n".join(
+            p for p in (self.lead_in, render_panels(self.panels), self.trailing) if p
+        )
+
+
 def _task_text(
     doc: FormSchemaDoc,
     task: Task,
@@ -395,13 +415,13 @@ def _task_text(
     contradictions: list[Contradiction],
     titles: dict[str, str],
     task_titles: dict[str, str],
-) -> str:
-    blocks: list[str] = []
+) -> _TaskText:
+    lead: list[str] = []
     if task.applicable_when is not None:
-        blocks.append(f"This task runs only when {render_cond(task.applicable_when)}.")
+        lead.append(f"This task runs only when {render_cond(task.applicable_when)}.")
     instructions = override.prompt or task.prompt
     if instructions:
-        blocks.append(instructions)
+        lead.append(instructions)
 
     confirm_lines = {
         anchor: [
@@ -411,7 +431,8 @@ def _task_text(
         ]
         for anchor, items in immediate_by_anchor.items()
     }
-    blocks.append(render_panels(build_question_plan(doc, task, confirm_lines)))
+    panels = build_question_plan(doc, task, confirm_lines)
+    blocks: list[str] = []
 
     if end_confirms:
         lines = ["Before finishing this task, confirm:"]
@@ -443,7 +464,7 @@ def _task_text(
             f"If {render_cond(contra.when)}: {contra.reason}{clarify} "
             f"Then re-confirm: {fields}."
         )
-    return "\n\n".join(blocks)
+    return _TaskText(lead_in="\n\n".join(lead), panels=panels, trailing="\n\n".join(blocks))
 
 
 def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> list[str]:

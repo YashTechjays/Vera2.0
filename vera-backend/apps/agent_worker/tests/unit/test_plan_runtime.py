@@ -849,6 +849,7 @@ def _gap_plan() -> CallPlan:
                 task_key="coverage_task",
                 title="Coverage",
                 prompt="Coverage details.",
+                lead_in="Coverage details.",
                 fields=[
                     _field("sections.cov.deductible", "Deductible", values=["Met", "Not met"]),
                     _field(
@@ -859,7 +860,6 @@ def _gap_plan() -> CallPlan:
                 ],
                 panels=[
                     PromptPanel(
-                        scope="sections.cov",
                         title="Coverage",
                         items=[
                             _question("Has the deductible been met?", "sections.cov.deductible"),

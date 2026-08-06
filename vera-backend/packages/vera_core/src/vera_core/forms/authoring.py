@@ -206,10 +206,10 @@ def cpt_groups(
     }
 
 
+# copay and coinsurance are absent on purpose: `panel_cost_pairs` merges them into one
+# either/or question, so asking them here as well would ask the cost twice.
 _PANEL_ASKS = {
     "covered": "Are {title} codes {codes} covered under this plan?",
-    "copay": None,  # supplied by the cost_pair alternative, which merges it with coinsurance
-    "coinsurance": None,
     "prior_auth": "Is prior authorization required for {title}?",
 }
 
@@ -230,7 +230,6 @@ def panel_ask_groups(base: str, title: str, codes: list[str]) -> list[AskGroup]:
             ask=template.format(title=title, codes=listed),
         )
         for sub, template in _PANEL_ASKS.items()
-        if template is not None
     ]
 
 

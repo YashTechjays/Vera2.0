@@ -8,7 +8,6 @@ turns several paths into labelled options on one question, and groups become pan
 from collections.abc import Iterator
 
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
-from vera_core.forms.dsl import Comparison
 from vera_core.forms.question_plan import (
     PromptPanel,
     PromptQuestion,
@@ -142,15 +141,12 @@ class TestGates:
     def test_a_gate_the_runtime_decides_is_never_rendered_as_prose(self) -> None:
         # any_service_requires_prior_auth references only earlier tasks, so the worker
         # resolves it; as prose it was 3,007 chars printed twice.
-        q = _by_text("closing_admin", "authorization department")
-        assert q.gates == ()
+        assert _by_text("closing_admin", "authorization department").gate_text is None
 
     def test_a_gate_on_a_field_this_task_asks_survives_as_prose(self) -> None:
         # Nothing at render time can know the answer — the model must evaluate it live.
         q = _by_text("closing_admin", "name and contact phone number of the pharmacy")
-        assert [g.field for g in q.gates if isinstance(g, Comparison)] == [
-            "sections.pharmacy_benefit_manager.pbm_exists"
-        ]
+        assert q.gate_text == '"PBM Exists" is "Yes"'
 
     def test_a_panel_gate_is_not_repeated_on_every_question_inside_it(self) -> None:
         iui = next(
@@ -158,9 +154,9 @@ class TestGates:
             for p in _panels("infertility_coverage")
             if p.title == "Intrauterine Insemination (IUI)"
         )
-        assert iui.gate is not None  # infertility_covered, stated once on the panel
-        covered = iui.questions[0]
-        assert covered.gates == ()  # and not repeated on the question
+        # infertility_covered, stated once on the panel and not on the questions inside it
+        assert iui.gate_text == '"Infertility Treatment Covered" is "Yes"'
+        assert iui.questions[0].gate_text is None
 
 
 class TestCoverage:
