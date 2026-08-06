@@ -192,6 +192,14 @@ class TestConstruction:
         names = [t.info.name for t in controller.agents[0].tools if isinstance(t, FunctionTool)]
         assert names == ["task_complete"]  # no answer-write tools, no end_call
 
+    def test_task_of_path_maps_every_collectable_field_to_its_task(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        assert controller._task_of_path["sections.intro.rep_name"] == 0
+        assert controller._task_of_path["sections.cov.deductible"] == 2
+        assert controller._task_of_path["sections.close.ref_number"] == 3
+        # a path no task collects (a context/prefilled leaf) is simply absent
+        assert "sections.a.in_network" not in controller._task_of_path
+
     def test_task_agents_get_their_schema_task_key_as_id(self) -> None:
         controller, _ = _controller()
         assert [a.id for a in controller.agents] == ["intro_task", "gated_task", "last_task"]

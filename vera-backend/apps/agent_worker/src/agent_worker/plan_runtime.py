@@ -591,6 +591,12 @@ class PlanRunController:
         # with the form's intake prefill (so gates work from call start); the
         # Phase-2 Observer keeps it current. Redis stays the cross-process truth.
         self._answers: dict[str, Any] = dict(plan.prefilled)
+        # Collectable path -> the task that asks it. A gate referencing a path in THIS task
+        # (or a later one) is undecided at entry; one referencing only earlier tasks is final,
+        # answered or gated-out-upstream alike. Paths absent here are context/prefilled.
+        self._task_of_path: dict[str, int] = {
+            field.path: index for index, task in enumerate(plan.tasks) for field in task.fields
+        }
         self.active_task_index: int | None = None
         # Tasks the call actually entered (main pass or gap pass).
         self._visited_tasks: set[int] = set()
