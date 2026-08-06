@@ -25,7 +25,7 @@ never double-swap the active agent.
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
@@ -46,7 +46,7 @@ from agent_worker.prompt import (
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
-from vera_core.forms.dsl import condition_field_paths
+from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -842,15 +842,44 @@ class PlanRunController:
                 conditional.append(field)
         return applicable, excluded, conditional
 
+    def _decided_true(self, cond: Condition, shared: Mapping[str, Condition]) -> bool:
+        """Whether `cond` is decidably TRUE — recurses through `all`/`any`/`ref`/`not` the same
+        way `evaluate` does, rather than flatly requiring every path anywhere in the tree
+        answered (see `_decided_false`, which this and `_has_decided_false_gate` mirror)."""
+        if isinstance(cond, RefCondition):
+            target = shared.get(cond.ref)
+            return self._decided_true(target, shared) if target is not None else False
+        if isinstance(cond, AllCondition):
+            return all(self._decided_true(c, shared) for c in cond.all)
+        if isinstance(cond, AnyCondition):
+            return any(self._decided_true(c, shared) for c in cond.any)
+        if isinstance(cond, NotCondition):
+            return self._decided_false(cond.not_, shared)
+        return self._is_answered(cond.field) and evaluate(cond, self._answers, shared)
+
+    def _decided_false(self, cond: Condition, shared: Mapping[str, Condition]) -> bool:
+        """Whether `cond` is decidably FALSE. An `all` is decided-false the moment ONE
+        conjunct is decided-false — mirroring `evaluate`'s `all(...)` short-circuit — so a
+        sibling conjunct reading a still-unanswered path never blocks the decision. Flattening
+        every path referenced anywhere in the tree (the prior bug) required `male_partner_in_scope`
+        `AllCondition(family_coverage, spouse_gender == "Male")` to have `spouse_gender` answered
+        before ever excluding it, even though `family_coverage` alone already decides it false."""
+        if isinstance(cond, RefCondition):
+            target = shared.get(cond.ref)
+            return self._decided_false(target, shared) if target is not None else True
+        if isinstance(cond, AllCondition):
+            return any(self._decided_false(c, shared) for c in cond.all)
+        if isinstance(cond, AnyCondition):
+            return all(self._decided_false(c, shared) for c in cond.any)
+        if isinstance(cond, NotCondition):
+            return self._decided_true(cond.not_, shared)
+        return self._is_answered(cond.field) and not evaluate(cond, self._answers, shared)
+
     def _has_decided_false_gate(self, field: PlanFieldDescriptor) -> bool:
         """`is_applicable` is `all(gates)`, so ONE decidably-false gate settles the
         whole chain — regardless of other gates reading unanswered paths."""
         shared = self.plan.shared_conditions
-        return any(
-            not evaluate(gate, self._answers, shared)
-            and all(self._is_answered(ref) for ref in condition_field_paths(gate, shared))
-            for gate in field.gates
-        )
+        return any(self._decided_false(gate, shared) for gate in field.gates)
 
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
         """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,

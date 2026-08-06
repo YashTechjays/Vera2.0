@@ -29,7 +29,7 @@ from agent_worker.plan_runtime import (
     _gating_block,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
-from vera_core.forms.dsl import Comparison, RequiredWhen
+from vera_core.forms.dsl import AllCondition, Comparison, RefCondition, RequiredWhen
 
 ROOM = "call--t--c"
 
@@ -843,17 +843,32 @@ _SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
 _INFERTILITY_TX_COVERED = "sections.benefit_coverage.infertility_tx_covered"
 _OVULATION_COVERED = "sections.ovulation_induction.covered"
 _OVULATION_COPAY = "sections.ovulation_induction.copay"
+_SPOUSE_GENDER = "sections.patient_information.spouse_gender"
+_MALE_PARTNER_COVERED = "sections.male_partner_coverage.covered"
 
 
 def _gating_plan() -> CallPlan:
     """Mirrors the real IBV schema's insurance_basics task: an ungated coverage-type
-    question, a spouse-name field gated on it being Family, and a two-gate copay field."""
+    question, a spouse-name field gated on it being Family, a two-gate copay field, and a
+    male-partner field gated on a single `ref` to a shared `AllCondition` — the real schema's
+    `male_partner_in_scope` shape (`family_coverage AND spouse_gender == "Male"`), used to prove
+    a decided-false conjunct inside a composite condition settles the gate even though the
+    condition is only ONE entry in `field.gates`."""
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
         dsl_version="2.1",
         schema_version_id=uuid.uuid4(),
         session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        shared_conditions={
+            "family_coverage": Comparison(field=_COVERAGE, op="eq", value="Family"),
+            "male_partner_in_scope": AllCondition(
+                all=[
+                    RefCondition(ref="family_coverage"),
+                    Comparison(field=_SPOUSE_GENDER, op="eq", value="Male"),
+                ]
+            ),
+        },
         tasks=[
             PlanTask(
                 task_key="insurance_basics",
@@ -873,6 +888,11 @@ def _gating_plan() -> CallPlan:
                             Comparison(field=_INFERTILITY_TX_COVERED, op="eq", value="Yes"),
                             Comparison(field=_OVULATION_COVERED, op="eq", value="Yes"),
                         ),
+                    ),
+                    _field(
+                        _MALE_PARTNER_COVERED,
+                        "Male Partner Services Covered",
+                        gates=(RefCondition(ref="male_partner_in_scope"),),
                     ),
                 ],
             ),
@@ -918,6 +938,42 @@ def test_one_decided_false_gate_excludes_despite_an_unanswered_sibling_gate() ->
     idx = _task_index(controller, "insurance_basics")
     assert _OVULATION_COPAY in {f.path for f in controller.excluded_fields(idx)}
     assert _OVULATION_COPAY not in {f.path for f in controller.conditional_fields(idx)}
+
+
+def test_decided_false_conjunct_inside_a_composite_gate_excludes() -> None:
+    """`male_partner_in_scope` is `AllCondition(family_coverage, spouse_gender == "Male")`, and
+    the field's own `gates` tuple has exactly ONE entry: a ref to that composite condition. A
+    flat check that required every path referenced ANYWHERE in the tree to be answered before
+    calling it decided-false would misclassify this as conditional forever, because
+    spouse_gender is a context leaf never asked on a call — its only source is intake, so on an
+    Individual-coverage call with no spouse_gender on file this gate could never be decided,
+    and the male-partner task would run and ask questions it can never resolve. The fix must
+    recurse into the composite condition: `family_coverage` alone already decides the whole
+    `all` false, regardless of `spouse_gender` being unanswered."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Individual"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _MALE_PARTNER_COVERED in {f.path for f in controller.excluded_fields(idx)}
+    assert _MALE_PARTNER_COVERED not in {f.path for f in controller.conditional_fields(idx)}
+
+
+def test_composite_gate_with_one_true_and_one_unanswered_conjunct_is_conditional() -> None:
+    """The other half of the same fix: `family_coverage` being decided TRUE must not, by
+    itself, decide the whole `all` — `spouse_gender` is still unanswered, so the field is
+    genuinely undecided, not excluded and not yet applicable."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _MALE_PARTNER_COVERED in {f.path for f in controller.conditional_fields(idx)}
+    assert _MALE_PARTNER_COVERED not in {f.path for f in controller.excluded_fields(idx)}
+    assert _MALE_PARTNER_COVERED not in {f.path for f in controller.applicable_fields(idx)}
+
+
+def test_composite_gate_with_both_conjuncts_true_is_applicable() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family", _SPOUSE_GENDER: "Male"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _MALE_PARTNER_COVERED in {f.path for f in controller.applicable_fields(idx)}
 
 
 def test_gating_block_lists_conditional_fields_with_their_condition() -> None:
