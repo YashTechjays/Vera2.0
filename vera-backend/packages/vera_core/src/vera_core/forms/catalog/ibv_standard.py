@@ -20,6 +20,8 @@ from vera_core.forms.authoring import (
     enum_ask,
     eq,
     money_triplet,
+    panel_ask_groups,
+    panel_cost_pairs,
     ref,
     service_asks,
     service_fields,
@@ -526,15 +528,17 @@ def _infertility_treatment() -> Section:
                 "covered as elective, or for cancer-related fertility preservation?"
             ),
         ),
-        cost_pair(oi_base),
+        cost_pair(oi_base, "ovulation induction"),
     ]
-    for key, codes in ((t.key, t.cpt_codes) for t in _TREATMENTS):
-        alternatives.extend(
-            cost_pair(f"sections.infertility_treatment.{key}.cpt_{code}") for code in codes
-        )
+    ask_groups: list[AskGroup] = []
+    for t in _TREATMENTS:
+        base = f"sections.infertility_treatment.{t.key}"
+        ask_groups.extend(panel_ask_groups(base, t.title, t.cpt_codes))
+        alternatives.extend(panel_cost_pairs(base, t.service, t.cpt_codes))
     return Section(
         title="Infertility Treatment",
         ui=Ui(layout="table"),
+        ask_groups=ask_groups,
         alternatives=alternatives,
         fields=fields,
     )
@@ -542,14 +546,13 @@ def _infertility_treatment() -> Section:
 
 def _diagnostic_testing() -> Section:
     group_base = "sections.diagnostic_testing.labs_xray_ultrasound"
-    copay_ask, coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
+    _copay_ask, _coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
+    # copay/coinsurance are merged into one either/or question by `panel_cost_pairs`.
     panel_asks = {
         "covered": (
             "Are diagnostic labs, X-ray and ultrasound services covered under this plan? "
             "Please answer Yes, No, or N/A."
         ),
-        "copay": copay_ask,
-        "coinsurance": coinsurance_ask,
         "prior_auth": prior_auth_ask,
     }
     return Section(
@@ -560,7 +563,7 @@ def _diagnostic_testing() -> Section:
             AskGroup(fields=[f"{group_base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
             for sub, panel_ask in panel_asks.items()
         ],
-        alternatives=[cost_pair(f"{group_base}.cpt_{c}") for c in _DIAG_CODES],
+        alternatives=panel_cost_pairs(group_base, _DIAG_SERVICE, _DIAG_CODES),
         fields={
             "diagnostic_testing_covered": enum_ask(
                 "Diagnostic Testing Covered",
@@ -600,7 +603,7 @@ def _general_coverage() -> Section:
                     "center services — is that billed as professional or facility?"
                 ),
             ),
-            *(cost_pair(f"{base}.{g.key}.cpt_{g.code}") for g in _GENERAL),
+            *(cost_pair(f"{base}.{g.key}.cpt_{g.code}", g.service) for g in _GENERAL),
         ],
         fields={
             g.key: Group(
@@ -747,7 +750,7 @@ def _male_partner_coverage() -> Section:
         title="Male Partner Coverage",
         ui=Ui(layout="table"),
         applicable_when=ref("male_partner_in_scope"),
-        alternatives=[cost_pair(f"{base}.{m.key}.cpt_{m.code}") for m in _MALE],
+        alternatives=[cost_pair(f"{base}.{m.key}.cpt_{m.code}", m.service) for m in _MALE],
         fields={
             "male_partner_covered": enum_ask(
                 "Male Partner Services Covered",

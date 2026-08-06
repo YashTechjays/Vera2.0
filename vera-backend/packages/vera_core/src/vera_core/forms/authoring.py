@@ -14,6 +14,7 @@ from typing import Literal
 from vera_core.forms.dsl import (
     Alternatives,
     AnyCondition,
+    AskGroup,
     Codes,
     Comparison,
     Condition,
@@ -35,52 +36,28 @@ YES_NO_NA = ["Yes", "No", "N/A"]
 # `text_ask(type_="date")` applies it automatically, raw Leaf sites use the constant.
 DATE_VALIDATION = Validation(date_format="M/D/YYYY")
 
-# Service-item question phrasing. Each service item picks one shape by its position within
-# the parent group, so a run of CPT codes does not read as one sentence repeated — a task
-# prompt carries up to 27 of these. The shapes name their subject rather than saying "this
-# service": the compiled prompt is one flat numbered list, so "this service" has no
-# antecedent, and one CPT code (89337) appears under two different services.
-_COVERED_ASKS = (
-    "Is CPT code {code} for {service} covered under this plan?",
-    "Staying with {service}, is CPT code {code} covered?",
-    "And for {service}, does the plan cover CPT code {code}?",
-)
-_COPAY_ASKS = (
-    "What is the copay amount for {referent}?",
-    "What copay applies to {referent}?",
-    "And for {referent}, what is the copay amount?",
-)
-_COINSURANCE_ASKS = (
-    "What is the coinsurance percentage for {referent}?",
-    "What coinsurance percentage applies to {referent}?",
-    "And for {referent}, what is the coinsurance percentage?",
-)
-_PRIOR_AUTH_ASKS = (
-    "Is prior authorization required for {referent}?",
-    "Does {referent} require prior authorization?",
-    "And for {referent}, is prior authorization required?",
-)
-
-
-def _shape(shapes: tuple[str, ...], variant: int, **fmt: str) -> str:
-    return shapes[variant % len(shapes)].format(**fmt)
-
 
 def coverage_ask(service: str) -> str:
     """The standard service-level coverage question."""
     return f"Can you provide coverage and benefit details for {service}?"
 
 
-def service_asks(referent: str, variant: int = 0) -> tuple[str, str, str]:
+def cost_ask(referent: str) -> str:
+    """The single cost question. Copay and coinsurance are alternatives — one answer
+    satisfies the pair — so they are asked together, not as two questions."""
+    return f"What is the copay or coinsurance for {referent}?"
+
+
+def service_asks(referent: str) -> tuple[str, str, str]:
     """The copay / coinsurance / prior-auth questions naming ``referent``.
 
-    ``variant`` rotates the sentence shape, staggered across the three so one service
-    item never opens three consecutive questions the same way.
+    One canonical shape each: the compiler emits at most one of these per service, so there
+    is no run of near-identical sentences left for a rotation to break up.
     """
     return (
-        _shape(_COPAY_ASKS, variant, referent=referent),
-        _shape(_COINSURANCE_ASKS, variant + 1, referent=referent),
-        _shape(_PRIOR_AUTH_ASKS, variant + 2, referent=referent),
+        f"What is the copay amount for {referent}?",
+        f"What is the coinsurance percentage for {referent}?",
+        f"Is prior authorization required for {referent}?",
     )
 
 
@@ -118,15 +95,13 @@ def service_fields(
     flavor: Flavor,
     *,
     referent: str,
-    variant: int = 0,
 ) -> dict[str, FormField]:
     """The standard covered/copay/coinsurance/prior_auth service item.
 
     ``base`` is the root-anchored path of the containing group; sub-field gates are
     wired to ``{base}.covered``. ``flavor`` picks the skip-fill defaults. ``referent``
     is how the copay/coinsurance/prior-auth questions name their subject aloud (a CPT
-    code, or the service itself where there is no code); ``variant`` rotates their
-    phrasing.
+    code, or the service itself where there is no code).
 
     ``"plain"`` flavor omits a ``covered`` inapplicable default because plain sections
     may have no ancestor ``applicable_when`` gate — a DSL invariant enforced by
@@ -135,7 +110,7 @@ def service_fields(
     """
     inapplicable = _INAPPLICABLE[flavor]
     gate = eq(f"{base}.covered", "Yes")
-    copay_ask, coinsurance_ask, prior_auth_ask = service_asks(referent, variant)
+    copay_ask, coinsurance_ask, prior_auth_ask = service_asks(referent)
     return {
         "covered": Leaf(
             type="enum",
@@ -188,13 +163,13 @@ def cpt_group(
     flavor: Flavor,
     *,
     service: str,
-    variant: int = 0,
     applicable_when: Condition | None = None,
 ) -> Group:
     """A per-CPT-code service item under ``parent_base`` (group key = ``cpt_<code>``).
 
     ``service`` is the spoken name of the service the code belongs to, said alongside the
-    code; ``variant`` picks the sentence shape (rotate it across a parent's codes).
+    code. A multi-code service asks these as ONE panel question per sub-field (see
+    `panel_ask_groups`); the per-code text below is what a single-code service says.
     """
     base = f"{parent_base}.cpt_{code}"
     return Group(
@@ -202,16 +177,14 @@ def cpt_group(
         title=f"CPT {code}",
         codes=Codes(cpt=[code]),
         applicable_when=applicable_when,
-        # Never rendered into a task prompt — `prompting._task_text` reads section intros,
-        # leaf prompts, ask_groups and alternatives only. This documents the group; the
-        # spoken questions are the leaf asks below.
+        # Documents the group. The panel heading the compiler emits carries the code, so this
+        # is not the spoken question — the leaf asks below (or the panel ask group) are.
         prompt=ask(f"Can you provide coverage details for CPT code {code}?"),
         fields=service_fields(
             base,
-            _shape(_COVERED_ASKS, variant, code=code, service=service),
+            f"Is CPT code {code} for {service} covered under this plan?",
             flavor,
             referent=f"CPT code {code} under {service}",
-            variant=variant,
         ),
     )
 
@@ -224,13 +197,60 @@ def cpt_groups(
     service: str,
     applicable_when: Condition | None = None,
 ) -> dict[str, FormField]:
-    """One `cpt_group` per code, rotating the sentence shape across the run."""
+    """One `cpt_group` per code."""
     return {
         f"cpt_{code}": cpt_group(
-            parent_base, code, flavor, service=service, variant=i, applicable_when=applicable_when
+            parent_base, code, flavor, service=service, applicable_when=applicable_when
         )
-        for i, code in enumerate(codes)
+        for code in codes
     }
+
+
+_PANEL_ASKS = {
+    "covered": "Are {title} codes {codes} covered under this plan?",
+    "copay": None,  # supplied by the cost_pair alternative, which merges it with coinsurance
+    "coinsurance": None,
+    "prior_auth": "Is prior authorization required for {title}?",
+}
+
+
+def panel_ask_groups(base: str, title: str, codes: list[str]) -> list[AskGroup]:
+    """One spoken question per sub-field, fanned out over a service's CPT codes.
+
+    A rep quotes benefits per service, not per code — reading eight codes back one at a time
+    is what made these tasks long. Below two codes there is nothing to merge (an `AskGroup`
+    needs >= 2 members), so a single-code service keeps its per-code wording.
+    """
+    if len(codes) < 2:
+        return []
+    listed = ", ".join(codes)
+    return [
+        AskGroup(
+            fields=[f"{base}.cpt_{code}.{sub}" for code in codes],
+            ask=template.format(title=title, codes=listed),
+        )
+        for sub, template in _PANEL_ASKS.items()
+        if template is not None
+    ]
+
+
+def panel_cost_pairs(base: str, title: str, codes: list[str]) -> list[Alternatives]:
+    """The cost question for a service, fanned out over its codes.
+
+    Copay and coinsurance are an either/or, so they are ONE question with two acceptable
+    answers rather than two questions plus a footnote nobody can act on.
+    """
+    if len(codes) < 2:
+        return [cost_pair(f"{base}.cpt_{code}") for code in codes]
+    return [
+        Alternatives(
+            members=[
+                *(f"{base}.cpt_{code}.copay" for code in codes),
+                *(f"{base}.cpt_{code}.coinsurance" for code in codes),
+            ],
+            ask=cost_ask(title),
+        )
+    ]
 
 
 def treatment_tail(gate: Condition, *, service: str) -> dict[str, FormField]:
@@ -285,9 +305,10 @@ def treatment_group(
     )
 
 
-def cost_pair(base: str) -> Alternatives:
-    """Ask-less either/or: copay OR coinsurance satisfies the cost-share requirement."""
-    return Alternatives(members=[f"{base}.copay", f"{base}.coinsurance"])
+def cost_pair(base: str, referent: str = "this service") -> Alternatives:
+    """Either/or: copay OR coinsurance satisfies the cost-share requirement, so the pair is
+    one spoken question with two acceptable answers."""
+    return Alternatives(members=[f"{base}.copay", f"{base}.coinsurance"], ask=cost_ask(referent))
 
 
 def money_leaf(
