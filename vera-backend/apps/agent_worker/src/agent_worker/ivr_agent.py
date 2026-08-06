@@ -9,7 +9,7 @@ human default at the handoff.
 
 import logging
 import re
-from collections.abc import AsyncIterable, AsyncIterator, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 
 from livekit import rtc
 from livekit.agents import (
@@ -152,6 +152,7 @@ class IvrNavigatorAgent(Agent):
         playbook: IvrPlaybookConfig | None = None,
         context: dict[str, str] | None = None,
         on_keypress: Callable[[str], None] | None = None,
+        on_ivr_exited: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         # The navigator keeps only a factory for the agent it hands off to once a human
         # answers (see transfer_to_verification) — the plan's first task agent, injected
@@ -163,6 +164,7 @@ class IvrNavigatorAgent(Agent):
         # action — a tool call is otherwise invisible in the transcript). None in rooms
         # with no transcript stream enabled.
         self._on_keypress = on_keypress
+        self._on_ivr_exited = on_ivr_exited
         # Patient end-of-turn detection for the IVR phase (waits for the machine to finish before
         # answering); a per-agent override that reverts to the snappy human default at the handoff.
         # A per-provider playbook (when present) specializes the generic navigator prompt.
@@ -252,6 +254,11 @@ class IvrNavigatorAgent(Agent):
         except Exception as exc:
             logger.warning("IVR handoff span tagging failed (%s)", type(exc).__name__)
         logger.info("handoff: %s -> %s (reason=ivr_live_human)", IVR_NAVIGATOR_ID, verifier.id)
+        if self._on_ivr_exited is not None:
+            try:
+                await self._on_ivr_exited()
+            except Exception:
+                logger.exception("ivr.exited publish failed")  # never break the handoff
         return verifier
 
     @function_tool(

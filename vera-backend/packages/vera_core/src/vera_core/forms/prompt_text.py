@@ -96,3 +96,13 @@ def build_condition_renderer(
         return render(cond)
 
     return entry
+
+
+def confirm_slot(path: str, *, bare: bool = False) -> str:
+    """The fuse-time slot for a confirm leaf's spoken line — sentence and confirm/ask
+    verb are chosen per form, once the prefilled value is known (`call_plan.expand_slots`).
+    `bare` drops the `confirm — `/`ask — ` label for the numbered-question list, whose
+    numbering already marks it as a question; the bullet contexts keep it because they mix
+    confirms and asks, and the label is what disambiguates them."""
+    token = "confirm_bare" if bare else "confirm"
+    return f"{{{{{token}:{path}}}}}"

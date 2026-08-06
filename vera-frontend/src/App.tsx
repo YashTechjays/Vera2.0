@@ -38,6 +38,11 @@ const VoiceLab = lazy(() =>
   import("@/pages/VoiceLab").then((m) => ({ default: m.VoiceLab })),
 )
 
+// Lazy-loaded: Analytics pulls in recharts (+ its d3 dependencies).
+const Analytics = lazy(() =>
+  import("@/pages/Analytics").then((m) => ({ default: m.Analytics })),
+)
+
 function App() {
   const dispatch = useAppDispatch()
   // Hydrate a persisted session once on mount.
@@ -90,7 +95,7 @@ function App() {
             />
             <Route
               path="analytics"
-              element={<RequireNavRoute to="/analytics"><Placeholder title="Analytics" /></RequireNavRoute>}
+              element={<RequireNavRoute to="/analytics"><Analytics /></RequireNavRoute>}
             />
             <Route path="tenant-access" element={<TenantAccess />} />
             {/* Super-admin-only tenant catalog: create / edit / deactivate (VR2-30). */}

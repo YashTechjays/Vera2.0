@@ -321,12 +321,15 @@ class Leaf(_Model):
         if self.prompt is not None:
             if self.prompt.confirm is not None and self.role != "confirm":
                 raise ValueError("prompt.confirm on non-confirm role")
-            if self.prompt.ask is not None and self.role != "ask":
+            if self.prompt.ask is not None and self.role not in ("ask", "confirm"):
                 raise ValueError(f"prompt.ask on role {self.role}")
         if self.role == "ask" and not (self.prompt and self.prompt.ask):
             raise ValueError("ask field needs prompt.ask")
         if self.role == "confirm" and not (self.prompt and self.prompt.confirm):
             raise ValueError("confirm field needs prompt.confirm")
+        if self.role == "confirm" and not (self.prompt and self.prompt.ask):
+            # The open question spoken when no value is on file to read back.
+            raise ValueError("confirm field needs prompt.ask")
         if self.confirm_in_task is not None and self.role != "confirm":
             raise ValueError("confirm_in_task only valid on role=confirm")
         if self.tags is not None and not all(KEY_RE.match(t) for t in self.tags):
@@ -644,6 +647,38 @@ class FormSchemaDoc(_Model):
         # tasks: every collect section in exactly one task
         assigned: list[str] = []
         context_paths = {p for p, leaf in leaves.items() if leaf.role == "context"}
+
+        def check_leaf_prompt(path: str, leaf: Leaf) -> None:
+            for attr in ("ask", "confirm"):
+                text = getattr(leaf.prompt, attr, None) if leaf.prompt else None
+                if text is None:
+                    continue
+                for token in PLACEHOLDER_RE.findall(text):
+                    if token == "value":
+                        if not (attr == "confirm" and leaf.role == "confirm"):
+                            errors.append(
+                                f"{path}.prompt.{attr}: {{{{value}}}} is only valid in a "
+                                "confirm-role leaf's prompt.confirm"
+                            )
+                        continue
+                    if (
+                        token not in RESERVED_PLACEHOLDER_TOKENS
+                        and token not in (self.system_fields or {})
+                        and token not in context_paths
+                    ):
+                        errors.append(
+                            f"{path}.prompt.{attr}: unknown placeholder {{{{{token}}}}} "
+                            "(not a system_fields key or context-leaf path)"
+                        )
+                for snippet in malformed_placeholders(text or ""):
+                    errors.append(
+                        f"{path}.prompt.{attr}: malformed placeholder {snippet!r} "
+                        "(use {{token}} — word characters and dots only, no spaces)"
+                    )
+
+        for path, leaf in leaves.items():
+            check_leaf_prompt(path, leaf)
+
         for task in self.tasks:
             check_key(f"task {task.task_key}", task.task_key)
             if task.applicable_when is not None:
@@ -664,6 +699,12 @@ class FormSchemaDoc(_Model):
             for attr in ("intro", "outro", "prompt"):
                 text: str | None = getattr(task, attr)
                 for token in PLACEHOLDER_RE.findall(text or ""):
+                    if token == "value":
+                        errors.append(
+                            f"task {task.task_key}.{attr}: {{{{value}}}} is only valid in a "
+                            "confirm-role leaf's prompt.confirm"
+                        )
+                        continue
                     if (
                         token not in RESERVED_PLACEHOLDER_TOKENS
                         and token not in (self.system_fields or {})
@@ -725,17 +766,17 @@ class FormSchemaDoc(_Model):
                 # one's vocabulary and bounds would be spoken for both.
                 shapes: dict[str, set[str]] = {}
                 for member in ag.fields:
-                    leaf = leaves.get(member)
-                    if leaf is None:
+                    member_leaf = leaves.get(member)
+                    if member_leaf is None:
                         continue
-                    shapes.setdefault(leaf.title, set()).add(
+                    shapes.setdefault(member_leaf.title, set()).add(
                         json.dumps(
                             [
-                                leaf.type,
-                                leaf.values,
-                                leaf.special_values,
-                                leaf.validation.model_dump(mode="json", exclude_none=True)
-                                if leaf.validation
+                                member_leaf.type,
+                                member_leaf.values,
+                                member_leaf.special_values,
+                                member_leaf.validation.model_dump(mode="json", exclude_none=True)
+                                if member_leaf.validation
                                 else None,
                             ],
                             sort_keys=True,

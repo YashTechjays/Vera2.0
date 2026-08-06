@@ -1,0 +1,33 @@
+IVR SUCCESS RECORDING — SIMPLE SUMMARY
+=======================================
+
+WHAT WE ARE BUILDING
+The AI calls insurance companies and first has to get through the phone menu
+("press 1 for eligibility..."). We want to measure: how often does it succeed
+in reaching a real human? Today nothing saves this, so we can't measure it.
+
+THE IDEA (like the completion % "photo")
+Two new fields on every call record:
+  1. ivr_enabled    — "did the phone-menu navigator run on this call?" (yes/no)
+  2. ivr_exited_at  — "when did it reach a human?" (empty = it never did)
+
+Later, the dashboard card is just:
+  success % = calls that reached a human / calls where the navigator ran
+  (calls a supervisor cancelled mid-menu don't count at all)
+
+THE 5 WORK STEPS
+  1. Add the two fields to the database (one small migration).
+  2. When a call is created, fill in field 1 (the backend already knows the
+     IVR toggle for the form).
+  3. In the worker: at the exact code moment the AI hands off from the menu
+     to the real conversation, send one small "ivr.exited" event.
+  4. In the backend: receive that event and stamp the time into field 2.
+     Receiving it twice is harmless (only the first one counts).
+  5. Run the full test gate, simplify pass, commit.
+
+WHAT WE ARE NOT DOING NOW
+  - No dashboard card yet (comes later, once data exists).
+  - No cost-per-call work (separate task, waiting on team pricing answers).
+  - No backfill (impossible — old calls never recorded this).
+
+SIZE: ~6 files touched, 1 migration, ~5 new tests.

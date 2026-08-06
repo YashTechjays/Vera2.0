@@ -20,7 +20,7 @@ answers.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from livekit.agents import Agent, llm
@@ -97,6 +97,7 @@ def build_agent(
     controller: "PlanRunController | None",
     tweak: PersonaTweak | None = None,
     on_keypress: Callable[[str], None] | None = None,
+    on_ivr_exited: Callable[[], Awaitable[None]] | None = None,
 ) -> Agent:
     """Pick the initial agent from dispatch metadata: the IVR navigator when
     `enable_ivr_navigation` is set (with an optional per-provider `ivr_playbook`
@@ -121,6 +122,7 @@ def build_agent(
             playbook=parse_ivr_playbook(meta),
             context=parse_agent_context(meta),
             on_keypress=on_keypress,
+            on_ivr_exited=on_ivr_exited,
             verification_agent_factory=make_verification_agent,
         )
     if meta.get("ivr_playbook") is not None:

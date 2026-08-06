@@ -121,10 +121,12 @@ def decided_at_entry(
     its gate question has not been asked yet, so evaluating it reads false and would
     forbid a follow-up the agent is about to need.
 
-    Shared by the prompt compiler (which omits a decided conjunct's prose, since the
-    runtime resolves it) and the worker (which drops the question outright). One
-    implementation because the two disagreeing means the compiler keeps a gate the worker
-    has already acted on, or the reverse — the `HasRequired` precedent above.
+    Used by the prompt COMPILER, which runs at dispatch with no answers and so has only
+    this signal. The worker classifies the same gates with a strictly stronger test
+    (`PlanRunController._decided_false`) because it also knows which paths are answered.
+    The asymmetry is safe in one direction only, and this is it: the compiler decides
+    whether to print a gate's prose, the worker decides whether the question survives, so
+    a question the worker drops never needs the prose the compiler kept.
 
     A conjunct referencing NO path is treated as undecided: there is nothing whose answer
     could settle it, so the safe reading is "leave it to the live prose".

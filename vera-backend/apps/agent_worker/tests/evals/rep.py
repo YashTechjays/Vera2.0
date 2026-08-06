@@ -190,3 +190,18 @@ You are looking at the member's plan in your system.
   coverage or CPT codes, say the plan is not active so there are no active benefits.
 - Your name is Martha Reed. Your call reference number is 841026.
 """
+
+# `spouse_partner_name`/`spouse_partner_dob` (ibv_standard.py) are `confirm`-role fields, gated
+# on a FAMILY policy, with no prefill anywhere in this harness (CASE has no `system_fields` entry
+# for either) — exactly the empty-value path the `{{confirm:<path>}}` fix targets. The rep is the
+# ONLY source of the spouse's name/DOB, so VERA must ask rather than read back or invent one.
+FAMILY_SPOUSE_NAME = "Sam Rivera"
+FAMILY_COVERAGE_FACTS = f"""\
+You are looking at the member's plan in your system.
+
+- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
+- This is a FAMILY policy, not an individual one.
+- Spouse/partner on the policy: {FAMILY_SPOUSE_NAME}, date of birth November 19 1988. Only give
+  this name and date of birth if the assistant asks about the spouse or partner on the policy.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""

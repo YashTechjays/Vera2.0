@@ -36,7 +36,7 @@ from vera_core.forms.dsl import (
     condition_field_paths,
     malformed_placeholders,
 )
-from vera_core.forms.prompt_text import build_condition_renderer
+from vera_core.forms.prompt_text import build_condition_renderer, confirm_slot
 from vera_core.forms.question_plan import PromptPanel, PromptQuestion, build_question_plan
 
 
@@ -174,6 +174,15 @@ def _join_gates(gates: tuple[Condition, ...], render_cond: Callable[[Condition],
         text = render_cond(gate)
         parts.append(f"({text})" if len(gates) > 1 and " or " in text else text)
     return " and ".join(parts)
+
+
+def render_gate_chains(doc: FormSchemaDoc) -> dict[str, str]:
+    """Rendered gate-chain prose per gated leaf path — the same words the compiled
+    task prompt uses, so a runtime consumer states a condition identically."""
+    render_cond = build_condition_renderer(doc)
+    return {
+        path: _join_gates(gates, render_cond) for path, _leaf, gates in leaf_gates(doc) if gates
+    }
 
 
 def render_task_prompts(
@@ -423,11 +432,13 @@ def _task_text(
     if instructions:
         lead.append(instructions)
 
+    # The confirm SLOT, not the confirm sentence: which verb and wording this leaf gets
+    # depends on whether the form actually prefilled a value, which only `fuse_prefill`
+    # knows (`_confirm_slot`).
     confirm_lines = {
         anchor: [
-            f"If {_join_gates(gates, render_cond)}: confirm — "
-            f"{leaf.prompt.confirm if leaf.prompt else leaf.title}"
-            for _path, leaf, gates in items
+            f"If {_join_gates(gates, render_cond)}: {confirm_slot(cpath)}"
+            for cpath, _leaf, gates in items
         ]
         for anchor, items in immediate_by_anchor.items()
     }
@@ -435,11 +446,10 @@ def _task_text(
     blocks: list[str] = []
 
     if end_confirms:
-        lines = ["Before finishing this task, confirm:"]
-        for _path, leaf, gates in end_confirms:
-            text = leaf.prompt.confirm if leaf.prompt else leaf.title
+        lines = ["Before finishing this task:"]
+        for cpath, _leaf, gates in end_confirms:
             only = f" (only if {_join_gates(gates, render_cond)})" if gates else ""
-            lines.append(f"- {text}{only}")
+            lines.append(f"- {confirm_slot(cpath)}{only}")
         blocks.append("\n".join(lines))
 
     for rule in flow_rules:
@@ -472,8 +482,8 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
 
     Shape errors are pydantic's job; this checks the parts that need the schema:
     task keys exist, no override entry is entirely empty, placeholders resolve.
-    Reserved runtime tokens ({{value}}, {{current_year}}) are exempt — the
-    call-plan fuse handles them, not field lookup."""
+    Reserved runtime tokens ({{current_year}}) are exempt — the call-plan fuse
+    handles them, not field lookup."""
     errors: list[str] = []
     valid_tokens = (
         set(schema_doc.system_fields or {})
@@ -497,6 +507,12 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
         )
     for where, text in texts:
         for token in PLACEHOLDER_RE.findall(text or ""):
+            if token == "value":
+                errors.append(
+                    f"{where}: {{{{value}}}} is only valid in a schema field's "
+                    "prompt.confirm, not in session or task text"
+                )
+                continue
             if token not in valid_tokens:
                 errors.append(f"{where}: unknown placeholder {{{{{token}}}}}")
         for snippet in malformed_placeholders(text or ""):

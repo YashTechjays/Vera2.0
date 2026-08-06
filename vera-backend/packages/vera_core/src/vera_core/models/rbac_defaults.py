@@ -31,6 +31,7 @@ DEFAULT_PERMISSIONS: Final[dict[str, str]] = {
     "apikeys:manage": "Issue and revoke inbound API keys",
     "integrations:manage": "Configure outbound integration credentials (e.g. Twilio)",
     "audit:read": "Read the compliance audit log",
+    "reports:dashboard": "View the analytics dashboard (live panel and history report)",
     "phi:detokenize": "Reveal raw PHI behind tokens (every use is audited)",
 }
 
@@ -79,6 +80,7 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
             "forms:export",
             "users:read",
             "audit:read",
+            "reports:dashboard",
             "phi:detokenize",
         }
     ),

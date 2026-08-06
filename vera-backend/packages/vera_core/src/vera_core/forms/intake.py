@@ -269,6 +269,35 @@ def unknown_payload_paths(answers: list[tuple[str, Any]], doc: FormSchemaDoc) ->
     return sorted(answer_paths - known)
 
 
+def enum_accepted_values(doc: FormSchemaDoc) -> dict[str, set[str]]:
+    """Accepted intake answers per enum leaf — declared `values` plus `special_values`,
+    the leaf's own `default` and its `inapplicable_value`."""
+    accepted: dict[str, set[str]] = {}
+    for path, leaf in doc.leaf_items():
+        if leaf.type != "enum" or not leaf.values:
+            continue
+        extras = (*(leaf.special_values or []), leaf.default, leaf.inapplicable_value)
+        accepted[path] = set(leaf.values) | {value for value in extras if value is not None}
+    return accepted
+
+
+def validate_enum_answers(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> None:
+    """Reject an enum leaf's intake value that is not one of its accepted options
+    (`enum_accepted_values`) — checked before `field_answer` rows are built,
+    mirroring `normalize_date_answers`.
+
+    Blank values pass through (a caller may clear a field). Raises `InvalidIntakeValue`
+    carrying the offending path only — never the value (PHI)."""
+    accepted = enum_accepted_values(doc)
+    for path, raw in answers:
+        allowed = accepted.get(path)
+        if allowed is None:
+            continue
+        text = _clean_str(raw)
+        if text is not None and text not in allowed:
+            raise InvalidIntakeValue(path, "value is not one of the field's declared options")
+
+
 def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
     """Extract + normalize the `patient_form` columns `doc.promoted_fields` maps to
     (ADR §5 rule 3 — stable input for a future blind index). `get_value(path)` resolves

@@ -2,10 +2,18 @@
 
 import logging
 import os
+import uuid
 from pathlib import Path
 
 import pytest
 
+from vera_core.forms.call_plan import (
+    CONFIRM_SLOT_RE,
+    CallPlan,
+    PlanTask,
+    compile_call_plan,
+    fuse_prefill,
+)
 from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
@@ -24,10 +32,19 @@ IBV: FormSchemaDoc = load_document(
     (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
 )
 RENDERED: RenderedPrompts = render_task_prompts(IBV)
+# Loaded locally (not imported from test_call_plan) to avoid a circular import:
+# test_call_plan.py already imports FORM_SCHEMA_DIR from this module.
+PLAN: CallPlan = compile_call_plan(
+    IBV, None, schema_version_id=uuid.uuid4(), prompt_version_id=None
+)
 
 
 def task(key: str) -> RenderedTaskPrompt:
     return next(t for t in RENDERED.tasks if t.task_key == key)
+
+
+def plan_task(plan: CallPlan, key: str) -> PlanTask:
+    return next(t for t in plan.tasks if t.task_key == key)
 
 
 def disease_only_prompts() -> RenderedPrompts:
@@ -108,7 +125,7 @@ class TestTaskText:
     def test_immediate_confirm_attaches_to_anchor(self) -> None:
         basics = task("insurance_basics").prompt
         assert "Immediately after this answer" in basics
-        assert "spouse listed" in basics  # spouse name confirm text
+        assert "{{confirm:sections.patient_information.spouse_partner_name}}" in basics
         assert (
             "Before finishing this task" not in basics
             or "spouse" not in basics.split("Before finishing this task")[-1]
@@ -139,8 +156,10 @@ class TestTaskText:
         assert out.tasks and all(t.prompt for t in out.tasks)
 
     def test_no_raw_paths_leak_into_any_prompt(self) -> None:
+        # The compiled {{confirm:<path>}} slot deliberately carries the raw path — it
+        # is fuse-time-only surface, expanded before the prompt ever reaches the agent.
         for t in RENDERED.tasks:
-            assert "sections." not in t.prompt, t.task_key
+            assert "sections." not in CONFIRM_SLOT_RE.sub("", t.prompt), t.task_key
 
     def test_a_covered_gate_reads_as_prose_not_a_field_comparison(self) -> None:
         # Inside a panel `"Covered" is "Yes"` has no antecedent, and on a fanned-out question
@@ -191,3 +210,24 @@ class TestSnapshots:
 
     def test_insurance_basics_snapshot(self) -> None:
         self._check("ibv_insurance_basics.prompt.txt", task("insurance_basics").prompt)
+
+    def test_fused_insurance_basics_with_spouse_on_file(self) -> None:
+        plan = fuse_prefill(
+            IBV,
+            PLAN,
+            {
+                "sections.patient_information.spouse_partner_name": "Jane Doe",
+                "sections.patient_information.spouse_partner_dob": "1991-04-12",
+            },
+            current_year=2026,
+        )
+        self._check(
+            "ibv_insurance_basics.fused_with_spouse.prompt.txt",
+            plan_task(plan, "insurance_basics").prompt,
+        )
+
+    def test_fused_insurance_basics_without_spouse(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "{{" not in text
+        self._check("ibv_insurance_basics.fused_without_spouse.prompt.txt", text)

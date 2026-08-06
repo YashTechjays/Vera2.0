@@ -89,7 +89,8 @@ tracer = trace.get_tracer(__name__)
 _EASTERN = ZoneInfo("America/New_York")
 
 # Form statuses that count toward the tenant's max_concurrent_calls ceiling.
-_ACTIVE_FORM_STATUSES = (
+# Public: the analytics queue-status endpoint reads this too, to mirror the slot math exactly.
+DISPATCH_ACTIVE_FORM_STATUSES = (
     FormStatus.IN_CALL.value,
     FormStatus.AI_PROCESSING.value,
 )
@@ -195,7 +196,7 @@ async def try_dispatch(
             .select_from(PatientForm)
             .where(
                 PatientForm.tenant_id == tenant_id,
-                PatientForm.status.in_(list(_ACTIVE_FORM_STATUSES)),
+                PatientForm.status.in_(list(DISPATCH_ACTIVE_FORM_STATUSES)),
             )
         )
     ).scalar_one()
@@ -427,6 +428,7 @@ async def try_dispatch(
                     # Whoever enqueued the form owns the call, however late dispatch runs.
                     initiated_by_id=form.enqueued_by_id,
                     insurance_provider_id=provider.id if provider else None,
+                    ivr_enabled=form.ivr_navigation_enabled,
                 )
                 session.add(call)
                 await session.flush()

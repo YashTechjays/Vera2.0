@@ -40,7 +40,7 @@ from vera_core.forms.dsl import (
     Task,
     condition_field_paths,
 )
-from vera_core.forms.prompt_text import build_condition_renderer
+from vera_core.forms.prompt_text import build_condition_renderer, confirm_slot
 
 
 class _Model(BaseModel):
@@ -284,10 +284,12 @@ class _Builder:
             text = alternatives.ask
         elif ask_group is not None:
             text = ask_group.ask
-        elif leaf.prompt is not None and leaf.role == "ask" and leaf.prompt.ask:
+        elif leaf.role == "confirm":
+            # The slot, not the sentence: `fuse_prefill` picks confirm-vs-ask wording once
+            # it knows whether this form prefilled a value (`prompting._confirm_slot`).
+            text = confirm_slot(head, bare=True)
+        elif leaf.prompt is not None and leaf.prompt.ask:
             text = leaf.prompt.ask
-        elif leaf.prompt is not None and leaf.prompt.confirm:
-            text = leaf.prompt.confirm
         else:
             text = leaf.title
 

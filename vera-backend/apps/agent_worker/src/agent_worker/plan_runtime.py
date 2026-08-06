@@ -25,7 +25,7 @@ never double-swap the active agent.
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
@@ -45,13 +45,8 @@ from agent_worker.prompt import (
     TOOL_REASON_ARG,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
-from vera_core.forms.conditions import (
-    decided_at_entry,
-    evaluate,
-    is_applicable,
-    is_required,
-)
-from vera_core.forms.dsl import Condition
+from vera_core.forms.conditions import evaluate, is_applicable, is_required
+from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
 from vera_core.forms.prompting import render_panels
 from vera_core.forms.question_plan import drop_questions
 from vera_core.plan_store import PlanRunStateService
@@ -120,25 +115,32 @@ def _owning_segment(path: str) -> str:
     return parts[-2] if len(parts) > 1 else path
 
 
+def _field_line(
+    field: PlanFieldDescriptor, title_counts: Counter[str], *, marker: str = "-"
+) -> str:
+    """One field, disambiguated when its title repeats in the list it's rendered into.
+
+    Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title
+    line names nothing the agent could act on; every field-list renderer shares this."""
+    line = f"{marker} {field.title}"
+    if title_counts[field.title] > 1:
+        line += f" ({_owning_segment(field.path)})"
+    if field.values:
+        line += f" (expected one of: {', '.join(field.values)})"
+    return line
+
+
 def _field_lines(fields: list[PlanFieldDescriptor], *, numbered: bool = False) -> str:
     """Questions as a list, naming the expected values where the schema fixes them.
 
     `numbered` ordinals give the agent something to check itself against: a CPT-heavy task
     renders a run of near-identical lines, and a bulleted run of fourteen carries no signal
     that fourteen is how many were owed."""
-    # Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title list
-    # would read "- Covered" four times and name nothing the agent could ask about.
     title_counts = Counter(field.title for field in fields)
-    lines: list[str] = []
-    for position, field in enumerate(fields, start=1):
-        marker = f"{position}." if numbered else "-"
-        line = f"{marker} {field.title}"
-        if title_counts[field.title] > 1:
-            line += f" ({_owning_segment(field.path)})"
-        if field.values:
-            line += f" (expected one of: {', '.join(field.values)})"
-        lines.append(line)
-    return "\n".join(lines)
+    return "\n".join(
+        _field_line(field, title_counts, marker=f"{position}." if numbered else "-")
+        for position, field in enumerate(fields, start=1)
+    )
 
 
 def _is_message(item: ChatItem, role: str) -> bool:
@@ -246,10 +248,13 @@ class PlanTaskAgent(Agent):
         asking those questions anyway is worse. A task with NO fields at all is a different thing
         — it carries only speech, so it still runs.
 
-        Entry-decided gates only: on full chains a task whose every question is gated on its own
-        first question would skip itself before asking anything."""
-        askable, _ = self._controller.entry_gate_split(self._task_index)
-        if not self._task.fields or askable:
+        A CONDITIONAL question counts as a reason to run: its gate is not yet decidable, so
+        skipping the task would settle it by omission."""
+        if (
+            not self._task.fields
+            or self._controller.applicable_fields(self._task_index)
+            or self._controller.conditional_fields(self._task_index)
+        ):
             return False
         if not self._controller.opened:
             # The call's greeting and recording disclosure ride on the opening task's intro;
@@ -271,13 +276,14 @@ class PlanTaskAgent(Agent):
         — needed the agent to reconcile two contradictory lists, and `SCOPE_DISCIPLINE` tells
         it the list is complete.
 
-        Judged on ENTRY-DECIDED gates only (`entry_gate_split`): a question gated on a field
-        this task itself asks is undecided here, so it stays in the list carrying its own prose
-        gate, which the agent re-evaluates every turn.
+        Judged on decidably-false gates only (`excluded_fields`): a question whose gate is
+        still undecided stays in the list carrying its own prose gate, which the agent
+        re-evaluates every turn. That is why there is no separate "conditional" block — the
+        condition is already stated on the question it governs.
 
         Rebuilt from the compiled tree rather than edited in place, so a re-entry (a ReAsk
         directive) re-narrows against fresher answers instead of stacking."""
-        _askable, excluded = self._controller.entry_gate_split(self._task_index)
+        excluded = self._controller.excluded_fields(self._task_index)
         if not excluded or not self._task.panels:
             return
         kept = drop_questions(self._task.panels, {f.path for f in excluded})
@@ -874,45 +880,94 @@ class PlanRunController:
 
     # -- gap-pass API -------------------------------------------------------------
 
-    def _decidable_gates(
-        self, field: PlanFieldDescriptor, task_index: int
-    ) -> tuple[Condition, ...]:
-        """The conjuncts of `field`'s gate chain already settled when this task is entered.
-
-        A mixed conjunct (`any(earlier, this_task)`) counts as undecided whole: descending
-        into an OR to salvage its decidable half would be unsound."""
-        return tuple(
-            gate
-            for gate in field.gates
-            if decided_at_entry(gate, self._task_of_path, task_index, self.plan.shared_conditions)
-        )
-
-    def entry_gate_split(
-        self, task_index: int
-    ) -> tuple[list[PlanFieldDescriptor], list[PlanFieldDescriptor]]:
-        """(askable, excluded) for this task, judged only on gates already decided at entry.
-
-        One pass so the two halves cannot drift, and so the gate walk happens once."""
-        askable: list[PlanFieldDescriptor] = []
-        excluded: list[PlanFieldDescriptor] = []
-        shared = self.plan.shared_conditions
-        for field in self.plan.tasks[task_index].fields:
-            gates = self._decidable_gates(field, task_index)
-            bucket = askable if is_applicable(gates, self._answers, shared) else excluded
-            bucket.append(field)
-        return askable, excluded
-
-    # -- gap-pass API: FULL gate chains, valid only once a task's own questions are asked ----
-
     def applicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
-        """A task's questions whose FULL gate chain holds. Valid for the gap pass, never at task
-        entry — an intra-task gate is undecided there (see `entry_gate_split`)."""
+        """A task's questions whose gates hold, so they are askable on THIS call."""
+        return self._classify_fields(task_index)[0]
+
+    def excluded_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """Questions a gate rules out decidably — some gate is false with every path it
+        reads already answered, so no later answer can turn it back on."""
+        return self._classify_fields(task_index)[1]
+
+    def conditional_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
+        """Questions whose gates are not yet decidable — a referenced answer is still
+        missing, so the compiled prompt's own condition governs them."""
+        return self._classify_fields(task_index)[2]
+
+    def _classify_fields(
+        self, task_index: int
+    ) -> tuple[list[PlanFieldDescriptor], list[PlanFieldDescriptor], list[PlanFieldDescriptor]]:
+        """One pass over a task's fields into (applicable, excluded, conditional) — the
+        partition `applicable_fields`/`excluded_fields`/`conditional_fields` share, so each
+        field's gates are evaluated once per call instead of once per accessor."""
         shared = self.plan.shared_conditions
-        return [
-            field
-            for field in self.plan.tasks[task_index].fields
-            if is_applicable(field.gates, self._answers, shared)
-        ]
+        applicable: list[PlanFieldDescriptor] = []
+        excluded: list[PlanFieldDescriptor] = []
+        conditional: list[PlanFieldDescriptor] = []
+        for field in self.plan.tasks[task_index].fields:
+            if is_applicable(field.gates, self._answers, shared):
+                applicable.append(field)
+            elif self._has_decided_false_gate(field, task_index):
+                excluded.append(field)
+            else:
+                conditional.append(field)
+        return applicable, excluded, conditional
+
+    def _settled(self, path: str, task_index: int) -> bool:
+        """Is this path's value final for the purposes of a gate evaluated at `task_index`?
+
+        Answered, or collected by an EARLIER task — an earlier task's unanswered field was
+        gated out upstream and no later answer is coming. Without the second half, a gate
+        over 27 prior-auth paths on a call where infertility was never covered reads as
+        undecided forever and the auth-department questions are asked anyway.
+
+        A path NO task collects is deliberately not settled by position: an absent context
+        value means "not supplied", which is unknown, not false."""
+        owner = self._task_of_path.get(path)
+        return self._is_answered(path) or (owner is not None and owner < task_index)
+
+    def _decided_true(
+        self, cond: Condition, shared: Mapping[str, Condition], task_index: int
+    ) -> bool:
+        """Whether `cond` is decidably TRUE — recurses through `all`/`any`/`ref`/`not` the same
+        way `evaluate` does, rather than flatly requiring every path anywhere in the tree
+        answered (see `_decided_false`, which this and `_has_decided_false_gate` mirror)."""
+        if isinstance(cond, RefCondition):
+            target = shared.get(cond.ref)
+            return self._decided_true(target, shared, task_index) if target is not None else False
+        if isinstance(cond, AllCondition):
+            return all(self._decided_true(c, shared, task_index) for c in cond.all)
+        if isinstance(cond, AnyCondition):
+            return any(self._decided_true(c, shared, task_index) for c in cond.any)
+        if isinstance(cond, NotCondition):
+            return self._decided_false(cond.not_, shared, task_index)
+        return self._settled(cond.field, task_index) and evaluate(cond, self._answers, shared)
+
+    def _decided_false(
+        self, cond: Condition, shared: Mapping[str, Condition], task_index: int
+    ) -> bool:
+        """Whether `cond` is decidably FALSE. An `all` is decided-false the moment ONE
+        conjunct is decided-false — mirroring `evaluate`'s `all(...)` short-circuit — so a
+        sibling conjunct reading a still-unanswered path never blocks the decision. Flattening
+        every path referenced anywhere in the tree (the prior bug) required `male_partner_in_scope`
+        `AllCondition(family_coverage, spouse_gender == "Male")` to have `spouse_gender` answered
+        before ever excluding it, even though `family_coverage` alone already decides it false."""
+        if isinstance(cond, RefCondition):
+            target = shared.get(cond.ref)
+            return self._decided_false(target, shared, task_index) if target is not None else True
+        if isinstance(cond, AllCondition):
+            return any(self._decided_false(c, shared, task_index) for c in cond.all)
+        if isinstance(cond, AnyCondition):
+            return all(self._decided_false(c, shared, task_index) for c in cond.any)
+        if isinstance(cond, NotCondition):
+            return self._decided_true(cond.not_, shared, task_index)
+        return self._settled(cond.field, task_index) and not evaluate(cond, self._answers, shared)
+
+    def _has_decided_false_gate(self, field: PlanFieldDescriptor, task_index: int) -> bool:
+        """`is_applicable` is `all(gates)`, so ONE decidably-false gate settles the
+        whole chain — regardless of other gates reading unanswered paths."""
+        shared = self.plan.shared_conditions
+        return any(self._decided_false(gate, shared, task_index) for gate in field.gates)
 
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
         """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,

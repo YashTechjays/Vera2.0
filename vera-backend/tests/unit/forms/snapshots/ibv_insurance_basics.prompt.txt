@@ -11,7 +11,7 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
 4. What type of plan is this — PPO, HMO, EPO, or something else? And for coordination of benefits, is this plan primary, secondary, or tertiary?
    - Health Plan Type: also: PPO, HMO, EPO, POS
    - Coordination of Benefits: Primary | Secondary | Tertiary
-5. I have the member ID as {{value}} — can you confirm that is correct?
+5. {{confirm_bare:sections.insurance_information.policy_number}}
 6. What is the group name and group number?
    - Group Name
    - Group Number
@@ -29,8 +29,8 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
 4. Is this an individual or a family policy? Please answer Individual or Family.
    - Answers: Individual | Family
    - Immediately after this answer:
-     * If "Coverage Type" is "Family": confirm — Can we also check the spouse on the plan? I have the spouse listed as {{value}} — can you confirm that is correct?
-     * If "Coverage Type" is "Family": confirm — And the spouse's date of birth I have is {{value}} — is that right?
+     * If "Coverage Type" is "Family": {{confirm:sections.patient_information.spouse_partner_name}}
+     * If "Coverage Type" is "Family": {{confirm:sections.patient_information.spouse_partner_dob}}
 5. Does this plan require a PCP referral?
    - Answers: Yes | No
    - Ask only if "Health Plan Type" is "HMO".

@@ -29,7 +29,7 @@ from agent_worker.plan_runtime import (
 )
 from agent_worker.prompt import SCOPE_DISCIPLINE
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
-from vera_core.forms.dsl import Comparison, RequiredWhen
+from vera_core.forms.dsl import AllCondition, Comparison, RefCondition, RequiredWhen
 from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
 ROOM = "call--t--c"
@@ -804,6 +804,7 @@ def _field(
     required: bool | RequiredWhen = True,
     gates: tuple[Comparison, ...] = (),
     values: list[str] | None = None,
+    gate_text: str | None = None,
 ) -> PlanFieldDescriptor:
     return PlanFieldDescriptor(
         path=path,
@@ -813,6 +814,7 @@ def _field(
         required=required,
         gates=gates,
         values=values,
+        gate_text=gate_text,
     )
 
 
@@ -848,7 +850,11 @@ def _gap_plan() -> CallPlan:
             PlanTask(
                 task_key="coverage_task",
                 title="Coverage",
-                prompt="Coverage details.",
+                prompt=(
+                    "Coverage details.\n\n### Coverage\n1. Has the deductible been met?\n"
+                    "2. Any out-of-network note?\n"
+                    '   - Ask only if "Doctor Inside Network" is "No".'
+                ),
                 lead_in="Coverage details.",
                 fields=[
                     _field("sections.cov.deductible", "Deductible", values=["Met", "Not met"]),
@@ -884,6 +890,162 @@ def _gap_plan() -> CallPlan:
 
 
 _CLOSER = 3  # index of closing_task in _gap_plan()
+
+_COVERAGE = "sections.benefit_coverage.coverage_type"
+_SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+# A two-gate field mirroring the real IBV schema's `ovulation_induction.copay`, gated on
+# `infertility_tx_covered` AND `ovulation_induction.covered` — used to prove ONE decided-false
+# gate excludes the field even while its sibling gate's own path is still unanswered.
+_INFERTILITY_TX_COVERED = "sections.benefit_coverage.infertility_tx_covered"
+_OVULATION_COVERED = "sections.ovulation_induction.covered"
+_OVULATION_COPAY = "sections.ovulation_induction.copay"
+_SPOUSE_GENDER = "sections.patient_information.spouse_gender"
+_MALE_PARTNER_COVERED = "sections.male_partner_coverage.covered"
+
+
+def _gating_plan() -> CallPlan:
+    """Mirrors the real IBV schema's insurance_basics task: an ungated coverage-type
+    question, a spouse-name field gated on it being Family, a two-gate copay field, and a
+    male-partner field gated on a single `ref` to a shared `AllCondition` — the real schema's
+    `male_partner_in_scope` shape (`family_coverage AND spouse_gender == "Male"`), used to prove
+    a decided-false conjunct inside a composite condition settles the gate even though the
+    condition is only ONE entry in `field.gates`."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        shared_conditions={
+            "family_coverage": Comparison(field=_COVERAGE, op="eq", value="Family"),
+            "male_partner_in_scope": AllCondition(
+                all=[
+                    RefCondition(ref="family_coverage"),
+                    Comparison(field=_SPOUSE_GENDER, op="eq", value="Male"),
+                ]
+            ),
+        },
+        tasks=[
+            PlanTask(
+                task_key="insurance_basics",
+                title="Insurance Basics",
+                prompt="Ask about coverage.",
+                fields=[
+                    _field(_COVERAGE, "Coverage Type", values=["Individual", "Family"]),
+                    _field(
+                        _SPOUSE_NAME,
+                        "Spouse / Partner Name",
+                        gates=(Comparison(field=_COVERAGE, op="eq", value="Family"),),
+                    ),
+                    _field(
+                        _OVULATION_COPAY,
+                        "Copay",
+                        gates=(
+                            Comparison(field=_INFERTILITY_TX_COVERED, op="eq", value="Yes"),
+                            Comparison(field=_OVULATION_COVERED, op="eq", value="Yes"),
+                        ),
+                    ),
+                    _field(
+                        _MALE_PARTNER_COVERED,
+                        "Male Partner Services Covered",
+                        gates=(RefCondition(ref="male_partner_in_scope"),),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _task_index(controller: PlanRunController, task_key: str) -> int:
+    return next(i for i, t in enumerate(controller.plan.tasks) if t.task_key == task_key)
+
+
+def test_unanswered_gate_is_conditional_not_excluded() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({})
+    idx = _task_index(controller, "insurance_basics")
+    assert _SPOUSE_NAME in {f.path for f in controller.conditional_fields(idx)}
+    assert _SPOUSE_NAME not in {f.path for f in controller.excluded_fields(idx)}
+
+
+def test_answered_false_gate_is_excluded() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Individual"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _SPOUSE_NAME in {f.path for f in controller.excluded_fields(idx)}
+    assert _SPOUSE_NAME not in {f.path for f in controller.conditional_fields(idx)}
+
+
+def test_answered_true_gate_is_applicable() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _SPOUSE_NAME in {f.path for f in controller.applicable_fields(idx)}
+
+
+def test_one_decided_false_gate_excludes_despite_an_unanswered_sibling_gate() -> None:
+    """`is_applicable` is `all(gates)`, so ONE decidably-false gate settles the whole chain.
+    A naive implementation that required EVERY gate's referenced paths to be answered (not
+    just the deciding gate's own) would wrongly call this conditional: infertility_tx_covered
+    is answered "No" (decided false, its own path answered), but the sibling gate's own path
+    (ovulation_induction.covered) is never answered here."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_INFERTILITY_TX_COVERED: "No"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _OVULATION_COPAY in {f.path for f in controller.excluded_fields(idx)}
+    assert _OVULATION_COPAY not in {f.path for f in controller.conditional_fields(idx)}
+
+
+def test_decided_false_conjunct_inside_a_composite_gate_excludes() -> None:
+    """`male_partner_in_scope` is `AllCondition(family_coverage, spouse_gender == "Male")`, and
+    the field's own `gates` tuple has exactly ONE entry: a ref to that composite condition. A
+    flat check that required every path referenced ANYWHERE in the tree to be answered before
+    calling it decided-false would misclassify this as conditional forever, because
+    spouse_gender is a context leaf never asked on a call — its only source is intake, so on an
+    Individual-coverage call with no spouse_gender on file this gate could never be decided,
+    and the male-partner task would run and ask questions it can never resolve. The fix must
+    recurse into the composite condition: `family_coverage` alone already decides the whole
+    `all` false, regardless of `spouse_gender` being unanswered."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Individual"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _MALE_PARTNER_COVERED in {f.path for f in controller.excluded_fields(idx)}
+    assert _MALE_PARTNER_COVERED not in {f.path for f in controller.conditional_fields(idx)}
+
+
+def test_composite_gate_with_one_true_and_one_unanswered_conjunct_is_conditional() -> None:
+    """The other half of the same fix: `family_coverage` being decided TRUE must not, by
+    itself, decide the whole `all` — `spouse_gender` is still unanswered, so the field is
+    genuinely undecided, not excluded and not yet applicable."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _MALE_PARTNER_COVERED in {f.path for f in controller.conditional_fields(idx)}
+    assert _MALE_PARTNER_COVERED not in {f.path for f in controller.excluded_fields(idx)}
+    assert _MALE_PARTNER_COVERED not in {f.path for f in controller.applicable_fields(idx)}
+
+
+def test_composite_gate_with_both_conjuncts_true_is_applicable() -> None:
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family", _SPOUSE_GENDER: "Male"})
+    idx = _task_index(controller, "insurance_basics")
+    assert _MALE_PARTNER_COVERED in {f.path for f in controller.applicable_fields(idx)}
+
+
+def test_conditional_field_is_never_also_excluded() -> None:
+    """The three buckets partition the task's fields — no field in two, none dropped."""
+    controller, _ = _controller(_gating_plan())
+    controller.update_answers({_COVERAGE: "Family"})
+    idx = _task_index(controller, "insurance_basics")
+    buckets = [
+        {f.path for f in controller.applicable_fields(idx)},
+        {f.path for f in controller.excluded_fields(idx)},
+        {f.path for f in controller.conditional_fields(idx)},
+    ]
+    assert buckets[0] & buckets[1] == set()
+    assert buckets[0] & buckets[2] == set()
+    assert buckets[1] & buckets[2] == set()
+    assert set().union(*buckets) == {f.path for f in controller.plan.tasks[idx].fields}
 
 
 def _intra_task_gate_plan() -> CallPlan:
@@ -941,17 +1103,15 @@ class TestEntryDecidability:
     def test_a_gate_on_a_field_this_task_asks_is_undecided_so_never_excluded(self) -> None:
         controller, _ = _controller(_intra_task_gate_plan())
         controller.update_answers({"sections.cov.prior_auth": "Yes"})
-        askable, excluded = controller.entry_gate_split(1)
-        assert "TPA Name" not in [f.title for f in excluded]
-        assert "TPA Name" in [f.title for f in askable]
+        assert "TPA Name" not in [f.title for f in controller.excluded_fields(1)]
+        assert "TPA Name" in [f.title for f in controller.conditional_fields(1)]
 
     def test_an_earlier_task_left_unanswered_upstream_still_decides(self) -> None:
         # The rep never reached prior auth (its own gate was off), so the value is final at "" —
         # the auth department question is genuinely out, not merely unasked. The harder input:
         # an explicit "No" and a never-answered "" reach the same single comparison.
         controller, _ = _controller(_intra_task_gate_plan())
-        _askable, excluded = controller.entry_gate_split(1)
-        assert "Authorization Department Name" in [f.title for f in excluded]
+        assert "Authorization Department Name" in [f.title for f in controller.excluded_fields(1)]
 
     def test_gap_fields_still_uses_full_chains(self) -> None:
         # At end of call the intra-task gate IS decided, which is what the sweep needs.
@@ -968,9 +1128,8 @@ class TestEntryDecidability:
         # would be the same bug in a new shape.
         controller, _ = _controller(_intra_task_gate_plan())
         controller.update_answers({"sections.cov.prior_auth": "No"})
-        askable, excluded = controller.entry_gate_split(1)
-        assert "TPA Name" in [f.title for f in askable]
-        assert [f.title for f in excluded] == ["Authorization Department Name"]
+        assert "TPA Name" in [f.title for f in controller.conditional_fields(1)]
+        assert [f.title for f in controller.excluded_fields(1)] == ["Authorization Department Name"]
 
     @pytest.mark.asyncio
     async def test_a_task_whose_only_failing_gates_are_undecided_gets_no_block(self) -> None:
@@ -1217,6 +1376,29 @@ class TestFieldLines:
             "2. Covered (cpt_82670) (expected one of: Yes, No)\n"
             "3. Representative name"
         )
+
+
+class TestConditionalQuestionsSurviveNarrowing:
+    """A conditional gate is not settled, so its question must stay askable — and must still
+    carry its condition. Plan B states that condition ON the question in the rendered list
+    instead of in a separate block, which is what removed the two-contradictory-lists problem
+    (regression: the real IBV schema has 4 title collisions, the worst being 14 byte-identical
+    "Covered" fields, which a bare-title block could not tell apart)."""
+
+    @pytest.mark.asyncio
+    async def test_a_conditional_question_keeps_its_condition_in_the_list(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "No"})  # oon_note conditional
+        agent = await _enter(controller, 2)
+        assert "Any out-of-network note?" in agent.instructions
+        assert '"Doctor Inside Network" is "No"' in agent.instructions
+
+    @pytest.mark.asyncio
+    async def test_only_a_decided_gate_removes_a_question(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})  # oon_note decided false
+        agent = await _enter(controller, 2)
+        assert "Any out-of-network note?" not in agent.instructions
 
 
 class TestGapDetection:
@@ -2034,21 +2216,57 @@ class TestGatedOutTask:
     have been given — which is how the eval judge caught VERA asking all of them."""
 
     def test_applicable_fields_drops_the_gated_ones(self) -> None:
+        # spouse_gender is unanswered, not decided false — the two gated fields are
+        # CONDITIONAL, not excluded (that would misreport an undecided gate as settled).
         controller, _ = _controller(_gated_task_plan())
-        askable, excluded = controller.entry_gate_split(1)
-        assert askable == []
-        assert [f.title for f in excluded] == ["Male partner covered", "CPT 89320"]
+        assert controller.applicable_fields(1) == []
+        assert [f.title for f in controller.conditional_fields(1)] == [
+            "Male partner covered",
+            "CPT 89320",
+        ]
+        assert controller.excluded_fields(1) == []
 
     def test_the_gate_holding_makes_them_applicable_again(self) -> None:
         controller, _ = _controller(_gated_task_plan())
         controller.update_answers({"sections.patient.spouse_gender": "Male"})
-        askable, excluded = controller.entry_gate_split(1)
-        assert len(askable) == 2
-        assert excluded == []
+        assert len(controller.applicable_fields(1)) == 2
+        assert controller.conditional_fields(1) == []
+        assert controller.excluded_fields(1) == []
+
+    def test_a_decided_false_gate_is_excluded(self) -> None:
+        controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Female"})
+        assert controller.applicable_fields(1) == []
+        assert [f.title for f in controller.excluded_fields(1)] == [
+            "Male partner covered",
+            "CPT 89320",
+        ]
+        assert controller.conditional_fields(1) == []
+
+    @pytest.mark.asyncio
+    async def test_an_undecided_gated_task_runs_instead_of_skipping_silently(self) -> None:
+        # THE regression fence for the bug this task fixes: spouse_gender is genuinely
+        # unanswered here (conditional, not excluded), so the task must run rather than be
+        # silently handed on. Every other test in this class supplies a decided answer, so
+        # without the `or conditional_fields(...)` clause in `_skip_when_nothing_applies`
+        # this is the only test that would catch a revert of that fix.
+        controller, _ = _controller(_gated_task_plan())
+        controller.opening_line("Hello rep.")  # the call has already opened
+        gated = controller.agents[1]
+        mock_session = MagicMock()
+        with _session_patch(gated, mock_session):
+            await gated.on_enter()
+        mock_session.say.assert_called_once_with(
+            "Now I'd like to ask about male partner fertility coverage."
+        )
+        mock_session.update_agent.assert_not_called()  # never handed on to closing_task
 
     @pytest.mark.asyncio
     async def test_a_fully_gated_task_is_skipped_without_speaking(self) -> None:
+        # The gate must be DECIDED false — an unanswered spouse_gender is conditional, not
+        # excluded, and must not skip the task silently (that was the bug this fixes).
         controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Female"})
         controller.opening_line("Hello rep.")  # the call has already opened
         gated = controller.agents[1]
         mock_session = MagicMock()
@@ -2063,6 +2281,7 @@ class TestGatedOutTask:
         # It speaks no outro, so the flag `note_task_outro` sets must not be left True by the
         # task before it — otherwise wrap-up closes silently and nobody says goodbye.
         controller, _ = _controller(_gated_task_plan())
+        controller.update_answers({"sections.patient.spouse_gender": "Female"})
         controller.opening_line("Hello rep.")
         basics = controller.agents[0]
         with _session_patch(basics, MagicMock()):

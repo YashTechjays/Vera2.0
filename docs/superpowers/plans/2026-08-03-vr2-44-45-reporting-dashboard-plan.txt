@@ -1,0 +1,212 @@
+ANALYTICS PAGE — ONE PLAN FOR VR2-44 + VR2-45
+===============================================
+
+THE GOAL
+--------
+The app already has an "Analytics" tab in the sidebar — today it's an
+empty "work in progress" page. This plan fills it in, with two parts
+on one page:
+
+  TOP — LIVE PANEL (VR2-44)
+  "How busy are we RIGHT NOW?" Updates by itself.
+
+  BELOW — HISTORY REPORT (VR2-45)
+  "How did we do over a period of time?" You pick the dates.
+
+Different audiences: supervisors glance at the live panel during the
+day; tenant admins and client stakeholders open the history report to
+see if the service is improving month over month; the platform team
+(super admins) can compare across all client tenants.
+
+
+WHO SEES WHAT — THREE LEVELS
+-----------------------------
+The dashboard respects the user hierarchy. Same page, different scope:
+
+  LEVEL 1 — SUPER ADMIN (platform operator)
+    Sees ALL tenants. Gets an extra "Tenant" filter so they can look
+    at one client or compare across everyone. Numbers are counts and
+    averages only — no patient details ever cross the tenant wall.
+
+  LEVEL 2 — TENANT ADMIN
+    Sees EVERYTHING inside their own tenant: every provider, every
+    VA, every call. Never anything from another tenant.
+
+  LEVEL 3 — REGULAR USERS (supervisors / VAs)
+    See THEIR OWN work: the calls they queued or personally stepped
+    into. Same rule the "My Calls Today" card already uses, so the
+    app tells one consistent story.
+
+How it's enforced: tenant separation is enforced by the database
+itself (the same row-level protection every screen uses), not by the
+frontend. The level someone gets is decided by their role's
+permissions, so access can be granted or taken away per role.
+
+One nuance for the LIVE panel: its numbers must match Live Monitoring
+exactly (that's a ticket requirement), and Live Monitoring shows each
+user "your own calls + calls shared with everyone + unclaimed live
+calls". So the live panel uses that same per-user rule for everyone.
+The three levels above apply to the HISTORY report, where "who did
+what over time" is the whole point.
+
+
+PART A — THE LIVE PANEL, IN DETAIL
+-----------------------------------
+What you see: a small table at the top of the Analytics page that
+refreshes on its own.
+
+    Provider          In Queue     Active
+    ------------------------------------------
+    Aetna                  4          2
+    Cigna                  1          5
+    UHC                    0          1
+    (No provider)          2          0
+
+How each number is counted:
+  - "In Queue"  = patient forms that are waiting for a call to start.
+  - "Active"    = calls happening right now (dialing, in conversation,
+                  or flagged critical).
+  - "(No provider)" row: some queued forms have a provider name typed
+    in that doesn't match our provider list. We show them in their own
+    row instead of hiding them, so the totals always add up.
+
+The one hard rule (from the ticket): if this panel says "5 active",
+the Live Monitoring page must also show 5. To guarantee that, the
+panel uses the EXACT same counting rules as Live Monitoring — same
+definition of "active", same visibility rules. It is one counting
+system with two views, so they can never disagree.
+
+Freshness: the panel re-asks the server every 8 seconds — the same
+rhythm Live Monitoring already uses. No page refresh needed.
+
+What we build for this: one new API endpoint that returns the rows
+above, and the panel itself on the Analytics page.
+
+
+PART B — THE HISTORY REPORT, IN DETAIL
+----------------------------------------
+What you see, below the live panel:
+  - A date-range picker: Last 7 / 30 / 90 days, This week, This month,
+    or a custom start and end date.
+  - Filters: by insurance provider and by VA. Super admins also get
+    a tenant filter (level 1 above).
+  - A row of metric cards. Each card shows the number for your chosen
+    range AND how it changed versus the previous equal-length period
+    (green up / red down arrows) — the same style version 1 had.
+  - A few simple charts: calls per day, trend lines over time, and a
+    breakdown of interventions.
+
+The six metrics, one by one — what each means and where the number
+comes from:
+
+1. COMPLETION %
+   Meaning: how much of the intake form got filled by the end of a call.
+   Source:  already recorded today.
+   One fix needed first: today the number lives on the FORM and can
+   change later (a human edits the form, or a retry call overwrites
+   it). For honest history we will freeze a copy on the CALL at the
+   moment the call ends, so a report about last month never changes
+   after the fact.
+
+2. INTERVENTION RATE
+   Meaning: out of all calls, how many needed a human supervisor to
+   step in (take over, coach, or whisper).
+   Source:  already recorded today — every intervention writes a
+   permanent event row. Rate = calls with at least one intervention
+   divided by all calls in the range.
+   (Version 1 got this wrong: it erased the flag when a call recovered,
+   so it undercounted. Our event rows can't be erased.)
+
+3. HOLD TIME
+   Meaning: how long people wait. We can honestly measure two waits
+   today: (a) how long a form sat in the queue before its call started,
+   and (b) how long the phone rang before someone answered.
+   Not measurable yet: time spent on hold DURING a call (hold music,
+   IVR menus). That needs new measurement — see Step 3 below.
+
+4. IVR SUCCESS  (needs new measurement first)
+   Meaning: when the automated phone menu (IVR) had to be navigated,
+   how often did we get through it to a live person?
+   Nothing records this today — not in version 1 either. The AI worker
+   already knows the exact moment it gets past the menu; we will make
+   it write that moment down as a permanent event on the call.
+   The exact success/failure definition is an open team decision —
+   see the decisions section at the end.
+
+5. COST PER CALL  (needs new measurement first)
+   Meaning: what a call cost us in vendor fees — speech-to-text,
+   text-to-speech, and the AI model.
+   Nothing records this today. The database table for it already
+   exists (it was designed but never filled). We will start filling
+   it: at the end of each call, save how much of each vendor service
+   was used and what it cost at current prices.
+
+6. LATENCY  (needs new measurement first)
+   Meaning: how quickly the system responds during a conversation —
+   the pause between the other side finishing a sentence and our AI
+   starting to answer.
+   Recorded per call into the same table as cost.
+
+Accuracy promise (from the ticket): every number must survive a
+spot-check — if someone counts the raw call records by hand for the
+same date range, the dashboard must match. We keep this true by
+computing everything directly from the raw records at request time
+(no separate pre-computed copies that can drift), with a short cache
+(a few seconds) so the page stays fast.
+
+
+BUILD ORDER — FOUR STEPS
+-------------------------
+STEP 1 — Live panel (VR2-44).
+  Smallest piece, immediately demoable. One endpoint + the panel on
+  the Analytics page.
+
+STEP 2 — History report for tenants (levels 2 and 3).
+  Date picker, filters, cards, charts on the Analytics page, with the
+  tenant-admin vs own-calls scoping. Ships with: completion % (after
+  the freeze-per-call fix), intervention rate, hold time (queue wait +
+  answer wait), plus call volume and average duration for context.
+
+STEP 3 — Super admin view (level 1).
+  The same history report on the platform side, across all tenants,
+  with the tenant filter. Kept as its own step because the platform
+  plane has its own security path (platform sessions can't read
+  tenant rows directly — the cross-tenant aggregates need their own
+  carefully-scoped, counts-only database functions).
+
+STEP 4 — Start measuring the missing three, then add their cards.
+  Add the three recording points (IVR outcome, cost, latency), let
+  data build up, then light up those cards for all levels.
+  Important: these three only have data from the day we start
+  recording — we cannot backfill the past, because the information
+  was never captured.
+
+Steps 1 and 2 are demoable within the sprint. Steps 3 and 4 are one
+PR each (step 4 is two: the recording points, then the cards).
+
+
+HOW WE'LL PROVE IT WORKS
+-------------------------
+- Automated tests for every counting rule, including the "panel
+  matches Live Monitoring" rule.
+- Access tests for all three levels: a regular user never sees
+  another user's totals, a tenant admin never sees another tenant,
+  a super admin's tenant filter returns exactly that tenant's numbers.
+- A spot-check test: seed a known set of calls, compute the expected
+  numbers by hand in the test, assert the dashboard returns exactly
+  those.
+- Manual pass on the real screens with seeded demo data before review.
+
+
+DECISIONS WE NEED FROM THE TEAM
+--------------------------------
+1. ACCESS LEVELS — confirm the three-level model above, and how it
+   maps to permissions: our suggestion is a "reports: own" permission
+   for regular users, "reports: tenant" for tenant admins, and the
+   platform view for super admins only.
+2. IVR SUCCESS — how are we going to calculate this? Nothing records
+   it today, so the team needs to agree on the definition first.
+3. SPEED BUDGET — the ticket says the report must load "within the
+   agreed budget" but no number was ever agreed. We suggest: under
+   3 seconds for any date range up to 90 days.
+

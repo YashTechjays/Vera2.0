@@ -346,6 +346,7 @@ async def test_dispatch_dials_the_forms_payer_number(
     room_name = livekit.created[0]
     assert livekit.sip_dials == [(room_name, "+15551234567", "ST_test")]
     assert call.current_status == CallStatus.INITIATED.value
+    assert call.ivr_enabled is True
 
     metadata = livekit.dispatch_metadata[0]
     assert metadata is not None
@@ -354,6 +355,22 @@ async def test_dispatch_dials_the_forms_payer_number(
     assert metadata["enable_ivr_navigation"] is True
     assert metadata["persona_tweak"] == {"greeting": "Custom greeting"}
     assert metadata["enable_observer"] is True  # tenant default: AI form filling on
+
+
+async def test_dispatch_stamps_ivr_disabled_when_form_toggle_off(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    tenant = _tenant()
+    form = _form(tenant.id, ivr_navigation_enabled=False)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    call = session.calls_added()[0]
+    assert call.ivr_enabled is False
+    assert "enable_ivr_navigation" not in (livekit.dispatch_metadata[0] or {})
 
 
 async def test_create_call_room_failure_scrubs_phi_from_logs(
