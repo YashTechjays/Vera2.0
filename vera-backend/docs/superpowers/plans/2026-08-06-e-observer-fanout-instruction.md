@@ -1,5 +1,13 @@
 # Plan E — teach the extractor that one answer can cover several field paths
 
+> **STATUS: NOT NEEDED — do not execute.** Superseded by live-call evidence on
+> 2026-08-06 (call `019fd79d-269d-7f00-97fb-cf00f0e6a23a`, run against schema v3, i.e.
+> post-Plan-B). The Observer already fans a blanket answer out across every path it
+> covers, with no instruction telling it to. This plan's premise — that the
+> "clearly answered" wording reads too conservatively — is empirically false for the
+> current model. See "Evidence that closed this plan" at the bottom. Re-open only if a
+> call shows PARTIAL fan-out.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
@@ -160,3 +168,42 @@ turns, so rules fire more reliably than on a real call.
 - Regrouping or restructuring the field list (explicitly rejected above).
 - Confidence thresholds and the `_parse_extraction` tolerant-JSON path.
 - The `_MAX_WINDOW_TURNS = 24` transcript window.
+
+
+---
+
+## Evidence that closed this plan
+
+Call `019fd79d-269d-7f00-97fb-cf00f0e6a23a`, 2026-08-06 15:07 UTC, schema version 3
+(compiled by the Plan B compiler — v3 was seeded at 13:03 the same day).
+
+**Diagnostic panel — one utterance, 24 answers.**
+
+```
+83 [agent] Can you provide coverage and benefit details for diagnostic labs, X-ray, and
+           ultrasound services? The codes are CPT 58340, 82670, 83001, 83002, 84146,
+           84443, 84144, and 76830 … Are these covered under this plan?
+84 [user]  Yes. All are covered with forty percent coinsurance, and prior authorization
+           is not required.
+```
+
+`field_answer` rows attributed to `evidence_seq = 84`: **24** — all 8 CPT codes ×
+{covered=Yes, coinsurance=40, prior_auth=No}. Copay was correctly NOT invented; the rep
+gave a coinsurance.
+
+**Infertility — every service got every one of its codes:**
+
+| service | codes with a `covered` answer |
+| --- | ---: |
+| intrauterine_insemination | 3 / 3 |
+| in_vitro_fertilization | 3 / 3 |
+| embryo_cryopreservation | 2 / 2 |
+| embryo_biopsy | 2 / 2 |
+| egg_cryopreservation_elective | 1 / 1 |
+| egg_cryopreservation_cancer | 1 / 1 |
+| frozen_embryo_transfer | 1 / 1 |
+
+A one-word "No." at turn 56 fanned across both embryo-cryopreservation codes.
+
+**Adding the sentence anyway would be exactly the failure this whole overhaul removes** —
+an instruction compensating for a problem that does not exist.

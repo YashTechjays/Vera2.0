@@ -63,10 +63,12 @@ macro changes) produced: **180 → 107 spoken questions, 60,882 → 24,134 chars
 | **B** — structure-preserving compiler + `PlanQuestion` | `2026-08-06-b-structure-preserving-prompt-compiler.md` | A | yes |
 | **C** — gap/refusal question-unit calibration | `2026-08-06-c-question-unit-gap-refusal-calibration.md` | B | **no — must ship with or immediately after B** |
 | **D** — focused-retry prompt narrowing (P7) | `2026-08-06-d-focused-retry-prompt-narrowing.md` | B | yes |
-| **E** — observer fan-out instruction | `2026-08-06-e-observer-fanout-instruction.md` | — | **yes** |
+| ~~**E** — observer fan-out instruction~~ | `2026-08-06-e-observer-fanout-instruction.md` | — | **NOT NEEDED** — closed by live-call evidence |
 
-**A and E are independent of everything** and are both worth landing on their own — A fixes a
-live bug, E is an improvement even against today's prompt.
+**A is independent of everything** and was worth landing on its own — it fixes a live bug.
+
+**E is closed.** A live call on the Plan B compiler showed the Observer already fans one
+blanket answer out across all 24 paths it covers, unprompted; the plan's premise was wrong.
 
 **C is not optional once B lands.** B makes the agent ask one question covering N fields;
 C's counters still count fields. Left uncalibrated, `_refuse_premature_completion`
