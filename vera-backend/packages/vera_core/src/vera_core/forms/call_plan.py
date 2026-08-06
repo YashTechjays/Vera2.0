@@ -50,11 +50,7 @@ from vera_core.forms.dsl import (
     RequiredWhen,
     Validation,
 )
-from vera_core.forms.prompting import (
-    PromptDocument,
-    render_gate_chains,
-    render_task_prompts,
-)
+from vera_core.forms.prompting import PromptDocument, render_task_prompts
 from vera_core.forms.question_plan import PromptPanel, hydrate_panels
 
 logger = logging.getLogger(__name__)
@@ -86,7 +82,6 @@ class PlanFieldDescriptor(_Model):
     validation: Validation | None = None
     required: bool | RequiredWhen = False
     gates: tuple[Condition, ...] = ()
-    gate_text: str | None = None
     inapplicable_value: str | None = None
 
 
@@ -146,7 +141,6 @@ def compile_call_plan(
     """
     rendered = render_task_prompts(doc, prompt_doc)
     section_to_task = doc.section_to_task()
-    gate_texts = render_gate_chains(doc)
     fields_by_task: dict[str, list[PlanFieldDescriptor]] = {}
     for path, leaf, gates in leaf_gates(doc):
         if leaf.role not in COLLECTABLE_ROLES:
@@ -167,7 +161,6 @@ def compile_call_plan(
                 validation=leaf.validation,
                 required=leaf.required,
                 gates=gates,
-                gate_text=gate_texts.get(path),
                 inapplicable_value=leaf.inapplicable_value,
             )
         )
@@ -364,6 +357,11 @@ class PrefillFuser:
 
             return CONFIRM_SLOT_RE.sub(repl, text)
 
+        def fuse_text(text: str) -> str:
+            """Slot expansion then token hydration — the whole per-form rewrite, named once
+            because every piece of a task's text gets exactly the same treatment."""
+            return hydrate(expand_slots(text)) or ""
+
         def hydrate(text: str | None) -> str | None:
             if text is None:
                 return None
@@ -409,16 +407,14 @@ class PrefillFuser:
                         update={
                             "intro": hydrate(task.intro),
                             "outro": hydrate(task.outro),
-                            "prompt": hydrate(expand_slots(task.prompt)) or "",
                             # The pieces carry the same slots and tokens as `prompt`, and the
                             # worker re-renders the list from `panels` at task entry — so they
                             # get the identical treatment or that re-render speaks a raw
                             # {{confirm:…}} / {{value}}.
-                            "lead_in": hydrate(expand_slots(task.lead_in)) or "",
-                            "panels": hydrate_panels(
-                                task.panels, lambda t: hydrate(expand_slots(t)) if t else t
-                            ),
-                            "trailing": hydrate(expand_slots(task.trailing)) or "",
+                            "prompt": fuse_text(task.prompt),
+                            "lead_in": fuse_text(task.lead_in),
+                            "panels": hydrate_panels(task.panels, fuse_text),
+                            "trailing": fuse_text(task.trailing),
                         }
                     )
                     for task in plan.tasks

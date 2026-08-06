@@ -123,7 +123,6 @@ def _question(text: str, *paths: str, gate_text: str | None = None) -> PromptQue
     return PromptQuestion(
         text=text,
         options=[PromptOption(target_paths=list(paths))],
-        gate_text=gate_text,
     )
 
 
@@ -804,7 +803,6 @@ def _field(
     required: bool | RequiredWhen = True,
     gates: tuple[Comparison, ...] = (),
     values: list[str] | None = None,
-    gate_text: str | None = None,
 ) -> PlanFieldDescriptor:
     return PlanFieldDescriptor(
         path=path,
@@ -814,7 +812,6 @@ def _field(
         required=required,
         gates=gates,
         values=values,
-        gate_text=gate_text,
     )
 
 
@@ -872,7 +869,6 @@ def _gap_plan() -> CallPlan:
                             _question(
                                 "Any out-of-network note?",
                                 "sections.cov.oon_note",
-                                gate_text='"Doctor Inside Network" is "No"',
                             ),
                         ],
                     )

@@ -24,7 +24,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from vera_core.forms.conditions import decided_at_entry, leaf_gates
+from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
     AllCondition,
     Alternatives,
@@ -163,8 +163,11 @@ class _Builder:
         self.order = {path: i for i, path in enumerate(self.leaves)}
         section_to_task = doc.section_to_task()
         task_index = {t.task_key: i for i, t in enumerate(doc.tasks)}
-        # Collectable path -> the task that asks it. Mirrors the worker's `_task_of_path`;
-        # a gate referencing only EARLIER tasks is resolved at task entry, never spoken.
+        # Collectable path -> the task that asks it, by SECTION ownership. The worker builds
+        # its own from the compiled descriptors, which route a `confirm_in_task` leaf to the
+        # task it is spoken in — so the two deliberately disagree on those few leaves, and an
+        # absent path reads as decided here (prose omitted) but undecided there (question
+        # kept). Safe only in that direction: see `PlanRunController._settled`.
         self.task_of_path = {
             path: task_index[key]
             for path in self.leaves
@@ -455,7 +458,22 @@ class _Builder:
         return renderer(cond)
 
     def _entry_decided(self, gate: Condition) -> bool:
-        return decided_at_entry(gate, self.task_of_path, self.this_task, self.shared)
+        """Is this conjunct's answer already final when the task is entered?
+
+        True when every field it references is collected by an EARLIER task — answered, or
+        never answered because it was gated out upstream. A conjunct referencing this task or
+        a later one is undecided: its gate question has not been asked yet, so the prose has
+        to stay for the agent to evaluate live.
+
+        The compiler runs at dispatch with no answers, so task position is the only signal it
+        has. The worker classifies the same gates with a strictly stronger test
+        (`PlanRunController._settled`, which also knows what is answered) — the asymmetry is
+        safe in that direction only, since this decides whether prose is PRINTED and the
+        worker decides whether the question SURVIVES.
+
+        A conjunct referencing no path at all counts as undecided: nothing could settle it."""
+        refs = set(condition_field_paths(gate, self.shared))
+        return bool(refs) and all(self.task_of_path.get(ref, -1) < self.this_task for ref in refs)
 
     # -- structural predicates -------------------------------------------------
 
@@ -553,16 +571,14 @@ def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[Prompt
     return out
 
 
-def hydrate_panels(
-    panels: list[PromptPanel], hydrate: Callable[[str | None], str | None]
-) -> list[PromptPanel]:
+def hydrate_panels(panels: list[PromptPanel], hydrate: Callable[[str], str]) -> list[PromptPanel]:
     """`hydrate` applied to every spoken string in the tree.
 
     The per-form fuse rewrites `{{token}}` placeholders in the task text; the tree holds the
     same strings, so a task-entry re-render would otherwise speak a raw `{{value}}`."""
 
     def text(value: str | None) -> str | None:
-        return hydrate(value) if value else value
+        return hydrate(value) if value else value  # falsy passes through untouched
 
     def one(panel: PromptPanel) -> PromptPanel:
         items: list[PromptItem] = []
@@ -573,12 +589,12 @@ def hydrate_panels(
             items.append(
                 item.model_copy(
                     update={
-                        "text": text(item.text) or item.text,
+                        "text": text(item.text) or "",
                         "gate_text": text(item.gate_text),
                         "derive_text": text(item.derive_text),
                         "required_text": text(item.required_text),
                         "immediate_confirms": [
-                            text(line) or line for line in item.immediate_confirms
+                            text(line) or "" for line in item.immediate_confirms
                         ],
                     }
                 )

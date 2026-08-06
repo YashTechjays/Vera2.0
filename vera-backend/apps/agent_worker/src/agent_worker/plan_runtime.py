@@ -148,9 +148,7 @@ def _is_message(item: ChatItem, role: str) -> bool:
     return item.type == "message" and item.role == role
 
 
-def _instructions(
-    plan: CallPlan, task_block: str, *, extra_instructions: str | None, gating: str = ""
-) -> str:
+def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
     the discipline guardrails + the Cartesia TTS markup guide — fused once, at
@@ -174,10 +172,6 @@ def _instructions(
     if extra_instructions:
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
-    if gating:
-        # Directly after the task list it narrows, and inside the instructions rather than a
-        # per-reply directive — the latter lives for one inference only (see _apply_gating).
-        parts.append(gating)
     parts.append(SCOPE_DISCIPLINE)
     parts.append(HANDOFF_DISCIPLINE)
     parts.append(CLOSING_DISCIPLINE)
@@ -922,7 +916,12 @@ class PlanRunController:
         undecided forever and the auth-department questions are asked anyway.
 
         A path NO task collects is deliberately not settled by position: an absent context
-        value means "not supplied", which is unknown, not false."""
+        value means "not supplied", which is unknown, not false.
+
+        This is WIDER than "answered", and has to be: the compiler omits the prose for any
+        gate it can decide by task position (`question_plan._entry_decided`), so a worker
+        that only trusted answers would keep a question whose condition is no longer stated
+        anywhere. The worker must be at least as decisive as the compiler."""
         owner = self._task_of_path.get(path)
         return self._is_answered(path) or (owner is not None and owner < task_index)
 
