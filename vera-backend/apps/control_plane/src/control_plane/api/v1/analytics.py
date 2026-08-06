@@ -216,8 +216,11 @@ async def _window_metrics(session: AsyncSession, conds: list[ColumnElement[bool]
                     Call.started_at.is_not(None), Call.ended_at.is_not(None)
                 ),
                 # Completion is frozen onto the call at terminal status (call_lifecycle);
-                # live calls still read the 0 default, so average terminals only.
-                func.avg(Call.completion_pct).filter(Call.current_status.in_(TERMINAL_VALUES)),
+                # average only terminal calls that connected — a dead dial would smuggle
+                # the form's frozen completion into the metric, and live calls read 0.
+                func.avg(Call.completion_pct).filter(
+                    Call.current_status.in_(TERMINAL_VALUES), Call.started_at.is_not(None)
+                ),
             )
             .select_from(Call)
             .where(*conds)

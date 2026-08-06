@@ -249,20 +249,24 @@ async def test_live_panel_requires_reports_dashboard(
 async def _seed_report_world(
     admin_sessionmaker: async_sessionmaker[AsyncSession], world: RBACWorld
 ) -> tuple[list[UUID], list[UUID]]:
-    """4 calls in the window (2 completed w/ known durations+completion, 1 active,
-    1 canceled), 1 whisper intervention on one of them, 1 call in the previous window.
+    """5 calls in the window (2 completed w/ known durations+completion, 1 active,
+    1 canceled, 1 no-answer that never connected), 1 whisper intervention on one of
+    them, 1 call in the previous window.
     Returns (call_ids, form_ids) for the caller to clean up."""
     specs = [
-        # (status, ended offset minutes, completion_pct)
-        ("completed", 5, "80.00"),
-        ("completed", 10, "60.00"),
-        ("active", None, "0"),
-        ("canceled", 3, "20.00"),
+        # (status, connected, ended offset minutes, completion_pct)
+        ("completed", True, 5, "80.00"),
+        ("completed", True, 10, "60.00"),
+        ("active", True, None, "0"),
+        ("canceled", True, 3, "20.00"),
+        # Dead dial: terminal with a frozen form completion but no started_at —
+        # must count in volume yet stay out of the completion average.
+        ("no_answer", False, None, "50.00"),
     ]
     started = _FROM.replace(hour=12)
     call_ids: list[UUID] = []
     form_ids: list[UUID] = []
-    for status, end_min, completion in specs:
+    for status, connected, end_min, completion in specs:
         async with admin_sessionmaker() as session, session.begin():
             form_id = await _seed_form(session, world.tenant_id)
         form_ids.append(form_id)
@@ -276,7 +280,8 @@ async def _seed_report_world(
         call_ids.append(call_id)
         values: dict[str, object] = {
             "created_at": started,
-            "started_at": started,
+            # seed_call stamps started_at; a dead dial must clear it explicitly.
+            "started_at": started if connected else None,
             "completion_pct": Decimal(completion),
         }
         if end_min is not None:
@@ -330,18 +335,19 @@ async def test_report_matches_hand_computed_numbers(
         data = resp.json()["data"]
 
         cur = data["current"]
-        assert cur["call_volume"] == 4
+        assert cur["call_volume"] == 5
         # Durations: 300s, 600s, 3*60=180s over the three ended calls -> avg 360s.
         assert cur["avg_duration_seconds"] == pytest.approx(360.0)
-        # Completion over TERMINAL calls only: (80 + 60 + 20) / 3.
+        # Completion over CONNECTED terminal calls only: (80 + 60 + 20) / 3 —
+        # the no-answer's frozen 50 must not enter the average.
         assert cur["avg_completion_pct"] == pytest.approx(160 / 3)
         assert cur["intervened_calls"] == 1
-        assert cur["intervention_rate"] == pytest.approx(0.25)
+        assert cur["intervention_rate"] == pytest.approx(0.2)
 
         assert data["previous"]["call_volume"] == 1
 
         days = {row["day"]: row["calls"] for row in data["calls_per_day"]}
-        assert days == {"2026-01-08": 4}
+        assert days == {"2026-01-08": 5}
         assert data["interventions_by_type"] == [{"type": "whisper", "count": 1}]
     finally:
         await _delete_calls_and_forms(admin_sessionmaker, *form_ids)
