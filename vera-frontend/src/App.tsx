@@ -29,7 +29,6 @@ import { IvrPlaybooks } from "@/pages/IvrPlaybooks"
 import { FormSchemas } from "@/pages/FormSchemas"
 import { LlmConfig } from "@/pages/LlmConfig"
 import { CallHistory } from "@/pages/CallHistory"
-import { Analytics } from "@/pages/Analytics"
 import { Placeholder } from "@/pages/Placeholder"
 
 // Lazy-loaded: Voice Lab pulls in livekit-client + react-phone-number-input's
@@ -37,6 +36,11 @@ import { Placeholder } from "@/pages/Placeholder"
 // initial bundle — only operators who open the page pay for it.
 const VoiceLab = lazy(() =>
   import("@/pages/VoiceLab").then((m) => ({ default: m.VoiceLab })),
+)
+
+// Lazy-loaded: Analytics pulls in recharts (+ its d3 dependencies).
+const Analytics = lazy(() =>
+  import("@/pages/Analytics").then((m) => ({ default: m.Analytics })),
 )
 
 function App() {
