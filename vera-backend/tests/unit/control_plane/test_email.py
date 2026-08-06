@@ -1,5 +1,5 @@
-"""Email senders and the build_email_sender selector: Twilio Email once an account
-SID is configured, the local SMTP sandbox otherwise."""
+"""Email senders and the build_email_sender selector: Twilio Email once an API key
+or account SID is configured (key preferred), the local SMTP sandbox otherwise."""
 
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -29,7 +29,7 @@ _FROM = "no-reply@vera.local"
 
 
 def _twilio_sender() -> TwilioEmailSender:
-    return TwilioEmailSender(account_sid="AC123", auth_token="token-abc", sender=_FROM)
+    return TwilioEmailSender(sid="AC123", secret="token-abc", sender=_FROM)
 
 
 def _post_mock(status_code: int, text: str = "") -> AsyncMock:
@@ -120,11 +120,44 @@ def _settings(**overrides: Any) -> Settings:
     )
 
 
-def test_build_selects_smtp_without_a_twilio_account(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A real Twilio SID configured in the dev shell must not leak into this "unset" case.
-    monkeypatch.delenv("VERA_TWILIO_ACCOUNT_SID", raising=False)
+@pytest.fixture(autouse=True)
+def _no_twilio_credentials_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real Twilio credentials in the dev shell must not leak into a "not set" case."""
+    for var in (
+        "VERA_TWILIO_API_KEY_SID",
+        "VERA_TWILIO_ACCOUNT_SID",
+        "TWILIO_API_KEY_SECRET",
+        "TWILIO_AUTH_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_build_selects_smtp_without_a_twilio_account() -> None:
     sender = build_email_sender(_settings(), EnvSecretProvider())
     assert isinstance(sender, SmtpEmailSender)
+
+
+def test_build_prefers_the_api_key_over_the_account_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TWILIO_API_KEY_SECRET", "key-secret")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "token-abc")
+    sender = build_email_sender(
+        _settings(twilio_api_key_sid="SK123", twilio_account_sid="AC123"),
+        EnvSecretProvider(),
+    )
+    assert isinstance(sender, TwilioEmailSender)
+    assert sender._auth == ("SK123", "key-secret")
+
+
+def test_build_falls_back_to_the_account_pair_without_the_key_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "token-abc")
+    sender = build_email_sender(
+        _settings(twilio_api_key_sid="SK123", twilio_account_sid="AC123"),
+        EnvSecretProvider(),
+    )
+    assert isinstance(sender, TwilioEmailSender)
+    assert sender._auth == ("AC123", "token-abc")
 
 
 def test_build_selects_twilio_and_reads_the_token_from_secrets(
@@ -142,12 +175,8 @@ def test_build_selects_smtp_when_the_sid_is_an_empty_string() -> None:
     assert isinstance(sender, SmtpEmailSender)
 
 
-def test_build_degrades_to_smtp_when_the_token_secret_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_build_degrades_to_smtp_when_the_token_secret_is_missing() -> None:
     # SID present, token unresolvable (e.g. secret rotation lag) must not crash the
-    # caller — that caller is app startup, so this can't raise. A real token set in
-    # the dev shell must not leak into this "unresolvable" case.
-    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    # caller — that caller is app startup, so this can't raise.
     sender = build_email_sender(_settings(twilio_account_sid="AC123"), EnvSecretProvider())
     assert isinstance(sender, SmtpEmailSender)
