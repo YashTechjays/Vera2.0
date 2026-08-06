@@ -16,6 +16,7 @@ import { ForgotPassword } from "@/pages/ForgotPassword"
 import { ResetPassword } from "@/pages/ResetPassword"
 import { PlatformAcceptInvite } from "@/pages/PlatformAcceptInvite"
 import { PlatformOperators } from "@/pages/PlatformOperators"
+import { PlatformTenants } from "@/pages/PlatformTenants"
 import { PlatformSettings } from "@/pages/PlatformSettings"
 import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
@@ -93,6 +94,8 @@ function App() {
               element={<RequireNavRoute to="/analytics"><Analytics /></RequireNavRoute>}
             />
             <Route path="tenant-access" element={<TenantAccess />} />
+            {/* Super-admin-only tenant catalog: create / edit / deactivate (VR2-30). */}
+            <Route path="platform-tenants" element={<PlatformTenants />} />
             {/* Super-admin-only platform-operator roster. */}
             <Route path="platform-operators" element={<PlatformOperators />} />
             {/* Super-admin-only per-tenant AI form-filling toggle. */}

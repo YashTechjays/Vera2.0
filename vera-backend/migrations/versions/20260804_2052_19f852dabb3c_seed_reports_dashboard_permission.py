@@ -1,7 +1,7 @@
 """seed reports:dashboard permission and grant to SUPER_ADMIN/TENANT_ADMIN/SUPERVISOR
 
 Revision ID: 19f852dabb3c
-Revises: 952630394b76
+Revises: a7ebcd0aec02
 Create Date: 2026-08-04 20:52:00.000000
 
 The new analytics dashboard (live panel + history report) needs its own permission.
@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "19f852dabb3c"
-down_revision: str | None = "952630394b76"
+down_revision: str | None = "a7ebcd0aec02"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

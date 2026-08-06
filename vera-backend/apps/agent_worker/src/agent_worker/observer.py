@@ -40,6 +40,7 @@ from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
+from vera_core.forms.consistency import derive_remaining, triplet_paths
 from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
@@ -331,6 +332,8 @@ class ObserverManager:
         # Call-scoped answer snapshot (seeded with intake prefill), the dedup key and the
         # rule engine's input. Grows across tasks — a flow rule may span them.
         self._answers: dict[str, Any] = dict(plan.prefilled)
+        self._triplets = [triplet_paths(rule.triplet) for rule in plan.numeric_consistencies]
+        self._derived: dict[str, str] = {}
         self._seq = 0
         self._active_index: int | None = None
         self._active: TaskObserver | None = None
@@ -486,6 +489,28 @@ class ObserverManager:
                 # Redirect the live call NOW: interrupt the bot + swap/re-ask (the controller
                 # serializes it against an in-flight task_complete handoff).
                 await self._controller.apply_directive_now(directive)
+        await self._derive_remaining_locked(answer, evidence_seq)
+
+    async def _derive_remaining_locked(
+        self, trigger: ExtractedAnswer, evidence_seq: int | None
+    ) -> None:
+        """Fill a triplet's blank remaining with total - met (fill-gaps-only)."""
+        for total_path, met_path, remaining_path in self._triplets:
+            if trigger.field_path not in (total_path, met_path):
+                continue
+            current = self._answers.get(remaining_path)
+            if not is_blank_answer(current) and current != self._derived.get(remaining_path):
+                continue  # a rep-stated or prefilled remaining wins — never overwrite it
+            value = derive_remaining(
+                str(self._answers.get(total_path) or ""),
+                str(self._answers.get(met_path) or ""),
+            )
+            if value is None:
+                continue
+            self._derived[remaining_path] = value
+            await self._record_locked(
+                ExtractedAnswer(remaining_path, value, trigger.confidence), evidence_seq
+            )
 
     async def aclose(self) -> None:
         """Stop tailing and drain. Call in the entrypoint shutdown AFTER the call-event

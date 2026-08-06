@@ -39,6 +39,7 @@ from vera_core.forms.dsl import (
     FormSchemaDoc,
     Group,
     Leaf,
+    NumericConsistency,
     PromotedFields,
     RequiredWhen,
     Section,
@@ -1174,20 +1175,43 @@ def build_ibv_standard() -> FormSchemaDoc:
                 sections=["insurance_information", "benefit_coverage"],
             ),
             Task(
-                task_key="coverage",
-                title="Coverage Verification",
+                task_key="infertility_coverage",
+                title="Infertility Coverage",
                 prompt=(
-                    "Work through infertility treatment, diagnostic testing and general "
-                    "coverage. Ask per service panel, fan answers out to the CPT codes the "
-                    "representative confirms, and skip sub-questions for services that are "
-                    "not covered."
+                    "Work through infertility treatment. Ask per service panel, fan answers "
+                    "out to the CPT codes the representative confirms, and skip sub-questions "
+                    "for services that are not covered."
                 ),
-                intro="Now I'd like to verify some coverage details.",
+                intro="Now I'd like to verify some infertility coverage details.",
                 outro=(
-                    "Thank you, that's really helpful. One moment while I organize these "
-                    "coverage details."
+                    "Thank you, that's really helpful. One moment while I organize these details."
                 ),
-                sections=["infertility_treatment", "diagnostic_testing", "general_coverage"],
+                sections=["infertility_treatment"],
+            ),
+            Task(
+                task_key="diagnostic_coverage",
+                title="Diagnostic Coverage",
+                prompt=(
+                    "Work through diagnostic details. Ask all the CPT codes at once unless the "
+                    "representative asks for them one at a time. Fan answers out to the CPT "
+                    "codes the representative confirms, and skip sub-questions for CPT codes "
+                    "that are not covered."
+                ),
+                intro="Now I'd like to verify some diagnostic coverage details.",
+                outro="Thank you. One moment while I organize these details.",
+                sections=["diagnostic_testing"],
+            ),
+            Task(
+                task_key="general_office_coverage",
+                title="General Office Coverage",
+                prompt=(
+                    "Work through general office visits details. Ask per service panel, fan "
+                    "answers out to the CPT codes the representative confirms, and skip "
+                    "sub-questions for services that are not covered."
+                ),
+                intro="Now I'd like to verify some general office visits coverage.",
+                outro="Thanks. One moment while I organize these details.",
+                sections=["general_coverage"],
             ),
             Task(
                 task_key="financial",
@@ -1334,6 +1358,48 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "but infertility treatment is showing as not covered — with a mandate, "
                     "infertility services should be covered. Could you double-check whether "
                     "infertility treatment is covered under this plan?"
+                ),
+            ),
+        ],
+        numeric_consistencies=[
+            NumericConsistency(
+                rule_key="lifetime_maximum_triplet_consistency",
+                triplet="sections.lifetime_maximum",
+                clarify=(
+                    "Could you double-check the total lifetime maximum for infertility "
+                    "services, how much of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="deductible_individual_triplet_consistency",
+                triplet="sections.deductibles.individual",
+                clarify=(
+                    "Could you double-check the total individual deductible, how much "
+                    "of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="deductible_family_triplet_consistency",
+                triplet="sections.deductibles.family",
+                clarify=(
+                    "Could you double-check the total family deductible, how much of "
+                    "it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="oop_individual_triplet_consistency",
+                triplet="sections.out_of_pocket.individual",
+                clarify=(
+                    "Could you double-check the total individual out-of-pocket "
+                    "maximum, how much of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="oop_family_triplet_consistency",
+                triplet="sections.out_of_pocket.family",
+                clarify=(
+                    "Could you double-check the total family out-of-pocket maximum, "
+                    "how much of it has been met, and how much remains?"
                 ),
             ),
         ],

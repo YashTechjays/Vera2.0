@@ -9,3 +9,14 @@ import { cleanup } from "@testing-library/react"
 // global `afterEach`) never registers itself — do it explicitly, or renders
 // from one test bleed into the next test's DOM.
 afterEach(cleanup)
+
+// jsdom ships no ResizeObserver, and Radix primitives that measure themselves
+// (Checkbox, Select, ...) construct one on mount — without this, rendering them
+// throws "ResizeObserver is not defined". Never fires in jsdom; a stub is enough.
+if (!("ResizeObserver" in globalThis)) {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
+}

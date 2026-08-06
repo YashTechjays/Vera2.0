@@ -223,3 +223,54 @@ describe("missingCreateLeaves", () => {
     expect(missingCreateLeaves(schema, {})).toHaveLength(createRequiredPaths(schema).size)
   })
 })
+
+describe("validateAll — numeric consistency (lifetime maximum triplet)", () => {
+  const TOTAL = "sections.lifetime_maximum.total"
+  const MET = "sections.lifetime_maximum.met_amount"
+  const REMAINING = "sections.lifetime_maximum.remaining"
+
+  it("flags the bug-report example on every participating field", () => {
+    const errors = validateAll(schema, { [TOTAL]: "$100", [MET]: "$300", [REMAINING]: "$300" })
+    for (const path of [TOTAL, MET, REMAINING]) {
+      expect(errors[path]).toMatch(/exceeds/i)
+    }
+    expect(errors[MET]).toContain("$300.00")
+    expect(errors[MET]).toContain("$100.00")
+  })
+
+  it("flags a sum mismatch when nothing exceeds the total", () => {
+    const errors = validateAll(schema, {
+      [TOTAL]: "$25,000",
+      [MET]: "$5,000",
+      [REMAINING]: "$25,000",
+    })
+    expect(errors[TOTAL]).toMatch(/must equal/i)
+  })
+
+  it("accepts a consistent triplet and tolerates one-cent rounding", () => {
+    const ok = validateAll(schema, { [TOTAL]: "$25,000", [MET]: "$5,000", [REMAINING]: "$20,000" })
+    expect(ok[TOTAL]).toBeUndefined()
+    const cent = validateAll(schema, { [TOTAL]: "100", [MET]: "50", [REMAINING]: "50.01" })
+    expect(cent[TOTAL]).toBeUndefined()
+  })
+
+  it("stays silent on special values and partial data", () => {
+    expect(validateAll(schema, { [TOTAL]: "No Limit" })[TOTAL]).toBeUndefined()
+    const partial = validateAll(schema, { [TOTAL]: "$100", [MET]: "$50" })
+    expect(partial[TOTAL]).toBeUndefined()
+    expect(partial[MET]).toBeUndefined()
+  })
+
+  // Parity with backend parse_currency: a string that is only currency symbols
+  // (no digits) is "absent", not 0 — Number("") is 0, which the backend rejects.
+  it("treats symbol-only values as absent, not zero", () => {
+    const errors = validateAll(schema, { [TOTAL]: "$", [MET]: "$300", [REMAINING]: "$50" })
+    for (const path of [TOTAL, MET, REMAINING]) expect(errors[path]).toBeUndefined()
+  })
+
+  // Parity with backend math.isfinite guard: non-finite amounts are "absent".
+  it("treats non-finite values as absent", () => {
+    const errors = validateAll(schema, { [TOTAL]: "Infinity", [MET]: "$50", [REMAINING]: "$50" })
+    for (const path of [TOTAL, MET, REMAINING]) expect(errors[path]).toBeUndefined()
+  })
+})

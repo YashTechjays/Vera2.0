@@ -300,6 +300,15 @@ class TestRulesAndRoundTrip:
         assert PLAN.contradictions == (IBV.contradictions or [])
         assert PLAN.shared_conditions == (IBV.shared_conditions or {})
 
+    def test_plan_carries_numeric_consistencies(self) -> None:
+        assert [(r.rule_key, r.triplet) for r in PLAN.numeric_consistencies] == [
+            ("lifetime_maximum_triplet_consistency", "sections.lifetime_maximum"),
+            ("deductible_individual_triplet_consistency", "sections.deductibles.individual"),
+            ("deductible_family_triplet_consistency", "sections.deductibles.family"),
+            ("oop_individual_triplet_consistency", "sections.out_of_pocket.individual"),
+            ("oop_family_triplet_consistency", "sections.out_of_pocket.family"),
+        ]
+
     def test_json_round_trip(self) -> None:
         assert CallPlan.model_validate_json(PLAN.model_dump_json()) == PLAN
 
@@ -352,10 +361,8 @@ class TestBookendPaths:
     def test_focused_retry_retains_greeting_and_wrapup_when_those_fields_satisfied(self) -> None:
         """Even when the intro/wrap-up fields are already satisfied (excluded from the
         retryable set), unioning bookends keeps both tasks in the focused plan."""
-        coverage_field = next(
-            f.path for t in PLAN.tasks if t.task_key == "coverage" for f in t.fields
-        )
-        focus = [coverage_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
+        mid_field = next(f.path for t in PLAN.tasks[1:-1] for f in t.fields)
+        focus = [mid_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
         keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
         assert "introduction" in keys
         assert "wrap_up" in keys
