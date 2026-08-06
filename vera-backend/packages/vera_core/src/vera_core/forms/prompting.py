@@ -37,6 +37,7 @@ from vera_core.forms.dsl import (
     malformed_placeholders,
 )
 from vera_core.forms.prompt_text import build_condition_renderer
+from vera_core.forms.question_plan import PromptPanel, PromptQuestion, build_question_plan
 
 
 class _Doc(BaseModel):
@@ -232,7 +233,6 @@ def render_task_prompts(
                     task,
                     override,
                     render_cond,
-                    questions,
                     immediate_by_anchor,
                     end_confirms.get(task.task_key, []),
                     flow_by_task.get(task.task_key, []),
@@ -310,63 +310,110 @@ def _codes_text(codes: Codes) -> str:
     return "; ".join(parts)
 
 
-def _question_lines(
-    idx: int,
-    path: str,
-    leaf: Leaf,
-    gates: tuple[Condition, ...],
-    render_cond: Callable[[Condition], str],
-    immediate: list[_QuestionItem],
+def _panel_lines(
+    panel: PromptPanel,
+    doc: FormSchemaDoc,
+    immediate_by_anchor: dict[str, list[_QuestionItem]],
+    depth: int,
 ) -> list[str]:
-    prompt = leaf.prompt
-    # ask/confirm coherence is validator-enforced (dsl.py Leaf._coherent), so an
-    # ask/confirm-role leaf always carries the matching prompt text.
-    assert prompt is not None, f"{path}: {leaf.role} leaf missing prompt text"
-    text = prompt.ask if leaf.role == "ask" else prompt.confirm
-    lines = [f"{idx}. {text}"]
-    if leaf.values:
-        lines.append(f"   - Answers: {' | '.join(leaf.values)}")
-    if leaf.special_values:
-        lines.append(f"   - Also accepted: {', '.join(leaf.special_values)}")
-    for hint in prompt.hints or []:
-        lines.append(f"   - Hint: {hint}")
-    if leaf.validation is not None and leaf.validation.date_format is not None:
-        lines.append(f"   - Expected date format: {leaf.validation.date_format}")
-    if leaf.validation is not None and leaf.validation.range is not None:
-        rng = leaf.validation.range
-        if rng.min is not None and rng.max is not None:
-            lines.append(f"   - Expected numeric range: {rng.min} to {rng.max}.")
-        elif rng.min is not None:
-            lines.append(f"   - Expected numeric range: at least {rng.min}.")
+    """One panel: heading, codes, its gate stated once, then its numbered questions.
+
+    Conditions render scoped to this panel — the heading already supplies the breadcrumb a
+    global label would have to spell out."""
+    render_cond = build_condition_renderer(doc, panel.scope)
+    lines: list[str] = []
+    if panel.title is not None:
+        lines.append(f"{'#' * (3 + depth)} {panel.title}")
+    if panel.intro:
+        lines.append(panel.intro)
+    if panel.codes is not None and (codes := _codes_text(panel.codes)):
+        speak = "Read these codes aloud when asking" if panel.codes.speak_cpt else "Codes"
+        lines.append(f"{speak}: {codes}.")
+    if panel.gate is not None:
+        lines.append(f"Ask only if {render_cond(panel.gate)}.")
+    number = 1
+    for item in panel.items:
+        if isinstance(item, PromptPanel):
+            lines.append("")
+            lines.extend(_panel_lines(item, doc, immediate_by_anchor, depth + 1))
+            continue
+        if item.routes_between:
+            # Unnumbered: it routes between the panels below rather than recording an
+            # answer of its own — the choice shows up as which panel's Covered is "Yes".
+            lines.append(f"Ask first: {item.text}")
+            lines.append(
+                "Then take only the matching panel below — "
+                f"{' or '.join(item.routes_between)} — and skip the other."
+            )
+            continue
+        lines.extend(
+            _numbered_question(number, item, render_cond, immediate_by_anchor, doc, panel.scope)
+        )
+        number += 1
+    return lines
+
+
+def _gate_text(
+    question: PromptQuestion,
+    render_cond: Callable[[Condition], str],
+    doc: FormSchemaDoc,
+    scope: str,
+) -> str:
+    """A gate that only asks "is the thing this question is about covered?" says exactly
+    that. Rendered field-by-field it reads `"Covered" is "Yes"`, which inside a panel has no
+    antecedent — and on a fanned-out question there is no single field it could name."""
+    refs = {
+        ref
+        for gate in question.gates
+        for ref in condition_field_paths(gate, doc.shared_conditions or {})
+    }
+    if refs and all(r.endswith(".covered") and r.startswith(f"{scope}.") for r in refs):
+        return "the codes above are covered" if len(refs) > 1 else "this service is covered"
+    return _join_gates(question.gates, render_cond)
+
+
+def _numbered_question(
+    number: int,
+    question: PromptQuestion,
+    render_cond: Callable[[Condition], str],
+    immediate_by_anchor: dict[str, list[_QuestionItem]],
+    doc: FormSchemaDoc,
+    scope: str,
+) -> list[str]:
+    lines = [f"{number}. {question.text}"]
+    for option in question.options:
+        if option.label is None:
+            if option.answers:
+                lines.append(f"   - Answers: {option.answers}")
         else:
-            lines.append(f"   - Expected numeric range: at most {rng.max}.")
-    if gates:
-        conds = _join_gates(gates, render_cond)
-        skip = (
-            f' If skipped, record "{leaf.inapplicable_value}".'
-            if leaf.inapplicable_value is not None
-            else ""
-        )
-        lines.append(f"   - Ask only if {conds}.{skip}")
-    if leaf.derive is not None:
+            suffix = f": {option.answers}" if option.answers else ""
+            lines.append(f"   - {option.label}{suffix}")
+        if option.date_format is not None:
+            lines.append(f"   - Expected date format: {option.date_format}")
+    for hint in question.hints:
+        lines.append(f"   - Hint: {hint}")
+    if question.gates:
+        lines.append(f"   - Ask only if {_gate_text(question, render_cond, doc, scope)}.")
+    if question.derive_when is not None:
         lines.append(
-            f'   - When {render_cond(leaf.derive.when)}: record "{leaf.derive.value}" '
-            "without asking."
+            f"   - When {render_cond(question.derive_when)}: record "
+            f'"{question.derive_value}" without asking.'
         )
-    if leaf.required is False:
-        lines.append("   - Optional; skip gracefully if the representative has nothing.")
-    elif not isinstance(leaf.required, bool):
-        lines.append(f"   - Required only when {render_cond(leaf.required.when)}.")
-    if leaf.codes is not None:
-        codes_text = _codes_text(leaf.codes)
-        if codes_text:
-            lines.append(f"   - Codes: {codes_text}")
+    if question.required_when is not None:
+        lines.append(f"   - Required only when {render_cond(question.required_when)}.")
+    elif question.optional:
+        lines.append("   - Optional; move on if the representative has nothing.")
+    if len(question.fanned_codes) > 1:
+        lines.append(
+            "   - One question for all of these codes; apply the answer to every code the "
+            f"representative confirms: {', '.join(question.fanned_codes)}."
+        )
+    immediate = [c for path in question.target_paths for c in immediate_by_anchor.get(path, [])]
     if immediate:
         lines.append("   - Immediately after this answer:")
-        for _cpath, cleaf, cgates in immediate:
-            cond_txt = _join_gates(cgates, render_cond)
-            ctext = cleaf.prompt.confirm if cleaf.prompt else cleaf.title
-            lines.append(f"     * If {cond_txt}: confirm — {ctext}")
+        for _path, leaf, gates in immediate:
+            text = leaf.prompt.confirm if leaf.prompt else leaf.title
+            lines.append(f"     * If {_join_gates(gates, render_cond)}: confirm — {text}")
     return lines
 
 
@@ -375,7 +422,6 @@ def _task_text(
     task: Task,
     override: TaskTextOverride,
     render_cond: Callable[[Condition], str],
-    questions: dict[str, list[_QuestionItem]],
     immediate_by_anchor: dict[str, list[_QuestionItem]],
     end_confirms: list[_QuestionItem],
     flow_rules: list[FlowRule],
@@ -390,37 +436,8 @@ def _task_text(
     if instructions:
         blocks.append(instructions)
 
-    n = 1
-    for section_key in task.sections:
-        section = doc.sections[section_key]
-        lines = [f"### {section.title}"]
-        if section.prompt is not None:
-            lines.append(section.prompt.intro)
-        if section.codes is not None:
-            codes_text = _codes_text(section.codes)
-            if codes_text:
-                speak = (
-                    "Read these codes aloud when asking"
-                    if section.codes.speak_cpt
-                    else "Provide these codes only if the representative asks"
-                )
-                lines.append(f"{speak}: {codes_text}.")
-        for path, leaf, gates in questions.get(section_key, []):
-            lines.extend(
-                _question_lines(
-                    n, path, leaf, gates, render_cond, immediate_by_anchor.get(path, [])
-                )
-            )
-            n += 1
-        for group in section.ask_groups or []:
-            members = ", ".join(titles.get(m, m) for m in group.fields)
-            lines.append(f'Ask together on the first pass: "{group.ask}" (covers: {members}).')
-        for alt in section.alternatives or []:
-            members = ", ".join(titles.get(m, m) for m in alt.members)
-            lines.append(
-                f'Either/or — once one of these is answered, record "N/A" for the rest: {members}.'
-            )
-        blocks.append("\n".join(lines))
+    for panel in build_question_plan(doc, task):
+        blocks.append("\n".join(_panel_lines(panel, doc, immediate_by_anchor, depth=0)))
 
     if end_confirms:
         lines = ["Before finishing this task, confirm:"]

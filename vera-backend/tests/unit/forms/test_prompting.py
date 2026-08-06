@@ -37,14 +37,6 @@ def disease_only_prompts() -> RenderedPrompts:
     return render_task_prompts(doc)
 
 
-def tasks_with_phrasing_guidance(rendered: RenderedPrompts) -> set[str]:
-    return {
-        t.task_key
-        for t in rendered.tasks
-        if "vary how you" in t.prompt.lower() and "That is wording only" in t.prompt
-    }
-
-
 class TestSession:
     def test_factory_fallback_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
@@ -150,31 +142,29 @@ class TestTaskText:
         for t in RENDERED.tasks:
             assert "sections." not in t.prompt, t.task_key
 
-    def test_multi_gate_or_condition_parenthesized(self) -> None:
+    def test_a_covered_gate_reads_as_prose_not_a_field_comparison(self) -> None:
+        # Inside a panel `"Covered" is "Yes"` has no antecedent, and on a fanned-out question
+        # there is no single field it could name.
         infertility = task("infertility_coverage").prompt
-        assert " and (" in infertility
-        assert " or " in infertility.split(" and (", 1)[1]
+        assert "Ask only if this service is covered." in infertility
+        assert 'Ask only if "Covered" is "Yes"' not in infertility
 
-    def test_numeric_range_note_renders(self) -> None:
+    def test_numeric_bounds_render_on_the_option_line(self) -> None:
         infertility = task("infertility_coverage").prompt
-        assert "Expected numeric range: 0 to 100." in infertility
-        assert "Expected numeric range: at least 0." in infertility
+        assert "Coinsurance (%): 0-100" in infertility
+        assert "Copay ($): also: $0, None; at least 0" in infertility
 
     def test_icd10_codes_render_for_speak_sections(self) -> None:
         assert "ICD-10 Z31.41" in task("diagnostic_coverage").prompt
 
-    def test_phrasing_guidance_rides_on_the_cpt_tasks_only(self) -> None:
-        # Authored per task in the schema, so it never depends on the runtime spotting
-        # "CPT code" in the rendered question list.
-        assert tasks_with_phrasing_guidance(RENDERED) == {
-            "infertility_coverage",
-            "diagnostic_coverage",
-            "general_office_coverage",
-            "male_partner",
-        }
-
-    def test_disease_only_coverage_task_carries_phrasing_guidance(self) -> None:
-        assert tasks_with_phrasing_guidance(disease_only_prompts()) == {"disease_coverage"}
+    def test_no_task_re_explains_the_structure_the_list_already_carries(self) -> None:
+        # The old renderer flattened groups/ask_groups away, so every CPT-heavy task carried
+        # prose re-describing the grouping and asking for phrasing variety. The panels carry
+        # it now, so that prose is gone — and cannot silently come back.
+        for rendered in (RENDERED, disease_only_prompts()):
+            for t in rendered.tasks:
+                assert "vary how you" not in t.prompt.lower()
+                assert "That is wording only" not in t.prompt
 
     def test_cpt_questions_carry_no_answer_instruction(self) -> None:
         # The rendered "- Answers: Yes | No | N/A" line already states the vocabulary.

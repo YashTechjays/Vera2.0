@@ -5,29 +5,37 @@ one-per-stored-field: an ask group fans one question out over many paths, an alt
 turns several paths into labelled options on one question, and groups become panels.
 """
 
-from vera_core.forms.catalog import build_ibv_standard
-from vera_core.forms.question_plan import build_question_plan, iter_questions
+from collections.abc import Iterator
+
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
+from vera_core.forms.dsl import Comparison
+from vera_core.forms.question_plan import (
+    PromptPanel,
+    PromptQuestion,
+    build_question_plan,
+    iter_questions,
+)
 
 DOC = build_ibv_standard()
 TASKS = {t.task_key: t for t in DOC.tasks}
 
 
-def _plan(task_key: str):
+def _plan(task_key: str) -> list[PromptPanel]:
     return build_question_plan(DOC, TASKS[task_key])
 
 
-def _questions(task_key: str):
+def _questions(task_key: str) -> list[PromptQuestion]:
     return list(iter_questions(_plan(task_key)))
 
 
-def _by_text(task_key: str, needle: str):
+def _by_text(task_key: str, needle: str) -> PromptQuestion:
     return next(q for q in _questions(task_key) if needle in q.text)
 
 
-def _panels(task_key: str):
+def _panels(task_key: str) -> list[PromptPanel]:
     """Every panel in the tree, depth-first, including nested ones."""
 
-    def walk(panels):
+    def walk(panels: list[PromptPanel]) -> Iterator[PromptPanel]:
         for panel in panels:
             yield panel
             yield from walk(panel.children)
@@ -140,7 +148,9 @@ class TestGates:
     def test_a_gate_on_a_field_this_task_asks_survives_as_prose(self) -> None:
         # Nothing at render time can know the answer — the model must evaluate it live.
         q = _by_text("closing_admin", "name and contact phone number of the pharmacy")
-        assert [g.field for g in q.gates] == ["sections.pharmacy_benefit_manager.pbm_exists"]
+        assert [g.field for g in q.gates if isinstance(g, Comparison)] == [
+            "sections.pharmacy_benefit_manager.pbm_exists"
+        ]
 
     def test_a_panel_gate_is_not_repeated_on_every_question_inside_it(self) -> None:
         iui = next(

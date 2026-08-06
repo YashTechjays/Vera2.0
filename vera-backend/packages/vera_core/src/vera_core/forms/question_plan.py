@@ -20,6 +20,7 @@ Pure and DB-free. Deterministic: same document = identical tree.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -50,12 +51,14 @@ class PromptOption(_Model):
 
     label: str | None = None
     answers: str = ""
+    date_format: str | None = None
     target_paths: list[str] = Field(default_factory=list)
 
 
 class PromptQuestion(_Model):
     """One thing the agent says out loud, and every field path it can answer."""
 
+    kind: Literal["question"] = "question"
     text: str
     options: list[PromptOption] = Field(default_factory=list)
     # Residual gate conjuncts only: those the enclosing panel does not already assert, and
@@ -79,6 +82,9 @@ class PromptQuestion(_Model):
 class PromptPanel(_Model):
     """A heading the questions underneath belong to — a section, or a service group."""
 
+    kind: Literal["panel"] = "panel"
+    # Root-anchored path this panel covers; conditions inside it render relative to this.
+    scope: str = ""
     title: str | None = None
     codes: Codes | None = None
     intro: str | None = None
@@ -86,15 +92,30 @@ class PromptPanel(_Model):
     gate: Condition | None = None
     # True for a section-level panel, whose heading renders one level shallower.
     is_section: bool = False
-    questions: list[PromptQuestion] = Field(default_factory=list)
-    children: list[PromptPanel] = Field(default_factory=list)
+    # Questions and child panels in ONE list because their order is meaningful: a routing
+    # question has to sit between the sibling panels it chooses between, not before them all.
+    items: list[PromptItem] = Field(default_factory=list)
+
+    @property
+    def questions(self) -> list[PromptQuestion]:
+        return [item for item in self.items if isinstance(item, PromptQuestion)]
+
+    @property
+    def children(self) -> list[PromptPanel]:
+        return [item for item in self.items if isinstance(item, PromptPanel)]
+
+
+PromptItem = Annotated[PromptQuestion | PromptPanel, Field(discriminator="kind")]
 
 
 def iter_questions(panels: list[PromptPanel]) -> Iterator[PromptQuestion]:
     """Every question in the tree, in spoken order."""
     for panel in panels:
-        yield from panel.questions
-        yield from iter_questions(panel.children)
+        for item in panel.items:
+            if isinstance(item, PromptQuestion):
+                yield item
+            else:
+                yield from iter_questions([item])
 
 
 def build_question_plan(doc: FormSchemaDoc, task: Task) -> list[PromptPanel]:
@@ -118,8 +139,6 @@ def _answers_text(leaf: Leaf) -> str:
             parts.append(f"at least {rng.min}")
         else:
             parts.append(f"at most {rng.max}")
-    if validation is not None and validation.date_format is not None:
-        parts.append(validation.date_format)
     return "; ".join(parts)
 
 
@@ -152,6 +171,7 @@ class _Builder:
             self._index_section(section_key, section)
             base = f"sections.{section_key}"
             panel = PromptPanel(
+                scope=base,
                 title=section.title,
                 codes=section.codes,
                 intro=section.prompt.intro if section.prompt is not None else None,
@@ -268,6 +288,11 @@ class _Builder:
             PromptOption(
                 label=title if labelled else None,
                 answers=_answers_text(self.leaves[member_paths[0]]),
+                date_format=(
+                    validation.date_format
+                    if (validation := self.leaves[member_paths[0]].validation) is not None
+                    else None
+                ),
                 target_paths=member_paths,
             )
             for title, member_paths in grouped.items()
@@ -305,7 +330,7 @@ class _Builder:
         for key, field in fields.items():
             path = f"{prefix}.{key}"
             if (route := self.route_at.get(path)) is not None:
-                panel.questions.append(route)
+                panel.items.append(route)
             if isinstance(field, Group):
                 self._fill_group(panel, path, field, scope, asserted, panel_codes)
                 continue
@@ -313,7 +338,7 @@ class _Builder:
                 continue
             question = self.question_at.get(path)
             if question is not None:
-                panel.questions.append(self._scoped(question, asserted))
+                panel.items.append(self._scoped(question, asserted))
 
     def _fill_group(
         self,
@@ -351,12 +376,13 @@ class _Builder:
             top, bottom = nxt
         codes = _merge_codes(group.codes, self._harvest_codes(path, group.fields))
         child = PromptPanel(
+            scope=top,
             title=group.title,
             codes=codes,
             intro=group.prompt.ask if group.prompt is not None and group.prompt.ask else None,
             gate=_conjoin(gates),
         )
-        panel.children.append(child)
+        panel.items.append(child)
         self._fill(child, top, bottom.fields, top, inner, frozenset(codes.cpt or ()))
 
     def _scoped(self, question: PromptQuestion, asserted: list[Condition]) -> PromptQuestion:

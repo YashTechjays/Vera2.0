@@ -8,42 +8,40 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
 3. Does this plan cover out-of-network benefits?
    - Answers: Yes | No
    - Ask only if "Doctor Inside Network" is "No" and "Facility Inside Network" is "No".
-4. What type of plan is this — PPO, HMO, EPO, or something else?
-   - Also accepted: PPO, HMO, EPO, POS
-5. For coordination of benefits, is this plan primary, secondary, or tertiary?
-   - Answers: Primary | Secondary | Tertiary
-6. I have the member ID as {{value}} — can you confirm that is correct?
-7. What is the group name?
-8. What is the group number?
-9. What is the policy state or contract state?
+4. What type of plan is this — PPO, HMO, EPO, or something else? And for coordination of benefits, is this plan primary, secondary, or tertiary?
+   - Health Plan Type: also: PPO, HMO, EPO, POS
+   - Coordination of Benefits: Primary | Secondary | Tertiary
+5. I have the member ID as {{value}} — can you confirm that is correct?
+6. What is the group name and group number?
+   - Group Name
+   - Group Number
+7. What is the policy state or contract state?
    - Hint: If the representative doesn't understand the question, clarify: In which state was this policy written?
-Ask together on the first pass: "What type of plan is this — PPO, HMO, EPO, or something else? And for coordination of benefits, is this plan primary, secondary, or tertiary?" (covers: Health Plan Type, Coordination of Benefits).
-Ask together on the first pass: "What is the group name and group number?" (covers: Group Name, Group Number).
 
 ### Benefit Coverage
-10. Does the benefit year run on a Calendar Year or a Plan Year?
+1. Does the benefit year run on a Calendar Year or a Plan Year?
    - Answers: Calendar Year | Plan Year
-11. What is the effective date for this coverage?
+2. What is the effective date for this coverage?
    - Expected date format: M/D/YYYY
    - When "Benefit Year Type" is "Calendar Year": record "01/01/{{current_year}}" without asking.
-12. What are the start and end dates of the plan year?
+3. What are the start and end dates of the plan year?
    - When "Benefit Year Type" is "Calendar Year": record "01/01/{{current_year}} - 12/31/{{current_year}}" without asking.
-13. Is this an individual or a family policy? Please answer Individual or Family.
+4. Is this an individual or a family policy? Please answer Individual or Family.
    - Answers: Individual | Family
    - Immediately after this answer:
      * If "Coverage Type" is "Family": confirm — Can we also check the spouse on the plan? I have the spouse listed as {{value}} — can you confirm that is correct?
      * If "Coverage Type" is "Family": confirm — And the spouse's date of birth I have is {{value}} — is that right?
-14. Does this plan require a PCP referral?
+5. Does this plan require a PCP referral?
    - Answers: Yes | No
    - Ask only if "Health Plan Type" is "HMO".
-15. Does this plan cover telehealth services?
+6. Does this plan cover telehealth services?
    - Answers: Yes | No | Limited
    - Hint: If the representative asks whether we use our own telehealth platform, answer exactly "Yes", then re-ask this question.
-16. Is this plan self insured or fully funded?
+7. Is this plan self insured or fully funded?
    - Answers: Self Insured | Fully Funded
-17. Is the employer group supporting this plan a small group or a large group?
+8. Is the employer group supporting this plan a small group or a large group?
    - Answers: Small Group | Large Group
-18. Is there an infertility plan mandate on this policy?
+9. Is there an infertility plan mandate on this policy?
    - Answers: Yes | No
    - Hint: Pronounce as: in-fer-TIL-ih-tee plan MAN-date.
 
