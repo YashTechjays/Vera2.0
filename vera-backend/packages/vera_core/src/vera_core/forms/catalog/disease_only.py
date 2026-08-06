@@ -433,7 +433,10 @@ def build_disease_only() -> FormSchemaDoc:
                 prompt=(
                     "Go disease by disease. Establish coverage first, then benefits per "
                     "covered condition; skip sub-questions for conditions that are not "
-                    "covered."
+                    "covered. Vary how you open each condition's questions instead of "
+                    "repeating one sentence shape, and keep the benefit name beside the code "
+                    "the way each listed question does. That is wording only — which "
+                    "questions you ask is set by the list."
                 ),
                 intro="Now I'd like to verify the covered disease benefits.",
                 outro="Thank you, that covers the disease benefits. Just a moment.",

@@ -1206,7 +1206,12 @@ def build_ibv_standard() -> FormSchemaDoc:
                 prompt=(
                     "Work through infertility treatment. Ask per service panel, fan answers "
                     "out to the CPT codes the representative confirms, and skip sub-questions "
-                    "for services that are not covered."
+                    "for services that are not covered. The list below runs through many "
+                    "procedure codes in a row, so vary how you open each question instead of "
+                    "reusing one pattern, keep the service name beside the code the way each "
+                    "listed question does, and move between codes with a short transition "
+                    "rather than restating what you are verifying. That is wording only — "
+                    "which questions you ask, and in what grouping, is set by the list."
                 ),
                 intro="Now I'd like to verify some infertility coverage details.",
                 outro=(
@@ -1221,7 +1226,10 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "Work through diagnostic details. Ask all the CPT codes at once unless the "
                     "representative asks for them one at a time. Fan answers out to the CPT "
                     "codes the representative confirms, and skip sub-questions for CPT codes "
-                    "that are not covered."
+                    "that are not covered. The codes below differ only in the number, so vary "
+                    "how you introduce a batch and read the codes as a natural group rather "
+                    "than reciting one identical sentence per code. That is wording only — "
+                    "which questions you ask, and in what grouping, is set by the list."
                 ),
                 intro="Now I'd like to verify some diagnostic coverage details.",
                 outro="Thank you. One moment while I organize these details.",
@@ -1233,7 +1241,11 @@ def build_ibv_standard() -> FormSchemaDoc:
                 prompt=(
                     "Work through general office visits details. Ask per service panel, fan "
                     "answers out to the CPT codes the representative confirms, and skip "
-                    "sub-questions for services that are not covered."
+                    "sub-questions for services that are not covered. Each service below "
+                    "carries a single code, so vary how you open each one instead of repeating "
+                    "one sentence shape, and keep the service name beside the code the way each "
+                    "listed question does. That is wording only — which questions you ask, and "
+                    "in what grouping, is set by the list."
                 ),
                 intro="Now I'd like to verify some general office visits coverage.",
                 outro="Thanks. One moment while I organize these details.",
@@ -1262,7 +1274,10 @@ def build_ibv_standard() -> FormSchemaDoc:
                 prompt=(
                     "Only reached for family plans with a male spouse. Establish whether "
                     "male partner fertility services are covered before asking any "
-                    "per-service question."
+                    "per-service question. Vary how you open each service's questions "
+                    "instead of repeating one sentence shape, and keep the service name "
+                    "beside the code the way each listed question does. That is wording "
+                    "only — which questions you ask is set by the list."
                 ),
                 intro="Now I'd like to ask about male partner fertility coverage.",
                 outro="Thanks, that covers the male partner benefits. Just a moment.",

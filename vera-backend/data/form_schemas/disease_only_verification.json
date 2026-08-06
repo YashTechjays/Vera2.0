@@ -352,7 +352,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 77067 for the cancer diagnosis benefit covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 77067 for the cancer diagnosis benefit covered under this plan?"
                   }
                 },
                 "copay": {
@@ -423,7 +423,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 77067 under the cancer diagnosis benefit, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 77067 under the cancer diagnosis benefit, is prior authorization required?"
                   }
                 }
               }
@@ -452,7 +452,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Staying with the cancer diagnosis benefit, is CPT code 85025 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with the cancer diagnosis benefit, is CPT code 85025 covered?"
                   }
                 },
                 "copay": {
@@ -523,7 +523,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 85025 under the cancer diagnosis benefit? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 85025 under the cancer diagnosis benefit?"
                   }
                 }
               }
@@ -592,7 +592,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 93000 for the cardiac disease benefit covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 93000 for the cardiac disease benefit covered under this plan?"
                   }
                 },
                 "copay": {
@@ -663,7 +663,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 93000 under the cardiac disease benefit, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 93000 under the cardiac disease benefit, is prior authorization required?"
                   }
                 }
               }
@@ -732,7 +732,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 70450 for the stroke benefit covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 70450 for the stroke benefit covered under this plan?"
                   }
                 },
                 "copay": {
@@ -803,7 +803,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 70450 under the stroke benefit, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 70450 under the stroke benefit, is prior authorization required?"
                   }
                 }
               }
@@ -930,7 +930,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "And for the kidney failure benefit, is prior authorization required? Please answer Yes, No, or N/A."
+                "ask": "And for the kidney failure benefit, is prior authorization required?"
               }
             },
             "notes": {
@@ -1070,7 +1070,7 @@
       "title": "Disease Coverage",
       "intro": "Now I'd like to verify the covered disease benefits.",
       "outro": "Thank you, that covers the disease benefits. Just a moment.",
-      "prompt": "Go disease by disease. Establish coverage first, then benefits per covered condition; skip sub-questions for conditions that are not covered.",
+      "prompt": "Go disease by disease. Establish coverage first, then benefits per covered condition; skip sub-questions for conditions that are not covered. Vary how you open each condition's questions instead of repeating one sentence shape, and keep the benefit name beside the code the way each listed question does. That is wording only — which questions you ask is set by the list.",
       "sections": [
         "covered_diseases"
       ]

@@ -47,10 +47,6 @@ SCOPE_DISCIPLINE = """SCOPE DISCIPLINE
 Ask only the questions listed under "Current task". That list is the complete set of questions for this call — do not add, invent, or expand into any question, sub-question, or topic that is not on the list, even if it seems relevant. Rephrasing a listed question, confirming an answer, or clarifying a listed question the representative doesn't understand is fine; introducing a new question or a new topic is not. If a system instruction during the call directs you to ask or re-ask specific questions, treat those as part of the current task's list."""
 
 
-PHRASING_VARIETY = """PHRASING VARIETY
-This task lists a long run of questions that differ only in the procedure code. Read them out in one fixed pattern and you sound like a form being processed, so vary the opening and the sentence shape instead of reusing one, keep the service name next to the code the way the listed question does, and move between codes with a short transition rather than restating what you are verifying. This changes wording only — how many questions you ask, and in what grouping, is set by the task list above."""
-
-
 # --- Voice Lab preview persona (sandbox only — NOT a real-call fallback) --------------
 # A Voice Lab session has no PatientForm and no CallPlan, so it can't run the schema-driven
 # plan agents. This generic infertility-verification persona lets the sandbox actually hold a

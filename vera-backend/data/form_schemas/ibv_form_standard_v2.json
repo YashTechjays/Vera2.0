@@ -999,7 +999,7 @@
                 "value": "Yes"
               },
               "prompt": {
-                "ask": "And for ovulation induction, is prior authorization required? Please answer Yes, No, or N/A."
+                "ask": "And for ovulation induction, is prior authorization required?"
               }
             },
             "cycle_limit": {
@@ -1078,7 +1078,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 58323 for IUI covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58323 for IUI covered under this plan?"
                   }
                 },
                 "copay": {
@@ -1149,7 +1149,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 58323 under IUI, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58323 under IUI, is prior authorization required?"
                   }
                 }
               }
@@ -1178,7 +1178,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Staying with IUI, is CPT code 58322 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with IUI, is CPT code 58322 covered?"
                   }
                 },
                 "copay": {
@@ -1249,7 +1249,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 58322 under IUI? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 58322 under IUI?"
                   }
                 }
               }
@@ -1278,7 +1278,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "And for IUI, does the plan cover CPT code 89261? Please answer Yes, No, or N/A."
+                    "ask": "And for IUI, does the plan cover CPT code 89261?"
                   }
                 },
                 "copay": {
@@ -1349,7 +1349,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Does CPT code 89261 under IUI require prior authorization? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 89261 under IUI require prior authorization?"
                   }
                 }
               }
@@ -1458,7 +1458,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 58970 for IVF covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58970 for IVF covered under this plan?"
                   }
                 },
                 "copay": {
@@ -1529,7 +1529,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 58970 under IVF, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58970 under IVF, is prior authorization required?"
                   }
                 }
               }
@@ -1558,7 +1558,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Staying with IVF, is CPT code 89280 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with IVF, is CPT code 89280 covered?"
                   }
                 },
                 "copay": {
@@ -1629,7 +1629,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 89280 under IVF? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 89280 under IVF?"
                   }
                 }
               }
@@ -1658,7 +1658,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "And for IVF, does the plan cover CPT code 89253? Please answer Yes, No, or N/A."
+                    "ask": "And for IVF, does the plan cover CPT code 89253?"
                   }
                 },
                 "copay": {
@@ -1729,7 +1729,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Does CPT code 89253 under IVF require prior authorization? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 89253 under IVF require prior authorization?"
                   }
                 }
               }
@@ -1838,7 +1838,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89258 for embryo cryopreservation covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89258 for embryo cryopreservation covered under this plan?"
                   }
                 },
                 "copay": {
@@ -1909,7 +1909,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 89258 under embryo cryopreservation, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89258 under embryo cryopreservation, is prior authorization required?"
                   }
                 }
               }
@@ -1938,7 +1938,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Staying with embryo cryopreservation, is CPT code 89342 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with embryo cryopreservation, is CPT code 89342 covered?"
                   }
                 },
                 "copay": {
@@ -2009,7 +2009,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 89342 under embryo cryopreservation? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 89342 under embryo cryopreservation?"
                   }
                 }
               }
@@ -2108,7 +2108,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89337 for elective egg cryopreservation covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89337 for elective egg cryopreservation covered under this plan?"
                   }
                 },
                 "copay": {
@@ -2179,7 +2179,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 89337 under elective egg cryopreservation, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89337 under elective egg cryopreservation, is prior authorization required?"
                   }
                 }
               }
@@ -2256,7 +2256,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89337 for egg cryopreservation related to cancer treatment covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89337 for egg cryopreservation related to cancer treatment covered under this plan?"
                   }
                 },
                 "copay": {
@@ -2327,7 +2327,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 89337 under egg cryopreservation related to cancer treatment, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89337 under egg cryopreservation related to cancer treatment, is prior authorization required?"
                   }
                 }
               }
@@ -2408,7 +2408,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 58974 for frozen embryo transfer covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58974 for frozen embryo transfer covered under this plan?"
                   }
                 },
                 "copay": {
@@ -2479,7 +2479,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 58974 under frozen embryo transfer, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58974 under frozen embryo transfer, is prior authorization required?"
                   }
                 }
               }
@@ -2560,7 +2560,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Is CPT code 89290 for embryo biopsy covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89290 for embryo biopsy covered under this plan?"
                   }
                 },
                 "copay": {
@@ -2631,7 +2631,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 89290 under embryo biopsy, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89290 under embryo biopsy, is prior authorization required?"
                   }
                 }
               }
@@ -2660,7 +2660,7 @@
                   ],
                   "inapplicable_value": "No",
                   "prompt": {
-                    "ask": "Staying with embryo biopsy, is CPT code 89291 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with embryo biopsy, is CPT code 89291 covered?"
                   }
                 },
                 "copay": {
@@ -2731,7 +2731,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 89291 under embryo biopsy? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 89291 under embryo biopsy?"
                   }
                 }
               }
@@ -2852,7 +2852,7 @@
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.prior_auth",
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.prior_auth"
           ],
-          "ask": "And for diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
+          "ask": "And for diagnostic testing, is prior authorization required?"
         }
       ],
       "alternatives": [
@@ -2960,7 +2960,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 58340 for diagnostic testing covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58340 for diagnostic testing covered under this plan?"
                   }
                 },
                 "copay": {
@@ -3031,7 +3031,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 58340 under diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58340 under diagnostic testing, is prior authorization required?"
                   }
                 }
               }
@@ -3062,7 +3062,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Staying with diagnostic testing, is CPT code 82670 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with diagnostic testing, is CPT code 82670 covered?"
                   }
                 },
                 "copay": {
@@ -3133,7 +3133,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 82670 under diagnostic testing? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 82670 under diagnostic testing?"
                   }
                 }
               }
@@ -3164,7 +3164,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "And for diagnostic testing, does the plan cover CPT code 83001? Please answer Yes, No, or N/A."
+                    "ask": "And for diagnostic testing, does the plan cover CPT code 83001?"
                   }
                 },
                 "copay": {
@@ -3235,7 +3235,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Does CPT code 83001 under diagnostic testing require prior authorization? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 83001 under diagnostic testing require prior authorization?"
                   }
                 }
               }
@@ -3266,7 +3266,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 83002 for diagnostic testing covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 83002 for diagnostic testing covered under this plan?"
                   }
                 },
                 "copay": {
@@ -3337,7 +3337,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 83002 under diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 83002 under diagnostic testing, is prior authorization required?"
                   }
                 }
               }
@@ -3368,7 +3368,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Staying with diagnostic testing, is CPT code 84146 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with diagnostic testing, is CPT code 84146 covered?"
                   }
                 },
                 "copay": {
@@ -3439,7 +3439,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 84146 under diagnostic testing? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 84146 under diagnostic testing?"
                   }
                 }
               }
@@ -3470,7 +3470,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "And for diagnostic testing, does the plan cover CPT code 84443? Please answer Yes, No, or N/A."
+                    "ask": "And for diagnostic testing, does the plan cover CPT code 84443?"
                   }
                 },
                 "copay": {
@@ -3541,7 +3541,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Does CPT code 84443 under diagnostic testing require prior authorization? Please answer Yes, No, or N/A."
+                    "ask": "Does CPT code 84443 under diagnostic testing require prior authorization?"
                   }
                 }
               }
@@ -3572,7 +3572,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 84144 for diagnostic testing covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 84144 for diagnostic testing covered under this plan?"
                   }
                 },
                 "copay": {
@@ -3643,7 +3643,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 84144 under diagnostic testing, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 84144 under diagnostic testing, is prior authorization required?"
                   }
                 }
               }
@@ -3674,7 +3674,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Staying with diagnostic testing, is CPT code 76830 covered? Please answer Yes, No, or N/A."
+                    "ask": "Staying with diagnostic testing, is CPT code 76830 covered?"
                   }
                 },
                 "copay": {
@@ -3745,7 +3745,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "Is prior authorization required for CPT code 76830 under diagnostic testing? Please answer Yes, No, or N/A."
+                    "ask": "Is prior authorization required for CPT code 76830 under diagnostic testing?"
                   }
                 }
               }
@@ -3822,7 +3822,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 99211 for office visits covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 99211 for office visits covered under this plan?"
                   }
                 },
                 "copay": {
@@ -3893,7 +3893,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 99211 under office visits, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 99211 under office visits, is prior authorization required?"
                   }
                 }
               }
@@ -3935,7 +3935,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 58555 for ambulatory surgical center professional services covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58555 for ambulatory surgical center professional services covered under this plan?"
                   }
                 },
                 "copay": {
@@ -4006,7 +4006,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 58555 under ambulatory surgical center professional services, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58555 under ambulatory surgical center professional services, is prior authorization required?"
                   }
                 }
               }
@@ -4048,7 +4048,7 @@
                     "N/A"
                   ],
                   "prompt": {
-                    "ask": "Is CPT code 58555 for the ambulatory surgical center facility covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 58555 for the ambulatory surgical center facility covered under this plan?"
                   }
                 },
                 "copay": {
@@ -4119,7 +4119,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 58555 under the ambulatory surgical center facility, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 58555 under the ambulatory surgical center facility, is prior authorization required?"
                   }
                 }
               }
@@ -4585,7 +4585,7 @@
                   ],
                   "inapplicable_value": "N/A",
                   "prompt": {
-                    "ask": "Is CPT code 89320 for semen analysis covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89320 for semen analysis covered under this plan?"
                   }
                 },
                 "copay": {
@@ -4656,7 +4656,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 89320 under semen analysis, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89320 under semen analysis, is prior authorization required?"
                   }
                 }
               }
@@ -4704,7 +4704,7 @@
                   ],
                   "inapplicable_value": "N/A",
                   "prompt": {
-                    "ask": "Is CPT code 89259 for sperm cryopreservation covered under this plan? Please answer Yes, No, or N/A."
+                    "ask": "Is CPT code 89259 for sperm cryopreservation covered under this plan?"
                   }
                 },
                 "copay": {
@@ -4775,7 +4775,7 @@
                     "value": "Yes"
                   },
                   "prompt": {
-                    "ask": "And for CPT code 89259 under sperm cryopreservation, is prior authorization required? Please answer Yes, No, or N/A."
+                    "ask": "And for CPT code 89259 under sperm cryopreservation, is prior authorization required?"
                   }
                 }
               }
@@ -5136,7 +5136,7 @@
       "title": "Infertility Coverage",
       "intro": "Now I'd like to verify some infertility coverage details.",
       "outro": "Thank you, that's really helpful. One moment while I organize these details.",
-      "prompt": "Work through infertility treatment. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered.",
+      "prompt": "Work through infertility treatment. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered. The list below runs through many procedure codes in a row, so vary how you open each question instead of reusing one pattern, keep the service name beside the code the way each listed question does, and move between codes with a short transition rather than restating what you are verifying. That is wording only — which questions you ask, and in what grouping, is set by the list.",
       "sections": [
         "infertility_treatment"
       ]
@@ -5146,7 +5146,7 @@
       "title": "Diagnostic Coverage",
       "intro": "Now I'd like to verify some diagnostic coverage details.",
       "outro": "Thank you. One moment while I organize these details.",
-      "prompt": "Work through diagnostic details. Ask all the CPT codes at once unless the representative asks for them one at a time. Fan answers out to the CPT codes the representative confirms, and skip sub-questions for CPT codes that are not covered.",
+      "prompt": "Work through diagnostic details. Ask all the CPT codes at once unless the representative asks for them one at a time. Fan answers out to the CPT codes the representative confirms, and skip sub-questions for CPT codes that are not covered. The codes below differ only in the number, so vary how you introduce a batch and read the codes as a natural group rather than reciting one identical sentence per code. That is wording only — which questions you ask, and in what grouping, is set by the list.",
       "sections": [
         "diagnostic_testing"
       ]
@@ -5156,7 +5156,7 @@
       "title": "General Office Coverage",
       "intro": "Now I'd like to verify some general office visits coverage.",
       "outro": "Thanks. One moment while I organize these details.",
-      "prompt": "Work through general office visits details. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered.",
+      "prompt": "Work through general office visits details. Ask per service panel, fan answers out to the CPT codes the representative confirms, and skip sub-questions for services that are not covered. Each service below carries a single code, so vary how you open each one instead of repeating one sentence shape, and keep the service name beside the code the way each listed question does. That is wording only — which questions you ask, and in what grouping, is set by the list.",
       "sections": [
         "general_coverage"
       ]
@@ -5179,7 +5179,7 @@
       "title": "Male Partner Coverage",
       "intro": "Now I'd like to ask about male partner fertility coverage.",
       "outro": "Thanks, that covers the male partner benefits. Just a moment.",
-      "prompt": "Only reached for family plans with a male spouse. Establish whether male partner fertility services are covered before asking any per-service question.",
+      "prompt": "Only reached for family plans with a male spouse. Establish whether male partner fertility services are covered before asking any per-service question. Vary how you open each service's questions instead of repeating one sentence shape, and keep the service name beside the code the way each listed question does. That is wording only — which questions you ask is set by the list.",
       "sections": [
         "male_partner_coverage"
       ]

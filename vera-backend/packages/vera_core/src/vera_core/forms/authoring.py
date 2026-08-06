@@ -41,9 +41,9 @@ DATE_VALIDATION = Validation(date_format="M/D/YYYY")
 # service": the compiled prompt is one flat numbered list, so "this service" has no
 # antecedent, and one CPT code (89337) appears under two different services.
 _COVERED_ASKS = (
-    "Is CPT code {code} for {service} covered under this plan? Please answer Yes, No, or N/A.",
-    "Staying with {service}, is CPT code {code} covered? Please answer Yes, No, or N/A.",
-    "And for {service}, does the plan cover CPT code {code}? Please answer Yes, No, or N/A.",
+    "Is CPT code {code} for {service} covered under this plan?",
+    "Staying with {service}, is CPT code {code} covered?",
+    "And for {service}, does the plan cover CPT code {code}?",
 )
 _COPAY_ASKS = (
     "What is the copay amount for {referent}?",
@@ -56,9 +56,9 @@ _COINSURANCE_ASKS = (
     "And for {referent}, what is the coinsurance percentage?",
 )
 _PRIOR_AUTH_ASKS = (
-    "Is prior authorization required for {referent}? Please answer Yes, No, or N/A.",
-    "Does {referent} require prior authorization? Please answer Yes, No, or N/A.",
-    "And for {referent}, is prior authorization required? Please answer Yes, No, or N/A.",
+    "Is prior authorization required for {referent}?",
+    "Does {referent} require prior authorization?",
+    "And for {referent}, is prior authorization required?",
 )
 
 
