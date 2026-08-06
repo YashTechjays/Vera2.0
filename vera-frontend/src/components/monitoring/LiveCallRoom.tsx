@@ -26,7 +26,6 @@ import {
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
 import { terminalStatusMessage } from "@/lib/api/callEvents"
-import { LIVE_CALL_ACTIVITY_EVENT, LIVE_CALL_ACTIVITY_INTERVAL_MS } from "@/lib/auth/idle"
 import {
   CONNECTION_PHASE_LABEL,
   PARTICIPANT_MODE_BADGE,
@@ -57,20 +56,6 @@ const MODE_BADGE_CLASS: Record<ParticipantMode, string> = {
   listener: "text-muted-foreground",
   agent: "text-emerald-600",
   callee: "text-muted-foreground",
-}
-
-// Keeps the session alive while connected — a passive listener sends no input, so without this it
-// idle-expires and logs the supervisor out mid-call. Must render inside <LiveKitRoom>.
-function LiveActivityBeacon() {
-  const state = useConnectionState()
-  useEffect(() => {
-    if (state !== ConnectionState.Connected) return
-    const beat = () => window.dispatchEvent(new Event(LIVE_CALL_ACTIVITY_EVENT))
-    beat()
-    const id = window.setInterval(beat, LIVE_CALL_ACTIVITY_INTERVAL_MS)
-    return () => window.clearInterval(id)
-  }, [state])
-  return null
 }
 
 function toParticipantLike(p: Participant): ParticipantLike {
@@ -367,7 +352,6 @@ export function LiveCallRoom({
       // !h-auto: .lk-room-container's height:100% would collapse the transcript below.
       className="flex !h-auto flex-col"
     >
-      <LiveActivityBeacon />
       <RoomView
         microphone={microphone}
         onStatus={onStatus}
