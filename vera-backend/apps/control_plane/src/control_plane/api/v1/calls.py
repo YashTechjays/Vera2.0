@@ -104,7 +104,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["calls"])
 
-_ACTIVE_STATUSES = (
+# Exported: the analytics live panel must count "live" exactly as Live Monitoring does.
+ACTIVE_CALL_STATUSES = (
     CallStatus.INITIATED,
     CallStatus.RINGING,
     CallStatus.IVR,
@@ -865,7 +866,7 @@ async def list_calls(
     pages with a `total` (the `/call-history` envelope)."""
     response.headers["Cache-Control"] = "no-store"
     status_cond = (
-        Call.current_status.in_(list(_ACTIVE_STATUSES))
+        Call.current_status.in_(list(ACTIVE_CALL_STATUSES))
         if scope == "live"
         else Call.current_status.in_(TERMINAL_VALUES)
     )
@@ -979,7 +980,7 @@ async def call_stats(
         await session.execute(
             select(
                 func.count().filter(Call.created_at >= utc_midnight, mine),
-                func.count().filter(visible, Call.current_status.in_(list(_ACTIVE_STATUSES))),
+                func.count().filter(visible, Call.current_status.in_(list(ACTIVE_CALL_STATUSES))),
                 func.count().filter(visible, Call.current_status == CallStatus.CRITICAL),
             ).select_from(Call)
         )

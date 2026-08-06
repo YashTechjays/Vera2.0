@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from google.genai.types import ThinkingConfig
@@ -57,6 +58,7 @@ from vera_core.events import (
     CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
+    IvrExitedEvent,
     WorkerEventBus,
 )
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
@@ -264,11 +266,23 @@ class CallLifecycleEmitter:
     async def ended(self, *, now_ms: int) -> None:
         await self._emit(CallEndedEvent(room_name=self._room_name, ts=now_ms))
 
-    async def _emit(self, event: CallAnsweredEvent | CallEndedEvent) -> None:
+    async def ivr_exited(self, *, now_ms: int) -> None:
+        await self._emit(IvrExitedEvent(room_name=self._room_name, ts=now_ms))
+
+    async def _emit(self, event: CallAnsweredEvent | CallEndedEvent | IvrExitedEvent) -> None:
         try:
             await self._bus.emit(event)
         except Exception:
             logger.exception("failed to emit %s for %s", event.type, self._room_name)
+
+
+def _ivr_exited_publisher(lifecycle: CallLifecycleEmitter) -> Callable[[], Awaitable[None]]:
+    """Bind `ivr_exited` into the no-arg callback the IVR navigator's handoff hook takes."""
+
+    async def publish() -> None:
+        await lifecycle.ivr_exited(now_ms=int(time.time() * 1000))
+
+    return publish
 
 
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
@@ -746,6 +760,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # A successful IVR keypad press rides the live transcript as a dtmf turn
         # (evidence of the action); rooms with no stream enabled report nowhere.
         on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
+        on_ivr_exited=_ivr_exited_publisher(lifecycle) if lifecycle is not None else None,
     )
     await session.start(
         agent=agent,

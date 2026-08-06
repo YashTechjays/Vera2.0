@@ -39,6 +39,7 @@ from vera_core.events import (
     CallFailedEvent,
     CallFailureReason,
     CallHealthEvent,
+    IvrExitedEvent,
     PostCallJob,
     PostCallJobBus,
     WorkerEvent,
@@ -178,6 +179,7 @@ class WorkerEventConsumer:
         self._handlers: dict[str, EventHandler] = {
             "call.failed": self._handle_call_failed,
             "call.answered": self._handle_call_answered,
+            "ivr.exited": self._handle_ivr_exited,
             "call.ended": self._handle_call_ended,
             "call.answer_recorded": self._handle_call_answer_recorded,
             "call.health": self._handle_call_health,
@@ -423,6 +425,24 @@ class WorkerEventConsumer:
                     event_value=CallStatus.ACTIVE.value,
                 )
             )
+
+    async def _handle_ivr_exited(self, event: WorkerEvent) -> None:
+        """Stamp the VR2-45 IVR Success numerator on the DB clock — the NULL guard
+        makes redelivery a no-op."""
+        if not isinstance(event, IvrExitedEvent):
+            return
+        ref = parse_room_name(event.room_name)
+        if ref is None:
+            return  # non-vera / console room
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id).with_for_update())
+            ).scalar_one_or_none()
+            if call is None:
+                _retry_young_or_drop(event.room_name, event.ts)
+                return  # voice-lab room (or the Call row hasn't committed yet → retry)
+            if call.ivr_exited_at is None:
+                call.ivr_exited_at = func.now()
 
     async def _handle_call_ended(self, event: WorkerEvent) -> None:
         if not isinstance(event, CallEndedEvent):

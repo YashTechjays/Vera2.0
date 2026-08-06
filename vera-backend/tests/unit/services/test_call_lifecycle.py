@@ -1,17 +1,25 @@
 """apply_terminal_call_status — terminal call statuses drive the form lifecycle."""
 
+from decimal import Decimal
 from types import SimpleNamespace
 
 from vera_core.models.enums import CallStatus, FormStatus
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 
+_FORM_COMPLETION_PCT = Decimal("62.50")
+
 
 def _call() -> SimpleNamespace:
-    return SimpleNamespace(current_status=CallStatus.ACTIVE.value)
+    return SimpleNamespace(current_status=CallStatus.ACTIVE.value, completion_pct=Decimal("0"))
 
 
 def _form(status: FormStatus = FormStatus.IN_CALL, retry_count: int = 0) -> SimpleNamespace:
-    return SimpleNamespace(status=status.value, retry_count=retry_count, enqueued_at=None)
+    return SimpleNamespace(
+        status=status.value,
+        retry_count=retry_count,
+        enqueued_at=None,
+        completion_pct=_FORM_COMPLETION_PCT,
+    )
 
 
 def test_completed_call_moves_form_to_ai_processing() -> None:
@@ -88,3 +96,21 @@ def test_illegal_form_edge_still_records_call_status() -> None:
     assert call.current_status == CallStatus.FAILED.value
     assert form.status == FormStatus.COMPLETED.value  # untouched
     assert requeued is False
+
+
+def test_terminal_status_freezes_form_completion_onto_the_call() -> None:
+    call, form = _call(), _form()
+    apply_terminal_call_status(
+        call, form, CallStatus.COMPLETED, tenant_max_retries=3, auto_retry_enabled=True
+    )
+    assert call.completion_pct == _FORM_COMPLETION_PCT
+
+
+def test_freeze_happens_even_when_the_form_edge_is_illegal() -> None:
+    """The form edge is best-effort by design; the call's snapshot must not be."""
+    call, form = _call(), _form(status=FormStatus.COMPLETED)  # form already terminal
+    apply_terminal_call_status(
+        call, form, CallStatus.COMPLETED, tenant_max_retries=3, auto_retry_enabled=True
+    )
+    assert call.current_status == CallStatus.COMPLETED.value
+    assert call.completion_pct == _FORM_COMPLETION_PCT

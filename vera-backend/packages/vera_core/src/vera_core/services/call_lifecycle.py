@@ -66,6 +66,8 @@ def apply_terminal_call_status(
     if status not in _FORM_EDGE:
         raise ValueError(f"{status.value} is not a terminal call status")
     call.current_status = status.value
+    # Snapshot, not a live read: the form keeps evolving (edits, retries); history must not.
+    call.completion_pct = form.completion_pct
     requeued = False
     try:
         if _FORM_EDGE[status] is FormStatus.CALL_FAILED:

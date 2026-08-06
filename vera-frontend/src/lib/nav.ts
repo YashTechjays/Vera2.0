@@ -33,7 +33,7 @@ export const navItems: NavItem[] = [
   { title: "Data Management", to: "/data-management", icon: Database, permission: "forms:read" },
   { title: "Voice Lab", to: "/voice-lab", icon: Mic, permission: "voice_lab:sandbox" },
   { title: "Call History", to: "/call-history", icon: PhoneCall, permission: "calls:read" },
-  { title: "Analytics", to: "/analytics", icon: BarChart3, permission: "calls:read" },
+  { title: "Analytics", to: "/analytics", icon: BarChart3, permission: "reports:dashboard" },
   { title: "Tenant Access", to: "/tenant-access", icon: KeyRound, permission: "platform:elevations:read" },
   { title: "Tenants", to: "/platform-tenants", icon: Building, permission: "platform:tenants:manage" },
   { title: "Platform Operators", to: "/platform-operators", icon: Users, permission: "platform:users:read" },

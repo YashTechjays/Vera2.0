@@ -84,3 +84,11 @@ def test_platform_users_permissions_are_catalogued_and_super_admin_only() -> Non
         # Platform perms go only to SUPER_ADMIN (never a tenant role).
         assert code in SYSTEM_ROLES["SUPER_ADMIN"]
         assert code not in SYSTEM_ROLES["TENANT_ADMIN"]
+
+
+def test_reports_dashboard_permission_seeded() -> None:
+    assert "reports:dashboard" in DEFAULT_PERMISSIONS
+    assert "reports:dashboard" in SYSTEM_ROLES["TENANT_ADMIN"]
+    assert "reports:dashboard" in SYSTEM_ROLES["SUPERVISOR"]
+    # VAs reach Live Monitoring via calls:read; the dashboard is an explicit grant.
+    assert "reports:dashboard" not in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
