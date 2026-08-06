@@ -109,6 +109,15 @@ async def _rep_turn(agent: Agent, said: str = "Pat") -> None:
     )
 
 
+async def _enter(controller: PlanRunController, index: int) -> Agent:
+    """Enter a task agent under a mock session, as the runtime would."""
+    agent = controller.agents[index]
+    with _session_patch(agent, MagicMock()):
+        await agent.on_enter()
+        await controller.drain_cursor_writes()
+    return agent
+
+
 def _session_patch(agent: Agent, mock_session: MagicMock) -> Any:
     # A real latch: a bare MagicMock attribute reads truthy and trips the takeover guards.
     mock_session.userdata = TakeoverState()
@@ -854,6 +863,116 @@ def _gap_plan() -> CallPlan:
 _CLOSER = 3  # index of closing_task in _gap_plan()
 
 
+def _intra_task_gate_plan() -> CallPlan:
+    """closing_admin's shape: `tpa_name` is gated on `tpa_exists`, asked in the SAME task, so
+    at entry that gate is undecided — not excluded. `auth_dept` is gated on a field the
+    previous task collected, so at entry it IS decided."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="coverage_task",
+                title="Coverage",
+                prompt="Coverage.",
+                fields=[_field("sections.cov.prior_auth", "Prior auth", values=["Yes", "No"])],
+            ),
+            PlanTask(
+                task_key="admin_task",
+                title="Administrative Details",
+                prompt="Admin.",
+                fields=[
+                    _field("sections.admin.tpa_exists", "TPA Exists", values=["Yes", "No"]),
+                    _field(
+                        "sections.admin.tpa_name",
+                        "TPA Name",
+                        gates=(
+                            Comparison(field="sections.admin.tpa_exists", op="eq", value="Yes"),
+                        ),
+                    ),
+                    _field(
+                        "sections.admin.auth_dept",
+                        "Authorization Department Name",
+                        gates=(Comparison(field="sections.cov.prior_auth", op="eq", value="Yes"),),
+                    ),
+                ],
+            ),
+            PlanTask(
+                task_key="closing_task",
+                title="Wrap Up",
+                prompt="Reference number then end.",
+                fields=[_field("sections.close.ref_number", "Reference number")],
+            ),
+        ],
+    )
+
+
+class TestEntryDecidability:
+    """A gate is only decided at task entry when every field it references was collected by an
+    EARLIER task. 131 of ibv_standard's 149 gated questions are gated on a field their own task
+    asks, and declaring those excluded told the agent not to ask the follow-up it needed."""
+
+    def test_a_gate_on_a_field_this_task_asks_is_undecided_so_never_excluded(self) -> None:
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "Yes"})
+        askable, excluded = controller.entry_gate_split(1)
+        assert "TPA Name" not in [f.title for f in excluded]
+        assert "TPA Name" in [f.title for f in askable]
+
+    def test_an_earlier_task_left_unanswered_upstream_still_decides(self) -> None:
+        # The rep never reached prior auth (its own gate was off), so the value is final at "" —
+        # the auth department question is genuinely out, not merely unasked. The harder input:
+        # an explicit "No" and a never-answered "" reach the same single comparison.
+        controller, _ = _controller(_intra_task_gate_plan())
+        _askable, excluded = controller.entry_gate_split(1)
+        assert "Authorization Department Name" in [f.title for f in excluded]
+
+    def test_gap_fields_still_uses_full_chains(self) -> None:
+        # At end of call the intra-task gate IS decided, which is what the sweep needs.
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers(
+            {"sections.cov.prior_auth": "No", "sections.admin.tpa_exists": "No"}
+        )
+        assert "TPA Name" not in [f.title for f in controller.gap_fields(1)]
+
+    @pytest.mark.asyncio
+    async def test_the_instructions_never_forbid_a_same_task_follow_up(self) -> None:
+        # The bug: at entry `tpa_exists` is unanswered, so the old block listed TPA Name under
+        # "do NOT ask these" and never withdrew it when the rep said yes.
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "No"})
+        agent = await _enter(controller, 1)
+        excluded_block = agent.instructions.split("# Excluded by the plan's gates")[1]
+        assert "TPA Name" not in excluded_block
+        assert "Authorization Department Name" in excluded_block
+
+    @pytest.mark.asyncio
+    async def test_a_task_whose_only_failing_gates_are_undecided_gets_no_block(self) -> None:
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "Yes"})
+        before = controller.agents[1].instructions
+        agent = await _enter(controller, 1)
+        assert agent.instructions == before
+
+    @pytest.mark.asyncio
+    async def test_a_task_is_not_skipped_because_its_own_gate_question_is_unanswered(
+        self,
+    ) -> None:
+        # On full chains a task whose EVERY question is intra-task-gated would skip itself
+        # before asking anything. Entry decidability makes that impossible by construction.
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "No"})
+        agent = controller.agents[1]
+        session = MagicMock()
+        with _session_patch(agent, session):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        session.update_agent.assert_not_called()
+
+
 def _multi_gap_plan() -> CallPlan:
     """A sweepable task with FIVE required-and-unanswered fields — the shape one field per
     task cannot express. Two share the title "Covered" (the CPT shape), so its list exercises
@@ -903,13 +1022,6 @@ class TestGating:
     """`coverage_task` is the shape that failed on a live eval: one applicable question
     (deductible) plus one the gates exclude (oon_note, gated on in_network == "No")."""
 
-    async def _enter(self, controller: PlanRunController, index: int) -> Agent:
-        agent = controller.agents[index]
-        with _session_patch(agent, MagicMock()):
-            await agent.on_enter()
-            await controller.drain_cursor_writes()
-        return agent
-
     @pytest.mark.asyncio
     async def test_gating_lands_in_the_instructions_not_a_one_shot_directive(self) -> None:
         # The defect: the list was a generate_reply directive, which LiveKit staples to a COPY
@@ -917,7 +1029,7 @@ class TestGating:
         # Instructions persist for every turn of the task, which is the whole fix.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
-        agent = await self._enter(controller, 2)
+        agent = await _enter(controller, 2)
         assert "OON note" in agent.instructions
         assert "Deductible" in agent.instructions
 
@@ -927,7 +1039,7 @@ class TestGating:
         # itself immediately. Leading with what DOES apply is what prevents that reading.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
-        agent = await self._enter(controller, 2)
+        agent = await _enter(controller, 2)
         assert agent.instructions.index("Deductible") < agent.instructions.index("OON note")
         assert "apply on THIS call" in agent.instructions
 
@@ -936,8 +1048,17 @@ class TestGating:
         # No gates in play → no narrowing text at all, so the common case is untouched.
         controller, _ = _controller(_gap_plan())
         before = controller.agents[0].instructions
-        agent = await self._enter(controller, 0)
+        agent = await _enter(controller, 0)
         assert agent.instructions == before
+
+    @pytest.mark.asyncio
+    async def test_a_gate_on_a_field_no_task_collects_still_excludes(self) -> None:
+        # `in_network` is prefilled context, not a question, so its value is final at entry —
+        # the decidability split must not weaken the case the block exists for.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await _enter(controller, 2)
+        assert "OON note" in agent.instructions.split("# Excluded by the plan's gates")[1]
 
     @pytest.mark.asyncio
     async def test_re_entry_re_narrows_instead_of_stacking(self) -> None:
@@ -945,9 +1066,9 @@ class TestGating:
         # answers, not appended again.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
-        agent = await self._enter(controller, 2)
+        agent = await _enter(controller, 2)
         once = agent.instructions
-        await self._enter(controller, 2)
+        await _enter(controller, 2)
         assert agent.instructions == once
 
 
@@ -1888,17 +2009,16 @@ class TestGatedOutTask:
 
     def test_applicable_fields_drops_the_gated_ones(self) -> None:
         controller, _ = _controller(_gated_task_plan())
-        assert controller.applicable_fields(1) == []
-        assert [f.title for f in controller.inapplicable_fields(1)] == [
-            "Male partner covered",
-            "CPT 89320",
-        ]
+        askable, excluded = controller.entry_gate_split(1)
+        assert askable == []
+        assert [f.title for f in excluded] == ["Male partner covered", "CPT 89320"]
 
     def test_the_gate_holding_makes_them_applicable_again(self) -> None:
         controller, _ = _controller(_gated_task_plan())
         controller.update_answers({"sections.patient.spouse_gender": "Male"})
-        assert len(controller.applicable_fields(1)) == 2
-        assert controller.inapplicable_fields(1) == []
+        askable, excluded = controller.entry_gate_split(1)
+        assert len(askable) == 2
+        assert excluded == []
 
     @pytest.mark.asyncio
     async def test_a_fully_gated_task_is_skipped_without_speaking(self) -> None:

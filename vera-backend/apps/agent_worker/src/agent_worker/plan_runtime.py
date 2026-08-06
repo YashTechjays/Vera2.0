@@ -46,6 +46,7 @@ from agent_worker.prompt import (
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
+from vera_core.forms.dsl import Condition, condition_field_paths
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -133,10 +134,8 @@ def _field_lines(fields: list[PlanFieldDescriptor], *, numbered: bool = False) -
     return "\n".join(lines)
 
 
-def _gating_block(
-    applicable: list[PlanFieldDescriptor], excluded: list[PlanFieldDescriptor]
-) -> str:
-    """This call's narrowed question list, or "" when the gates exclude nothing.
+def _gating_block(askable: list[PlanFieldDescriptor], excluded: list[PlanFieldDescriptor]) -> str:
+    """This call's narrowed question list, or "" when no decided gate excludes anything.
 
     Leads with what DOES apply. An exclusions-only list was read as "the whole task is
     excluded" — the financial task announced itself and completed in the same turn, claiming
@@ -146,10 +145,9 @@ def _gating_block(
     if not excluded:
         return ""
     sections: list[str] = []
-    if applicable:
+    if askable:
         sections.append(
-            "# Questions that apply on THIS call — ask every one of them\n"
-            f"{_field_lines(applicable)}"
+            f"# Questions that apply on THIS call — ask every one of them\n{_field_lines(askable)}"
         )
     sections.append(
         "# Excluded by the plan's gates — do NOT ask these, whatever the task list says\n"
@@ -252,8 +250,12 @@ class PlanTaskAgent(Agent):
         Announcing a section and closing it in the same breath ("Now I'd like to ask about male
         partner coverage… Thanks, that covers the male partner benefits.") sounds broken, and
         asking those questions anyway is worse. A task with NO fields at all is a different thing
-        — it carries only speech, so it still runs."""
-        if not self._task.fields or self._controller.applicable_fields(self._task_index):
+        — it carries only speech, so it still runs.
+
+        Entry-decided gates only: on full chains a task whose every question is gated on its own
+        first question would skip itself before asking anything."""
+        askable, _ = self._controller.entry_gate_split(self._task_index)
+        if not self._task.fields or askable:
             return False
         if not self._controller.opened:
             # The call's greeting and recording disclosure ride on the opening task's intro;
@@ -278,11 +280,14 @@ class PlanTaskAgent(Agent):
         the excluded questions anyway.
 
         Rebuilt from `_task_block` rather than appended to the current instructions, so a
-        re-entry (a ReAsk directive) re-narrows against fresher answers instead of stacking."""
-        gating = _gating_block(
-            self._controller.applicable_fields(self._task_index),
-            self._controller.inapplicable_fields(self._task_index),
-        )
+        re-entry (a ReAsk directive) re-narrows against fresher answers instead of stacking.
+
+        Judged on ENTRY-DECIDED gates only (`entry_gate_split`). A question gated on a field this
+        task itself asks is undecided here, and listing it as excluded told the agent not to ask
+        the follow-up it needed one turn later — 131 of ibv_standard's 149 gated questions are
+        that shape. Those are left to the prose gate in the task prompt, which the agent re-reads
+        every turn; this block only ever names questions a settled answer has ruled out."""
+        gating = _gating_block(*self._controller.entry_gate_split(self._task_index))
         if not gating:
             return
         await self.update_instructions(self._build_instructions(gating))
@@ -878,27 +883,53 @@ class PlanRunController:
 
     # -- gap-pass API -------------------------------------------------------------
 
+    def _decided_before(self, path: str, task_index: int) -> bool:
+        owner = self._task_of_path.get(path)  # absent: context/prefilled, so always final
+        return owner is None or owner < task_index
+
+    def _decidable_gates(
+        self, field: PlanFieldDescriptor, task_index: int
+    ) -> tuple[Condition, ...]:
+        """The conjuncts of `field`'s gate chain whose answer is already final at task entry.
+
+        A conjunct referencing a path THIS task (or a later one) collects is undecided —
+        evaluating it reads false and would forbid a follow-up the agent is about to need. A
+        mixed conjunct (`any(earlier, this_task)`) counts as undecided whole: descending into an
+        OR to salvage its decidable half would be unsound."""
+        shared = self.plan.shared_conditions
+        return tuple(
+            gate
+            for gate in field.gates
+            if all(
+                self._decided_before(ref, task_index) for ref in condition_field_paths(gate, shared)
+            )
+        )
+
+    def entry_gate_split(
+        self, task_index: int
+    ) -> tuple[list[PlanFieldDescriptor], list[PlanFieldDescriptor]]:
+        """(askable, excluded) for this task, judged only on gates already decided at entry.
+
+        One pass so the two halves cannot drift, and so the gate walk happens once."""
+        askable: list[PlanFieldDescriptor] = []
+        excluded: list[PlanFieldDescriptor] = []
+        shared = self.plan.shared_conditions
+        for field in self.plan.tasks[task_index].fields:
+            gates = self._decidable_gates(field, task_index)
+            bucket = askable if is_applicable(gates, self._answers, shared) else excluded
+            bucket.append(field)
+        return askable, excluded
+
+    # -- gap-pass API: FULL gate chains, valid only once a task's own questions are asked ----
+
     def applicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
-        """A task's questions whose gates hold, so they are askable on THIS call."""
+        """A task's questions whose FULL gate chain holds. Valid for the gap pass, never at task
+        entry — an intra-task gate is undecided there (see `entry_gate_split`)."""
         shared = self.plan.shared_conditions
         return [
             field
             for field in self.plan.tasks[task_index].fields
             if is_applicable(field.gates, self._answers, shared)
-        ]
-
-    def inapplicable_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
-        """The complement: questions the compiled prompt still lists but the gates exclude.
-
-        The prompt is rendered per schema, before any answer exists, so it enumerates every
-        question and can only express a gate as prose the model must evaluate itself — often
-        against a value it was never given. Naming the exclusions live is the only signal it has.
-        """
-        shared = self.plan.shared_conditions
-        return [
-            field
-            for field in self.plan.tasks[task_index].fields
-            if not is_applicable(field.gates, self._answers, shared)
         ]
 
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
