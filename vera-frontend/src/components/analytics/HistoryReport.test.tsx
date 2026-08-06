@@ -30,6 +30,7 @@ const REPORT = {
   },
   calls_per_day: [{ day: "2026-08-01", calls: 40 }],
   interventions_by_type: [{ type: "whisper", count: 10 }],
+  interventions_per_day: [{ day: "2026-08-01", flag: 0, coach: 3, whisper: 7, takeover: 0 }],
 }
 
 describe("HistoryReport", () => {
@@ -51,6 +52,20 @@ describe("HistoryReport", () => {
     expect(screen.getByText("Intervention Rate")).toBeInTheDocument()
     expect(screen.getByText("25.0%")).toBeInTheDocument()
     expect(screen.getByText("6m 0s")).toBeInTheDocument()
+  })
+
+  it("renders the interventions-per-day chart card", async () => {
+    render(<HistoryReport />)
+    await waitFor(() => expect(screen.getByText("Interventions per day")).toBeInTheDocument())
+    expect(screen.queryByText("No interventions in this period")).not.toBeInTheDocument()
+  })
+
+  it("shows an empty state when the range has no interventions", async () => {
+    mockedReport.mockResolvedValue({ ...REPORT, interventions_per_day: [] })
+    render(<HistoryReport />)
+    await waitFor(() =>
+      expect(screen.getByText("No interventions in this period")).toBeInTheDocument(),
+    )
   })
 
   it("refetches when the provider filter changes", async () => {

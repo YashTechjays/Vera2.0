@@ -4,6 +4,7 @@ Counts, averages, and catalog names only — no patient field ever leaves this m
 which is what exempts it from the PHI display-path audit (precedent: calls.py::call_stats).
 """
 
+from collections import Counter
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
@@ -176,11 +177,22 @@ class InterventionTypeCount(BaseModel):
     count: int
 
 
+class InterventionDayCounts(BaseModel):
+    """One field per InterventionType value — extend together with the enum."""
+
+    day: date
+    flag: int = 0
+    coach: int = 0
+    whisper: int = 0
+    takeover: int = 0
+
+
 class HistoryReport(BaseModel):
     current: ReportMetrics
     previous: ReportMetrics
     calls_per_day: list[DayCount]
     interventions_by_type: list[InterventionTypeCount]
+    interventions_per_day: list[InterventionDayCounts]
 
 
 class FilterOption(BaseModel):
@@ -291,22 +303,32 @@ async def history_report(
             .order_by(day)
         )
     ).all()
-    type_rows = (
+    # Interventions bucket by their CALL's day so every report series shares one axis.
+    type_day_rows = (
         await session.execute(
-            select(InterventionEvent.type, func.count())
+            select(day.label("day"), InterventionEvent.type, func.count())
             .select_from(InterventionEvent)
             .join(Call, Call.id == InterventionEvent.call_id)
             .where(*current_conds)
-            .group_by(InterventionEvent.type)
-            .order_by(InterventionEvent.type)
+            .group_by(day, InterventionEvent.type)
         )
     ).all()
+    per_day: dict[date, dict[str, int]] = {}
+    type_totals: Counter[str] = Counter()
+    for d, t, n in type_day_rows:
+        per_day.setdefault(d.date(), {})[t] = n
+        type_totals[t] += n
     return ok(
         HistoryReport(
             current=current,
             previous=previous,
             calls_per_day=[DayCount(day=d.date(), calls=n) for d, n in day_rows],
-            interventions_by_type=[InterventionTypeCount(type=t, count=n) for t, n in type_rows],
+            interventions_by_type=[
+                InterventionTypeCount(type=t, count=n) for t, n in sorted(type_totals.items())
+            ],
+            interventions_per_day=[
+                InterventionDayCounts(day=d, **counts) for d, counts in sorted(per_day.items())
+            ],
         )
     )
 
