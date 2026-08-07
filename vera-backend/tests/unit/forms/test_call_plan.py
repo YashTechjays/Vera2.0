@@ -503,3 +503,47 @@ class TestDescriptorCarriesDefault:
     def test_a_leaf_without_a_default_carries_none(self) -> None:
         by_path = {f.path: f for task in PLAN.tasks for f in task.fields}
         assert by_path["sections.insurance_representative.rep_name"].default is None
+
+
+class TestExclusiveNotes:
+    """A routing `alternatives` picks ONE branch but gates none of them, so the Observer inferred
+    `No` for the branch not taken — a coverage claim, at confidence 90 on a live call, where `N/A`
+    is the truth. The schema has to tell it; it cannot know from the transcript."""
+
+    def _noted(self) -> dict[str, str]:
+        return {f.path: f.exclusive_note for t in PLAN.tasks for f in t.fields if f.exclusive_note}
+
+    def test_a_routing_branchs_leaves_name_their_sibling(self) -> None:
+        noted = self._noted()
+        elective = noted[
+            "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered"
+        ]
+        assert "Egg Cryopreservation Cancer" in elective
+        assert "record N/A here" in elective
+        assert "never No" in elective
+
+    def test_the_note_is_symmetric(self) -> None:
+        noted = self._noted()
+        cancer = noted[
+            "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered"
+        ]
+        assert "Egg Cryopreservation Elective" in cancer
+
+    def test_both_asc_branches_are_noted(self) -> None:
+        noted = self._noted()
+        professional = noted["sections.general_coverage.asc_professional.cpt_58555.covered"]
+        assert "ASC Facility" in professional
+        assert (
+            "ASC Professional Services"
+            in (noted["sections.general_coverage.asc_facility.cpt_58555.covered"])
+        )
+
+    def test_a_leaf_level_either_or_gets_no_note(self) -> None:
+        # cost pairs are alternatives over LEAVES — an either/or over two answers, not a routing
+        # choice between services. Answering coinsurance says nothing about applicability.
+        noted = self._noted()
+        cost = "sections.infertility_treatment.intrauterine_insemination.cpt_58323.copay"
+        assert cost not in noted
+
+    def test_an_unrelated_leaf_gets_no_note(self) -> None:
+        assert "sections.insurance_representative.rep_name" not in self._noted()

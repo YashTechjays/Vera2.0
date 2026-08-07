@@ -132,7 +132,10 @@ def _extraction_instructions(task: PlanTask) -> str:
     ]
     for f in task.fields:
         allowed = f" (one of: {', '.join(f.values)})" if f.values else ""
-        lines.append(f"- {f.path}: {f.title}{allowed}")
+        # Routing branches are not gated on the choice, so without this the extractor infers `No`
+        # for the branch the rep did not take — a coverage claim, where `N/A` is the truth.
+        note = f" — {f.exclusive_note}" if f.exclusive_note else ""
+        lines.append(f"- {f.path}: {f.title}{allowed}{note}")
     return "\n".join(lines)
 
 

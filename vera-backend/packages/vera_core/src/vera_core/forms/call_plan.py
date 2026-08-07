@@ -45,6 +45,7 @@ from vera_core.forms.dsl import (
     Contradiction,
     FlowRule,
     FormSchemaDoc,
+    Group,
     LeafType,
     NumericConsistency,
     RequiredWhen,
@@ -86,6 +87,8 @@ class PlanFieldDescriptor(_Model):
     # `completion_pct_v2` counts a leaf with a default as FILLED and the export writes it, so a
     # worker that cannot see it chases fields the form already calls done.
     default: str | None = None
+    # Prose for the Observer when this leaf sits under a routing branch (see `_exclusive_notes`).
+    exclusive_note: str | None = None
 
 
 class PlanTask(_Model):
@@ -129,6 +132,40 @@ class CallPlan(_Model):
     on_file_values: str | None = None  # "Title: value" lines, confirm-role prefills (to confirm)
 
 
+def _exclusive_notes(doc: FormSchemaDoc) -> dict[str, str]:
+    """`{leaf path: note}` for every leaf under a ROUTING branch — an `alternatives` over groups.
+
+    A routing set picks one branch, but nothing gates the others, so the Observer has been
+    inferring `No` for the branch not taken: a live call recorded
+    `egg_cryopreservation_elective…covered = "No"` at confidence 90, which asserts the plan does
+    not cover elective egg cryopreservation when the representative never discussed it. `N/A` is
+    the true answer, and the Observer cannot know that from the transcript alone — the schema has
+    to say it.
+
+    Resolved to prose at compile time because the worker is DB-free, the same reason gate
+    conditions are pre-rendered rather than shipped as `Condition`s."""
+    leaf_paths = [path for path, _leaf, _gates in leaf_gates(doc)]
+    notes: dict[str, str] = {}
+    for section in doc.sections.values():
+        for alternatives in section.alternatives or []:
+            branches = [
+                (member, node.title)
+                for member in alternatives.members
+                if isinstance(node := section.fields.get(member.split(".")[-1]), Group)
+            ]
+            if len(branches) < 2:
+                continue  # a leaf-level either/or, not a routing set
+            for branch, title in branches:
+                others = " or ".join(other for path, other in branches if path != branch)
+                note = (
+                    f"Only one of {title} or {others} applies to this patient. If the "
+                    f"representative indicates {others} applies instead, record N/A here — never "
+                    "No, which would claim the plan does not cover it."
+                )
+                notes.update({p: note for p in leaf_paths if p.startswith(f"{branch}.")})
+    return notes
+
+
 def compile_call_plan(
     doc: FormSchemaDoc,
     prompt_doc: PromptDocument | None,
@@ -146,6 +183,7 @@ def compile_call_plan(
     """
     rendered = render_task_prompts(doc, prompt_doc)
     section_to_task = doc.section_to_task()
+    exclusive_notes = _exclusive_notes(doc)
     fields_by_task: dict[str, list[PlanFieldDescriptor]] = {}
     for path, leaf, gates in leaf_gates(doc):
         if leaf.role not in COLLECTABLE_ROLES:
@@ -168,6 +206,7 @@ def compile_call_plan(
                 gates=gates,
                 inapplicable_value=leaf.inapplicable_value,
                 default=leaf.default,
+                exclusive_note=exclusive_notes.get(path),
             )
         )
 

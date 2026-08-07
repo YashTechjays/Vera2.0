@@ -709,3 +709,34 @@ class TestDerivedRemaining:
         await _feed(manager, _rep("Same again.", ts=2))
         derived = [r for r in run_state.records if r[1] == REMAINING]
         assert len(derived) == 1
+
+
+def test_extraction_instructions_carry_the_routing_note() -> None:
+    """Without it the extractor writes `No` for the branch the rep did not take."""
+    from agent_worker.observer import _extraction_instructions
+    from vera_core.forms.call_plan import PlanFieldDescriptor, PlanTask
+
+    task = PlanTask(
+        task_key="t",
+        title="T",
+        prompt="p",
+        fields=[
+            PlanFieldDescriptor(
+                path="sections.s.branch_a.covered",
+                title="Covered",
+                type="enum",
+                role="ask",
+                values=["Yes", "No", "N/A"],
+                exclusive_note="Only one of A or B applies. …record N/A here — never No…",
+            ),
+            PlanFieldDescriptor(
+                path="sections.s.plain",
+                title="Plain",
+                type="text",
+                role="ask",
+            ),
+        ],
+    )
+    text = _extraction_instructions(task)
+    assert "record N/A here — never No" in text
+    assert "- sections.s.plain: Plain" in text  # unnoted fields keep their bare line
