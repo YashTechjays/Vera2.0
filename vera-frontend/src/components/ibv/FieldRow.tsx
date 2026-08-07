@@ -136,6 +136,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
               dispute={dispute!}
               flags={flags}
               className="top-1/2 right-1 -translate-y-1/2"
+              canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
             />
@@ -144,6 +145,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
               dispute={dispute!}
               flags={flags}
               className="right-1.5"
+              canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
             />

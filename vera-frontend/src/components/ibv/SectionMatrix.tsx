@@ -139,6 +139,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
               dispute={dispute!}
               flags={flags}
               className="top-1 right-1"
+              canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
             />
@@ -148,6 +149,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
               flags={flags}
               className="right-1"
               bareBadge={field.type === "enum"}
+              canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
             />
