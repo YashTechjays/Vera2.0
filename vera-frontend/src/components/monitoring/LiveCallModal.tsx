@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { copyText } from "@/lib/clipboard"
 import { usePermission } from "@/lib/auth/permissions"
+import { LIVE_CALL_ACTIVITY_EVENT, LIVE_CALL_ACTIVITY_INTERVAL_MS } from "@/lib/auth/idle"
 import { ApiError } from "@/lib/api/client"
 import { endCall } from "@/lib/api/calls"
 import type { CallHealth } from "@/lib/api/callEvents"
@@ -201,6 +202,16 @@ export function LiveCallModal({
   // SSE is the sole source of truth for "call ended"; a room "ended" phase is the
   // supervisor's own connection dropping (LiveCallRoom shows a connection-lost state).
   const callEnded = sseEnded
+
+  // Watching a live call needs no mouse and no audio-room connection, so the beacon is
+  // keyed to the modal showing an un-ended call, not to LiveKit state (VR2-167).
+  useEffect(() => {
+    if (!open || callEnded) return
+    const beat = () => window.dispatchEvent(new Event(LIVE_CALL_ACTIVITY_EVENT))
+    beat()
+    const id = window.setInterval(beat, LIVE_CALL_ACTIVITY_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [open, callEnded])
 
   // The list is poll-driven and its DB status lags the worker's shutdown drain by
   // many seconds (VR2-72) — surface the SSE terminal signal so it updates now.

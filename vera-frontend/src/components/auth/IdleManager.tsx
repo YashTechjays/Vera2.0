@@ -15,8 +15,8 @@ import {
 } from "@/store/authSlice"
 import { useAppDispatch, useAppSelector, useAppStore } from "@/store/hooks"
 
-// User input plus the live-call beacon: an open live-call connection counts as
-// activity (the supervisor is actively listening even without touching the page).
+// User input plus the live-call beacon: an open live call counts as activity (the
+// supervisor is watching it even without touching the page).
 const ACTIVITY_EVENTS = [
   "mousemove",
   "mousedown",
@@ -55,14 +55,24 @@ export function IdleManager() {
     })
   }, [dispatch, navigate, store])
 
+  // The server's idle window slides only on this request, so a send it never heard must
+  // not silence the throttle for a full window — a failure rolls the throttle clock back.
+  const sendKeepalive = useCallback(() => {
+    const sentAt = Date.now()
+    lastKeepalive.current = sentAt
+    dispatch(keepaliveThunk())
+      .unwrap()
+      .catch(() => {
+        if (lastKeepalive.current === sentAt) lastKeepalive.current = 0
+      })
+  }, [dispatch])
+
   const staySignedIn = useCallback(() => {
-    const now = Date.now()
-    lastActivity.current = now
-    lastKeepalive.current = now
+    lastActivity.current = Date.now()
     warningRef.current = false
     setWarning(false)
-    void dispatch(keepaliveThunk())
-  }, [dispatch])
+    sendKeepalive()
+  }, [sendKeepalive])
 
   // Activity → reset idle timer + throttled keepalive. Ignored while the warning
   // shows, so only the explicit "Stay signed in" can rescue the session.
@@ -71,21 +81,19 @@ export function IdleManager() {
       if (warningRef.current) return
       const now = Date.now()
       lastActivity.current = now
-      if (now - lastKeepalive.current >= KEEPALIVE_THROTTLE_MS) {
-        lastKeepalive.current = now
-        void dispatch(keepaliveThunk())
-      }
+      if (now - lastKeepalive.current >= KEEPALIVE_THROTTLE_MS) sendKeepalive()
     }
     ACTIVITY_EVENTS.forEach((e) => window.addEventListener(e, onActivity, { passive: true }))
     return () => ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onActivity))
-  }, [dispatch])
+  }, [sendKeepalive])
 
   // 1s tick using real timestamps + immediate recompute on focus/visibility so a
   // backgrounded or slept tab logs out correctly on return.
   useEffect(() => {
-    const now = Date.now()
-    if (lastActivity.current === 0) lastActivity.current = now
-    if (lastKeepalive.current === 0) lastKeepalive.current = now
+    if (lastActivity.current === 0) lastActivity.current = Date.now()
+    // The server started its idle countdown at login, so without a send here the first
+    // keepalive can lag a whole throttle window and the server expires early (VR2-167).
+    if (lastKeepalive.current === 0) sendKeepalive()
 
     function check() {
       // /me hasn't hydrated the timeout config yet — wait for it rather than
@@ -115,7 +123,7 @@ export function IdleManager() {
       document.removeEventListener("visibilitychange", check)
       window.removeEventListener("focus", check)
     }
-  }, [doLogout, idleTimeoutMs, sessionExpiresAt])
+  }, [doLogout, idleTimeoutMs, sessionExpiresAt, sendKeepalive])
 
   return (
     <IdleWarningDialog
