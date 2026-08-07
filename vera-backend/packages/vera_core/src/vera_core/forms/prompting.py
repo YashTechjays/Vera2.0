@@ -16,7 +16,8 @@ Pure and DB-free; consumed by the seeder and the call-time prompt pipeline.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from itertools import count
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -319,17 +320,41 @@ def _codes_text(codes: Codes) -> str:
 
 
 def render_panels(panels: list[PromptPanel]) -> str:
-    """The question list for a set of panels.
+    """The question list for a set of panels, numbered CONTINUOUSLY across all of them.
 
     Pure string assembly over an already-resolved tree — every condition was rendered to
     text in `build_question_plan`, so the DB-free worker can call this to re-render the list
     with entry-decided gates applied, and can never render the tree differently than the
-    compiler did."""
-    return "\n\n".join("\n".join(_panel_lines(panel, depth=0)) for panel in panels)
+    compiler did.
+
+    One counter spans every panel so the last ordinal IS the task's question total. Numbering
+    per panel instead made a multi-section task read as several separately finishable lists,
+    and a live call ended `insurance_basics` after its first section."""
+    numbering = count(1)
+    return "\n\n".join(
+        "\n".join(_panel_lines(panel, depth=0, numbering=numbering)) for panel in panels
+    )
 
 
-def _panel_lines(panel: PromptPanel, depth: int) -> list[str]:
-    """One panel: heading, codes, its gate stated once, then its numbered questions."""
+def numbered_questions(panels: list[PromptPanel]) -> int:
+    """How many questions `render_panels` gives an ordinal — so also its LAST ordinal.
+
+    Lives here, next to `_panel_lines`, because it describes what that function emits: one
+    continuous count across every panel, skipping routing questions. A caller that tells the
+    agent "this task has N questions" has to move whenever the numbering does."""
+    return sum(
+        numbered_questions([item])
+        if isinstance(item, PromptPanel)
+        else (0 if item.routes_between else 1)
+        for panel in panels
+        for item in panel.items
+    )
+
+
+def _panel_lines(panel: PromptPanel, depth: int, numbering: Iterator[int]) -> list[str]:
+    """One panel: heading, codes, its gate stated once, then its questions.
+
+    `numbering` is the whole task's counter, shared with every sibling and nested panel."""
     lines: list[str] = []
     if panel.title is not None:
         lines.append(f"{'#' * (3 + depth)} {panel.title}")
@@ -344,11 +369,10 @@ def _panel_lines(panel: PromptPanel, depth: int) -> list[str]:
         lines.append(f"{speak}: {codes}.")
     if panel.gate_text is not None:
         lines.append(f"Ask only if {panel.gate_text}.")
-    number = 1
     for item in panel.items:
         if isinstance(item, PromptPanel):
             lines.append("")
-            lines.extend(_panel_lines(item, depth + 1))
+            lines.extend(_panel_lines(item, depth + 1, numbering))
             continue
         if item.routes_between:
             # Unnumbered: it routes between the panels below rather than recording an answer
@@ -359,8 +383,7 @@ def _panel_lines(panel: PromptPanel, depth: int) -> list[str]:
                 f"{' or '.join(item.routes_between)} — and skip the other."
             )
             continue
-        lines.extend(_numbered_question(number, item))
-        number += 1
+        lines.extend(_numbered_question(next(numbering), item))
     return lines
 
 

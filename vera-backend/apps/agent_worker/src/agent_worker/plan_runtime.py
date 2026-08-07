@@ -47,8 +47,8 @@ from agent_worker.prompt import (
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
-from vera_core.forms.prompting import render_panels
-from vera_core.forms.question_plan import drop_questions, owed_questions
+from vera_core.forms.prompting import numbered_questions, render_panels
+from vera_core.forms.question_plan import PromptPanel, drop_questions, owed_questions
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -106,6 +106,38 @@ def _gap_block(title: str, fields: list[PlanFieldDescriptor]) -> str:
         "do NOT say goodbye, do NOT thank the representative as if finishing, and do NOT "
         "claim you have everything you need — more questions may still follow. Once every "
         "question on the list has been asked, call gap_complete."
+    )
+
+
+def _completeness_block(panels: list[PromptPanel]) -> str:
+    """This task's LOWER bound: ask every question on the list above before completing.
+
+    Nothing else in a task agent's instructions states one — `SCOPE_DISCIPLINE` bounds the list
+    from above and `HANDOFF_DISCIPLINE` governs only timing — so the requirement lived solely in
+    `task_complete`'s tool description, and a live call ended every task early. `_gap_block`
+    states this same bound and its agent did not, which is why the wording mirrors it, and why
+    this sits directly under the list rather than after the trailing rules — one of which tells
+    the agent to skip the remaining questions when its condition holds.
+
+    The total is `render_panels`' last ordinal, so the agent can check the claim against the
+    list it can see instead of taking it on faith."""
+    total = numbered_questions(panels)
+    if not total:
+        return ""
+    if total == 1:
+        return (
+            "COMPLETENESS\n"
+            "The list above is exactly 1 question and is the complete set. Ask it, then call "
+            "task_complete once it has been asked — whether or not the representative could "
+            "answer it, and never before."
+        )
+    return (
+        "COMPLETENESS\n"
+        f"The list above runs 1 to {total} and is the complete set — every question on it is "
+        "owed, and the section headings group them without breaking the count. Ask every one of "
+        f"them, one at a time, in order. Call task_complete only once all {total} have been "
+        "asked, whether or not the representative could answer them, and never while one of them "
+        "is still unasked."
     )
 
 
@@ -193,23 +225,31 @@ class PlanTaskAgent(Agent):
         self._rep_turns = 0
         super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
 
-    def _build_instructions(self, question_list: str | None = None) -> str:
-        """This task's full instruction text; `question_list` replaces the compiled one when
-        the gates rule some questions out on this call."""
-        block = self._task_block if question_list is None else self._narrowed_block(question_list)
+    def _build_instructions(self, panels: list[PromptPanel] | None = None) -> str:
+        """This task's full instruction text; `panels` replaces the compiled question list when
+        the gates rule some questions out on this call.
+
+        The completeness rule is counted off the SAME panels the list is rendered from, so a
+        narrowed task states the total the agent can actually see rather than the compiled one."""
         return _instructions(
             self._controller.plan,
-            block,
+            self._assembled_block(self._task.panels if panels is None else panels),
             extra_instructions=self._controller.extra_instructions,
         )
 
-    def _narrowed_block(self, question_list: str) -> str:
-        """The task block with its question list swapped for the narrowed one, reassembled
-        from the pieces the compiler shipped — recovering them by splitting `prompt` dropped
-        the TERMINATION RULE and CONSISTENCY CHECK blocks that follow the list."""
+    def _assembled_block(self, panels: list[PromptPanel]) -> str:
+        """The task block rebuilt from the pieces the compiler shipped, with the completeness
+        rule seated directly under the question list.
+
+        Reassembled rather than string-edited because recovering the pieces by splitting
+        `prompt` dropped the TERMINATION RULE and CONSISTENCY CHECK blocks that follow the list
+        (`TestPanelsMatchThePrompt` pins the reassembly as byte-identical). A task the compiler
+        shipped no tree for keeps its `prompt` verbatim — there is nothing to count or narrow."""
         task = self._task
-        body = "\n\n".join(p for p in (task.lead_in, question_list, task.trailing) if p)
-        return f"# Current task: {task.title}\n{body}"
+        if not task.panels:
+            return self._task_block
+        parts = (task.lead_in, render_panels(panels), _completeness_block(panels), task.trailing)
+        return f"# Current task: {task.title}\n" + "\n\n".join(p for p in parts if p)
 
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
@@ -281,7 +321,7 @@ class PlanTaskAgent(Agent):
         if not excluded or not self._task.panels:
             return
         kept = drop_questions(self._task.panels, {f.path for f in excluded})
-        await self.update_instructions(self._build_instructions(render_panels(kept)))
+        await self.update_instructions(self._build_instructions(kept))
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage

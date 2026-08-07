@@ -120,9 +120,12 @@ async def _enter(controller: PlanRunController, index: int) -> Agent:
 
 
 def _question(text: str, *paths: str, gate_text: str | None = None) -> PromptQuestion:
+    # gate_text has to reach the model: `render_panels` states a conditional question's gate ON
+    # the question, which is what replaced the separate "do NOT ask these" block.
     return PromptQuestion(
         text=text,
         options=[PromptOption(target_paths=list(paths))],
+        gate_text=gate_text,
     )
 
 
@@ -869,6 +872,7 @@ def _gap_plan() -> CallPlan:
                             _question(
                                 "Any out-of-network note?",
                                 "sections.cov.oon_note",
+                                gate_text='"Doctor Inside Network" is "No"',
                             ),
                         ],
                     )
@@ -1310,6 +1314,88 @@ class TestGating:
         once = agent.instructions
         await _enter(controller, 2)
         assert agent.instructions == once
+
+
+def _two_section_plan() -> CallPlan:
+    """A task rendering TWO independently numbered lists — the real `insurance_basics` shape
+    (### Insurance Information 1..7, ### Benefit Coverage 1..9), where a live call asked the
+    first section and called task_complete. Plus a routing question, which renders unnumbered
+    and so must not be counted."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="insurance_basics",
+                title="Insurance Basics",
+                prompt="Ask both sections.",
+                fields=[
+                    _field("sections.info.plan_type", "Plan type"),
+                    _field("sections.info.group_no", "Group number"),
+                    _field("sections.cov.deductible", "Deductible"),
+                ],
+                panels=[
+                    PromptPanel(
+                        title="Insurance Information",
+                        items=[
+                            PromptQuestion(text="Individual or family?", routes_between=["A", "B"]),
+                            _question("What type of plan is this?", "sections.info.plan_type"),
+                            _question("What is the group number?", "sections.info.group_no"),
+                        ],
+                    ),
+                    PromptPanel(
+                        title="Benefit Coverage",
+                        items=[
+                            _question("Has the deductible been met?", "sections.cov.deductible")
+                        ],
+                    ),
+                ],
+            ),
+            PlanTask(task_key="closing_task", title="Wrap Up", prompt="Close."),
+        ],
+    )
+
+
+class TestCompletenessRule:
+    """The task agent's LOWER bound — see `_completeness_block` for why it exists. These pin the
+    rendered wording, because the wording IS the fix."""
+
+    def test_the_stated_range_matches_the_rendered_list(self) -> None:
+        # Two sections, one of them holding a routing question that renders unnumbered — so the
+        # list runs 1..3 continuously and the rule must name that exact range.
+        instructions = _controller(_two_section_plan())[0].agents[0].instructions
+        assert "The list above runs 1 to 3 and is the complete set" in instructions
+        assert "3. Has the deductible been met?" in instructions
+
+    def test_a_lone_question_reads_as_one(self) -> None:
+        # The plural template rendered "all 1 have been asked", which is the kind of sloppiness
+        # a prompt cannot afford — it is the model's only description of what it owes.
+        controller, _ = _controller(_panel_plan())
+        assert "exactly 1 question" in controller.agents[0].instructions
+
+    def test_a_task_with_no_compiled_panels_gets_no_rule(self) -> None:
+        # Nothing to be complete about, and a "0 questions" line would be worse than silence.
+        controller, _ = _controller(_multi_gap_plan())
+        assert "COMPLETENESS" not in controller.agents[0].instructions
+
+    @pytest.mark.asyncio
+    async def test_the_total_follows_the_gates_narrowing(self) -> None:
+        # The count has to describe the list the agent can SEE, not the compiled one.
+        controller, _ = _controller(_gap_plan())
+        assert "The list above runs 1 to 2" in controller.agents[2].instructions
+        controller.update_answers({"sections.a.in_network": "Yes"})  # excludes oon_note
+        agent = await _enter(controller, 2)
+        assert "exactly 1 question" in agent.instructions
+
+    def test_the_gap_sweep_and_wrap_up_do_not_get_it(self) -> None:
+        # Both already state their own bound, and task_complete is not even their tool. True from
+        # construction: each builds its instructions in __init__.
+        controller, _ = _controller(_multi_gap_plan())
+        assert "COMPLETENESS" not in controller.gap_agents[0].instructions
+        assert "COMPLETENESS" not in controller.wrap_up_agent.instructions
 
 
 class TestOwedQuestionCount:

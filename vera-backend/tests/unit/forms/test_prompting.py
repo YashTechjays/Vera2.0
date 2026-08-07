@@ -22,8 +22,16 @@ from vera_core.forms.prompting import (
     RenderedTaskPrompt,
     SessionBlock,
     TaskTextOverride,
+    numbered_questions,
+    render_panels,
     render_task_prompts,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
+
+
+def _q(text: str, *paths: str) -> PromptQuestion:
+    return PromptQuestion(text=text, options=[PromptOption(target_paths=list(paths))])
+
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
@@ -231,3 +239,52 @@ class TestSnapshots:
         text = plan_task(plan, "insurance_basics").prompt
         assert "{{" not in text
         self._check("ibv_insurance_basics.fused_without_spouse.prompt.txt", text)
+
+
+class TestContinuousNumbering:
+    """A task's list is numbered once end to end, so its last ordinal IS its question total.
+    The voice agent is told that total; if the two ever diverge the prompt lies about the list
+    right in front of it."""
+
+    def test_every_real_task_numbers_1_to_n_across_its_sections(self) -> None:
+        for task in PLAN.tasks:
+            ordinals = [
+                int(line.split(".", 1)[0])
+                for line in render_panels(task.panels).splitlines()
+                if line[:1].isdigit()
+            ]
+            assert ordinals == list(range(1, len(ordinals) + 1)), task.task_key
+            assert numbered_questions(task.panels) == len(ordinals), task.task_key
+
+    def test_a_nested_panel_continues_the_parents_count(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Outer",
+                items=[
+                    _q("First?", "a.one"),
+                    PromptPanel(title="Inner", items=[_q("Second?", "a.two")]),
+                    _q("Third?", "a.three"),
+                ],
+            )
+        ]
+        rendered = render_panels(panels)
+        assert "1. First?" in rendered
+        assert "2. Second?" in rendered  # was "1." while numbering restarted per panel
+        assert "3. Third?" in rendered
+        assert numbered_questions(panels) == 3
+
+    def test_a_routing_question_is_neither_numbered_nor_counted(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Coverage",
+                items=[
+                    PromptQuestion(text="Individual or family?", routes_between=["Ind", "Fam"]),
+                    _q("Spouse name?", "a.spouse"),
+                ],
+            )
+        ]
+        assert numbered_questions(panels) == 1
+        assert "1. Spouse name?" in render_panels(panels)
+
+    def test_an_empty_tree_counts_nothing(self) -> None:
+        assert numbered_questions([]) == 0

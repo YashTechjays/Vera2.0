@@ -19,29 +19,29 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
    - Hint: If the representative doesn't understand the question, clarify: In which state was this policy written?
 
 ### Benefit Coverage
-1. Does the benefit year run on a Calendar Year or a Plan Year?
+8. Does the benefit year run on a Calendar Year or a Plan Year?
    - Answers: Calendar Year | Plan Year
-2. What is the effective date for this coverage?
+9. What is the effective date for this coverage?
    - Expected date format: M/D/YYYY
    - When "Benefit Year Type" is "Calendar Year": record "01/01/2026" without asking.
-3. What are the start and end dates of the plan year?
+10. What are the start and end dates of the plan year?
    - When "Benefit Year Type" is "Calendar Year": record "01/01/2026 - 12/31/2026" without asking.
-4. Is this an individual or a family policy? Please answer Individual or Family.
+11. Is this an individual or a family policy? Please answer Individual or Family.
    - Answers: Individual | Family
    - Immediately after this answer:
      * If "Coverage Type" is "Family": ask — Can we also check the spouse on the plan? Can I get the spouse's full name?
      * If "Coverage Type" is "Family": ask — And what is the spouse's date of birth?
-5. Does this plan require a PCP referral?
+12. Does this plan require a PCP referral?
    - Answers: Yes | No
    - Ask only if "Health Plan Type" is "HMO".
-6. Does this plan cover telehealth services?
+13. Does this plan cover telehealth services?
    - Answers: Yes | No | Limited
    - Hint: If the representative asks whether we use our own telehealth platform, answer exactly "Yes", then re-ask this question.
-7. Is this plan self insured or fully funded?
+14. Is this plan self insured or fully funded?
    - Answers: Self Insured | Fully Funded
-8. Is the employer group supporting this plan a small group or a large group?
+15. Is the employer group supporting this plan a small group or a large group?
    - Answers: Small Group | Large Group
-9. Is there an infertility plan mandate on this policy?
+16. Is there an infertility plan mandate on this policy?
    - Answers: Yes | No
    - Hint: Pronounce as: in-fer-TIL-ih-tee plan MAN-date.
 

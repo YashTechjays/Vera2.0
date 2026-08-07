@@ -470,7 +470,7 @@ class TestConfirmSlot:
         """The numbered-question list never carried the confirm/ask label — only the
         two bullet contexts (immediate/end-of-task) do."""
         plan = fuse_prefill(IBV, PLAN, {MEMBER_ID: "ABC123"}, current_year=2026)
-        # matched by content, not by ordinal: panels renumber per section.
+        # matched by content, not by ordinal: the ordinal moves whenever a question is added.
         line = next(
             line
             for line in plan_task(plan, "insurance_basics").prompt.splitlines()
