@@ -27,7 +27,7 @@ from agent_worker.cartesia_workaround import guard_utterance_initial_spell
 from agent_worker.dtmf import DtmfTransportError, InvalidDtmfError, send_dtmf
 from agent_worker.handoff import carry_chat_ctx
 from agent_worker.intervention import takeover_engaged
-from agent_worker.ivr_prompt import SILENCE_TOKEN, build_ivr_instructions
+from agent_worker.ivr_prompt import build_ivr_instructions
 from agent_worker.prompt import TOOL_REASON_ARG
 from vera_core.config.settings import get_settings
 from vera_core.schemas import IvrPlaybookConfig
@@ -44,25 +44,53 @@ IVR_NAVIGATOR_ID = "@ivr_navigator"
 _IVR_MAX_TURNS = 60
 
 
-# Matches the silence sentinel ([[SILENT]]) AND the label the model sometimes emits by mistake
-# ("SILENCE_TOKEN:", from the prompt's silence contract) — case-insensitive, tolerant of a stray
-# colon/whitespace. The label alternative is word-boundaried so it can only strip the standalone
-# label, never splice a word that merely contains it (e.g. "SILENCE_TOKENS"). Stripping both keeps
-# a "stay silent" turn from reaching TTS when the model's rendering of the sentinel drifts.
-_SILENCE_RE = re.compile(rf"{re.escape(SILENCE_TOKEN)}|\bSILENCE_TOKEN\b\s*:?", re.IGNORECASE)
+# The navigator speaks only words/digits a caller would say aloud — no markup, no structured-output
+# contract — yet a fast model under this syntax-dense prompt occasionally leaks a machine token
+# (the [[SILENT]] control token it IS told to emit primes the habit, e.g. "global_timing:13.251s").
+# The three patterns below strip that whole class at one choke point, before the text reaches TTS
+# (the payer's IVR runs ASR and would capture it as a menu response) or the transcript.
+
+# Bracketed/braced/angle sentinels: [[SILENT]], {{token}}, <tag>, single [x]/{x}. A caller never
+# speaks a bracket, and the <spell> readback markup is added AFTER this stage, so none is real here.
+_BRACKET_TOKEN_RE = re.compile(r"\[\[.*?\]\]|\{\{.*?\}\}|<[^>]*>|\[[^\]]*\]|\{[^}]*\}")
+# The bare control label the model emits without its brackets — word-boundaried so it strips only
+# the standalone label, never a word that merely contains it (e.g. "SILENCE_TOKENS").
+_CONTROL_LABEL_RE = re.compile(r"\bSILENCE_TOKEN\b\s*:?", re.IGNORECASE)
+# A programmer-style key:value annotation. The key must be code-shaped — snake_case (underscore) or
+# camelCase (a lower-then-upper hump) — which speech is not, so "3:15", "80:20" and title-case
+# "Provider:" stay untouched. Leading whitespace is consumed so no double space is left behind.
+_META_KV_RE = re.compile(r"\s*\b(?P<key>\w*(?:_\w|[a-z][A-Z])\w*):\S+")
 
 
-async def _strip_silence_token(text: AsyncIterable[str]) -> AsyncIterator[str]:
-    """Drop the navigator's silence sentinel from an LLM text stream.
+def _strip_nonspeech_tokens(text: str) -> str:
+    """Remove non-speakable machine tokens the navigator LLM leaks into its spoken text (the three
+    regexes above). When it strips anything it logs a PHI-safe summary — token kinds and code-shaped
+    keys only, never the removed values — so a new leak shape surfaces instead of going silent."""
+    removed: list[str] = []
 
-    The prompt tells the model to emit exactly ``[[SILENT]]`` when the right action is to stay
-    quiet — the common case. Without this, the default tts_node would synthesize that token (or
-    the near-miss ``SILENCE_TOKEN:`` the model sometimes emits instead) into the live call.
-    Navigator utterances are short, so buffer the whole turn, strip the sentinel/label, and emit
-    the remainder — nothing at all on a silent turn.
-    """
+    def _drop(kind: str) -> Callable[[re.Match[str]], str]:
+        def _sub(match: re.Match[str]) -> str:
+            key = match.groupdict().get("key")
+            removed.append(f"{kind}:{key}" if key else kind)
+            return ""
+
+        return _sub
+
+    cleaned = _BRACKET_TOKEN_RE.sub(_drop("bracket"), text)
+    cleaned = _CONTROL_LABEL_RE.sub(_drop("label"), cleaned)
+    cleaned = _META_KV_RE.sub(_drop("kv"), cleaned)
+    if removed:
+        logger.warning("navigator scrubbed non-speech token(s): %s", ", ".join(removed))
+    return cleaned
+
+
+async def _scrub_navigator_output(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    """Drop the navigator's leaked non-speech tokens from an LLM text stream before the text reaches
+    TTS or the transcript (transcription_node output is also what commits as the turn's text).
+    Navigator utterances are short, so buffer the whole turn, scrub, and emit the remainder —
+    nothing at all on a fully non-speech turn (e.g. a bare [[SILENT]])."""
     buffered = "".join([chunk async for chunk in text])
-    cleaned = _SILENCE_RE.sub("", buffered)
+    cleaned = _strip_nonspeech_tokens(buffered)
     if cleaned.strip():
         yield cleaned
 
@@ -100,9 +128,9 @@ def _spell_id_tokens(text: str) -> str:
 
 
 async def _tts_spoken_text(text: AsyncIterable[str]) -> AsyncIterator[str]:
-    # The lead-in guard is per-utterance, which holds only because _strip_silence_token buffers
+    # The lead-in guard is per-utterance, which holds only because _scrub_navigator_output buffers
     # the whole turn into one chunk — make it stream and the comma lands on every chunk.
-    async for chunk in _strip_silence_token(text):
+    async for chunk in _scrub_navigator_output(text):
         yield guard_utterance_initial_spell(_spell_id_tokens(chunk))
 
 
@@ -178,14 +206,16 @@ class IvrNavigatorAgent(Agent):
     def tts_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
     ) -> AsyncIterable[rtc.AudioFrame]:
-        # Strips the silence sentinel and <spell>-wraps ID tokens for Cartesia.
+        # Scrubs leaked tokens (silence sentinel, fabricated annotations) and <spell>-wraps ID
+        # tokens for Cartesia.
         return Agent.default.tts_node(self, _tts_spoken_text(text), model_settings)
 
     def transcription_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
     ) -> AsyncIterable[str]:
-        # Keep the sentinel out of the forwarded transcript too, for the same reason.
-        return Agent.default.transcription_node(self, _strip_silence_token(text), model_settings)
+        # Keep leaked tokens (silence sentinel, fabricated annotations) out of the transcript too:
+        # this output is also what the framework commits as the turn's text_content.
+        return Agent.default.transcription_node(self, _scrub_navigator_output(text), model_settings)
 
     def _end_navigation(self, reason: str) -> None:
         """Hang up the call cleanly (drain pending audio), to bail out of an unresolvable IVR

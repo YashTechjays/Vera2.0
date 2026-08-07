@@ -22,8 +22,9 @@ from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
     _IVR_MAX_TURNS,
     IvrNavigatorAgent,
+    _scrub_navigator_output,
     _spell_id_tokens,
-    _strip_silence_token,
+    _strip_nonspeech_tokens,
     _tts_spoken_text,
     ivr_turn_handling,
 )
@@ -423,15 +424,15 @@ async def _drain(stream: AsyncIterable[str]) -> str:
 @pytest.mark.asyncio
 async def test_strip_silence_token_swallows_a_silent_turn() -> None:
     # A turn whose entire output is the sentinel yields nothing — so tts_node makes no sound.
-    assert await _drain(_strip_silence_token(_astream(SILENCE_TOKEN))) == ""
+    assert await _drain(_scrub_navigator_output(_astream(SILENCE_TOKEN))) == ""
     # even split across streamed chunks
-    assert await _drain(_strip_silence_token(_astream("[[SIL", "ENT]]"))) == ""
+    assert await _drain(_scrub_navigator_output(_astream("[[SIL", "ENT]]"))) == ""
 
 
 @pytest.mark.asyncio
 async def test_strip_silence_token_passes_real_speech_through() -> None:
     # A real answer is spoken verbatim (the sentinel filter is transparent to normal output).
-    assert await _drain(_strip_silence_token(_astream("Med", "ical"))) == "Medical"
+    assert await _drain(_scrub_navigator_output(_astream("Med", "ical"))) == "Medical"
 
 
 @pytest.mark.asyncio
@@ -439,11 +440,11 @@ async def test_strip_silence_token_swallows_label_variant() -> None:
     # Regression: on a silent turn the model sometimes emits the sentinel's LABEL
     # ("SILENCE_TOKEN:") instead of [[SILENT]]. The exact-match stripper let it through, so
     # "SILENCE_TOKEN:" was spoken + transcribed into a live call. All renderings must be silent.
-    assert await _drain(_strip_silence_token(_astream("SILENCE_TOKEN:"))) == ""
-    assert await _drain(_strip_silence_token(_astream("SILENCE_TOKEN: [[SILENT]]"))) == ""
-    assert await _drain(_strip_silence_token(_astream("silence_token :"))) == ""
+    assert await _drain(_scrub_navigator_output(_astream("SILENCE_TOKEN:"))) == ""
+    assert await _drain(_scrub_navigator_output(_astream("SILENCE_TOKEN: [[SILENT]]"))) == ""
+    assert await _drain(_scrub_navigator_output(_astream("silence_token :"))) == ""
     # a real answer that merely follows the sentinel still gets spoken (remainder is kept)
-    assert await _drain(_strip_silence_token(_astream("[[SILENT]] Provider"))) == " Provider"
+    assert await _drain(_scrub_navigator_output(_astream("[[SILENT]] Provider"))) == " Provider"
 
 
 @pytest.mark.asyncio
@@ -451,9 +452,55 @@ async def test_strip_silence_token_label_is_word_boundaried() -> None:
     # The label alternative must strip only the standalone label, never a word that merely
     # contains it — an unanchored regex turned "the SILENCE_TOKENS list" into "the S list".
     assert (
-        await _drain(_strip_silence_token(_astream("read the SILENCE_TOKENS list")))
+        await _drain(_scrub_navigator_output(_astream("read the SILENCE_TOKENS list")))
         == "read the SILENCE_TOKENS list"
     )
+
+
+def test_strip_nonspeech_tokens_removes_key_value_annotations() -> None:
+    # Regression: the navigator hallucinated a telemetry field onto its answer and spoke it into a
+    # live call ("No, thank you global_timing:13.251s"). Any code-shaped key:value is dropped
+    # wherever it lands — snake_case or camelCase key — with its leading whitespace, so no dangling
+    # space remains. This is the general class, not one blacklisted token.
+    assert _strip_nonspeech_tokens("No, thank you global_timing:13.251s") == "No, thank you"
+    assert _strip_nonspeech_tokens("Eligibility session_id:abc-123") == "Eligibility"
+    assert _strip_nonspeech_tokens("Medical turnCount:4 done") == "Medical done"
+
+
+def test_strip_nonspeech_tokens_removes_brackets_tags_and_labels() -> None:
+    # Bracketed/braced/angle sentinels and the bare control label are never spoken.
+    assert _strip_nonspeech_tokens("Provider [[SILENT]]") == "Provider "
+    assert _strip_nonspeech_tokens("{{member_id}} Yes") == " Yes"
+    # angle tags strip the delimiters (a spoken bracket is never real); inner text is left as-is
+    assert _strip_nonspeech_tokens("Agent <state>waiting</state>") == "Agent waiting"
+    assert _strip_nonspeech_tokens("SILENCE_TOKEN: Provider") == " Provider"
+
+
+def test_strip_nonspeech_tokens_leaves_real_speech_untouched() -> None:
+    # A spoken time, ratio, phonetic spelling, or plain menu answer is NOT code-shaped, so the
+    # sanitizer never touches it — over-stripping a menu response is its own failure on a payer IVR.
+    for spoken in ("call back at 3:15", "the ratio is 80:20", "T as in Tango", "Plan details"):
+        assert _strip_nonspeech_tokens(spoken) == spoken
+
+
+def test_strip_nonspeech_tokens_logs_kinds_and_keys_not_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # PHI-safe observability: the warning names the token kind and code-shaped key so a new leak
+    # shape is visible, but never the removed value (model-generated, could echo call data).
+    with caplog.at_level(logging.WARNING, logger="agent_worker"):
+        _strip_nonspeech_tokens("No, thank you global_timing:13.251s")
+    assert "global_timing" in caplog.text
+    assert "13.251" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_scrub_navigator_output_drops_fabricated_annotation_across_paths() -> None:
+    # Both the TTS and transcript paths run through _scrub_navigator_output, so the hallucinated
+    # token reaches neither the payer's line nor the transcript.
+    assert await _drain(
+        _scrub_navigator_output(_astream("No, thank you ", "global_timing:13.251s"))
+    ) == ("No, thank you")
 
 
 def _spelled(token: str) -> str:
@@ -536,9 +583,9 @@ async def test_tts_spoken_text_strips_silence_then_spells_ids() -> None:
 
 @pytest.mark.asyncio
 async def test_transcription_path_keeps_plain_digits() -> None:
-    # transcription_node uses _strip_silence_token only, so the live transcript shows the plain
+    # transcription_node uses _scrub_navigator_output only, so the live transcript shows the plain
     # digits — never the <spell>/<break> markup the TTS path injects.
-    assert await _drain(_strip_silence_token(_astream("200236789"))) == "200236789"
+    assert await _drain(_scrub_navigator_output(_astream("200236789"))) == "200236789"
 
 
 def test_build_agent_selects_by_ivr_navigation_flag() -> None:
