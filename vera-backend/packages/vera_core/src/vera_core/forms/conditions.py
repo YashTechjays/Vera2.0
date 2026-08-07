@@ -222,6 +222,57 @@ def alternative_fills(doc: FormSchemaDoc, values: Values, answered: str) -> dict
     return fills
 
 
+_NOT_APPLICABLE = "N/A"
+
+
+def routing_branch_fills(doc: FormSchemaDoc, values: Values) -> dict[str, str]:
+    """`N/A` for the applicable, empty leaves of a routing branch nobody took, `{path: value}`.
+
+    A routing `alternatives` picks ONE branch and gates none of them, so the untaken branch's
+    `covered` stays required ∧ applicable ∧ unanswered — a phantom gap that blocks auto-completion
+    via `review.unsatisfied_required_paths`. One write closes it: the branch's cost-sharing leaves
+    are already gated behind `covered == "Yes"`, so `N/A` leaves them inapplicable.
+
+    Filled only when a sibling branch has answers AND this branch has none at all, so ASC
+    professional and facility both applying — which happens — is left untouched.
+
+    `N/A` comes from the leaf's own enum vocabulary, not `inapplicable_value`: the validator allows
+    one only where self or an ancestor carries `applicable_when`, and `general_coverage`,
+    `asc_professional` and its `cpt_58555` group all have none. A discriminator leaf the routing
+    question actually writes is the real fix — recorded as debt in the plan."""
+    gated = list(leaf_gates(doc))
+    shared = doc.shared_conditions or {}
+    fills: dict[str, str] = {}
+    for section in doc.sections.values():
+        for alternatives in section.alternatives or []:
+            branches = [
+                member
+                for member in alternatives.members
+                if isinstance(section.fields.get(member.split(".")[-1]), Group)
+            ]
+            if len(branches) < 2:
+                continue  # a leaf-level either/or, handled by `alternative_fills`
+            under = {
+                branch: [entry for entry in gated if entry[0].startswith(f"{branch}.")]
+                for branch in branches
+            }
+            answered = {
+                branch: any(has_value(values, path) for path, _leaf, _gates in leaves)
+                for branch, leaves in under.items()
+            }
+            for branch, leaves in under.items():
+                if answered[branch] or not any(answered[other] for other in branches):
+                    continue
+                for path, leaf, leaf_gate in leaves:
+                    if has_value(values, path) or _NOT_APPLICABLE not in (leaf.values or []):
+                        continue
+                    if not is_applicable(leaf_gate, values, shared):
+                        continue  # already excluded; the cascade will keep it that way
+                    if not _would_open_a_gated_field(gated, values, shared, path, _NOT_APPLICABLE):
+                        fills[path] = _NOT_APPLICABLE
+    return fills
+
+
 def is_required(field: HasRequired, values: Values, shared: SharedConditions) -> bool:
     """Resolve `required: bool | {when}` against the current values."""
     if isinstance(field.required, bool):

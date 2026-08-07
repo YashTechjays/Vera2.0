@@ -19,6 +19,7 @@ from vera_core.forms.conditions import (
     is_satisfied,
     is_v2,
     leaf_gates,
+    routing_branch_fills,
 )
 from vera_core.forms.dsl import FormSchemaDoc, PromotedFields, load_document
 from vera_core.forms.intake import missing_required, required_intake_fields
@@ -347,3 +348,47 @@ class TestAlternativeFills:
         fills = alternative_fills(V2_DOC, values, f"{_CRYO}.coinsurance")
         assert fills == {f"{_CRYO}.copay": "$0"}
         assert "storage_time_coverage" not in " ".join(fills)
+
+
+_ELECTIVE = "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337"
+_CANCER = "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337"
+_ASC_PRO = "sections.general_coverage.asc_professional.cpt_58555"
+_ASC_FAC = "sections.general_coverage.asc_facility.cpt_58555"
+
+
+class TestRoutingBranchFills:
+    """A routing `alternatives` gates none of its branches, so the untaken one stays owed forever
+    and blocks auto-completion. `N/A` closes it, and the cost-sharing cascade follows."""
+
+    def test_the_untaken_asc_branch_is_marked_not_applicable(self) -> None:
+        fills = routing_branch_fills(V2_DOC, {f"{_ASC_FAC}.covered": "Yes"})
+        assert fills == {f"{_ASC_PRO}.covered": "N/A"}
+
+    def test_it_works_the_other_way_round(self) -> None:
+        fills = routing_branch_fills(V2_DOC, {f"{_ASC_PRO}.covered": "Yes"})
+        assert fills == {f"{_ASC_FAC}.covered": "N/A"}
+
+    def test_both_branches_answered_fills_nothing(self) -> None:
+        # ASC professional and facility genuinely both applying is not unusual — observed on a
+        # live call — and must never be overwritten.
+        values = {f"{_ASC_PRO}.covered": "Yes", f"{_ASC_FAC}.covered": "Yes"}
+        assert routing_branch_fills(V2_DOC, values) == {}
+
+    def test_neither_answered_fills_nothing(self) -> None:
+        assert routing_branch_fills(V2_DOC, {}) == {}
+
+    def test_the_untaken_egg_cryo_branch_gets_na_not_no(self) -> None:
+        # The live-call defect: the Observer wrote `No` here at confidence 90, asserting the plan
+        # does not cover elective egg cryopreservation, for a service never discussed.
+        values = {
+            "sections.infertility_treatment.infertility_tx_covered": "Yes",
+            f"{_CANCER}.covered": "Yes",
+        }
+        fills = routing_branch_fills(V2_DOC, values)
+        assert fills.get(f"{_ELECTIVE}.covered") == "N/A"
+
+    def test_cost_sharing_is_left_to_the_gate_cascade(self) -> None:
+        # copay/coinsurance/prior_auth are gated on `covered == "Yes"`, so filling covered=N/A
+        # keeps them inapplicable — never owed, never written.
+        fills = routing_branch_fills(V2_DOC, {f"{_ASC_FAC}.covered": "Yes"})
+        assert not any(p.endswith((".copay", ".coinsurance", ".prior_auth")) for p in fills)

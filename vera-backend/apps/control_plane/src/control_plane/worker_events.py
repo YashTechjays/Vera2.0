@@ -52,6 +52,7 @@ from vera_core.forms.conditions import (
     alternative_index,
     alternative_pairs,
     is_v2,
+    routing_branch_fills,
 )
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import dispute_view
@@ -459,6 +460,17 @@ class WorkerEventConsumer:
             event.room_name, CallStatus.COMPLETED, trigger="call.ended", ts=event.ts
         )
 
+    @staticmethod
+    def _under_a_routing_branch(doc: FormSchemaDoc, path: str) -> bool:
+        """Whether `path` sits under either side of a routing `alternatives`, in which case
+        answering it may make the OTHER branch fillable."""
+        return any(
+            path.startswith(f"{member}.")
+            for section in doc.sections.values()
+            for alternatives in section.alternatives or []
+            for member in alternatives.members
+        )
+
     async def _fill_alternatives(
         self,
         session: AsyncSession,
@@ -486,12 +498,16 @@ class WorkerEventConsumer:
             # Type name only — a pydantic ValidationError's message embeds the document verbatim.
             logger.warning("alternatives fill skipped, schema invalid (%s)", type(exc).__name__)
             return
-        # Membership needs no values, and three quarters of this schema's leaves are in no pair —
-        # so check it before paying for the answer snapshot.
-        if answered not in alternative_index(alternative_pairs(doc)):
+        # Pair membership needs no values, but a routing fill can be triggered by ANY leaf under a
+        # branch, so the snapshot is only skippable when neither applies.
+        in_pair = answered in alternative_index(alternative_pairs(doc))
+        if not in_pair and not self._under_a_routing_branch(doc, answered):
             return
         values = await current_values_by_path(session, form_id)
-        for path, value in alternative_fills(doc, values, answered).items():
+        fills = dict(routing_branch_fills(doc, values))
+        if in_pair:
+            fills.update(alternative_fills(doc, values, answered))
+        for path, value in fills.items():
             await record_answer(
                 session,
                 tenant_id=tenant_id,
