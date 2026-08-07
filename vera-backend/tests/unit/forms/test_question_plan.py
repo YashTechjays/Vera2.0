@@ -17,6 +17,7 @@ from vera_core.forms.question_plan import (
     build_question_plan,
     hydrate_panels,
     iter_questions,
+    owed_questions,
 )
 
 from .test_schema_dsl import minimal_doc
@@ -300,6 +301,66 @@ class TestHydration:
         ]
         hydrated = hydrate_panels(tree, lambda s: s.replace("{{tok}}", "Jane"))
         assert "{{tok}}" not in "".join(panel.model_dump_json() for panel in hydrated)
+
+
+_OWED_TREE = [
+    PromptPanel(
+        title="CPT 58340",
+        items=[
+            PromptQuestion(
+                text="Covered, and what copay and coinsurance?",
+                options=[PromptOption(target_paths=["a.covered", "a.copay", "a.coins"])],
+            ),
+            PromptPanel(
+                title="Prior auth",
+                items=[
+                    PromptQuestion(
+                        text="Is prior authorization required?",
+                        options=[PromptOption(target_paths=["a.prior_auth"])],
+                    )
+                ],
+            ),
+        ],
+    )
+]
+
+
+class TestOwedQuestions:
+    """The complement of `drop_questions`, and the unit both completion guards count in."""
+
+    def test_a_multi_target_question_is_owed_once_however_many_targets_are_open(self) -> None:
+        assert len(owed_questions(_OWED_TREE, {"a.covered", "a.copay", "a.coins"})) == 1
+
+    def test_one_open_target_is_enough_to_owe_the_whole_question(self) -> None:
+        # The mirror of drop_questions, which keeps a question with even one askable target.
+        assert len(owed_questions(_OWED_TREE, {"a.copay"})) == 1
+
+    def test_nested_panels_are_reached(self) -> None:
+        owed = owed_questions(_OWED_TREE, {"a.covered", "a.prior_auth"})
+        assert [q.text for q in owed] == [
+            "Covered, and what copay and coinsurance?",
+            "Is prior authorization required?",
+        ]
+
+    def test_nothing_open_owes_nothing(self) -> None:
+        assert owed_questions(_OWED_TREE, set()) == []
+
+    def test_a_routing_question_is_never_owed(self) -> None:
+        # It has no target_paths — it chooses between panels rather than collecting anything,
+        # so counting it would inflate the ceiling by one ask that answers no field.
+        tree = [
+            PromptPanel(
+                title="Coverage",
+                items=[
+                    PromptQuestion(text="Individual or family?", routes_between=["Ind", "Fam"]),
+                    PromptQuestion(
+                        text="Spouse name?",
+                        options=[PromptOption(target_paths=["a.spouse"])],
+                    ),
+                ],
+            )
+        ]
+        assert [q.text for q in owed_questions(tree, {"a.spouse"})] == ["Spouse name?"]
 
 
 class TestCoverage:

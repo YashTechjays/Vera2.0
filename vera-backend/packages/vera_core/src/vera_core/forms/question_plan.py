@@ -19,7 +19,7 @@ Pure and DB-free. Deterministic: same document = identical tree.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from typing import Annotated, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -630,6 +630,17 @@ def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[Prompt
         if items:
             out.append(panel.model_copy(update={"items": items}))
     return out
+
+
+def owed_questions(panels: list[PromptPanel], paths: Collection[str]) -> list[PromptQuestion]:
+    """Every question that would still have to be SPOKEN to collect `paths`, in spoken order.
+
+    The complement of `drop_questions`: that keeps a question with even one target outside
+    `excluded`, so this owes a question with even one target inside `paths` — one ask, however
+    many of its targets are open. A routing question has no targets and is therefore never
+    owed; it chooses between panels rather than collecting anything."""
+    wanted = set(paths)
+    return [q for q in iter_questions(panels) if not wanted.isdisjoint(q.target_paths)]
 
 
 def hydrate_panels(panels: list[PromptPanel], hydrate: Callable[[str], str]) -> list[PromptPanel]:

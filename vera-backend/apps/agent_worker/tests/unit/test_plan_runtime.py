@@ -1162,6 +1162,54 @@ class TestEntryDecidability:
         session.update_agent.assert_not_called()
 
 
+_CPT_COVERED = "sections.diag.cpt_58340.covered"
+_CPT_COPAY = "sections.diag.cpt_58340.copay"
+_CPT_COINSURANCE = "sections.diag.cpt_58340.coinsurance"
+_CPT_PRIOR_AUTH = "sections.diag.cpt_58340.prior_auth"
+
+
+def _panel_plan(*, extra_field: bool = False) -> CallPlan:
+    """One task whose three fields are asked by ONE spoken panel question — the shape the
+    compiler now emits as the normal case, and the one a field count mis-measures.
+    `extra_field` adds a required field no question targets."""
+    fields = [
+        _field(_CPT_COVERED, "Covered", values=["Yes", "No"]),
+        _field(_CPT_COPAY, "Copay ($)"),
+        _field(_CPT_COINSURANCE, "Coinsurance (%)"),
+    ]
+    if extra_field:
+        fields.append(_field(_CPT_PRIOR_AUTH, "Prior Authorization Required"))
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="diagnostic_testing",
+                title="Diagnostic Testing",
+                prompt="Ask about 58340.",
+                fields=fields,
+                panels=[
+                    PromptPanel(
+                        title="CPT 58340",
+                        items=[
+                            _question(
+                                "For 58340, is it covered, and what copay and coinsurance apply?",
+                                _CPT_COVERED,
+                                _CPT_COPAY,
+                                _CPT_COINSURANCE,
+                            )
+                        ],
+                    )
+                ],
+            ),
+            PlanTask(task_key="closing_task", title="Wrap Up", prompt="Close the call."),
+        ],
+    )
+
+
 def _multi_gap_plan() -> CallPlan:
     """A sweepable task with FIVE required-and-unanswered fields — the shape one field per
     task cannot express. Two share the title "Covered" (the CPT shape), so its list exercises
@@ -1264,6 +1312,34 @@ class TestGating:
         assert agent.instructions == once
 
 
+class TestOwedQuestionCount:
+    """The turn ceiling both guards below judge by, in the unit the agent actually speaks."""
+
+    def test_one_panel_question_over_three_open_fields_counts_once(self) -> None:
+        controller, _ = _controller(_panel_plan())
+        assert len(controller.gap_fields(0)) == 3
+        assert controller.owed_question_count(0) == 1
+
+    def test_a_task_with_no_compiled_panels_still_counts_fields(self) -> None:
+        controller, _ = _controller(_multi_gap_plan())
+        assert controller.owed_question_count(0) == 5
+
+    def test_a_gap_no_question_covers_counts_as_an_ask_of_its_own(self) -> None:
+        controller, _ = _controller(_panel_plan(extra_field=True))
+        assert controller.owed_question_count(0) == 2
+
+    def test_a_question_whose_targets_are_all_answered_is_not_owed(self) -> None:
+        controller, _ = _controller(_panel_plan())
+        controller.update_answers({_CPT_COVERED: "Yes", _CPT_COPAY: "20", _CPT_COINSURANCE: "10"})
+        assert controller.owed_question_count(0) == 0
+
+    def test_a_partly_answered_question_is_still_owed_once(self) -> None:
+        controller, _ = _controller(_panel_plan())
+        controller.update_answers({_CPT_COVERED: "Yes"})
+        assert len(controller.gap_fields(0)) == 2
+        assert controller.owed_question_count(0) == 1
+
+
 class TestPrematureCompletion:
     @pytest.mark.asyncio
     async def test_task_complete_is_refused_while_required_questions_are_open(self) -> None:
@@ -1337,6 +1413,26 @@ class TestPrematureCompletion:
             result = cast(str, await _tool(agent, "task_complete")())
         assert "Deductible" in result
         assert "OON note" in result
+
+    @pytest.mark.asyncio
+    async def test_a_panel_answered_in_one_turn_is_not_refused(self) -> None:
+        # The regression: one spoken question covers three fields, so one exchange CAN have
+        # answered all three. Counting fields made the ceiling 3 and the guard fought the merge.
+        controller, _ = _controller(_panel_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await _rep_turn(agent, "Covered, twenty dollar copay, ten percent coinsurance.")
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_a_gap_no_panel_question_covers_still_holds_the_ceiling_up(self) -> None:
+        controller, _ = _controller(_panel_plan(extra_field=True))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await _rep_turn(agent)
+            result = cast(str, await _tool(agent, "task_complete")())
+        assert "Prior Authorization Required" in result
 
     @pytest.mark.asyncio
     async def test_takeover_still_wins_over_the_guard(self) -> None:
@@ -1783,6 +1879,17 @@ class TestGapCoverage:
         )
         with _session_patch(controller.gap_agents[0], MagicMock()):
             result = await _tool(controller.gap_agents[0], "gap_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_a_swept_panel_answered_in_one_turn_is_not_refused(self) -> None:
+        # Same regression as the main pass: the sweep owes ONE spoken question, so one rep
+        # exchange has discharged it even though three fields are still unextracted.
+        controller, _ = _controller(_panel_plan())
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+            await _rep_turn(agent, "Covered, twenty dollar copay, ten percent coinsurance.")
+            result = await _tool(agent, "gap_complete")()
         assert isinstance(result, Agent)
 
 

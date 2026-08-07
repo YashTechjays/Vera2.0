@@ -4,6 +4,10 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (2026-08-07): DONE, scope narrowed.** Tasks 1, 3 and 6 shipped. Tasks 2, 4 and 5
+> are **CLOSED — do not implement**; evidence below. The re-ask lists stay **field-granular**
+> on purpose. Net shape: question-granular *turn ceilings*, field-granular *re-ask lists*.
+
 **Goal:** The gap sweep and both premature-completion guards must count **questions**, not
 fields, so a panel question answered in one turn is not refused and re-asked N times.
 
@@ -86,49 +90,80 @@ def gap_questions(self, task_index: int) -> list[PlanQuestion]:
 
 ---
 
-### Task 1: `gap_questions` on the controller
+### Task 1: `gap_questions` on the controller — **DONE**, shipped in two pieces
 
-Map `gap_fields(task_index)` paths onto `plan.tasks[task_index].questions`; a question is owed
-if any target path is in that set. Preserve document order; never emit a question twice.
+The tree walk went into `vera_core.forms.question_plan` beside `drop_questions`, whose
+predicate it complements, rather than being hand-rolled in the worker:
 
-Test: a plan with one 3-target panel question where 2 targets are unanswered yields **one**
-owed question, not two. A plan with two independent single-target questions yields two.
+```python
+def owed_questions(panels: list[PromptPanel], paths: Collection[str]) -> list[PromptQuestion]
+```
 
-### Task 2: `_question_lines` replaces `_field_lines`
+`PlanRunController.owed_question_count(task_index)` is the adapter over it, and returns a
+**count** rather than a list — nothing needs the questions themselves once Task 2 is closed.
+It adds back gaps no question targets (`len(owed) + len(outstanding - covered)`), so a task
+with no compiled panels falls through to the plain field count with no special case, and
+partial coverage does not silently lower the ceiling. Routing questions have no
+`target_paths` and are never owed.
 
-Render `1. <question text>` and, where the schema fixes them, the expected values from the
-question's first target's descriptor. Drop `_owning_segment` qualification — the question text
-names its own subject, which is why the old `Covered (cpt_58340)` shape existed.
+### Task 2: `_question_lines` replaces `_field_lines` — **CLOSED, do not implement**
 
-Keep the `numbered=True` ordinal behaviour and its reason: a run of near-identical lines
-carries no signal that N is how many were owed.
+**Rejected 2026-08-07** because it re-asks answers already on file. A question's targets are
+answered *independently* by the Observer, so a partially-answered question rendered as
+`1. <question text>` re-asks the part that landed.
 
-### Task 3: both refusal guards count questions
+Measured on a PBM question targeting `pbm_exists` + `pbm_name`, with `pbm_exists` extracted
+and `pbm_name` missed. Field lines (shipped) give the gap sweep:
 
-`_refuse_premature_completion`: `outstanding = self._controller.gap_questions(self._task_index)`;
-ceiling `self._rep_turns >= len(outstanding)`. Keep the refuse-at-most-once-per-task design and
-its docstring reason (a rep who cannot answer never empties the set, so an unconditional guard
-would strand the plan).
+```
+1 required question is still unanswered from earlier in the call. …
+1. PBM Name
+```
 
-`_refuse_premature_gap_complete`: same substitution; `self._questions_owed = len(questions)` in
-`on_enter`. Keep both bounds (turn ceiling + `_GAP_FRUITLESS_REFUSALS`) and the
-`_outstanding_at_last_refusal` progress check.
+Question lines (this task) would instead give:
 
-Test the specific regression: a 3-target panel question, one rep turn that answers all three →
-`task_complete` is **not** refused. Before this plan it is.
+```
+1. Is there a separate pharmacy benefit manager for this plan, and if so, what is its name?
+```
 
-### Task 4: `_apply_gap_list` keys on question identity
+— re-asking `pbm_exists`. That is a regression against what ships today, and partial
+extraction of a multi-target question is the common case, not the edge case.
 
-`self._listed_paths` becomes `self._listed_questions: tuple[str, ...]` of question texts (or a
-stable index). The rebuild-not-append rule stays — the reason in `_apply_gating`'s docstring
-applies here too.
+The over-asking this task was written to fix (eight `Copay ($)` lines for one CPT panel
+question) is real but is the *lesser* cost, and `_owning_segment` already keeps those lines
+distinguishable. Fixing both at once needs a third thing neither plan specifies: render the
+question text **narrowed to its still-missing targets**. That is unbuilt — open it as its own
+plan if the CPT batching is worth it, and do not reopen this task as written.
 
-### Task 5: reconcile the existing tests
+### Task 3: both refusal guards count questions — **DONE**
 
-`_INTAKE_GAPS` currently lists `"Covered (cpt_58340)"`, `"Covered (cpt_82670)"`. With
-`PlanTask.questions` populated on the fixture, those become one question. Either add
-`questions=` to the fixture plans or assert on question text. Prefer adding `questions=` —
-it exercises the real shape.
+`_refuse_premature_completion` recomputes the ceiling **live** at refusal time; the guard's
+`outstanding` list (what it re-lists to the agent) stays fields. Refuse-at-most-once-per-task
+is unchanged.
+
+`_refuse_premature_gap_complete` uses the **entry snapshot** `self._questions_owed`, now set
+from `owed_question_count` in `on_enter`. The old `or len(outstanding)` fallback was dropped:
+the takeover latch is one-way (`intervention.py` — "never reset") and there is no `await`
+between the `gap_fields` and `owed_question_count` calls in `on_enter`, so the attribute can
+never be 0 by the time the guard reads it. Both bounds and the `_outstanding_at_last_refusal`
+progress check are unchanged.
+
+The refusal log names its units — `%d field(s) open across %d owed ask(s)` — because the two
+counts genuinely differ now; the old `%d of %d question(s)` would print "3 of 1".
+
+Regression covered: a 3-target panel question, one rep turn answering all three →
+`task_complete` is not refused. Before this plan it was.
+
+### Task 4: `_apply_gap_list` keys on question identity — **CLOSED, do not implement**
+
+Existed only to match Task 2's question-granular list. The list stays field-granular, so
+`self._listed_paths` stays paths and the rebuild-not-append rule is untouched.
+
+### Task 5: reconcile the existing tests — **CLOSED, not needed**
+
+Premised on Task 2 changing what the lists render. `_INTAKE_GAPS` keeps its field titles
+(`"Covered (cpt_58340)"`, `"Covered (cpt_82670)"`) because the gap block still renders fields;
+no existing assertion needed changing.
 
 ### Task 6: verify
 

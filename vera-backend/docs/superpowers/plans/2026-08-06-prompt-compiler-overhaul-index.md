@@ -77,6 +77,11 @@ until `rep_turns >= len(outstanding_fields)`, so a panel answered in one turn ge
 and re-asked. `_GAP_FRUITLESS_REFUSALS = 2` bounds the loop, so it degrades rather than
 hangs — but it costs the rep two spurious re-asks per panel.
 
+**C shipped 2026-08-07 with narrowed scope.** The turn ceilings are question-granular; the
+re-ask lists deliberately stay **field-granular**, so C's Tasks 2/4/5 are closed unimplemented.
+Rendering a partially-answered question by its text re-asks the half already on file — see the
+PBM worked example in the C plan. Net: ceilings count asks, lists name missing fields.
+
 ## Shared facts every plan needs
 
 - **Nothing here changes the DSL grammar.** No `dsl_version` bump, no migration, no frontend

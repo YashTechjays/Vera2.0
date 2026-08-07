@@ -48,7 +48,7 @@ from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
 from vera_core.forms.conditions import evaluate, is_applicable, is_required
 from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
 from vera_core.forms.prompting import render_panels
-from vera_core.forms.question_plan import drop_questions
+from vera_core.forms.question_plan import drop_questions, owed_questions
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -336,7 +336,7 @@ class PlanTaskAgent(Agent):
         # The Observer extracts in a detached pass, so the answer to the task's last question is
         # never on file yet here; judge by turns instead, since N questions cannot have been asked
         # in fewer than N exchanges. Coarse until answers carry the asking task's index.
-        if self._rep_turns >= len(outstanding):
+        if self._rep_turns >= self._controller.owed_question_count(self._task_index):
             return None
         self._completion_refused = True
         logger.info(
@@ -448,7 +448,7 @@ class GapTaskAgent(Agent):
             await self._controller.prepare_successor(self, successor)
             self.session.update_agent(successor)
             return
-        self._questions_owed = len(fields)
+        self._questions_owed = self._controller.owed_question_count(self._task_index)
         await self._apply_gap_list(fields)
         self.session.generate_reply(instructions=_GAP_REASK_DIRECTIVE)
 
@@ -512,7 +512,7 @@ class GapTaskAgent(Agent):
         outstanding = self._controller.gap_fields(self._task_index)
         if not outstanding:
             return None
-        owed = self._questions_owed or len(outstanding)
+        owed = self._questions_owed
         if self._rep_turns >= owed:
             return None
         shrank = (
@@ -529,7 +529,7 @@ class GapTaskAgent(Agent):
             return None
         self._outstanding_at_last_refusal = len(outstanding)
         logger.info(
-            "gap sweep of task %s: completion refused, %d of %d question(s) still open",
+            "gap sweep of task %s: completion refused, %d field(s) open across %d owed ask(s)",
             self._task.task_key,
             len(outstanding),
             owed,
@@ -979,6 +979,18 @@ class PlanRunController:
             for field in self.applicable_fields(task_index)
             if is_required(field, self._answers, shared) and not self._is_answered(field.path)
         ]
+
+    def owed_question_count(self, task_index: int) -> int:
+        """`gap_fields` measured in SPOKEN questions — the turn ceiling both completion guards
+        judge by.
+
+        One compiled panel question answers several fields at once, so counting fields sets the
+        ceiling N times too high and the guard refuses a task the rep answered in one breath. A
+        gap no question covers still counts as an ask of its own."""
+        outstanding = {field.path for field in self.gap_fields(task_index)}
+        owed = owed_questions(self.plan.tasks[task_index].panels, outstanding)
+        covered = {path for question in owed for path in question.target_paths}
+        return len(owed) + len(outstanding - covered)
 
     def _is_answered(self, path: str) -> bool:
         value = self._answers.get(path)
