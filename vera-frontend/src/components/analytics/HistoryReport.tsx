@@ -1,5 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts"
 
 import { MetricCard } from "@/components/analytics/MetricCard"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -15,8 +24,10 @@ import {
 import { ApiError } from "@/lib/api/client"
 import {
   deltaPct,
+  formatDay,
   formatDuration,
   formatPct,
+  mergeInterventionDays,
   presetRange,
   type DateRange,
   type PresetKey,
@@ -33,6 +44,33 @@ const PRESETS: { key: PresetKey; label: string }[] = [
 
 const BAR_COLOR = "#34B2B2" // brand teal, same literal Live Monitoring uses
 
+// Stack order = array order; colors CVD-validated as adjacent pairs on white
+// (dataviz six-checks validator) — change order and colors together.
+const INTERVENTION_SERIES = [
+  { key: "flag", label: "Flag", color: "#2a78d6" },
+  { key: "coach", label: "Coach", color: "#eb6834" },
+  { key: "whisper", label: "Whisper", color: "#0f9b9b" },
+  { key: "takeover", label: "Takeover", color: "#c98500" },
+] as const
+
+// Both charts share one axis, so both read the same config.
+const DAY_AXIS = {
+  dataKey: "day",
+  tickFormatter: formatDay,
+  interval: "preserveStartEnd",
+  minTickGap: 24,
+  tickLine: false,
+  axisLine: false,
+  fontSize: 12,
+} as const
+
+const COUNT_AXIS = {
+  allowDecimals: false,
+  tickLine: false,
+  axisLine: false,
+  fontSize: 12,
+} as const
+
 function selectedRange(preset: PresetKey, customFrom: string, customTo: string): DateRange | null {
   if (preset !== "custom") return presetRange(preset, new Date())
   if (!customFrom || !customTo) return null
@@ -40,16 +78,29 @@ function selectedRange(preset: PresetKey, customFrom: string, customTo: string):
   return { date_from: `${customFrom}T00:00:00Z`, date_to: `${customTo}T23:59:59Z` }
 }
 
-function ChartCard({ title, children }: { title: string; children: ReactNode }) {
+type ChartCardProps = {
+  title: string
+  /** Message to show instead of the chart when the series has no data. */
+  empty?: string
+  children: ReactNode
+}
+
+function ChartCard({ title, empty, children }: ChartCardProps) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>{title}</CardTitle>
       </CardHeader>
       <CardContent className="h-64">
-        <ResponsiveContainer width="100%" height="100%">
-          {children}
-        </ResponsiveContainer>
+        {empty ? (
+          <p className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            {empty}
+          </p>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            {children}
+          </ResponsiveContainer>
+        )}
       </CardContent>
     </Card>
   )
@@ -191,32 +242,40 @@ export function HistoryReport() {
           <ChartCard title="Calls per day">
             <BarChart data={report.calls_per_day}>
               <CartesianGrid vertical={false} strokeOpacity={0.3} />
-              <XAxis dataKey="day" tickLine={false} axisLine={false} fontSize={12} />
-              <YAxis allowDecimals={false} tickLine={false} axisLine={false} fontSize={12} />
+              <XAxis {...DAY_AXIS} />
+              <YAxis {...COUNT_AXIS} />
               <Tooltip cursor={{ fillOpacity: 0.1 }} />
               <Bar dataKey="calls" fill={BAR_COLOR} radius={[3, 3, 0, 0]} />
             </BarChart>
           </ChartCard>
-          <ChartCard title="Interventions by type">
-            <BarChart data={report.interventions_by_type} layout="vertical">
-              <CartesianGrid horizontal={false} strokeOpacity={0.3} />
-              <XAxis
-                type="number"
-                allowDecimals={false}
-                tickLine={false}
-                axisLine={false}
-                fontSize={12}
-              />
-              <YAxis
-                type="category"
-                dataKey="type"
-                width={90}
-                tickLine={false}
-                axisLine={false}
-                fontSize={12}
-              />
+          <ChartCard
+            title="Interventions per day"
+            empty={
+              report.interventions_per_day.length === 0
+                ? "No interventions in this period"
+                : undefined
+            }
+          >
+            <BarChart
+              data={mergeInterventionDays(report.calls_per_day, report.interventions_per_day)}
+            >
+              <CartesianGrid vertical={false} strokeOpacity={0.3} />
+              <XAxis {...DAY_AXIS} />
+              <YAxis {...COUNT_AXIS} />
               <Tooltip cursor={{ fillOpacity: 0.1 }} />
-              <Bar dataKey="count" fill={BAR_COLOR} radius={[0, 3, 3, 0]} />
+              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+              {INTERVENTION_SERIES.map((series) => (
+                <Bar
+                  key={series.key}
+                  dataKey={series.key}
+                  name={series.label}
+                  stackId="interventions"
+                  fill={series.color}
+                  stroke="#fff"
+                  strokeWidth={1}
+                  maxBarSize={40}
+                />
+              ))}
             </BarChart>
           </ChartCard>
         </div>

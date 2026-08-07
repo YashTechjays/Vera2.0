@@ -1,3 +1,5 @@
+import type { InterventionDayRow } from "@/lib/api/analytics"
+
 export type PresetKey = "7d" | "30d" | "90d" | "week" | "month" | "custom"
 
 export type DateRange = { date_from: string; date_to: string }
@@ -30,6 +32,18 @@ export function presetRange(preset: Exclude<PresetKey, "custom">, now: Date): Da
   }
 }
 
+const ZERO_INTERVENTIONS = { flag: 0, coach: 0, whisper: 0, takeover: 0 }
+
+/** Union of both series' days, sorted and zero-filled, so the report charts share one axis. */
+export function mergeInterventionDays(
+  callsPerDay: { day: string }[],
+  interventionsPerDay: InterventionDayRow[],
+): InterventionDayRow[] {
+  const byDay = new Map(interventionsPerDay.map((row) => [row.day, row]))
+  const days = new Set([...callsPerDay.map((c) => c.day), ...byDay.keys()])
+  return [...days].sort().map((day) => byDay.get(day) ?? { day, ...ZERO_INTERVENTIONS })
+}
+
 export function deltaPct(current: number | null, previous: number | null): number | null {
   if (current === null || previous === null || previous === 0) return null
   return ((current - previous) / previous) * 100
@@ -40,6 +54,15 @@ export function formatDuration(seconds: number | null): string {
   const m = Math.floor(seconds / 60)
   const s = Math.round(seconds % 60)
   return `${m}m ${s}s`
+}
+
+/** "2026-08-05" → "Aug 5", for axis ticks; the tooltip keeps the full ISO day. */
+export function formatDay(day: string): string {
+  return new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  })
 }
 
 export function formatPct(value: number | null, opts?: { fraction?: boolean }): string {
