@@ -180,3 +180,26 @@ def test_build_degrades_to_smtp_when_the_token_secret_is_missing() -> None:
     # caller — that caller is app startup, so this can't raise.
     sender = build_email_sender(_settings(twilio_account_sid="AC123"), EnvSecretProvider())
     assert isinstance(sender, SmtpEmailSender)
+
+
+def test_build_falls_back_when_the_key_secret_resolves_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An empty secret version (or `TWILIO_API_KEY_SECRET=` in a .env) resolves without
+    # raising — authenticating with a blank password would 401 every send instead.
+    monkeypatch.setenv("TWILIO_API_KEY_SECRET", "")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "token-abc")
+    sender = build_email_sender(
+        _settings(twilio_api_key_sid="SK123", twilio_account_sid="AC123"),
+        EnvSecretProvider(),
+    )
+    assert isinstance(sender, TwilioEmailSender)
+    assert sender._auth == ("AC123", "token-abc")
+
+
+def test_build_degrades_to_smtp_when_the_auth_token_resolves_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "   ")
+    sender = build_email_sender(_settings(twilio_account_sid="AC123"), EnvSecretProvider())
+    assert isinstance(sender, SmtpEmailSender)
