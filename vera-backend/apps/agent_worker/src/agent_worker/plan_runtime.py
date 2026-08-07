@@ -918,10 +918,11 @@ class PlanRunController:
         A path NO task collects is deliberately not settled by position: an absent context
         value means "not supplied", which is unknown, not false.
 
-        This is WIDER than "answered", and has to be: the compiler omits the prose for any
-        gate it can decide by task position (`question_plan._entry_decided`), so a worker
-        that only trusted answers would keep a question whose condition is no longer stated
-        anywhere. The worker must be at least as decisive as the compiler."""
+        Position alone IS the compiler's rule (`question_plan._entry_decided`), which runs at
+        dispatch with no answers; adding "answered" only makes this MORE decisive, never less.
+        That ordering is required, not incidental: the compiler omits the prose for every gate
+        it decides, so a worker less decisive than the compiler keeps a question whose
+        condition is stated nowhere."""
         owner = self._task_of_path.get(path)
         return self._is_answered(path) or (owner is not None and owner < task_index)
 

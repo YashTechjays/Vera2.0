@@ -382,6 +382,11 @@ class TestBookendPaths:
         assert "wrap_up" in keys
 
 
+SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
+MEMBER_ID = "sections.insurance_information.policy_number"
+
+
 class TestPanelsMatchThePrompt:
     """The plan carries the prompt twice — as text and as the tree the worker re-renders.
     Anything that transforms one must transform the other, or narrowing a task silently
@@ -394,6 +399,20 @@ class TestPanelsMatchThePrompt:
 
     def test_every_task_reassembles_from_its_pieces(self) -> None:
         for task in self._plan().tasks:
+            parts = (task.lead_in, render_panels(task.panels), task.trailing)
+            assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
+
+    def test_every_fused_task_reassembles_from_its_pieces(self) -> None:
+        # The FUSED tree is what `_narrowed_block` re-renders, and `fuse_prefill` rewrites
+        # `prompt` as one whole string: a spoken string the fuse touches in the text but not
+        # in the tree diverges only here, never in the compile-time check above.
+        fused = fuse_prefill(
+            build_ibv_standard(),
+            self._plan(),
+            {SPOUSE_NAME: "Jane Doe", MEMBER_ID: "ABC123"},
+            current_year=2026,
+        )
+        for task in fused.tasks:
             parts = (task.lead_in, render_panels(task.panels), task.trailing)
             assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
 
@@ -412,11 +431,6 @@ class TestPanelsMatchThePrompt:
         fused = fuse_prefill(doc, self._plan(), {}, current_year=2026)
         for task in fused.tasks:
             assert "{{current_year}}" not in render_panels(task.panels), task.task_key
-
-
-SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
-SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
-MEMBER_ID = "sections.insurance_information.policy_number"
 
 
 class TestConfirmSlot:

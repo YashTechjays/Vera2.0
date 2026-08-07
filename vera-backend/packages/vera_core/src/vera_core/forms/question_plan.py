@@ -20,7 +20,7 @@ Pure and DB-free. Deterministic: same document = identical tree.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,13 +28,16 @@ from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
     AllCondition,
     Alternatives,
+    AnyCondition,
     AskGroup,
     Codes,
+    Comparison,
     Condition,
     FormField,
     FormSchemaDoc,
     Group,
     Leaf,
+    RefCondition,
     RequiredWhen,
     Section,
     Task,
@@ -149,6 +152,14 @@ def _answers_text(leaf: Leaf) -> str:
     return "; ".join(parts)
 
 
+class _CoveredGate(NamedTuple):
+    """A gate that reduces to coverage alone: the `.covered` paths it names, and whether ANY
+    one of them satisfying it is enough."""
+
+    refs: frozenset[str]
+    any_of: bool
+
+
 class _Builder:
     def __init__(
         self, doc: FormSchemaDoc, task: Task, immediate_by_anchor: dict[str, list[str]]
@@ -165,9 +176,7 @@ class _Builder:
         task_index = {t.task_key: i for i, t in enumerate(doc.tasks)}
         # Collectable path -> the task that asks it, by SECTION ownership. The worker builds
         # its own from the compiled descriptors, which route a `confirm_in_task` leaf to the
-        # task it is spoken in — so the two deliberately disagree on those few leaves, and an
-        # absent path reads as decided here (prose omitted) but undecided there (question
-        # kept). Safe only in that direction: see `PlanRunController._settled`.
+        # task it is spoken in — so the two deliberately disagree on those few leaves.
         self.task_of_path = {
             path: task_index[key]
             for path in self.leaves
@@ -440,14 +449,64 @@ class _Builder:
         """A gate that only asks "is the thing this question is about covered?" says exactly
         that. Field-by-field it reads `"Covered" is "Yes"`, which inside a panel has no
         antecedent — and on a fanned-out question no single field it could name."""
-        refs = {ref for gate in residual for ref in condition_field_paths(gate, self.shared)}
-        if refs and all(r.endswith(".covered") and r.startswith(f"{scope}.") for r in refs):
-            return "the codes above are covered" if len(refs) > 1 else "this service is covered"
+        shortcut = self._covered_shortcut(residual, scope)
+        if shortcut is not None:
+            return shortcut
         parts: list[str] = []
         for gate in residual:
             text = self._render(gate, scope)
             parts.append(f"({text})" if len(residual) > 1 and " or " in text else text)
         return " and ".join(parts)
+
+    def _covered_shortcut(self, residual: tuple[Condition, ...], scope: str) -> str | None:
+        """The friendly wording, only where it provably makes the same claim as the gate.
+
+        Every conjunct has to reduce to `<this panel>.….covered is "Yes"`; a `ne`, a `not` or
+        a path from another panel would be spoken as its own opposite. `any` and `all` need
+        different words too — three CPT codes under an `any` are not "the codes above are
+        covered". Anything else falls back to the literal field-by-field rendering."""
+        gates: list[_CoveredGate] = []
+        for conjunct in residual:
+            covered = self._covered_gate(conjunct, scope)
+            if covered is None:
+                return None
+            gates.append(covered)
+        any_of = any(gate.any_of for gate in gates)
+        # Conjuncts are ANDed, and an `any` inside that AND has no short phrasing left.
+        if any_of and len(gates) > 1:
+            return None
+        refs = {ref for gate in gates for ref in gate.refs}
+        if not refs:
+            return None
+        if len(refs) == 1:
+            return "this service is covered"
+        return "any of the codes above is covered" if any_of else "the codes above are covered"
+
+    def _covered_gate(self, cond: Condition, scope: str, depth: int = 0) -> _CoveredGate | None:
+        """`cond` as a coverage-only gate, or None the moment it asks anything else."""
+        if depth > 10:  # the nesting bound `condition_field_paths` and the validator share
+            return None
+        if isinstance(cond, RefCondition):
+            target = self.shared.get(cond.ref)
+            return None if target is None else self._covered_gate(target, scope, depth + 1)
+        if isinstance(cond, AllCondition | AnyCondition):
+            subs = cond.all if isinstance(cond, AllCondition) else cond.any
+            refs: set[str] = set()
+            for sub in subs:
+                nested = self._covered_gate(sub, scope, depth + 1)
+                if nested is None or nested.any_of:  # one quantifier is all the wording carries
+                    return None
+                refs |= nested.refs
+            return _CoveredGate(frozenset(refs), any_of=isinstance(cond, AnyCondition))
+        if (
+            isinstance(cond, Comparison)
+            and cond.op == "eq"
+            and cond.value == "Yes"
+            and cond.field.startswith(f"{scope}.")
+            and cond.field.endswith(".covered")
+        ):
+            return _CoveredGate(frozenset({cond.field}), any_of=False)
+        return None
 
     def _render(self, cond: Condition, scope: str) -> str:
         # `build_condition_renderer` is a factory doing four document walks to build its
@@ -460,20 +519,22 @@ class _Builder:
     def _entry_decided(self, gate: Condition) -> bool:
         """Is this conjunct's answer already final when the task is entered?
 
-        True when every field it references is collected by an EARLIER task — answered, or
-        never answered because it was gated out upstream. A conjunct referencing this task or
-        a later one is undecided: its gate question has not been asked yet, so the prose has
-        to stay for the agent to evaluate live.
+        A path is final only when some task collects it AND that task runs earlier — its value
+        is then answered, or never answered because the field was gated out upstream. A path
+        this task or a later one collects has not been asked yet; a path NO task collects is
+        an absent context value, and "not supplied" is unknown, not false; a conjunct with no
+        path at all has nothing that could ever settle it. All three stay undecided, so the
+        prose survives for the agent to evaluate live.
 
-        The compiler runs at dispatch with no answers, so task position is the only signal it
-        has. The worker classifies the same gates with a strictly stronger test
-        (`PlanRunController._settled`, which also knows what is answered) — the asymmetry is
-        safe in that direction only, since this decides whether prose is PRINTED and the
-        worker decides whether the question SURVIVES.
-
-        A conjunct referencing no path at all counts as undecided: nothing could settle it."""
+        That is exactly the worker's rule (`PlanRunController._settled`), plus the one signal
+        the worker has and a dispatch-time compiler cannot: the answers so far. So the worker
+        is never LESS decisive than this — and it must not be, because this decides whether a
+        gate's prose is PRINTED while the worker decides whether the question SURVIVES. A gate
+        decided here but not there is a question asked with its condition stated nowhere."""
         refs = set(condition_field_paths(gate, self.shared))
-        return bool(refs) and all(self.task_of_path.get(ref, -1) < self.this_task for ref in refs)
+        return bool(refs) and all(
+            ref in self.task_of_path and self.task_of_path[ref] < self.this_task for ref in refs
+        )
 
     # -- structural predicates -------------------------------------------------
 
@@ -580,25 +641,39 @@ def hydrate_panels(panels: list[PromptPanel], hydrate: Callable[[str], str]) -> 
     def text(value: str | None) -> str | None:
         return hydrate(value) if value else value  # falsy passes through untouched
 
-    def one(panel: PromptPanel) -> PromptPanel:
-        items: list[PromptItem] = []
-        for item in panel.items:
-            if isinstance(item, PromptPanel):
-                items.append(one(item))
-                continue
-            items.append(
-                item.model_copy(
-                    update={
-                        "text": text(item.text) or "",
-                        "gate_text": text(item.gate_text),
-                        "derive_text": text(item.derive_text),
-                        "required_text": text(item.required_text),
-                        "immediate_confirms": [
-                            text(line) or "" for line in item.immediate_confirms
-                        ],
-                    }
-                )
-            )
-        return panel.model_copy(update={"intro": text(panel.intro), "items": items})
+    def lines(values: list[str]) -> list[str]:
+        return [text(value) or "" for value in values]
 
-    return [one(panel) for panel in panels]
+    def option(node: PromptOption) -> PromptOption:
+        return node.model_copy(
+            update={"label": text(node.label), "answers": text(node.answers) or ""}
+        )
+
+    def question(node: PromptQuestion) -> PromptQuestion:
+        return node.model_copy(
+            update={
+                "text": text(node.text) or "",
+                "options": [option(opt) for opt in node.options],
+                "gate_text": text(node.gate_text),
+                "derive_text": text(node.derive_text),
+                "required_text": text(node.required_text),
+                "immediate_confirms": lines(node.immediate_confirms),
+                "hints": lines(node.hints),
+                "routes_between": lines(node.routes_between),
+            }
+        )
+
+    def panel(node: PromptPanel) -> PromptPanel:
+        return node.model_copy(
+            update={
+                "title": text(node.title),
+                "intro": text(node.intro),
+                "gate_text": text(node.gate_text),
+                "items": [
+                    panel(item) if isinstance(item, PromptPanel) else question(item)
+                    for item in node.items
+                ],
+            }
+        )
+
+    return [panel(node) for node in panels]

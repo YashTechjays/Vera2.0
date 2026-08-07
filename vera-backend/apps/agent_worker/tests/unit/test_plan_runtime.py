@@ -1109,6 +1109,17 @@ class TestEntryDecidability:
         controller, _ = _controller(_intra_task_gate_plan())
         assert "Authorization Department Name" in [f.title for f in controller.excluded_fields(1)]
 
+    def test_a_path_no_task_collects_is_undecided_here_and_in_the_compiler(self) -> None:
+        # `_settled` and `question_plan._entry_decided` decide the same gates by task
+        # position, so they have to agree on a path neither can attribute to a task: an
+        # absent context value is "not supplied", which is unknown, not false. The compiler
+        # calling it decided while this keeps the question is the one unsafe direction — the
+        # question gets asked with its condition stated nowhere.
+        controller, _ = _controller(_intra_task_gate_plan())
+        unknown = "sections.patient_information.spouse_gender"
+        assert unknown not in controller._task_of_path
+        assert not controller._settled(unknown, 1)
+
     def test_gap_fields_still_uses_full_chains(self) -> None:
         # At end of call the intra-task gate IS decided, which is what the sweep needs.
         controller, _ = _controller(_intra_task_gate_plan())

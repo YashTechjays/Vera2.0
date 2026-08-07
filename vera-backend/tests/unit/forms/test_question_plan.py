@@ -6,14 +6,20 @@ turns several paths into labelled options on one question, and groups become pan
 """
 
 from collections.abc import Iterator
+from typing import Any
 
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.question_plan import (
+    PromptOption,
     PromptPanel,
     PromptQuestion,
     build_question_plan,
+    hydrate_panels,
     iter_questions,
 )
+
+from .test_schema_dsl import minimal_doc
 
 DOC = build_ibv_standard()
 TASKS = {t.task_key: t for t in DOC.tasks}
@@ -29,6 +35,68 @@ def _questions(task_key: str) -> list[PromptQuestion]:
 
 def _by_text(task_key: str, needle: str) -> PromptQuestion:
     return next(q for q in _questions(task_key) if needle in q.text)
+
+
+def _gated_doc(gate: dict[str, Any]) -> FormSchemaDoc:
+    """`minimal_doc` plus a coded service panel whose follow-up question carries `gate`, and
+    a context section no task collects."""
+    doc = minimal_doc()
+    doc["sections"]["intake"] = {
+        "title": "Intake",
+        "role": "context",
+        "fields": {"on_file": {"type": "text", "title": "On File", "role": "context"}},
+    }
+    doc["sections"]["service"] = {
+        "title": "Service",
+        "fields": {
+            "iui": {
+                "type": "group",
+                "title": "IUI",
+                "codes": {"cpt": ["58323", "58322"]},
+                "fields": {
+                    "covered": {
+                        "type": "enum",
+                        "title": "Covered",
+                        "role": "ask",
+                        "values": ["Yes", "No"],
+                        "prompt": {"ask": "Is IUI covered?"},
+                    },
+                    # Codes the panel above already lists: storage, so its Covered lands in
+                    # the same panel and the same scope as the one beside it.
+                    "cpt_58322": {
+                        "type": "group",
+                        "title": "CPT 58322",
+                        "codes": {"cpt": ["58322"]},
+                        "fields": {
+                            "covered": {
+                                "type": "enum",
+                                "title": "58322 Covered",
+                                "role": "ask",
+                                "values": ["Yes", "No"],
+                                "prompt": {"ask": "Is 58322 covered?"},
+                            }
+                        },
+                    },
+                    "cycle_limit": {
+                        "type": "text",
+                        "title": "Cycle Limit",
+                        "role": "ask",
+                        "applicable_when": gate,
+                        "prompt": {"ask": "What is the cycle limit?"},
+                    },
+                },
+            }
+        },
+    }
+    doc["tasks"].append({"task_key": "coverage", "title": "Coverage", "sections": ["service"]})
+    return FormSchemaDoc.model_validate(doc)
+
+
+def _gated_question(gate: dict[str, Any]) -> PromptQuestion:
+    doc = _gated_doc(gate)
+    task = next(t for t in doc.tasks if t.task_key == "coverage")
+    plan = build_question_plan(doc, task)
+    return next(q for q in iter_questions(plan) if "cycle limit" in q.text)
 
 
 def _panels(task_key: str) -> list[PromptPanel]:
@@ -157,6 +225,81 @@ class TestGates:
         # infertility_covered, stated once on the panel and not on the questions inside it
         assert iui.gate_text == '"Infertility Treatment Covered" is "Yes"'
         assert iui.questions[0].gate_text is None
+
+    def test_a_gate_on_a_path_no_task_collects_keeps_its_prose(self) -> None:
+        # Task position cannot decide a path nothing collects — an absent context value is
+        # unknown, not false — so the prose has to survive. The worker reaches the same
+        # verdict on the same path (`PlanRunController._settled`); if only the compiler
+        # called it decided, the worker would keep asking a question whose condition it had
+        # just dropped from the prompt.
+        gate = {"field": "sections.intake.on_file", "op": "eq", "value": "Yes"}
+        assert _gated_question(gate).gate_text == '"On File" is "Yes"'
+
+
+class TestCoveredShortcut:
+    """Inside a panel `"Covered" is "Yes"` has no antecedent, so a gate that asks only that is
+    reworded — but only where the short wording makes the identical claim."""
+
+    def test_a_single_covered_gate_names_the_service(self) -> None:
+        q = _by_text("infertility_coverage", "cycle limit for ovulation induction")
+        assert q.gate_text == "this service is covered"
+
+    def test_an_any_over_several_codes_does_not_read_as_all_of_them(self) -> None:
+        # IUI's cycle limit is gated on `any` over three CPT codes' Covered; "the codes above
+        # are covered" states the other quantifier, and the agent skips a covered service.
+        q = _by_text("infertility_coverage", "cycle limit for IUI")
+        assert q.gate_text == "any of the codes above is covered"
+
+    def test_an_all_over_several_codes_still_reads_as_all_of_them(self) -> None:
+        gate = {
+            "all": [
+                {"field": "sections.service.iui.covered", "op": "eq", "value": "Yes"},
+                {"field": "sections.service.iui.cpt_58322.covered", "op": "eq", "value": "Yes"},
+            ]
+        }
+        assert _gated_question(gate).gate_text == "the codes above are covered"
+
+    def test_an_inequality_is_never_reworded_as_covered(self) -> None:
+        # The shortcut inspected paths only, so `covered != "Yes"` — the exact opposite of
+        # what it says — was spoken as "this service is covered".
+        gate = {"field": "sections.service.iui.covered", "op": "ne", "value": "Yes"}
+        assert _gated_question(gate).gate_text == '"Covered" is not "Yes"'
+
+    def test_a_negation_is_never_reworded_as_covered(self) -> None:
+        gate = {"not": {"field": "sections.service.iui.covered", "op": "eq", "value": "Yes"}}
+        assert _gated_question(gate).gate_text == 'not ("Covered" is "Yes")'
+
+
+class TestHydration:
+    def test_every_spoken_string_in_the_tree_is_hydrated(self) -> None:
+        # `fuse_prefill` rewrites a task's text as ONE string, so any slot missed here
+        # hydrates in `prompt` and stays raw in `panels` — the tree the worker re-renders.
+        tree = [
+            PromptPanel(
+                title="{{tok}} title",
+                intro="{{tok}} intro",
+                gate_text="{{tok}} panel gate",
+                items=[
+                    PromptQuestion(
+                        text="{{tok}} text",
+                        options=[PromptOption(label="{{tok}} label", answers="{{tok}} answers")],
+                        gate_text="{{tok}} gate",
+                        derive_text="{{tok}} derive",
+                        required_text="{{tok}} required",
+                        immediate_confirms=["{{tok}} confirm"],
+                        hints=["{{tok}} hint"],
+                    ),
+                    PromptPanel(
+                        title="{{tok}} child",
+                        items=[
+                            PromptQuestion(text="{{tok}} route", routes_between=["{{tok}} between"])
+                        ],
+                    ),
+                ],
+            )
+        ]
+        hydrated = hydrate_panels(tree, lambda s: s.replace("{{tok}}", "Jane"))
+        assert "{{tok}}" not in "".join(panel.model_dump_json() for panel in hydrated)
 
 
 class TestCoverage:
