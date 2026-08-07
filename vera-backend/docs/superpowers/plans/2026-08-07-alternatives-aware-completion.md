@@ -138,7 +138,28 @@ Corrections to the decisions above, from reviewing the implementation:
   truth by string surgery on the parent path. Authored honestly — 8 `cost_pair()` sets of 2 plus a
   cost fan-out through `AskGroup`, the shape `panel_ask_groups` already emits for
   `covered`/`prior_auth` — Decision 2 evaporates and the validator could check it. Deferred for
-  blast radius (re-compile, re-seed, prompt diff, eval), not because the current shape is right.
+  blast radius, not because the current shape is right.
+
+  **Tested 2026-08-07, and "the spoken output should be unchanged" does NOT hold.** Union-find
+  does merge as documented (`question_plan._index_section` unions each alternatives member with
+  its ask group's head, and says so). But swapping `panel_cost_pairs` for per-code `cost_pair`s
+  plus cost `AskGroup`s renders **7 of 9** task prompts byte-identical and blows up
+  `diagnostic_coverage` from 4 questions to 11+ — "What is the copay or coinsurance for diagnostic
+  testing?" once per CPT code, and the merged gate prose replaced by a per-code chain. That is the
+  regression Plan B removed (33 items → 4).
+  Caveat on the experiment: `diagnostic_coverage` never calls `panel_ask_groups` (it passes
+  `alternatives=panel_cost_pairs(...)` straight in at `ibv_standard.py:572`), so the patch added no
+  cost ask-groups there and the per-code pairs had nothing to merge with — some of the explosion is
+  the harness. The transferable result is that this is **not** a two-helper swap: it needs
+  section-by-section authoring, and getting it wrong regresses the prompt.
+
+  So `AskGroup` is correctly excluded from the alternatives rule by design — it means collect ALL,
+  not one-of — and the parent grouping in Decision 2 stays. Note the grouping is a **safety net**,
+  not a correction of authorial intent: if a panel's cost is genuinely one answer for every code
+  (which `panel_ask_groups`' docstring asserts — "a rep quotes benefits per service, not per code")
+  then set-level satisfaction is also correct, and the two agree whenever the Observer fans out —
+  as it did in every panel of trace `98df8092…`. They diverge only on partial fan-out, where
+  grouping yields a visible gap and set-level would print `$0` for codes nobody quoted.
 - **Three `FormSchemaDoc.model_validate` calls per recorded answer** (4.65 ms vs 2.86 ms before);
   threading one validated doc through `recompute_form_projection` measures a 15× cut. Mostly
   pre-existing duplication, and the fix changes that function's signature.
