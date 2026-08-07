@@ -806,6 +806,7 @@ def _field(
     required: bool | RequiredWhen = True,
     gates: tuple[Comparison, ...] = (),
     values: list[str] | None = None,
+    default: str | None = None,
 ) -> PlanFieldDescriptor:
     return PlanFieldDescriptor(
         path=path,
@@ -815,6 +816,7 @@ def _field(
         required=required,
         gates=gates,
         values=values,
+        default=default,
     )
 
 
@@ -2551,3 +2553,74 @@ class TestGatedOutTask:
         with _session_patch(coverage, mock_session):
             await coverage.on_enter()
         assert mock_session.generate_reply.call_args.kwargs["instructions"] == _OPENING_DIRECTIVE
+
+
+_COPAY = "sections.svc.cpt_1.copay"
+_COINS = "sections.svc.cpt_1.coinsurance"
+_OTHER_COPAY = "sections.svc.cpt_2.copay"
+_GROUP_NAME = "sections.svc.group_name"
+
+
+def _pair_plan() -> CallPlan:
+    """One spoken question over an either/or cost pair, as `cost_pair` authors it, plus a
+    defaulted field and a second code's copay that must NOT be satisfied by the first's."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        alternative_pairs=[(_COPAY, _COINS)],
+        tasks=[
+            PlanTask(
+                task_key="cost",
+                title="Cost",
+                prompt="Ask the cost.",
+                fields=[
+                    _field(_COPAY, "Copay ($)"),
+                    _field(_COINS, "Coinsurance (%)"),
+                    _field(_OTHER_COPAY, "Copay ($)"),
+                    _field(_GROUP_NAME, "Group Name", default="N/A"),
+                ],
+                panels=[
+                    PromptPanel(
+                        title="CPT 1",
+                        items=[_question("What is the copay or coinsurance?", _COPAY, _COINS)],
+                    )
+                ],
+            ),
+            PlanTask(task_key="closing_task", title="Wrap Up", prompt="Close."),
+        ],
+    )
+
+
+class TestAlternativesAwareGapFields:
+    """A live call's gap sweep owed ten phantom fields: for each, the OTHER side of the pair had
+    been answered. `gap_fields` never consulted the alternatives the schema declares."""
+
+    def test_a_sibling_answer_closes_the_gap(self) -> None:
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({_COINS: "30"})
+        assert _COPAY not in {f.path for f in controller.gap_fields(0)}
+
+    def test_both_answered_closes_the_gap_without_hiding_either(self) -> None:
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({_COPAY: "$25", _COINS: "30"})
+        open_paths = {f.path for f in controller.gap_fields(0)}
+        assert _COPAY not in open_paths and _COINS not in open_paths
+        # Satisfaction, not applicability: both are still applicable, so both still render.
+        assert {_COPAY, _COINS} <= {f.path for f in controller.applicable_fields(0)}
+
+    def test_neither_answered_owes_the_pair_as_one_ask(self) -> None:
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({})
+        open_paths = {f.path for f in controller.gap_fields(0)}
+        assert {_COPAY, _COINS} <= open_paths
+        # One spoken question covers both, so the turn ceiling counts them once.
+        assert controller.owed_question_count(0) == 2  # the pair's one ask + cpt_2's copay
+
+    def test_a_defaulted_field_is_never_owed(self) -> None:
+        # completion_pct_v2 counts it filled and the export writes it; the bot chased it anyway.
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({})
+        assert _GROUP_NAME not in {f.path for f in controller.gap_fields(0)}

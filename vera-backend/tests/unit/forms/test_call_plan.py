@@ -478,3 +478,28 @@ class TestConfirmSlot:
         )
         assert line.endswith("I have the member ID as ABC123 — can you confirm that is correct?")
         assert "confirm — " not in line
+
+
+class TestAlternativePairs:
+    """The grouping rule itself is covered in test_conditions.py; this asserts only that the
+    compiled plan CARRIES it, since the worker is DB-free and cannot derive it."""
+
+    def test_the_plan_carries_per_code_pairs(self) -> None:
+        assert PLAN.alternative_pairs
+        for pair in PLAN.alternative_pairs:
+            assert len({path.rsplit(".", 1)[0] for path in pair}) == 1, pair
+
+
+class TestDescriptorCarriesDefault:
+    """`completion_pct_v2` counts a leaf with a `default` as filled and the export writes it, but
+    the descriptor did not carry it — so the bot chased six fields the form already called done."""
+
+    def test_default_reaches_the_descriptor(self) -> None:
+        by_path = {f.path: f for task in PLAN.tasks for f in task.fields}
+        group_name = by_path["sections.insurance_information.group_name"]
+        assert group_name.default == "N/A"
+        assert group_name.required is True
+
+    def test_a_leaf_without_a_default_carries_none(self) -> None:
+        by_path = {f.path: f for task in PLAN.tasks for f in task.fields}
+        assert by_path["sections.insurance_representative.rep_name"].default is None

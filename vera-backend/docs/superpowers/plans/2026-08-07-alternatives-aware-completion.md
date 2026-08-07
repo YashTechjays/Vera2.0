@@ -94,6 +94,60 @@ Two further defects found while scoping, both in scope here:
    let a focused retry (new `call_id`) fill `$0` over a real `$25` from call 1, or over a human edit
    (`call_id = NULL`).
 
+## Status and corrections (2026-08-07)
+
+**Tasks 1–4 implemented.** `just check`: 2155 passed. Two `test_auth_audit_chain` integration
+tests fail, and they fail identically with this whole change stashed (2140 passed on the clean
+tree) and pass in isolation — pre-existing, order/DB-state dependent, not from this work.
+
+Corrections to the decisions above, from reviewing the implementation:
+
+- **Decision 1's export-marker consumer is WITHDRAWN.** Task 2 said to call the shared predicate
+  from the export's `*` marker. Wrong: `*` marks **required**, a schema property, not still-owed.
+  Applying it stripped the asterisk from `Patient Name` and `Network status` (two existing tests
+  caught it). Both members of an either/or genuinely are required as a pair. The shared rule has
+  **two** consumers, not four: `gap_fields` (hence both `task_complete` guards) and
+  `completion_pct_v2`. `review`'s path lists apply the same rule through `is_field_satisfied`,
+  because `_gate_values` can hand them a sentinel map instead of real values.
+- **`satisfied_required_fraction` had already drifted** — it measures `verified_pct` and did not
+  get the alternatives clause, while its docstring claims it measures the same set as
+  `unsatisfied_required_paths`. All three now fold onto one `_unsatisfied` helper so they cannot
+  diverge again.
+- **The frontend scope in Task 2 named the wrong file.** `conditions.ts` holds only
+  `evaluateCondition` and needs no change, and `completionPercent` (`schema.ts`) has **zero
+  production call sites** — the UI renders the backend's `completion_pct`, so no user sees a
+  divergent percentage. The live alternatives-blind consumers are `validateLeaf`
+  (`validation.ts`) and `clearedRequired` (`IbvProvider.tsx`). Two concrete user-visible bugs
+  remain open there: an inline "Copay ($) is required" on a form the backend counts complete
+  (whenever the fill is skipped), and — newly created by the fill — a reviewer who deletes the
+  derived `$0` trips `clearedRequired` and **disables Save for the whole form**, with no escape
+  but retyping a value the rep never gave.
+- **The human-edit path never fills.** `patient_forms.py` does not call `record_answer`; it builds
+  `FieldAnswer` rows inline and recomputes completion inline. So a reviewer who types coinsurance
+  into an empty pair gets the completion credit but the copay cell stays blank in the export —
+  the inconsistency the fill exists to prevent. The real shared seam is the post-write derivation
+  (`recompute_form_projection`), not the writer.
+
+## Recorded debt
+
+- **The authoring is the actual modelling error.** `Alternatives`' own docstring says "one member
+  answered ⇒ others auto-record N/A, set complete" — exactly what this plan implements — while
+  `AskGroup` is the axis for "one combined spoken question over ≥2 sibling leaves".
+  `panel_cost_pairs` uses the **either/or** axis to express the **fan-out**, so the compiled
+  document asserts a 16-member either/or that is not true, and `alternative_pairs` recovers the
+  truth by string surgery on the parent path. Authored honestly — 8 `cost_pair()` sets of 2 plus a
+  cost fan-out through `AskGroup`, the shape `panel_ask_groups` already emits for
+  `covered`/`prior_auth` — Decision 2 evaporates and the validator could check it. Deferred for
+  blast radius (re-compile, re-seed, prompt diff, eval), not because the current shape is right.
+- **Three `FormSchemaDoc.model_validate` calls per recorded answer** (4.65 ms vs 2.86 ms before);
+  threading one validated doc through `recompute_form_projection` measures a 15× cut. Mostly
+  pre-existing duplication, and the fix changes that function's signature.
+- **`has_value` is a fourth spelling of "empty"** and forks from `review.is_blank_answer` on falsy
+  non-strings: `0` reads as blank here, answered there. It deliberately preserves
+  `completion_pct_v2`'s expression so `gap_fields` agrees with the form's percentage — but it also
+  means `plan_runtime._settled` (via `_is_answered`) and `gap_fields` disagree about a percent leaf
+  answered `0`. Reconciling is a behaviour decision about zero-valued answers.
+
 ## Global Constraints
 
 - `gap_fields`' set and `completion_pct_v2`'s set must stay identical — `gap_fields`' docstring says
@@ -157,7 +211,20 @@ an `inapplicable_value` stays blank but is not owed.
 The point of Task 3. Assert the generated sheet shows `$0` / `0%` / `N/A` for filled members and the
 real value where the rep answered — not blank, and not grey.
 
-### Task 5: the unchosen routing branch
+### Task 5: the unchosen routing branch — **BLOCKED, not attempted**
+
+The plan assumed the branch's `covered` could be filled with its `inapplicable_value`. It has none,
+and one cannot be authored: the DSL validator permits `inapplicable_value` only where self or an
+ancestor carries `applicable_when`, and `general_coverage`, `asc_professional` and its `cpt_58555`
+group all have `applicable_when=None`. Nor is there anything to gate on — the routing question has
+no `target_paths`, which is why it renders unnumbered.
+
+Three ways out, none chosen: give the routing question a real discriminator leaf and gate both
+branches on it; relax the validator rule; or hardcode `"N/A"` in the fill when it is in the leaf's
+enum `values` (true for every `covered` today) at the cost of a literal in code rather than schema.
+This compounds with the open design question below, so it needs a decision before implementation.
+
+
 
 When any leaf under a sibling branch has a value and **this branch has none at all**, fill this
 branch's `covered` with `N/A`. Its cost-sharing children are already gated on `covered == "Yes"`, so

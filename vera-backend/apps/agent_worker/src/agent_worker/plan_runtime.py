@@ -45,7 +45,13 @@ from agent_worker.prompt import (
     TOOL_REASON_ARG,
 )
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
-from vera_core.forms.conditions import evaluate, is_applicable, is_required
+from vera_core.forms.conditions import (
+    alternative_index,
+    evaluate,
+    is_applicable,
+    is_required,
+    is_satisfied,
+)
 from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
 from vera_core.forms.prompting import numbered_questions, render_panels
 from vera_core.forms.question_plan import PromptPanel, drop_questions, owed_questions
@@ -604,6 +610,8 @@ class PlanRunController:
         if not plan.tasks:
             raise ValueError("call plan has no tasks")
         self.plan = plan
+        # Built once: the either/or groups the compiler recovered from the authored sets.
+        self._alternatives = alternative_index(plan.alternative_pairs)
         self.room_name = room_name
         self.greeting = greeting
         # Tenant persona-tweak overlay, appended to every plan agent's instructions.
@@ -1010,14 +1018,15 @@ class PlanRunController:
         return any(self._decided_false(gate, shared, task_index) for gate in field.gates)
 
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
-        """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,
+        """A task's still-open gaps: applicable (gates hold) ∧ required ∧ owing an answer,
         against the live answer snapshot — the same required/applicable set the form's
-        completion percentage counts."""
+        completion percentage counts, which is why `is_satisfied` is shared with it."""
         shared = self.plan.shared_conditions
         return [
             field
             for field in self.applicable_fields(task_index)
-            if is_required(field, self._answers, shared) and not self._is_answered(field.path)
+            if is_required(field, self._answers, shared)
+            and not is_satisfied(field.path, field.default, self._answers, self._alternatives)
         ]
 
     def owed_question_count(self, task_index: int) -> int:

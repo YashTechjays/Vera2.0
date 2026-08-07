@@ -36,7 +36,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from vera_core.forms.conditions import leaf_gates
+from vera_core.forms.conditions import alternative_pairs, leaf_gates
 from vera_core.forms.dsl import (
     PATH_PREFIX,
     PLACEHOLDER_RE,
@@ -83,6 +83,9 @@ class PlanFieldDescriptor(_Model):
     required: bool | RequiredWhen = False
     gates: tuple[Condition, ...] = ()
     inapplicable_value: str | None = None
+    # `completion_pct_v2` counts a leaf with a default as FILLED and the export writes it, so a
+    # worker that cannot see it chases fields the form already calls done.
+    default: str | None = None
 
 
 class PlanTask(_Model):
@@ -117,6 +120,8 @@ class CallPlan(_Model):
     contradictions: list[Contradiction] = Field(default_factory=list)
     numeric_consistencies: list[NumericConsistency] = Field(default_factory=list)
     shared_conditions: dict[str, Condition] = Field(default_factory=dict)
+    # Either/or groups; answering one member satisfies the rest. See `conditions.alternative_pairs`.
+    alternative_pairs: list[tuple[str, ...]] = Field(default_factory=list)
     stt_key_terms: list[str] | None = None
     # Per-form stage (fuse_prefill) — empty/None on the compile_call_plan template:
     prefilled: dict[str, Any] = Field(default_factory=dict)  # {path: raw intake value}
@@ -162,6 +167,7 @@ def compile_call_plan(
                 required=leaf.required,
                 gates=gates,
                 inapplicable_value=leaf.inapplicable_value,
+                default=leaf.default,
             )
         )
 
@@ -197,6 +203,7 @@ def compile_call_plan(
         contradictions=list(doc.contradictions or []),
         numeric_consistencies=list(doc.numeric_consistencies or []),
         shared_conditions=dict(doc.shared_conditions or {}),
+        alternative_pairs=alternative_pairs(doc),
         stt_key_terms=doc.stt_key_terms,
     )
 
