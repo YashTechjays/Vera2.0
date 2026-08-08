@@ -178,12 +178,14 @@ function RoomNotice({
 
 function RoomView({
   microphone,
+  intervening,
   onStatus,
   ended,
   onReconnect,
   replaced,
 }: {
   microphone: boolean
+  intervening: boolean
   onStatus?: (status: RoomStatus) => void
   ended: boolean
   onReconnect: () => void
@@ -201,7 +203,8 @@ function RoomView({
   const phase = connectionPhase(state, everConnected, replaced)
   const otherIntervener = otherIntervenerPresent(likes)
   const supervisorLabel = intervenerLabel(likes)
-  const takeoverLive = microphone || otherIntervener
+  // Callee mode publishes too, but never silences the agent — only a takeover hides the agent row.
+  const takeoverLive = intervening || otherIntervener
   const roster = participants.filter((p) => rosterVisible(toParticipantLike(p), takeoverLive))
   // Our connection dropped, but the call itself isn't over (SSE, via `ended`) — offer a rejoin.
   const connectionLost = phase === "ended" && !ended
@@ -280,7 +283,8 @@ export function LiveCallRoom({
 }: {
   callId: string
   /** Publishing mode: "intervene" is a supervisor speaking over the agent, "callee" the
-   *  browser standing in for the payer rep (test transport). Only "listen" stays silent. */
+   *  browser standing in for the payer rep (test transport). Only "listen" stays silent;
+   *  publishing can still fail if getUserMedia is blocked (e.g. incognito). */
   mode?: LiveCallMode
   /** Call hit a terminal status (events stream). The room can outlive the call while a supervisor
    *  sits in it, so room state alone would keep reading "Live" after the callee hung up. */
@@ -293,6 +297,7 @@ export function LiveCallRoom({
   onJoinFailed?: (error: unknown) => void
 }) {
   const microphone = mode !== "listen"
+  const intervening = mode === "intervene"
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -373,6 +378,7 @@ export function LiveCallRoom({
       <LiveActivityBeacon />
       <RoomView
         microphone={microphone}
+        intervening={intervening}
         onStatus={onStatus}
         ended={ended}
         onReconnect={reconnect}

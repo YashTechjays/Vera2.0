@@ -481,7 +481,7 @@ export function LiveCallModal({
                 {ending ? "Ending…" : "End Call"}
               </Button>
             )}
-            {(mode === "listen" || callEnded) && (
+            {(mode !== "intervene" || callEnded) && (
               <Button variant="outline" onClick={() => handleOpenChange(false)}>
                 Close
               </Button>
