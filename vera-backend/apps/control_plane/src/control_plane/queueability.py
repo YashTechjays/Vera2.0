@@ -1,8 +1,9 @@
 """Enqueue-time gates for `PUT /patient-forms/{id}/status` → IN_QUEUE, run BEFORE the
 state-machine transition: `ensure_queueable` rejects a form that could never be dialed
-(no payer phone, no outbound trunk); `ensure_va_capacity` rejects an enqueue that would
-put the caller past the tenant's per-VA in-flight limit. Working hours stay dial-time
-concerns the dispatcher handles.
+(no payer phone, no outbound trunk — the trunk half is skipped under browser-callee
+transport); `ensure_va_capacity` rejects an enqueue that would put the caller past the
+tenant's per-VA in-flight limit. Working hours stay dial-time concerns the dispatcher
+handles.
 """
 
 from typing import TYPE_CHECKING
@@ -29,7 +30,11 @@ TRUNK_INTEGRATION = "livekit_outbound_trunk_id"
 
 
 async def ensure_queueable(
-    session: "AsyncSession", kms: "KeyManagementService", form: "PatientForm"
+    session: "AsyncSession",
+    kms: "KeyManagementService",
+    form: "PatientForm",
+    *,
+    browser_callee: bool = False,
 ) -> None:
     """Raise if *form* cannot possibly be dialed once dispatched."""
     phone = form.insurance_provider_phone_number
@@ -39,6 +44,8 @@ async def ensure_queueable(
             message="form has no valid insurance provider phone number (E.164 required)",
             data={"field": "insurance_provider_phone_number"},
         )
+    if browser_callee:
+        return
     creds = await get_integration_credentials(session, kms, integration_type_name=TRUNK_INTEGRATION)
     if not (creds or {}).get("trunk_id"):
         raise CustomAPIException(

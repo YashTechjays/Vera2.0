@@ -129,3 +129,27 @@ async def test_over_limit_raises() -> None:
 
 def test_in_flight_statuses_are_queue_plus_active() -> None:
     assert set(IN_FLIGHT_FORM_STATUSES) == {"in_queue", "in_call", "ai_processing"}
+
+
+@pytest.mark.asyncio
+async def test_browser_callee_allows_a_missing_trunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("control_plane.queueability.get_integration_credentials", _creds_missing)
+    await ensure_queueable(
+        cast(AsyncSession, _FakeSession()),
+        cast(KeyManagementService, object()),
+        _form("+15551234567"),
+        browser_callee=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_callee_still_requires_e164(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("control_plane.queueability.get_integration_credentials", _creds_missing)
+    with pytest.raises(CustomAPIException) as exc:
+        await ensure_queueable(
+            cast(AsyncSession, _FakeSession()),
+            cast(KeyManagementService, object()),
+            _form("555-1234"),
+            browser_callee=True,
+        )
+    assert "phone" in str(exc.value.message).lower()

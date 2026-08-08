@@ -88,6 +88,7 @@ class FakeLiveKit(LiveKitGateway):
         self.room_metadata: list[tuple[str, dict[str, object]]] = []
         self.minted: list[MintedToken] = []
         self._url = "ws://fake:7880"
+        self._browser_callee_transport = False
         # Test knobs for trunk validation / dial hardening (reset by reset_livekit_knobs):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
