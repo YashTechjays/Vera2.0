@@ -63,7 +63,13 @@ from vera_core.models.enums import (
     FormStatus,
     VersionStatus,
 )
-from vera_core.observability.correlation import call_trace_attributes, room_name_for_call
+from vera_core.observability.correlation import (
+    TRANSPORT_ATTR,
+    TRANSPORT_BROWSER,
+    TRANSPORT_SIP,
+    call_trace_attributes,
+    room_name_for_call,
+)
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.field_answers import current_values_by_path
@@ -460,6 +466,7 @@ async def try_dispatch(
                 span_attrs: dict[str, Any] = {
                     **call_trace_attributes(room_name),
                     "vera.dispatch.ivr_enabled": bool(metadata.get("enable_ivr_navigation")),
+                    TRANSPORT_ATTR: TRANSPORT_BROWSER if browser_callee else TRANSPORT_SIP,
                 }
                 if staged_plan is not None:
                     span_attrs["vera.dispatch.task_count"] = len(staged_plan[0].tasks)

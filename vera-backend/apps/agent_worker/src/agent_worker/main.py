@@ -64,6 +64,9 @@ from vera_core.events import (
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
+    TRANSPORT_ATTR,
+    TRANSPORT_BROWSER,
+    TRANSPORT_SIP,
     call_trace_attributes,
     is_observer_identity,
     parse_room_name,
@@ -100,6 +103,13 @@ def _is_ready_speaker(participant: rtc.Participant) -> bool:
     if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
         return participant.attributes.get(_SIP_CALL_STATUS_ATTR) == _SIP_CALL_STATUS_ACTIVE
     return True
+
+
+def transport_of(speaker: rtc.Participant) -> str:
+    """How the callee reached the room, for the call's Langfuse span."""
+    if speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return TRANSPORT_SIP
+    return TRANSPORT_BROWSER
 
 
 def should_emit_answered(speaker: rtc.Participant, meta: dict[str, object]) -> bool:
@@ -406,6 +416,8 @@ async def entrypoint(ctx: JobContext) -> None:
                         await events_redis.aclose()
                 return
             speaker = outcome.participant
+            # From the resolved speaker, not the metadata: what actually reached the room.
+            trace.get_current_span().set_attribute(TRANSPORT_ATTR, transport_of(speaker))
             if lifecycle is not None and should_emit_answered(speaker, meta):
                 await lifecycle.answered(now_ms=int(time.time() * 1000))
 
