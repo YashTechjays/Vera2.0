@@ -102,6 +102,15 @@ def _is_ready_speaker(participant: rtc.Participant) -> bool:
     return True
 
 
+def should_emit_answered(speaker: rtc.Participant, meta: dict[str, object]) -> bool:
+    """The SIP callee answering is the "call is live" signal; under browser-callee
+    transport the browser speaker stands in for it (a Voice Lab browser caller, which
+    sets no such metadata, does not)."""
+    if speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return True
+    return bool(meta.get("browser_callee"))
+
+
 @dataclass(frozen=True)
 class SpeakerReady:
     """A ready, non-monitor participant is present — the agent may start/greet."""
@@ -397,9 +406,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         await events_redis.aclose()
                 return
             speaker = outcome.participant
-            # The SIP callee answering is the "call is live" signal; a browser caller
-            # (voice-lab browser mode) is not an answered phone call.
-            if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            if lifecycle is not None and should_emit_answered(speaker, meta):
                 await lifecycle.answered(now_ms=int(time.time() * 1000))
 
         # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
