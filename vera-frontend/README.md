@@ -7,6 +7,16 @@ Currently, two official plugins are available:
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
 - [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
+## Environment variables
+
+There's no `.env.example` in this project — this README is where env vars are recorded.
+
+- `VITE_BROWSER_CALLEE_TRANSPORT` — off by default; test transport only. Controls only
+  whether the "Join as payer rep" button renders in Live Monitoring. The backend's
+  `VERA_BROWSER_CALLEE_TRANSPORT` is the authority — if the two drift, the join request
+  returns 409 and the UI falls back to listen-only. Set both to `true` together for local
+  end-to-end testing.
+
 ## React Compiler
 
 The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
