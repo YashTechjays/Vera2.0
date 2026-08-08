@@ -2013,3 +2013,120 @@ async def test_live_scope_response_shape_unchanged(
     data = resp.json()["data"]
     assert isinstance(data, list)  # live stays a bare array, not the paginated envelope
     assert str(live_id) in [c["id"] for c in data]
+
+
+# ---------------------------------------------------------------------------
+# ?callee=true — the test-only browser-callee join (Task 4)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_callee_call(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    form_id: UUID,
+) -> UUID:
+    """Admin-owned call still in `initiated` — the browser callee joins before answer."""
+    return await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_callee_join_token_is_publishable_and_unbadged(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A callee token publishes, carries a caller- identity, and has NO vera.mode —
+    any mode attribute would trip the worker's takeover controller and mute the agent."""
+    fake_livekit.browser_callee_transport = True
+    call_id = await _seed_callee_call(admin_sessionmaker, rbac_world, seeded_form_id)
+
+    res = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?callee=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+
+    assert res.status_code == 200, res.text
+    minted = fake_livekit.minted[-1]
+    assert minted.identity.startswith("caller-")
+    assert minted.can_publish is True
+    assert minted.attributes is None
+
+    result = await admin_session.execute(
+        select(AuditLog).where(
+            AuditLog.resource_type == "call", AuditLog.resource_id == str(call_id)
+        )
+    )
+    events = [row.event_type for row in result.scalars().all()]
+    assert events == ["call.callee.join"]
+
+
+@pytest.mark.asyncio
+async def test_callee_join_token_claims_no_intervener_lock(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_session: AsyncSession,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    fake_livekit.browser_callee_transport = True
+    call_id = await _seed_callee_call(admin_sessionmaker, rbac_world, seeded_form_id)
+
+    res = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?callee=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+
+    assert res.status_code == 200, res.text
+    call = (await admin_session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+    assert call.intervener_user_id is None
+    assert call.intervener_claimed_at is None
+    assert len(await _intervention_events(admin_session, call_id)) == 0
+
+
+@pytest.mark.asyncio
+async def test_callee_join_token_refused_when_transport_is_off(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Production never enables the transport, so the callee mode is unreachable there."""
+    fake_livekit.browser_callee_transport = False
+    call_id = await _seed_callee_call(admin_sessionmaker, rbac_world, seeded_form_id)
+
+    res = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?callee=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+
+    assert res.status_code == 409, res.text
+
+
+@pytest.mark.asyncio
+async def test_callee_and_intervene_are_mutually_exclusive(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    fake_livekit: FakeLiveKit,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Transport on, so the 422 can only come from the mode clash, not the transport gate.
+    fake_livekit.browser_callee_transport = True
+    call_id = await _seed_callee_call(admin_sessionmaker, rbac_world, seeded_form_id)
+
+    res = await client.get(
+        f"/api/v1/calls/{call_id}/join-token?callee=true&intervene=true",
+        headers=_auth(rbac_world.admin_token),
+    )
+
+    assert res.status_code == 422, res.text

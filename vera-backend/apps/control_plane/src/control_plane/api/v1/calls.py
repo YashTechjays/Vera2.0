@@ -4,7 +4,9 @@ publish, and end.
 `publish` is owner-only: the caller must hold `calls:publish` *and* be the call's
 `initiated_by_id` (explicit 403 in-handler). A publish-capable join token
 (`?intervene=true`) additionally requires `calls:intervene`, checked after the
-visibility 404s, and claims the call's single-intervener lock.
+visibility 404s, and claims the call's single-intervener lock. `?callee=true` is the
+test-only browser-callee join: a publish-capable `caller-` participant standing in for
+the SIP callee, claiming no lock — refused unless the gateway enables that transport.
 """
 
 import asyncio
@@ -90,6 +92,7 @@ from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
 from vera_core.observability.correlation import (
+    CALLER_IDENTITY_PREFIX,
     PARTICIPANT_MODE_ATTR,
     PARTICIPANT_MODE_INTERVENER,
     PARTICIPANT_MODE_LISTENER,
@@ -282,9 +285,17 @@ async def join_token(
     audit: Audit,
     resolver: Annotated[PermissionResolver, Depends(get_resolver)],
     intervene: bool = False,
+    callee: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
     response.headers["Cache-Control"] = "no-store"  # publish-capable JWT + email; never cache
+    if callee and intervene:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="callee and intervene are mutually exclusive join modes",
+        )
+    if callee and not livekit.browser_callee_transport:
+        raise ConflictError(message="browser-callee transport is not enabled")
     # Intervening claims the single-intervener lock — the row lock serializes
     # concurrent claims while the listen path stays lock-free.
     stmt = select(Call).where(Call.id == call_id)
@@ -296,7 +307,11 @@ async def join_token(
     if _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")  # 404 not 403: don't reveal a private call
     room_name = room_name_for_call(tenant_id, call.id)
-    identity = supervisor_identity(caller.user_id, caller.session_id)
+    identity = (
+        f"{CALLER_IDENTITY_PREFIX}{caller.user_id}"
+        if callee
+        else supervisor_identity(caller.user_id, caller.session_id)
+    )
     stolen_from: UUID | None = None
     if intervene:
         # Checked AFTER the visibility 404s so a private call never turns into a 403.
@@ -332,8 +347,20 @@ async def join_token(
                     payload_ref={},
                 )
             )
+    # The callee carries NO vera.mode: any value trips the worker's takeover controller
+    # and permanently silences the agent.
+    participant_attributes: dict[str, str] | None
+    if callee:
+        join_event = AuditEvent.CALL_CALLEE_JOIN
+        participant_attributes = None
+    elif intervene:
+        join_event = AuditEvent.CALL_INTERVENE_JOIN
+        participant_attributes = {PARTICIPANT_MODE_ATTR: PARTICIPANT_MODE_INTERVENER}
+    else:
+        join_event = AuditEvent.CALL_LISTEN_ONLY_JOIN
+        participant_attributes = {PARTICIPANT_MODE_ATTR: PARTICIPANT_MODE_LISTENER}
     # Every join is audited (owner included — their join is a PHI access too); the
-    # event name carries the mode: listen-only or intervene.
+    # event name carries the mode: listen-only, intervene, or callee.
     detail: dict[str, object] = {
         "owner_id": str(call.initiated_by_id) if call.initiated_by_id else None
     }
@@ -345,9 +372,7 @@ async def join_token(
             actor_type=ActorType.USER,
             actor_user_id=caller.user_id,
             actor_label=caller.email or caller.subject,
-            event_type=(
-                AuditEvent.CALL_INTERVENE_JOIN if intervene else AuditEvent.CALL_LISTEN_ONLY_JOIN
-            ).value,
+            event_type=join_event.value,
             resource_type="call",
             resource_id=str(call.id),
             permission_key="calls:intervene" if intervene else "calls:read",
@@ -356,17 +381,13 @@ async def join_token(
             detail=detail,
         )
     )
-    # Watch-only tokens are server-side mute; only ?intervene=true may publish.
+    # Watch-only tokens are server-side mute; only intervene and callee may publish.
     token = livekit.mint_join_token(
         room_name=room_name,
         identity=identity,
-        can_publish=intervene,
+        can_publish=intervene or callee,
         name=caller.email or caller.subject,
-        attributes={
-            PARTICIPANT_MODE_ATTR: (
-                PARTICIPANT_MODE_INTERVENER if intervene else PARTICIPANT_MODE_LISTENER
-            )
-        },
+        attributes=participant_attributes,
         # Cap the intervene token at the grace so a stale token can't outlive a stolen lock.
         ttl=_INTERVENE_CONNECT_GRACE if intervene else _LISTEN_TOKEN_TTL,
     )
