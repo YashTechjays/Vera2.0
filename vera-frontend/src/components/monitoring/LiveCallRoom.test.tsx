@@ -34,8 +34,14 @@ vi.mock("@livekit/components-react", () => ({
   useTrackToggle: () => ({ enabled: false, pending: false, toggle: () => {} }),
 }))
 
+// vi.hoisted lifts this alongside the hoisted vi.mock calls above, so the factory
+// below can close over a spy the tests can also assert against.
+const { getJoinToken } = vi.hoisted(() => ({
+  getJoinToken: vi.fn(() => Promise.resolve({ url: "ws://fake", token: "t" })),
+}))
+
 vi.mock("@/lib/api/calls", () => ({
-  getJoinToken: () => Promise.resolve({ url: "ws://fake", token: "t" }),
+  getJoinToken,
 }))
 
 import { LiveCallRoom } from "./LiveCallRoom"
@@ -79,5 +85,17 @@ describe("LiveCallRoom, displaced by another tab", () => {
 
     expect(latest().connect).toBe(true)
     expect(screen.queryByText("Moved to another tab")).toBeNull()
+  })
+})
+
+describe("LiveCallRoom, join-token mode", () => {
+  it("requests a callee token in callee mode", async () => {
+    render(<LiveCallRoom callId="c1" mode="callee" />)
+    await waitFor(() => expect(getJoinToken).toHaveBeenCalledWith("c1", "callee"))
+  })
+
+  it("requests a listen token by default", async () => {
+    render(<LiveCallRoom callId="c1" />)
+    await waitFor(() => expect(getJoinToken).toHaveBeenCalledWith("c1", "listen"))
   })
 })

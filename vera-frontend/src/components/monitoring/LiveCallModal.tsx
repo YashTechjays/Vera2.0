@@ -44,6 +44,10 @@ import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
+// Test transport only — must match the backend's VERA_BROWSER_CALLEE_TRANSPORT. The
+// backend is the authority; this only decides whether the button renders.
+const BROWSER_CALLEE = import.meta.env.VITE_BROWSER_CALLEE_TRANSPORT === "true"
+
 /** Collapsible form panel; loads the call's own form on expand (VR2-64). */
 function FormPanel({
   formId,
@@ -258,11 +262,13 @@ export function LiveCallModal({
     }
   }
 
-  // An intervene token can be refused (e.g. 409 if someone took the mic first) — fall back to listening.
+  // A publish token can be refused (409 if someone took the mic, or the test transport
+  // is off) — fall back to listening.
   function handleJoinFailed(error: unknown) {
-    if (mode !== "intervene") return
+    if (mode === "listen") return
+    const what = mode === "callee" ? "join as the payer rep" : "intervene"
     setMode("listen")
-    setActionError(error instanceof ApiError ? error.message : "Could not intervene.")
+    setActionError(error instanceof ApiError ? error.message : `Could not ${what}.`)
   }
 
   return (
@@ -423,7 +429,7 @@ export function LiveCallModal({
                 <LiveCallRoom
                   key={`${call.id}:${mode}`}
                   callId={call.id}
-                  microphone={mode === "intervene"}
+                  mode={mode}
                   ended={sseEnded}
                   endedStatus={terminalStatus}
                   onStatus={setRoomStatus}
@@ -487,19 +493,33 @@ export function LiveCallModal({
               <span className="text-sm text-muted-foreground">{endCallState.title}</span>
             )}
           </div>
-          {intervene.visible && mode === "listen" && !callEnded && (
-            <Button
-              onClick={() => {
-                setActionError(null)
-                setMode("intervene")
-              }}
-              disabled={intervene.disabled}
-              title={intervene.title}
-              className="bg-orange-500 text-white hover:bg-orange-600"
-            >
-              Intervene
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {BROWSER_CALLEE && mode === "listen" && !callEnded && (
+              <Button
+                onClick={() => {
+                  setActionError(null)
+                  setMode("callee")
+                }}
+                disabled={roomStatus?.phase !== "live"}
+                className="bg-sky-600 text-white hover:bg-sky-700"
+              >
+                Join as payer rep
+              </Button>
+            )}
+            {intervene.visible && mode === "listen" && !callEnded && (
+              <Button
+                onClick={() => {
+                  setActionError(null)
+                  setMode("intervene")
+                }}
+                disabled={intervene.disabled}
+                title={intervene.title}
+                className="bg-orange-500 text-white hover:bg-orange-600"
+              >
+                Intervene
+              </Button>
+            )}
+          </div>
         </div>
 
         <Keypad open={keypadOpen} onOpenChange={setKeypadOpen} />

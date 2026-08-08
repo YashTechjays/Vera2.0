@@ -39,6 +39,7 @@ import {
   rosterVisible,
   speakerButtonState,
   type ConnectionPhase,
+  type LiveCallMode,
   type ParticipantLike,
   type ParticipantMode,
   type RoomStatus,
@@ -266,20 +267,22 @@ function RoomView({
 /**
  * Joins a call's LiveKit room via a server-minted token and renders the live panel.
  *
- * Changing `microphone` needs a new token, and LiveKit ignores a token swap while
+ * Changing `mode` needs a new token, and LiveKit ignores a token swap while
  * connected — the parent must remount (key on the mode) to switch.
  */
 export function LiveCallRoom({
   callId,
-  microphone = false,
+  mode = "listen",
   ended = false,
   endedStatus = null,
   onStatus,
   onJoinFailed,
 }: {
   callId: string
-  /** Publish the local mic (intervene only) — a viewer must never be audible, and getUserMedia may be blocked (e.g. incognito). */
-  microphone?: boolean
+  /** Publish the local mic. "intervene" = a supervisor speaking over the agent; "callee" = the
+   *  browser standing in for the payer rep (test transport). A viewer must never be audible,
+   *  and getUserMedia may be blocked (e.g. incognito). */
+  mode?: LiveCallMode
   /** Call hit a terminal status (events stream). The room can outlive the call while a supervisor
    *  sits in it, so room state alone would keep reading "Live" after the callee hung up. */
   ended?: boolean
@@ -290,6 +293,7 @@ export function LiveCallRoom({
   /** Token fetch failed (e.g. 409 while another supervisor holds the mic); modal falls back to listen-only. */
   onJoinFailed?: (error: unknown) => void
 }) {
+  const microphone = mode !== "listen"
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -303,7 +307,7 @@ export function LiveCallRoom({
   useEffect(() => {
     if (ended) return
     let cancelled = false
-    getJoinToken(callId, microphone ? "intervene" : "listen")
+    getJoinToken(callId, mode)
       .then((res) => {
         if (!cancelled) setJoin(res)
       })
@@ -320,7 +324,7 @@ export function LiveCallRoom({
     }
     // onJoinFailed is intentionally not a dep: modals pass a fresh closure each render, which would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callId, microphone, ended, reconnectNonce])
+  }, [callId, mode, ended, reconnectNonce])
 
   if (ended) {
     return (
