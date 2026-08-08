@@ -303,7 +303,7 @@ export function LiveCallRoom({
   useEffect(() => {
     if (ended) return
     let cancelled = false
-    getJoinToken(callId, microphone)
+    getJoinToken(callId, microphone ? "intervene" : "listen")
       .then((res) => {
         if (!cancelled) setJoin(res)
       })

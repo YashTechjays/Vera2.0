@@ -32,8 +32,9 @@ export function connectionPhase(
 
 // Mirrors backend vocabulary (vera_core.observability.correlation): the vera.mode attr + supervisor-/monitor-/caller- identity prefixes.
 export const MODE_ATTR = "vera.mode"
-const HUMAN_IDENTITY_PREFIXES = ["supervisor-", "monitor-", "caller-"]
+const LISTENER_IDENTITY_PREFIXES = ["supervisor-", "monitor-"]
 const SIP_CALLEE_IDENTITY = "phone-callee"
+const CALLER_IDENTITY_PREFIX = "caller-"
 
 export type ParticipantMode = "intervener" | "listener" | "agent" | "callee"
 
@@ -64,10 +65,13 @@ export const PARTICIPANT_MODE_BADGE: Record<ParticipantMode, string> = {
 /** Kind beats identity beats attribute; an unknown identity falls back to agent (self-hosted workers may lack ParticipantKind.Agent). */
 export function participantMode(p: ParticipantLike): ParticipantMode {
   if (p.isAgent) return "agent"
-  if (p.identity === SIP_CALLEE_IDENTITY) return "callee"
+  // Both identities are the payer rep: phone-callee over SIP, caller-<id> from the browser test transport.
+  if (p.identity === SIP_CALLEE_IDENTITY || p.identity.startsWith(CALLER_IDENTITY_PREFIX)) {
+    return "callee"
+  }
   const mode = p.attributes?.[MODE_ATTR]
   if (mode === "intervener" || mode === "listener") return mode
-  if (HUMAN_IDENTITY_PREFIXES.some((prefix) => p.identity.startsWith(prefix))) return "listener"
+  if (LISTENER_IDENTITY_PREFIXES.some((prefix) => p.identity.startsWith(prefix))) return "listener"
   return "agent"
 }
 
@@ -104,7 +108,7 @@ export function isWaitingForCall(state: string, participants: ParticipantLike[])
   return state === "connected" && !agentJoined(participants)
 }
 
-export type LiveCallMode = "listen" | "intervene"
+export type LiveCallMode = "listen" | "intervene" | "callee"
 
 /** Radix routes every close path (X, Esc, overlay) here; an intervener can't leave until the call
  *  ends — unless another tab took the seat, which leaves this one holding a dead panel. */

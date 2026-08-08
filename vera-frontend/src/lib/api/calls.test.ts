@@ -112,8 +112,14 @@ describe("calls API client", () => {
 
   it("requests a publishable token for intervene", async () => {
     vi.mocked(apiRequest).mockResolvedValue(joinToken)
-    await getJoinToken("c1", true)
+    await getJoinToken("c1", "intervene")
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token?intervene=true")
+  })
+
+  it("requests a callee token", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(joinToken)
+    await getJoinToken("c1", "callee")
+    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token?callee=true")
   })
 
   it("ends a call (POST, no body)", async () => {
@@ -126,7 +132,7 @@ describe("calls API client", () => {
     vi.mocked(apiRequest).mockRejectedValue(
       new ApiError(409, "CONFLICT", "another supervisor is currently intervening on this call"),
     )
-    await expect(getJoinToken("c1", true)).rejects.toBeInstanceOf(ApiError)
+    await expect(getJoinToken("c1", "intervene")).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when a non-owner tries to publish (403)", async () => {

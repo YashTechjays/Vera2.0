@@ -2,6 +2,7 @@
 // envelope unwrap, throws `ApiError`). Calls are created by the queue dispatcher — no manual start-call endpoint.
 
 import { apiRequest } from "@/lib/api/client"
+import type { LiveCallMode } from "@/lib/monitoring/liveCallView"
 
 /** A verification call as returned by the control-plane (list rows + publish result). */
 export type CallSummary = {
@@ -139,11 +140,22 @@ export function publishCall(callId: string): Promise<CallSummary> {
   })
 }
 
+const JOIN_TOKEN_QUERY: Record<LiveCallMode, string> = {
+  listen: "",
+  intervene: "?intervene=true",
+  callee: "?callee=true",
+}
+
 /** GET /calls/{id}/join-token — listen-only by default; intervene mints a publish token
- *  (needs calls:intervene; claims the single-intervener lock, 409 while another holds it). */
-export function getJoinToken(callId: string, intervene = false): Promise<JoinTokenResponse> {
-  const query = intervene ? "?intervene=true" : ""
-  return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
+ *  (needs calls:intervene; claims the single-intervener lock, 409 while another holds it);
+ *  callee mints a rep-side publish token for the browser-callee test transport (no lock). */
+export function getJoinToken(
+  callId: string,
+  mode: LiveCallMode = "listen",
+): Promise<JoinTokenResponse> {
+  return apiRequest<JoinTokenResponse>(
+    `/calls/${encodeURIComponent(callId)}/join-token${JOIN_TOKEN_QUERY[mode]}`,
+  )
 }
 
 /** POST /calls/{id}/end — tears the room down; the worker's call.ended event drives closeout
