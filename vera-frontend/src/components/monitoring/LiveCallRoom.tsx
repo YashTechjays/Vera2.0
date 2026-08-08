@@ -279,9 +279,8 @@ export function LiveCallRoom({
   onJoinFailed,
 }: {
   callId: string
-  /** Publish the local mic. "intervene" = a supervisor speaking over the agent; "callee" = the
-   *  browser standing in for the payer rep (test transport). A viewer must never be audible,
-   *  and getUserMedia may be blocked (e.g. incognito). */
+  /** Publishing mode: "intervene" is a supervisor speaking over the agent, "callee" the
+   *  browser standing in for the payer rep (test transport). Only "listen" stays silent. */
   mode?: LiveCallMode
   /** Call hit a terminal status (events stream). The room can outlive the call while a supervisor
    *  sits in it, so room state alone would keep reading "Live" after the callee hung up. */

@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // Stubbed rather than imported: pulling the real SDK into jsdom costs the whole suite
 // minutes. Literals are inlined because vi.mock is hoisted above any const.
@@ -34,8 +34,7 @@ vi.mock("@livekit/components-react", () => ({
   useTrackToggle: () => ({ enabled: false, pending: false, toggle: () => {} }),
 }))
 
-// vi.hoisted lifts this alongside the hoisted vi.mock calls above, so the factory
-// below can close over a spy the tests can also assert against.
+// vi.hoisted lifts the spy above the hoisted vi.mock below, so the factory and the tests share it.
 const { getJoinToken } = vi.hoisted(() => ({
   getJoinToken: vi.fn(() => Promise.resolve({ url: "ws://fake", token: "t" })),
 }))
@@ -89,6 +88,9 @@ describe("LiveCallRoom, displaced by another tab", () => {
 })
 
 describe("LiveCallRoom, join-token mode", () => {
+  // Without this the listen assertion passes on a call the tests above made.
+  beforeEach(() => getJoinToken.mockClear())
+
   it("requests a callee token in callee mode", async () => {
     render(<LiveCallRoom callId="c1" mode="callee" />)
     await waitFor(() => expect(getJoinToken).toHaveBeenCalledWith("c1", "callee"))

@@ -44,8 +44,7 @@ import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
 
-// Test transport only — must match the backend's VERA_BROWSER_CALLEE_TRANSPORT. The
-// backend is the authority; this only decides whether the button renders.
+// Test transport only, and only whether the button renders — the backend's VERA_BROWSER_CALLEE_TRANSPORT is the authority.
 const BROWSER_CALLEE = import.meta.env.VITE_BROWSER_CALLEE_TRANSPORT === "true"
 
 /** Collapsible form panel; loads the call's own form on expand (VR2-64). */
@@ -216,6 +215,7 @@ export function LiveCallModal({
   const replaced = roomStatus?.phase === "replaced"
   const closeAllowed = shouldAllowClose(mode, callEnded, false, replaced)
   const intervene = interveneButtonState(canIntervene, roomStatus)
+  const canUpgradeFromListen = mode === "listen" && !callEnded
   const endCallState = endCallButtonState(call?.isOwner ?? false, mode === "intervene", roomStatus)
   const canCoach = coachingPanelVisible(canIntervene, call?.isOwner ?? false, callEnded)
 
@@ -262,13 +262,12 @@ export function LiveCallModal({
     }
   }
 
-  // A publish token can be refused (409 if someone took the mic, or the test transport
-  // is off) — fall back to listening.
+  // A publish token can be refused (409 on the mic lock, or the test transport is off) — fall back to listening.
   function handleJoinFailed(error: unknown) {
     if (mode === "listen") return
-    const what = mode === "callee" ? "join as the payer rep" : "intervene"
+    const attempted = mode === "callee" ? "join as the payer rep" : "intervene"
     setMode("listen")
-    setActionError(error instanceof ApiError ? error.message : `Could not ${what}.`)
+    setActionError(error instanceof ApiError ? error.message : `Could not ${attempted}.`)
   }
 
   return (
@@ -494,7 +493,7 @@ export function LiveCallModal({
             )}
           </div>
           <div className="flex items-center gap-2">
-            {BROWSER_CALLEE && mode === "listen" && !callEnded && (
+            {BROWSER_CALLEE && canUpgradeFromListen && (
               <Button
                 onClick={() => {
                   setActionError(null)
@@ -506,7 +505,7 @@ export function LiveCallModal({
                 Join as payer rep
               </Button>
             )}
-            {intervene.visible && mode === "listen" && !callEnded && (
+            {intervene.visible && canUpgradeFromListen && (
               <Button
                 onClick={() => {
                   setActionError(null)
