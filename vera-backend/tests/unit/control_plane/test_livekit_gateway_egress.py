@@ -13,7 +13,8 @@ import pytest
 from livekit import api
 from livekit.api.twirp_client import TwirpError
 
-from control_plane.livekit_gateway import EgressStartError, LiveKitGateway
+from control_plane.livekit_gateway import EgressStartError, LiveKitGateway, build_livekit_gateway
+from vera_core.config.settings import Settings
 
 
 class _FakeEgress:
@@ -157,3 +158,25 @@ async def test_stop_egress_swallows_not_found() -> None:
     gw = _gateway_with(egress)
     # Idempotent: stopping an already-gone egress is a no-op, not a raise.
     await gw.stop_egress("EG_GONE")
+
+
+class _StubSecrets:
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def get(self, key: str) -> str:
+        return self._values[key]
+
+
+def test_gateway_defaults_to_sip_transport() -> None:
+    gw = LiveKitGateway(url="ws://x", api_key="k", api_secret="s")
+    assert gw.browser_callee_transport is False
+
+
+def test_build_gateway_carries_browser_callee_transport() -> None:
+    settings = Settings(
+        livekit_url="ws://x",
+        browser_callee_transport=True,
+    )
+    secrets = _StubSecrets({"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"})
+    assert build_livekit_gateway(settings, secrets).browser_callee_transport is True
