@@ -139,7 +139,7 @@ async def test_browser_callee_allows_a_missing_trunk(monkeypatch: pytest.MonkeyP
         cast(KeyManagementService, object()),
         _form("+15551234567"),
         browser_callee=True,
-    )
+    )  # no raise
 
 
 @pytest.mark.asyncio

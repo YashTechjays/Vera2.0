@@ -44,6 +44,7 @@ async def ensure_queueable(
             message="form has no valid insurance provider phone number (E.164 required)",
             data={"field": "insurance_provider_phone_number"},
         )
+    # A browser callee joins the room over WebRTC, so no SIP call is placed.
     if browser_callee:
         return
     creds = await get_integration_credentials(session, kms, integration_type_name=TRUNK_INTEGRATION)
