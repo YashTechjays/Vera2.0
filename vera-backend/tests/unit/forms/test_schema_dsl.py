@@ -8,6 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
+from vera_core.forms.catalog.disease_only import build_disease_only
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.dsl import (
     FieldPrompt,
     FormSchemaDoc,
@@ -18,6 +20,7 @@ from vera_core.forms.dsl import (
     format_date,
     load_document,
     parse_date_format,
+    validate_question_coverage,
 )
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
@@ -701,3 +704,18 @@ class TestNumericConsistencyValidation:
     def test_round_trips_through_compile_and_load(self) -> None:
         doc = FormSchemaDoc.model_validate(triplet_doc())
         assert load_document(compile_document(doc)) == doc
+
+
+def test_every_collectable_path_is_reachable_from_exactly_one_question() -> None:
+    """The completion guard walks questions; a path no question targets can never be
+    asked for, and a path two questions target would be double-counted (spec §8)."""
+    for build in (build_ibv_standard, build_disease_only):
+        doc = build()
+        assert validate_question_coverage(doc) == []
+
+
+def test_an_unreachable_collectable_path_is_reported() -> None:
+    doc = build_ibv_standard()
+    # Drop a section's questions but keep its collectable leaves.
+    errors = validate_question_coverage(doc, _drop_questions_for="benefit_coverage")
+    assert any("not reachable from any spoken question" in e for e in errors)

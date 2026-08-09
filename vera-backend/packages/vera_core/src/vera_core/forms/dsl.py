@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date
 from typing import Annotated, Literal
@@ -741,6 +742,8 @@ class FormSchemaDoc(_Model):
                     f"must reference a collectable leaf inside task {cit.task_key!r}"
                 )
 
+        errors.extend(validate_question_coverage(self))
+
         # ask_groups / alternatives
         for skey, section in self.sections.items():
             prefix = f"{PATH_PREFIX}{skey}."
@@ -916,6 +919,58 @@ class FormSchemaDoc(_Model):
                 "invalid form schema document:\n" + "\n".join(f"- {e}" for e in errors)
             )
         return self
+
+
+def validate_question_coverage(
+    doc: FormSchemaDoc, *, _drop_questions_for: str | None = None
+) -> list[str]:
+    """Every collectable leaf must be reachable from exactly one spoken question.
+
+    This is what makes `task.fields` a PROJECTION of the question tree rather than a
+    parallel artifact. Without it the prompt can say 16 while the guard counts 20, which
+    is exactly how a live call ended a task with six required questions unasked.
+
+    `_drop_questions_for` is a test seam: a section key whose questions are pruned from
+    the built tree before counting, so a test can prove a real omission gets reported."""
+    # Function-scope imports: `conditions`, `prompting` and `question_plan` each import
+    # `dsl`, so importing them at module scope here would be a cycle.
+    from vera_core.forms.conditions import leaf_gates
+    from vera_core.forms.prompting import immediate_confirms_by_anchor
+    from vera_core.forms.question_plan import build_question_plan, drop_questions, iter_questions
+
+    errors: list[str] = []
+    section_to_task = doc.section_to_task()
+    anchors = immediate_confirms_by_anchor(doc)
+    drop_targets = set(doc.collection_paths([_drop_questions_for])) if _drop_questions_for else None
+    for task in doc.tasks:
+        if any(skey not in doc.sections for skey in task.sections):
+            continue  # unknown section — already reported by the structural check above
+        panels = build_question_plan(doc, task, anchors)
+        if drop_targets:
+            panels = drop_questions(panels, drop_targets)
+        hits: Counter[str] = Counter(
+            path for q in iter_questions(panels) for path in q.target_paths
+        )
+        for path, leaf, _gates in leaf_gates(doc):
+            if leaf.role not in COLLECTED_ROLES:
+                continue
+            cit = leaf.confirm_in_task
+            if cit is not None and not cit.confirm_immediate:
+                continue  # spoken by the end-of-task confirm block, not a panel node
+            owner = cit.task_key if cit is not None else section_to_task.get(path.split(".")[1])
+            if owner != task.task_key:
+                continue
+            if hits[path] == 0:
+                errors.append(
+                    f"{task.task_key}: collectable path {path} is not reachable "
+                    "from any spoken question"
+                )
+            elif hits[path] > 1:
+                errors.append(
+                    f"{task.task_key}: collectable path {path} is reachable from "
+                    f"{hits[path]} questions"
+                )
+    return errors
 
 
 # ---------------------------------------------------------------------------
