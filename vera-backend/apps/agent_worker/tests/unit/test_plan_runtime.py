@@ -20,6 +20,7 @@ from agent_worker.intervention import TakeoverState, push_coaching_note
 from agent_worker.plan_runtime import (
     _GAP_FRUITLESS_REFUSALS,
     _OPENING_DIRECTIVE,
+    _TASK_FRUITLESS_REFUSALS,
     _WRAP_UP_DIRECTIVE,
     WRAP_UP_TASK_KEY,
     GapTaskAgent,
@@ -1516,7 +1517,7 @@ def test_run_b_owes_six_questions_including_the_defaulted_one() -> None:
 @pytest.mark.asyncio
 async def test_run_b_shape_is_refused_after_eleven_turns() -> None:
     """The trace: 11 rep turns into a 16-question task with 6 still owed. The old guard
-    compared whole-task turns (11) against the CURRENT outstanding count (5) and bailed.
+    compared whole-task turns (11) against the CURRENT outstanding count (6) and bailed.
     Both sides must measure the same window."""
     controller, _ = _controller(_ibv_plan())
     index = _task_index(controller, "insurance_basics")
@@ -1559,9 +1560,11 @@ class TestPrematureCompletion:
     async def test_a_second_task_complete_advances_even_with_questions_still_open(self) -> None:
         # THE no-deadlock property. A rep who cannot answer never empties gap_fields, so an
         # unconditional guard would refuse every completion and strand the call on this task.
-        # A refusal budget of 2 needs three task_complete calls, with a real rep turn between
-        # retries — coverage_task owes 2 questions here, so the turn ceiling backstops the
-        # budget instead of racing ahead of it.
+        # Needs three task_complete calls now (budget of 2), with a real rep turn between
+        # retries — but the TURN CEILING is what frees it here: coverage_task owes 2 questions,
+        # and 2 rep turns have landed by the third call. The budget's OWN escape path (no rep
+        # turn between calls) is pinned separately, by
+        # test_repeated_task_complete_advances_even_with_no_rep_turns.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "No"})  # opens oon_note too
         agent = controller.agents[2]
@@ -1652,6 +1655,23 @@ class TestPrematureCompletion:
             session.userdata.engaged = True
             result = cast(str, await _tool(agent, "task_complete")())
         assert "supervisor" in result
+
+    @pytest.mark.asyncio
+    async def test_repeated_task_complete_advances_even_with_no_rep_turns(self) -> None:
+        # The budget's own scenario: a model that calls task_complete straight back off the
+        # forced follow-up, with no rep turn in between, must still eventually escape.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        results: list[Any] = []
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            for _ in range(_TASK_FRUITLESS_REFUSALS + 3):
+                results.append(await _tool(agent, "task_complete")())
+                if isinstance(results[-1], Agent):
+                    break
+        assert isinstance(results[-1], Agent), results[-1]
+        # ...but it refused first; a guard that never refuses would pass the line above vacuously
+        assert any(isinstance(r, str) for r in results)
 
 
 class TestFieldLines:
@@ -2157,8 +2177,12 @@ async def _insist_complete(agent: Agent) -> Agent:
     """`task_complete`, retried through one refusal.
 
     These walks leave required questions unanswered on purpose — that is what gives the gap
-    pass something to sweep — so the premature-completion guard refuses the first call. It
-    refuses only once, and the walk is asserting the handoff chain, not the guard."""
+    pass something to sweep. The main pass can now refuse up to `_TASK_FRUITLESS_REFUSALS`
+    times before giving up, but this helper still retries only ONCE — safe today only because
+    `_walk` calls `note_task_entered` directly rather than `on_enter`, so `_questions_at_entry`
+    never advances past its `__init__` default of 0 and the guard is a permanent no-op for every
+    walk-driven call. Wiring `_walk` to call `on_enter` properly would make the guard real again
+    and could trip the assert below on a second refusal."""
     result = await _tool(agent, "task_complete")()
     if isinstance(result, str):
         result = await _tool(agent, "task_complete")()
