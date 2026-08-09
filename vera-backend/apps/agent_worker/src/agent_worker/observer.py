@@ -312,11 +312,16 @@ class TranscriptSource(Protocol):
 # force-cancels (a crashed writer may never write the sentinel).
 _TAIL_DRAIN_TIMEOUT_S = 5.0
 
-# Default bound for drain_pending: measured extraction latency is a 15.3s median, 23.2s p90
-# (turn N's pass effectively starts around turn N+1). Since a timeout here no longer cancels
-# the pass (see drain_pending), generous is safe — this covers the p90 with headroom rather
-# than the pre-fix 10.0s, which would have timed out on the MAJORITY of real drains.
-_DRAIN_TIMEOUT_S = 25.0
+# Default bound for drain_pending, used when the caller (main.py) doesn't derive one from
+# settings (see ObserverManager's drain_timeout param) — e.g. Voice Lab, tests. NOT sized off
+# the 15.3s/23.2s completion-latency figures: drain_pending only waits on passes that already
+# EXIST, so scheduling lag before a pass starts is either already spent or unreachable by any
+# timeout here. It is sized off the extraction chain's own attempt cap
+# (observer_extract_attempt_timeout_seconds, 8.0s today) plus adapter overhead — one in-flight
+# attempt, not the whole fallback cascade. Kept tight because the gap pass CHAINS agent to
+# agent with no speech between them, so every extra second here is silent dead air repeated
+# once per swept task, not a one-time cost.
+_DRAIN_TIMEOUT_S = 10.0
 
 
 class ObserverManager:
@@ -335,6 +340,7 @@ class ObserverManager:
         transcript: TranscriptSource,
         room_name: str,
         now_ms: Callable[[], int] | None = None,
+        drain_timeout: float | None = None,
     ) -> None:
         self._plan = plan
         self._controller = controller
@@ -344,6 +350,10 @@ class ObserverManager:
         self._transcript = transcript
         self._room = room_name
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        # `drain_pending`'s default when its caller doesn't pass one explicitly. main.py
+        # derives this from the extraction chain's own attempt-timeout setting so the two
+        # budgets can't drift apart; falls back to _DRAIN_TIMEOUT_S when unset (Voice Lab).
+        self._drain_timeout = _DRAIN_TIMEOUT_S if drain_timeout is None else drain_timeout
         self._rule_engine = RuleEngine(plan)
         # Call-scoped answer snapshot (seeded with intake prefill), the dedup key and the
         # rule engine's input. Grows across tasks — a flow rule may span them.
@@ -448,7 +458,7 @@ class ObserverManager:
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
 
-    async def drain_pending(self, timeout: float = _DRAIN_TIMEOUT_S) -> None:  # noqa: ASYNC109
+    async def drain_pending(self, timeout: float | None = None) -> None:  # noqa: ASYNC109
         """Await whatever extraction is still in flight before a caller reads the answer map.
 
         Three sources, because the manager's own rotation is LAZY (`_rotate` fires from the
@@ -462,20 +472,28 @@ class ObserverManager:
         question the rep just answered. Bounded and best-effort: `asyncio.wait` (never
         `wait_for`/`asyncio.timeout`) so a timeout returns the caller WITHOUT cancelling the
         extraction it was waiting for — a cancelled pass is an answer lost for good, which is
-        worse than the phantom gap this exists to fix. Whatever is still pending on timeout is
-        kept in `_closing` (a strong ref, so it isn't GC'd mid-flight) for a later drain or the
-        final `aclose` to pick up; its answer still lands, just later than this call waited."""
+        worse than the phantom gap this exists to fix.
+
+        Every task this drains carries its OWN `add_done_callback(self._closing.discard)`,
+        added at creation — none of it is removed from `_closing` up front, only `done`
+        members after a wait that actually completed. So `drain_pending` being CANCELLED
+        mid-wait (a hangup during the outro, session teardown) loses no tracking: everything
+        stays in `_closing` for the next drain or the final `aclose` to pick up; the answer
+        still lands, just later than this call waited."""
         self._close_retiring()
         batch: set[asyncio.Task[None]] = set(self._closing)
-        self._closing.difference_update(batch)
         if self._active is not None:
-            batch.add(asyncio.create_task(self._active.drain_passes()))
+            drain = asyncio.create_task(self._active.drain_passes())
+            self._closing.add(drain)
+            drain.add_done_callback(self._closing.discard)
+            batch.add(drain)
         if not batch:
             return
-        _done, pending = await asyncio.wait(batch, timeout=timeout)
+        bound = self._drain_timeout if timeout is None else timeout
+        done, pending = await asyncio.wait(batch, timeout=bound)
+        self._closing.difference_update(done)
         if pending:
             logger.warning("observer manager %s: drain timed out", self._room)
-            self._closing.update(pending)
 
     async def _record(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
         async with self._record_lock:

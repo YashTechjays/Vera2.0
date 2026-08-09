@@ -551,6 +551,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     end_grace_seconds=settings.transcript_end_grace_seconds,
                 ),
                 room_name=room_name,
+                # One in-flight attempt's cap plus adapter overhead, not the whole
+                # Gemini->OpenAI fallback cascade — tied to the same setting so the two
+                # budgets can't drift, since the gap pass chains agent to agent with no
+                # speech between them and every extra second here is repeated dead air.
+                drain_timeout=settings.observer_extract_attempt_timeout_seconds + 2.0,
             )
             controller.attach_observer(observer_manager)
             observer_manager.start()

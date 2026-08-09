@@ -844,3 +844,24 @@ class TestDrainPending:
         await ticker
         assert ticked, "a concurrent task never got a turn — the loop was starved"
         assert done_task not in manager._closing
+
+    @pytest.mark.asyncio
+    async def test_cancelling_drain_pending_does_not_orphan_closing(self) -> None:
+        """A drain cancelled mid-wait (hangup during the outro, session teardown) must not
+        strand the adopted task outside `_closing`: removing it from the tracked set up
+        front, before the await, is exactly what a cancellation skips past — the
+        `if pending:` restore line never runs. Each task now carries its OWN discard
+        callback and is only ever removed after a wait that actually completed, so a
+        cancelled drain leaves it there for `aclose` to keep waiting on."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.1)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)  # retires the observer; drain_pending will schedule its close
+        drain = asyncio.create_task(manager.drain_pending(timeout=5.0))
+        await asyncio.sleep(0)  # let drain_pending run its setup and reach the await
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+        assert manager._closing, "the adopted close task was stranded outside _closing"
+        await manager.aclose()
+        assert run_state.records, "aclose stopped waiting for the in-flight pass"
