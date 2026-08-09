@@ -331,11 +331,15 @@ def _last_ref_task(
 
 
 def _codes_text(codes: Codes) -> str:
+    """The codes line for a panel header. Prompt text only — never storage or export.
+
+    "ICD-Ten", not "ICD-10": the agent copies this string into what it says, and Cartesia
+    voiced the digits as "I-C-D one zero" on a live call."""
     parts: list[str] = []
     if codes.cpt:
         parts.append(f"CPT {', '.join(codes.cpt)}")
     if codes.icd10:
-        parts.append(f"ICD-10 {', '.join(codes.icd10)}")
+        parts.append(f"ICD-Ten {', '.join(codes.icd10)}")
     return "; ".join(parts)
 
 
