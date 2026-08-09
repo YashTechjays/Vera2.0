@@ -578,14 +578,13 @@ def _diagnostic_testing() -> Section:
                 "Is diagnostic testing covered under this plan?",
                 YES_NO,
             ),
+            # No panel intro: this section has ONE panel, so an intro phrased as a question
+            # ("Can you provide coverage and benefit details for…?") was spoken as a second
+            # coverage ask. The grouping lives in `codes`, not the sentence.
             "labs_xray_ultrasound": Group(
                 type="group",
                 title="Labs, Xray/Ultrasound",
                 codes=Codes(icd10=["Z31.41"]),
-                prompt=ask(
-                    "Can you provide coverage and benefit details for diagnostic labs, "
-                    "X-ray and ultrasound services?"
-                ),
                 fields=cpt_groups(
                     group_base,
                     _DIAG_CODES,

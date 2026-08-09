@@ -2926,9 +2926,6 @@
               "Z31.41"
             ]
           },
-          "prompt": {
-            "ask": "Can you provide coverage and benefit details for diagnostic labs, X-ray and ultrasound services?"
-          },
           "fields": {
             "cpt_58340": {
               "type": "group",
