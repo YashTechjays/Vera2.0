@@ -58,6 +58,17 @@ class FakeRunState:
         self.cursor_writes.append((room_name, task_key))
 
 
+class FakeObserverManager:
+    """Stands in for `ObserverManager` so `GapTaskAgent.on_enter` awaiting the drain is
+    provable without a real transcript stream."""
+
+    def __init__(self) -> None:
+        self.drains = 0
+
+    async def drain_pending(self) -> None:
+        self.drains += 1
+
+
 def _plan() -> CallPlan:
     return CallPlan(
         schema_name="Test",
@@ -2115,6 +2126,29 @@ class TestGapAgent:
             result = await _tool(agent, "gap_complete")()
         assert isinstance(result, str)
         assert "supervisor" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_on_enter_awaits_the_attached_observers_drain(self) -> None:
+        # Extraction lands ~15s after the turn that produced it, so the sweep must wait for
+        # the retiring observer's final pass before it decides what is still owed.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = controller.gap_agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+        assert observer.drains == 1
+
+    @pytest.mark.asyncio
+    async def test_on_enter_skips_the_drain_without_an_attached_observer(self) -> None:
+        # Voice Lab and every other test build a bare controller — drain_observer must be a
+        # true no-op, not a hang waiting on a manager that was never attached.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = controller.gap_agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()  # must not raise or hang
 
 
 class TestGapCoverage:

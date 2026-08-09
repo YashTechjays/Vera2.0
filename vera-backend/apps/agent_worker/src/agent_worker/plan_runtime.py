@@ -26,7 +26,7 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
 from livekit.agents.llm import ChatItem
@@ -56,6 +56,9 @@ from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondit
 from vera_core.forms.prompting import numbered_questions, render_panels
 from vera_core.forms.question_plan import PromptPanel, drop_questions
 from vera_core.plan_store import PlanRunStateService
+
+if TYPE_CHECKING:
+    from agent_worker.observer import ObserverManager
 
 logger = logging.getLogger("agent_worker")
 
@@ -507,6 +510,9 @@ class GapTaskAgent(Agent):
         self._controller.note_task_entered(self._task_index)
         if takeover_engaged(self.session):
             return
+        # The preceding task's outro is playing ("let me take a quick moment to review my
+        # notes... one moment please"), so this barrier costs the caller no extra silence.
+        await self._controller.drain_observer()
         fields = self._controller.gap_fields(self._task_index)
         if not fields:
             successor = await self._controller.advance_gap_from(self._task_index)
@@ -684,6 +690,10 @@ class PlanRunController:
         # The live AgentSession, attached after session.start (see attach_session).
         # apply_directive_now drives it to interrupt/swap the bot on a rule fire.
         self._session: AgentSession[TakeoverState] | None = None
+        # The Observer, attached from main.py alongside the session (see attach_observer).
+        # None in Voice Lab and every test that builds a controller bare — drain_observer
+        # is then a no-op.
+        self._observer_manager: ObserverManager | None = None
         # Fire-and-forget cursor writes: strong refs (a bare create_task result
         # can be GC'd mid-flight), drained in tests via drain_cursor_writes.
         self._cursor_writes: set[asyncio.Task[None]] = set()
@@ -869,9 +879,19 @@ class PlanRunController:
         which requires a started session producing transcript turns."""
         self._session = session
 
+    def attach_observer(self, manager: "ObserverManager") -> None:
+        """Hand the controller the Observer so `drain_observer` has something to await.
+        Wired from main.py alongside `attach_session`; left unset in Voice Lab and tests."""
+        self._observer_manager = manager
+
     def update_answers(self, answers: dict[str, Any]) -> None:
         """Refresh the in-process answers snapshot (Observer-fed in Phase 2)."""
         self._answers = dict(answers)
+
+    async def drain_observer(self) -> None:
+        """Let extraction settle before a caller reads `gap_fields`. No-op without a manager."""
+        if self._observer_manager is not None:
+            await self._observer_manager.drain_pending()
 
     async def apply_directive_now(self, directive: Directive) -> None:
         """Apply a rule-engine redirect immediately, from the Observer's background task:

@@ -552,6 +552,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 ),
                 room_name=room_name,
             )
+            controller.attach_observer(observer_manager)
             observer_manager.start()
 
         # Call-health observer (real /calls flow only: needs both the per-call

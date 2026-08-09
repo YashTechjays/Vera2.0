@@ -432,6 +432,23 @@ class ObserverManager:
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
 
+    async def drain_pending(self, timeout: float = 10.0) -> None:  # noqa: ASYNC109
+        """Await the retiring observer's final pass and any in-flight closes.
+
+        The gap sweep decides what is still owed; extraction lands ~15s after the turn that
+        produced it (p90 23s), so without this the sweep re-asks the last question the rep
+        just answered. Bounded and best-effort: on timeout the sweep proceeds on whatever
+        landed, because a barrier that can hang is worse than a stale answer set."""
+        self._close_retiring()
+        if not self._closing:
+            return
+        try:
+            async with asyncio.timeout(timeout):
+                while self._closing:
+                    await asyncio.gather(*list(self._closing), return_exceptions=True)
+        except TimeoutError:
+            logger.warning("observer manager %s: drain timed out", self._room)
+
     async def _record(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
         async with self._record_lock:
             await self._record_locked(answer, evidence_seq)

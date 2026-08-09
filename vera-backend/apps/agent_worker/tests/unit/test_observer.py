@@ -32,18 +32,18 @@ def _field(path: str) -> PlanFieldDescriptor:
 
 
 def _plan(
+    fields: list[PlanFieldDescriptor] | None = None,
     *,
     flow_rules: list[FlowRule] | None = None,
     numeric_consistencies: list[NumericConsistency] | None = None,
     prefilled: dict[str, Any] | None = None,
 ) -> CallPlan:
-    return CallPlan(
-        schema_name="Test",
-        insurance_type="ibv_standard",
-        dsl_version="2.1",
-        schema_version_id=uuid.uuid4(),
-        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
-        tasks=[
+    # `fields` overrides the default two-task shape with a single task ("t1") whitelisting
+    # exactly those fields — for tests that only care about one task's extraction/whitelist.
+    tasks = (
+        [PlanTask(task_key="t1", title="T1", prompt=".", fields=fields)]
+        if fields is not None
+        else [
             PlanTask(
                 task_key="t1",
                 title="T1",
@@ -56,7 +56,15 @@ def _plan(
                 ],
             ),
             PlanTask(task_key="t2", title="T2", prompt=".", fields=[_field("sections.b.y")]),
-        ],
+        ]
+    )
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=tasks,
         flow_rules=flow_rules or [],
         numeric_consistencies=numeric_consistencies or [],
         prefilled=prefilled or {},
@@ -99,6 +107,18 @@ class FakeExtractor:
         if self.raises:
             raise RuntimeError("gemini exploded")
         return list(self.answers)
+
+
+class SlowExtractor(FakeExtractor):
+    """`FakeExtractor` that takes `delay` seconds, so a drain has something to wait for."""
+
+    def __init__(self, answers: list[ExtractedAnswer], *, delay: float) -> None:
+        super().__init__(answers)
+        self.delay = delay
+
+    async def extract(self, task: Any, transcript: str) -> list[ExtractedAnswer]:
+        await asyncio.sleep(self.delay)
+        return await super().extract(task, transcript)
 
 
 class FakeTranscript:
@@ -740,3 +760,28 @@ def test_extraction_instructions_carry_the_routing_note() -> None:
     text = _extraction_instructions(task)
     assert "record N/A here — never No" in text
     assert "- sections.s.plain: Plain" in text  # unnoted fields keep their bare line
+
+
+class TestDrainPending:
+    @pytest.mark.asyncio
+    async def test_drain_awaits_the_retiring_observers_final_pass(self) -> None:
+        """A rep answer finalized in the last turn before a handoff is extracted by the
+        retiring observer's drain. The sweep must wait for it, or it re-asks a question
+        the rep has just answered."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.05)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)  # task ended; the outgoing observer retires
+        await manager.drain_pending(timeout=5.0)
+        assert run_state.records, "the final extraction pass had not completed when drain returned"
+
+    @pytest.mark.asyncio
+    async def test_drain_returns_on_timeout_instead_of_stalling(self) -> None:
+        """The barrier must never become a hang: a slow extractor falls through."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=5.0)
+        manager, _run_state, _bus, _controller = _manager(
+            _plan([_field("sections.a.b")]), extractor
+        )
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)
+        await asyncio.wait_for(manager.drain_pending(timeout=0.05), timeout=1.0)
