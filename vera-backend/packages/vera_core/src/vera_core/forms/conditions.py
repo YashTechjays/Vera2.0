@@ -156,9 +156,10 @@ def has_value(values: Values, path: str) -> bool:
 def is_satisfied(
     path: str, default: str | None, values: Values, alternatives: AlternativeIndex
 ) -> bool:
-    """Whether a required, applicable field owes nothing — shared by `gap_fields` (and so both
-    `task_complete` guards through it) and `completion_pct_v2`. `review`'s path lists apply the
-    same rule through `is_field_satisfied` instead, since they may hold a sentinel value map.
+    """Whether a required, applicable field owes nothing, for `completion_pct_v2` — its only
+    caller. NOT the call's owed set: `gap_fields` and both `task_complete` guards go through
+    `call_plan.owed_now`, which consults no `default` (9e17401b). `review`'s path lists apply
+    the same rule through `is_field_satisfied` instead, since they may hold a sentinel map.
 
     Three ways to owe nothing: a value on file; a declared `default`, which `completion_pct_v2`
     counts as filled and the export writes; or another member of its either/or group answered,
