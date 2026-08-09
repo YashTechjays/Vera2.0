@@ -10,6 +10,8 @@ from typing import Any
 
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.prompting import immediate_confirms_by_anchor as _immediate_by_anchor
+from vera_core.forms.prompting import numbered_questions
 from vera_core.forms.question_plan import (
     PromptOption,
     PromptPanel,
@@ -287,7 +289,8 @@ class TestHydration:
                         gate_text="{{tok}} gate",
                         derive_text="{{tok}} derive",
                         required_text="{{tok}} required",
-                        immediate_confirms=["{{tok}} confirm"],
+                        is_confirm=True,
+                        confirm_line="{{tok}} confirm",
                         hints=["{{tok}} hint"],
                     ),
                     PromptPanel(
@@ -376,3 +379,26 @@ class TestCoverage:
                 p for q in iter_questions(build_question_plan(DOC, task)) for p in q.target_paths
             }
             assert collectable <= asked, f"{task.task_key} drops {sorted(collectable - asked)}"
+
+
+def test_confirm_anchors_are_reachable_question_nodes() -> None:
+    """A confirm_immediate leaf must be a node with target_paths, not prose on its anchor.
+
+    Anything that walks the tree to decide what is still owed can only see nodes; a
+    pre-rendered string is invisible to it (spec §1).
+    """
+    doc = build_ibv_standard()
+    task = next(t for t in doc.tasks if t.task_key == "insurance_basics")
+    panels = build_question_plan(doc, task, _immediate_by_anchor(doc))
+    reachable = {p for q in iter_questions(panels) for p in q.target_paths}
+    assert "sections.patient_information.spouse_partner_name" in reachable
+    assert "sections.patient_information.spouse_partner_dob" in reachable
+
+
+def test_confirm_nodes_are_not_numbered() -> None:
+    """They render nested under their anchor, so they must not consume an ordinal —
+    the same treatment routing questions already get."""
+    doc = build_ibv_standard()
+    task = next(t for t in doc.tasks if t.task_key == "insurance_basics")
+    panels = build_question_plan(doc, task, _immediate_by_anchor(doc))
+    assert numbered_questions(panels) == 16

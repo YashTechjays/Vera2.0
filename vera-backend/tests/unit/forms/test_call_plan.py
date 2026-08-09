@@ -417,12 +417,10 @@ class TestPanelsMatchThePrompt:
             assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
 
     def test_the_stored_tree_keeps_the_immediate_confirmations(self) -> None:
-        # Built once and shared: building it a second time without the confirm lines gave the
+        # Built once and shared: building it a second time without the confirm nodes gave the
         # worker a tree whose re-render dropped every "Immediately after this answer" block.
         plan = self._plan()
-        confirms = sum(
-            len(q.immediate_confirms) for t in plan.tasks for q in iter_questions(t.panels)
-        )
+        confirms = sum(q.is_confirm for t in plan.tasks for q in iter_questions(t.panels))
         assert confirms > 0
 
     def test_fusing_hydrates_the_tree_as_well_as_the_text(self) -> None:

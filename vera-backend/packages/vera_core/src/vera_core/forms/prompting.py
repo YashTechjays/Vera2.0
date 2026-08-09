@@ -177,6 +177,30 @@ def _join_gates(gates: tuple[Condition, ...], render_cond: Callable[[Condition],
     return " and ".join(parts)
 
 
+def immediate_confirms_by_anchor(doc: FormSchemaDoc) -> dict[str, list[tuple[str, str]]]:
+    """`{anchor path: [(collected path, rendered confirm line)]}` for every
+    `confirm_immediate` leaf — the anchor rule `render_task_prompts` already applies,
+    exposed so the question-plan builder and the validator cannot drift from it."""
+    render_cond = build_condition_renderer(doc)
+    shared = doc.shared_conditions or {}
+    leaves = dict(doc.leaf_items())
+    order = {path: i for i, path in enumerate(leaves)}
+    section_to_task = doc.section_to_task()
+    result: dict[str, list[tuple[str, str]]] = {}
+    for path, leaf, gates in leaf_gates(doc):
+        cit = leaf.confirm_in_task
+        if cit is None:
+            continue
+        anchor = _anchor(cit, gates, shared, leaves, order, section_to_task)
+        if anchor is None:
+            continue
+        # The confirm SLOT, not the confirm sentence: `fuse_prefill` picks confirm-vs-ask
+        # wording once it knows whether this form prefilled a value (`prompting.confirm_slot`).
+        line = f"If {_join_gates(gates, render_cond)}: {confirm_slot(path)}"
+        result.setdefault(anchor, []).append((path, line))
+    return result
+
+
 def render_task_prompts(
     doc: FormSchemaDoc, prompt_doc: PromptDocument | None = None
 ) -> RenderedPrompts:
@@ -202,16 +226,12 @@ def render_task_prompts(
     titles = {path: field.title for path, field in doc._iter_fields()}
     task_titles = {t.task_key: t.title for t in doc.tasks}
 
-    immediate_by_anchor: dict[str, list[_QuestionItem]] = {}
+    immediate_by_anchor = immediate_confirms_by_anchor(doc)
     end_confirms: dict[str, list[_QuestionItem]] = {}
     for path, leaf, gates in leaf_gates(doc):
         cit = leaf.confirm_in_task
-        if cit is not None:
-            anchor = _anchor(cit, gates, shared, leaves, order, section_to_task)
-            if cit.confirm_immediate and anchor is not None:
-                immediate_by_anchor.setdefault(anchor, []).append((path, leaf, gates))
-            else:
-                end_confirms.setdefault(cit.task_key, []).append((path, leaf, gates))
+        if cit is not None and _anchor(cit, gates, shared, leaves, order, section_to_task) is None:
+            end_confirms.setdefault(cit.task_key, []).append((path, leaf, gates))
 
     flow_by_task: dict[str, list[FlowRule]] = {}
     for rule in doc.flow_rules or []:
@@ -345,7 +365,7 @@ def numbered_questions(panels: list[PromptPanel]) -> int:
     return sum(
         numbered_questions([item])
         if isinstance(item, PromptPanel)
-        else (0 if item.routes_between else 1)
+        else (0 if item.routes_between or item.is_confirm else 1)
         for panel in panels
         for item in panel.items
     )
@@ -369,10 +389,14 @@ def _panel_lines(panel: PromptPanel, depth: int, numbering: Iterator[int]) -> li
         lines.append(f"{speak}: {codes}.")
     if panel.gate_text is not None:
         lines.append(f"Ask only if {panel.gate_text}.")
-    for item in panel.items:
+    items = list(panel.items)
+    i = 0
+    while i < len(items):
+        item = items[i]
         if isinstance(item, PromptPanel):
             lines.append("")
             lines.extend(_panel_lines(item, depth + 1, numbering))
+            i += 1
             continue
         if item.routes_between:
             # Unnumbered: it routes between the panels below rather than recording an answer
@@ -382,12 +406,26 @@ def _panel_lines(panel: PromptPanel, depth: int, numbering: Iterator[int]) -> li
                 "Then take only the matching panel below — "
                 f"{' or '.join(item.routes_between)} — and skip the other."
             )
+            i += 1
             continue
-        lines.extend(_numbered_question(next(numbering), item))
+        # Absorb the run of confirm nodes this question anchors — they render nested
+        # under it rather than starting numbered lines of their own.
+        run: list[PromptQuestion] = []
+        j = i + 1
+        while j < len(items):
+            candidate = items[j]
+            if not (isinstance(candidate, PromptQuestion) and candidate.is_confirm):
+                break
+            run.append(candidate)
+            j += 1
+        lines.extend(_numbered_question(next(numbering), item, run))
+        i = j
     return lines
 
 
-def _numbered_question(number: int, question: PromptQuestion) -> list[str]:
+def _numbered_question(
+    number: int, question: PromptQuestion, confirms: list[PromptQuestion] | None = None
+) -> list[str]:
     lines = [f"{number}. {question.text}"]
     for option in question.options:
         if option.label is None:
@@ -413,9 +451,9 @@ def _numbered_question(number: int, question: PromptQuestion) -> list[str]:
             "   - One question for all of these codes; apply the answer to every code the "
             f"representative confirms: {', '.join(question.fanned_codes)}."
         )
-    if question.immediate_confirms:
+    if confirms:
         lines.append("   - Immediately after this answer:")
-        lines.extend(f"     * {line}" for line in question.immediate_confirms)
+        lines.extend(f"     * {c.confirm_line}" for c in confirms)
     return lines
 
 
@@ -436,7 +474,7 @@ def _task_text(
     task: Task,
     override: TaskTextOverride,
     render_cond: Callable[[Condition], str],
-    immediate_by_anchor: dict[str, list[_QuestionItem]],
+    immediate_by_anchor: dict[str, list[tuple[str, str]]],
     end_confirms: list[_QuestionItem],
     flow_rules: list[FlowRule],
     contradictions: list[Contradiction],
@@ -450,17 +488,7 @@ def _task_text(
     if instructions:
         lead.append(instructions)
 
-    # The confirm SLOT, not the confirm sentence: which verb and wording this leaf gets
-    # depends on whether the form actually prefilled a value, which only `fuse_prefill`
-    # knows (`_confirm_slot`).
-    confirm_lines = {
-        anchor: [
-            f"If {_join_gates(gates, render_cond)}: {confirm_slot(cpath)}"
-            for cpath, _leaf, gates in items
-        ]
-        for anchor, items in immediate_by_anchor.items()
-    }
-    panels = build_question_plan(doc, task, confirm_lines)
+    panels = build_question_plan(doc, task, immediate_by_anchor)
     blocks: list[str] = []
 
     if end_confirms:

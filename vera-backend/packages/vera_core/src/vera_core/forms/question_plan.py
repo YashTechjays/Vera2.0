@@ -71,14 +71,18 @@ class PromptQuestion(_Model):
     gate_text: str | None = None
     derive_text: str | None = None
     required_text: str | None = None
-    # Pre-rendered "confirm this immediately after the answer" lines (confirm_in_task).
-    immediate_confirms: list[str] = Field(default_factory=list)
     # CPT codes this one question fans out across, when there is more than one.
     fanned_codes: list[str] = Field(default_factory=list)
     hints: list[str] = Field(default_factory=list)
     optional: bool = False
     # Routing questions only: the panel titles the answer chooses between.
     routes_between: list[str] = Field(default_factory=list)
+    # A `confirm_immediate` leaf: renders as a nested bullet under the question it
+    # follows and takes NO ordinal (like `routes_between`), but unlike a routing
+    # question it DOES collect, so it is owed. Numbering is a rendering concern;
+    # owed-ness is a state concern.
+    is_confirm: bool = False
+    confirm_line: str | None = None
 
     @property
     def target_paths(self) -> list[str]:
@@ -123,13 +127,13 @@ def iter_questions(panels: list[PromptPanel]) -> Iterator[PromptQuestion]:
 def build_question_plan(
     doc: FormSchemaDoc,
     task: Task,
-    immediate_by_anchor: dict[str, list[str]] | None = None,
+    immediate_by_anchor: dict[str, list[tuple[str, str]]] | None = None,
 ) -> list[PromptPanel]:
     """One panel per collect section of `task`, each holding its spoken questions.
 
-    `immediate_by_anchor` maps an anchor path to already-rendered confirmation lines
-    (`confirm_in_task` with `confirm_immediate`), attached to whichever question answers
-    that path."""
+    `immediate_by_anchor` maps an anchor path to the `(collected path, rendered confirm
+    line)` pairs of every `confirm_immediate` leaf (`confirm_in_task`) attached to
+    whichever question answers that path."""
     return _Builder(doc, task, immediate_by_anchor or {}).build()
 
 
@@ -162,7 +166,10 @@ class _CoveredGate(NamedTuple):
 
 class _Builder:
     def __init__(
-        self, doc: FormSchemaDoc, task: Task, immediate_by_anchor: dict[str, list[str]]
+        self,
+        doc: FormSchemaDoc,
+        task: Task,
+        immediate_by_anchor: dict[str, list[tuple[str, str]]],
     ) -> None:
         self.doc = doc
         self.task = task
@@ -361,7 +368,9 @@ class _Builder:
                 continue
             question = self.question_at.get(path)
             if question is not None:
-                panel.items.append(self._scoped(path, question, asserted, scope))
+                scoped = self._scoped(path, question, asserted, scope)
+                panel.items.append(scoped)
+                panel.items.extend(self._confirm_nodes(scoped))
 
     def _fill_group(
         self,
@@ -437,13 +446,26 @@ class _Builder:
                     if isinstance(leaf.required, RequiredWhen)
                     else None
                 ),
-                "immediate_confirms": [
-                    line
-                    for target in question.target_paths
-                    for line in self.immediate_by_anchor.get(target, [])
-                ],
             }
         )
+
+    def _confirm_nodes(self, question: PromptQuestion) -> list[PromptQuestion]:
+        """The `confirm_immediate` leaves anchored to `question`, as nodes in spoken order.
+
+        Ordered by the anchor's own target order so the rendered bullets keep the sequence
+        the previous string list produced — this is what keeps the prompt byte-identical."""
+        nodes: list[PromptQuestion] = []
+        for target in question.target_paths:
+            for path, line in self.immediate_by_anchor.get(target, []):
+                nodes.append(
+                    PromptQuestion(
+                        text=line,
+                        options=[PromptOption(target_paths=[path])],
+                        is_confirm=True,
+                        confirm_line=line,
+                    )
+                )
+        return nodes
 
     def _gate_text(self, residual: tuple[Condition, ...], scope: str) -> str:
         """A gate that only asks "is the thing this question is about covered?" says exactly
@@ -668,7 +690,7 @@ def hydrate_panels(panels: list[PromptPanel], hydrate: Callable[[str], str]) -> 
                 "gate_text": text(node.gate_text),
                 "derive_text": text(node.derive_text),
                 "required_text": text(node.required_text),
-                "immediate_confirms": lines(node.immediate_confirms),
+                "confirm_line": text(node.confirm_line),
                 "hints": lines(node.hints),
                 "routes_between": lines(node.routes_between),
             }
