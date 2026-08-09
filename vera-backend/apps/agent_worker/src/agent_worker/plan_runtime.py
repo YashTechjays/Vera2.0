@@ -240,6 +240,7 @@ class PlanTaskAgent(Agent):
         self._refusals = 0
         self._outstanding_at_last_refusal: int | None = None
         self._rep_turns = 0
+        self._advanced_this_turn = False
         super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
 
     def _build_instructions(self, panels: list[PromptPanel] | None = None) -> str:
@@ -346,6 +347,7 @@ class PlanTaskAgent(Agent):
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
         self._rep_turns += 1
+        self._advanced_this_turn = False
 
     @llm.function_tool(
         name="task_complete",
@@ -362,6 +364,10 @@ class PlanTaskAgent(Agent):
             # A str is a tool result, so the plan parks here. Returning `self` would
             # re-fire on_enter and speak the intro again.
             return "A human supervisor has taken over this call. Stay silent."
+        if self._advanced_this_turn:
+            # A second chain-advancing call in one turn traverses a task without ever
+            # entering its question loop. Inert, not a second Agent.
+            return "Already moving on — continue with the next question."
         if (refusal := self._refuse_premature_completion()) is not None:
             return refusal
         outro = self._task.outro
@@ -374,6 +380,7 @@ class PlanTaskAgent(Agent):
         # tool-returned agent, so without this it re-greets and re-asks.
         await self._controller.prepare_successor(self, successor)
         self._tag_task_complete_handoff(successor)
+        self._advanced_this_turn = True
         return successor
 
     def _refuse_premature_completion(self) -> str | None:
@@ -491,6 +498,7 @@ class GapTaskAgent(Agent):
         self._rep_turns = 0
         self._outstanding_at_last_refusal: int | None = None
         self._fruitless_refusals = 0
+        self._advanced_this_turn = False
         super().__init__(instructions=self._build_instructions([]))
 
     def _build_instructions(self, fields: list[PlanFieldDescriptor]) -> str:
@@ -538,6 +546,7 @@ class GapTaskAgent(Agent):
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
         self._rep_turns += 1
+        self._advanced_this_turn = False
         # The Observer keeps writing during the pass, so re-narrow as answers land. Not when the
         # set empties: the agent's next move is then gap_complete, which the guard passes.
         if outstanding := self._controller.gap_fields(self._task_index):
@@ -555,10 +564,15 @@ class GapTaskAgent(Agent):
     async def _gap_complete(self, reason: str) -> Agent | str:
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
+        if self._advanced_this_turn:
+            # A second chain-advancing call in one turn traverses a task without ever
+            # entering its question loop. Inert, not a second Agent.
+            return "Already moving on — continue with the next question."
         if (refusal := self._refuse_premature_gap_complete()) is not None:
             return refusal
         successor = await self._controller.advance_gap_from(self._task_index)
         await self._controller.prepare_successor(self, successor)
+        self._advanced_this_turn = True
         return successor
 
     def _refuse_premature_gap_complete(self) -> str | None:

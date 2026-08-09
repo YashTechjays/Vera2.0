@@ -1710,6 +1710,19 @@ class TestPrematureCompletion:
         assert third is not agent
 
     @pytest.mark.asyncio
+    async def test_two_task_completes_in_one_turn_produce_one_handoff(self) -> None:
+        """A doubled tool call walked straight past a task without entering its question
+        loop (P10, 2026-07-30). The second call must be inert."""
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            first = await _tool(agent, "task_complete")()
+            second = await _tool(agent, "task_complete")()
+        assert isinstance(first, Agent)
+        assert isinstance(second, str)
+
+    @pytest.mark.asyncio
     async def test_a_complete_task_is_never_refused(self) -> None:
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.intro.rep_name": "Pat"})
