@@ -185,6 +185,21 @@ def owed_now(
     return owed
 
 
+def gating_seed(plan: CallPlan) -> dict[str, Any]:
+    """The answers a gate may be judged against before the call has collected anything.
+
+    An `ask`-role leaf is collected ON the call, so a value on file for one is a pre-call
+    baseline and never an answer: letting it settle a gate deletes every question behind it
+    from the compiled list, which is how the intake UI's `default` for `enrollment_required`
+    removed the enrollment provider question from `closing_admin`. `confirm` stays — it is on
+    file precisely to be read back — and a path no task collects is clinic-supplied context.
+
+    Provenance is deliberately not consulted, only role: `field_answer.source` does not reach
+    the worker, and an ask leaf's authority is the payer's representative either way."""
+    asked = {field.path for task in plan.tasks for field in task.fields if field.role == "ask"}
+    return {path: value for path, value in plan.prefilled.items() if path not in asked}
+
+
 def _exclusive_notes(doc: FormSchemaDoc) -> dict[str, str]:
     """`{leaf path: note}` for every leaf under a ROUTING branch — an `alternatives` over groups.
 

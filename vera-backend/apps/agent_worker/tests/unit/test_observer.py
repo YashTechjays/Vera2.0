@@ -753,7 +753,9 @@ class TestDerivedRemaining:
             extractor,
         )
         await _feed(manager, _rep("Total 25k, met 5k."))
-        assert controller.answers[REMAINING] == "$1,000"
+        # Blocked derivation means nothing was ever RECORDED for it, and the Observer now
+        # pushes only what the call collected — the controller never sees the prefill either.
+        assert REMAINING not in controller.answers
         assert not any(path == REMAINING for _, path, _, _ in run_state.records)
 
     @pytest.mark.asyncio

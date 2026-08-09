@@ -16,6 +16,7 @@ from vera_core.forms.call_plan import (
     compile_call_plan,
     focus_call_plan,
     fuse_prefill,
+    gating_seed,
     owed_now,
 )
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
@@ -602,3 +603,41 @@ class TestOwedNow:
         # `second` is answered and drops out; `first`/`third` must still come back in the order
         # the tree speaks them, across a panel boundary, not in field or insertion order.
         assert owed_now(task, {second_path: "X"}, {}) == [first, third]
+
+
+class TestGatingSeed:
+    """`ask` is collected ON the call, so a pre-call value for one must not settle a gate."""
+
+    def _fused(self, values: dict[str, object]) -> CallPlan:
+        return fuse_prefill(IBV, PLAN, values, current_year=2026)
+
+    def test_ask_role_prefill_is_dropped(self) -> None:
+        path = "sections.enrollment.enrollment_required"
+        plan = self._fused({path: "N/A"})
+        assert plan.prefilled[path] == "N/A"
+        assert path not in gating_seed(plan)
+
+    def test_confirm_role_prefill_survives(self) -> None:
+        # On file to be read back — the member-ID pattern.
+        path = "sections.insurance_information.policy_number"
+        plan = self._fused({path: "ABC123"})
+        assert gating_seed(plan)[path] == "ABC123"
+
+    def test_context_role_prefill_survives(self) -> None:
+        # No task collects it; it is what the clinic supplied.
+        path = "sections.patient_information.spouse_gender"
+        plan = self._fused({path: "Male"})
+        assert gating_seed(plan)[path] == "Male"
+
+    def test_prefilled_itself_is_not_mutated(self) -> None:
+        path = "sections.enrollment.enrollment_required"
+        plan = self._fused({path: "N/A"})
+        gating_seed(plan)
+        assert plan.prefilled == {path: "N/A"}
+
+    def test_a_human_typed_ask_value_is_dropped_too(self) -> None:
+        """Provenance is not consulted, only role: `field_answer.source` never reaches the
+        worker, and the payer's representative is the authority on an ask leaf either way."""
+        path = "sections.benefit_coverage.coverage_type"
+        plan = self._fused({path: "Family"})
+        assert path not in gating_seed(plan)

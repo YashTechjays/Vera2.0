@@ -44,7 +44,7 @@ from agent_worker.prompt import (
     SCOPE_DISCIPLINE,
     TOOL_REASON_ARG,
 )
-from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, owed_now
+from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, gating_seed, owed_now
 from vera_core.forms.conditions import (
     alternative_index,
     evaluate,
@@ -708,10 +708,12 @@ class PlanRunController:
         # closer a context in which VERA never introduced herself.
         self._anchor_items: list[ChatItem] = []
         self._run_state = run_state
-        # In-process answers snapshot for applicability/skip decisions, seeded
-        # with the form's intake prefill (so gates work from call start); the
-        # Phase-2 Observer keeps it current. Redis stays the cross-process truth.
-        self._answers: dict[str, Any] = dict(plan.prefilled)
+        # Pre-call baseline for gate evaluation: the intake values a gate may legitimately be
+        # judged against before the call collects anything. Role-scoped (`gating_seed`), so an
+        # ask leaf's prefill can never settle a gate. Immutable for the run.
+        self._baseline = gating_seed(plan)
+        # Baseline + what the call has collected. Redis stays the cross-process truth.
+        self._answers: dict[str, Any] = dict(self._baseline)
         # Collectable path -> the task that asks it. A gate referencing a path in THIS task
         # (or a later one) is undecided at entry; one referencing only earlier tasks is final,
         # answered or gated-out-upstream alike. Paths absent here are context/prefilled.
@@ -933,9 +935,14 @@ class PlanRunController:
         Wired from main.py alongside `attach_session`; left unset in Voice Lab and tests."""
         self._observer_manager = manager
 
-    def update_answers(self, answers: dict[str, Any]) -> None:
-        """Refresh the in-process answers snapshot (Observer-fed in Phase 2)."""
-        self._answers = dict(answers)
+    def update_answers(self, answers: Mapping[str, Any]) -> None:
+        """The answers the CALL has collected, laid over the pre-call baseline.
+
+        MERGED, never replaced. The Observer's own map is not role-scoped, so a wholesale
+        replace would put every ask-role intake value back and re-arm the question deletion
+        `gating_seed` exists to prevent — and it would do so invisibly, since the controller
+        cannot tell a pre-call value from one the rep just gave."""
+        self._answers = {**self._baseline, **answers}
 
     async def drain_observer(self) -> None:
         """Let extraction settle before a caller reads `gap_fields`. No-op without a manager."""

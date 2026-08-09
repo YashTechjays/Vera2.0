@@ -355,9 +355,14 @@ class ObserverManager:
         # budgets can't drift apart; falls back to _DRAIN_TIMEOUT_S when unset (Voice Lab).
         self._drain_timeout = _DRAIN_TIMEOUT_S if drain_timeout is None else drain_timeout
         self._rule_engine = RuleEngine(plan)
-        # Call-scoped answer snapshot (seeded with intake prefill), the dedup key and the
-        # rule engine's input. Grows across tasks — a flow rule may span them.
-        self._answers: dict[str, Any] = dict(plan.prefilled)
+        # Everything on file for this form — intake included, all roles. NOT the controller's
+        # gate-evaluation set: three behaviours here need the intake values, namely the dedup in
+        # `_record_locked`, `_derive_remaining_locked`'s "a prefilled remaining wins", and the
+        # rule engine, whose terminate rules read ask-role paths a clinic may fill.
+        self._on_file: dict[str, Any] = dict(plan.prefilled)
+        # What THIS CALL collected, which is all the controller may gate on — see
+        # `PlanRunController.update_answers`.
+        self._recorded: dict[str, Any] = {}
         self._triplets = [triplet_paths(rule.triplet) for rule in plan.numeric_consistencies]
         self._derived: dict[str, str] = {}
         self._seq = 0
@@ -371,7 +376,7 @@ class ObserverManager:
         self._closing: set[asyncio.Task[None]] = set()
         self._tail_task: asyncio.Task[None] | None = None
         # A retiring Observer's pass runs concurrently with the active one's, and `_record`
-        # read-modify-writes `_answers` across awaits.
+        # read-modify-writes `_on_file` across awaits.
         self._record_lock = asyncio.Lock()
 
     def start(self) -> None:
@@ -500,7 +505,7 @@ class ObserverManager:
             await self._record_locked(answer, evidence_seq)
 
     async def _record_locked(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
-        if self._answers.get(answer.field_path) == answer.value:
+        if self._on_file.get(answer.field_path) == answer.value:
             # Unchanged — do not re-write or re-emit. INTENTIONALLY covers the intake
             # prefill seed too: a rep merely confirming a prefilled value leaves no
             # ai_call row (the INTAKE row stays current). The form reads the same either
@@ -527,8 +532,9 @@ class ObserverManager:
         )
         # Mark dedup only after the write+emit land, so a failed emit is retried on the
         # next pass (the CP consumer is idempotent under the redelivery).
-        self._answers[answer.field_path] = answer.value
-        self._controller.update_answers(self._answers)
+        self._on_file[answer.field_path] = answer.value
+        self._recorded[answer.field_path] = answer.value
+        self._controller.update_answers(self._recorded)
         # Path, confidence and task only — never the value (PHI). Both knobs off for the
         # same reason as the rule-engine span below: this span's body sits beside raw
         # extracted values.
@@ -550,7 +556,7 @@ class ObserverManager:
                     self._room,
                     type(exc).__name__,
                 )
-        # This span's body reads `self._answers`, raw extracted field values. `evaluate` is
+        # This span's body reads `self._on_file`, raw extracted field values. `evaluate` is
         # pure string comparison and is documented not to raise, so the two knobs below are
         # defense-in-depth here — but they stay off, as on every Vera-owned span whose body
         # touches PHI: record_exception=False drops the exception EVENT,
@@ -560,7 +566,7 @@ class ObserverManager:
             record_exception=False,
             set_status_on_exception=False,
         ) as span:
-            directive = self._rule_engine.evaluate(self._answers)
+            directive = self._rule_engine.evaluate(self._on_file)
             try:
                 span.set_attribute("vera.rule_engine.fired", directive is not None)
                 if directive is not None:
@@ -585,12 +591,12 @@ class ObserverManager:
         for total_path, met_path, remaining_path in self._triplets:
             if trigger.field_path not in (total_path, met_path):
                 continue
-            current = self._answers.get(remaining_path)
+            current = self._on_file.get(remaining_path)
             if not is_blank_answer(current) and current != self._derived.get(remaining_path):
                 continue  # a rep-stated or prefilled remaining wins — never overwrite it
             value = derive_remaining(
-                str(self._answers.get(total_path) or ""),
-                str(self._answers.get(met_path) or ""),
+                str(self._on_file.get(total_path) or ""),
+                str(self._on_file.get(met_path) or ""),
             )
             if value is None:
                 continue
