@@ -3248,3 +3248,14 @@ class TestTheObserverCannotReArmTheDeletion:
             f.path for f in controller.excluded_fields(_plan_task_index(plan, "closing_admin"))
         }
         assert "sections.enrollment.enrollment_provider_name" in excluded
+
+    def test_an_unrelated_recorded_answer_does_not_drop_the_baseline(self) -> None:
+        """The discriminating case for merge-vs-replace. A confirm-role prefill lives in the
+        baseline; a wholesale replace on the next recorded answer would drop it, and every
+        gate and owed-set decision that reads it would silently change mid-call."""
+        policy = "sections.insurance_information.policy_number"
+        plan = _fused_plan(build_ibv_standard, {policy: "ABC123"})
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.insurance_representative.rep_name": "Pat"})
+        owed = {f.path for f in controller.gap_fields(_plan_task_index(plan, "insurance_basics"))}
+        assert policy not in owed
