@@ -19,9 +19,11 @@ Two stages (the split keeps dispatch-pass memoization honest):
 * :func:`fuse_prefill` — the per-FORM stage: hydrates every resolvable
   ``{{token}}`` with the form's intake-prefilled value (spoken-title fallback
   when no value exists), builds the "Known information" block from prefilled
-  context-role leaves, and stamps ``prefilled`` — the answers seed for
-  applicability gates and the Phase-2 rule engine. ``{{current_year}}`` is
-  hydrated here too; ``{{value}}`` survives as the runtime sentinel.
+  context-role leaves, and stamps ``prefilled`` — the full per-form ``{path:
+  raw value}`` map, all roles. :func:`gating_seed` derives the worker's
+  role-scoped gate-evaluation seed from it; the Phase-2 rule engine reads
+  ``prefilled`` directly. ``{{current_year}}`` is hydrated here too;
+  ``{{value}}`` survives as the runtime sentinel.
 
 Note: PHI tokenization was dropped (2026-07-13), so the fused plan carries the
 form's raw intake values — the same Redis posture as ``vera:transcript:*`` keys.
@@ -444,8 +446,9 @@ class PrefillFuser:
           value" lines) — the schema's "context = agent background" contract.
           Ask/confirm leaves are collected/confirmed on the call and
           input/ui_only leaves are never voice-touched, so they stay out.
-        * ``prefilled`` carries the full ``{path: raw}`` map (all roles) — the
-          answers seed for applicability gates and the Phase-2 rule engine.
+        * ``prefilled`` carries the full ``{path: raw}`` map (all roles).
+          :func:`gating_seed` derives the worker's role-scoped gate-evaluation
+          seed from it; the Phase-2 rule engine reads ``prefilled`` directly.
         """
         unresolved = 0
         unbacked = 0
