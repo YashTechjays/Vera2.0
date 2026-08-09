@@ -488,6 +488,21 @@ def owed_now(
 
 Import `is_applicable`, `is_required`, `has_value` from `vera_core.forms.conditions` and `iter_questions`, `PromptQuestion` from `vera_core.forms.question_plan`.
 
+**Known limitation, added after Task 2 (load-bearing — read before implementing).** `owed_now`
+walks question nodes only. An **end-of-task confirm** (`confirm_in_task` with
+`confirm_immediate=False`) is spoken by `render_task_prompts`' separate `end_confirms` block, not
+as a tree node, and Task 2's coverage validator deliberately exempts it. Such a leaf therefore has
+no question node and `owed_now` can **never** owe it — while `task.prompt` still instructs the
+agent to ask it. Today's `gap_fields` iterates `task.fields` and *does* owe it, so this would be a
+silent **regression**, not merely a gap.
+
+**Zero end-confirms exist in either catalog today**, and Task 2 added
+`test_no_catalog_uses_an_end_of_task_confirm` so authoring one goes red immediately. So implement
+`owed_now` as questions-only, as written above — do **not** try to union in the end-confirm set
+here. Record the limitation in the docstring so the next reader sees it. Lifting the
+`end_confirms` loop (`prompting.py:230-234`) into a named function and unioning it is the
+principled follow-up, deliberately deferred so a correctness fix does not carry a refactor.
+
 - [ ] **Step 4: Point the worker at it**
 
 Replace `PlanRunController.gap_fields` and `owed_question_count` in `plan_runtime.py`:
