@@ -708,7 +708,7 @@
             "Family"
           ],
           "prompt": {
-            "ask": "Is this an individual or a family policy? Please answer Individual or Family."
+            "ask": "Is this an individual or a family policy?"
           }
         },
         "pcp_referral_required": {
@@ -977,7 +977,7 @@
               ],
               "inapplicable_value": "No",
               "prompt": {
-                "ask": "Is ovulation induction covered under this plan? Please answer Yes, No, or N/A."
+                "ask": "Is ovulation induction covered under this plan?"
               }
             },
             "copay": {
@@ -2862,7 +2862,7 @@
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.covered",
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.covered"
           ],
-          "ask": "Are diagnostic labs, X-ray and ultrasound services covered under this plan? Please answer Yes, No, or N/A."
+          "ask": "Are diagnostic labs, X-ray and ultrasound services covered under this plan?"
         },
         {
           "fields": [
@@ -4809,7 +4809,7 @@
           ],
           "default": "N/A",
           "prompt": {
-            "ask": "Is enrollment required for this patient? Please answer Yes, No, or N/A."
+            "ask": "Is enrollment required for this patient?"
           }
         },
         "enrollment_provider_name": {
@@ -4851,7 +4851,7 @@
             "N/A"
           ],
           "prompt": {
-            "ask": "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A."
+            "ask": "Is a center of excellence required for infertility treatment?"
           }
         }
       }
@@ -5190,7 +5190,7 @@
       "title": "Administrative Details",
       "intro": "Just a few more questions about administrative details.",
       "outro": "Perfect, I have all the administrative details I need. Let me take a quick moment to review my notes and make sure I haven't missed anything. One moment please.",
-      "prompt": "Close out enrollment, authorization and third-party administration details. Ask the existence gate first and skip the contact questions when the entity does not exist.",
+      "prompt": "Ask all the questions listed below.",
       "sections": [
         "enrollment",
         "authorization_department",

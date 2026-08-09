@@ -26,7 +26,7 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
    - When "Benefit Year Type" is "Calendar Year": record "01/01/{{current_year}}" without asking.
 10. What are the start and end dates of the plan year?
    - When "Benefit Year Type" is "Calendar Year": record "01/01/{{current_year}} - 12/31/{{current_year}}" without asking.
-11. Is this an individual or a family policy? Please answer Individual or Family.
+11. Is this an individual or a family policy?
    - Answers: Individual | Family
    - Immediately after this answer:
      * If "Coverage Type" is "Family": {{confirm:sections.patient_information.spouse_partner_name}}

@@ -453,7 +453,7 @@ def _benefit_coverage() -> Section:
             ),
             "coverage_type": enum_ask(
                 "Coverage Type",
-                "Is this an individual or a family policy? Please answer Individual or Family.",
+                "Is this an individual or a family policy?",
                 ["Individual", "Family"],
             ),
             "pcp_referral_required": enum_ask(
@@ -497,7 +497,7 @@ def _infertility_treatment() -> Section:
     oi_base = "sections.infertility_treatment.ovulation_induction"
     oi_fields = service_fields(
         oi_base,
-        "Is ovulation induction covered under this plan? Please answer Yes, No, or N/A.",
+        "Is ovulation induction covered under this plan?",
         "treatment",
         referent="ovulation induction",
     )
@@ -555,10 +555,7 @@ def _diagnostic_testing() -> Section:
     _copay_ask, _coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
     # copay/coinsurance are merged into one either/or question by `panel_cost_pairs`.
     panel_asks = {
-        "covered": (
-            "Are diagnostic labs, X-ray and ultrasound services covered under this plan? "
-            "Please answer Yes, No, or N/A."
-        ),
+        "covered": "Are diagnostic labs, X-ray and ultrasound services covered under this plan?",
         "prior_auth": prior_auth_ask,
     }
     return Section(
@@ -794,7 +791,7 @@ def _admin_sections() -> dict[str, Section]:
             fields={
                 "enrollment_required": enum_ask(
                     "Enrollment Required",
-                    "Is enrollment required for this patient? Please answer Yes, No, or N/A.",
+                    "Is enrollment required for this patient?",
                     YES_NO_NA,
                     default="N/A",
                 ),
@@ -813,7 +810,7 @@ def _admin_sections() -> dict[str, Section]:
                 ),
                 "center_of_excellence_required": enum_ask(
                     "Center of Excellence Required",
-                    "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A.",
+                    "Is a center of excellence required for infertility treatment?",
                     YES_NO_NA,
                 ),
             },
@@ -1273,11 +1270,7 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="closing_admin",
                 title="Administrative Details",
-                prompt=(
-                    "Close out enrollment, authorization and third-party administration "
-                    "details. Ask the existence gate first and skip the contact questions "
-                    "when the entity does not exist."
-                ),
+                prompt="Ask all the questions listed below.",
                 intro="Just a few more questions about administrative details.",
                 outro=(
                     "Perfect, I have all the administrative details I need. Let me "
