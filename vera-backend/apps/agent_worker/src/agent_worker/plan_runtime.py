@@ -232,10 +232,13 @@ class PlanTaskAgent(Agent):
         self._task_index = task_index
         self._task = controller.plan.tasks[task_index]
         self._task_block = f"# Current task: {self._task.title}\n{self._task.prompt}"
-        # Questions owed when the task was ENTERED. The ceiling must measure the same
-        # window as `_rep_turns` (which accumulates over the whole task); comparing it
-        # against the CURRENTLY outstanding count let an 11-turn task clear a 5-question
-        # bar and hand off with six questions unasked.
+        # The task's own question total as rendered at ENTRY — the same count COMPLETENESS
+        # states, not the answer-sensitive `owed_question_count` (a task whose follow-ups sit
+        # behind an unanswered gate reads as owing almost nothing at entry, collapsing this to
+        # a number far short of what the agent was actually told to ask). The ceiling must also
+        # measure the same window as `_rep_turns` (which accumulates over the whole task);
+        # comparing it against the CURRENTLY outstanding count let an 11-turn task clear a
+        # 5-question bar and hand off with six questions unasked.
         self._questions_at_entry = 0
         self._refusals = 0
         self._outstanding_at_last_refusal: int | None = None
@@ -276,8 +279,8 @@ class PlanTaskAgent(Agent):
             return
         if await self._skip_when_nothing_applies():
             return
-        await self._apply_gating()
-        self._questions_at_entry = self._controller.owed_question_count(self._task_index)
+        kept = await self._apply_gating()
+        self._questions_at_entry = numbered_questions(kept or self._task.panels)
         # Read before opening_line — that call flips `opened` as a side effect.
         is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
@@ -321,8 +324,10 @@ class PlanTaskAgent(Agent):
         self.session.update_agent(successor)
         return True
 
-    async def _apply_gating(self) -> None:
-        """Re-render this task's question list without the questions the gates rule out.
+    async def _apply_gating(self) -> list[PromptPanel]:
+        """Re-render this task's question list without the questions the gates rule out,
+        and return the panels actually rendered — `on_enter` snapshots its question-count
+        ceiling off this SAME list, so the two can never diverge.
 
         The list the agent reads IS the list it should ask, so a gated-out question is simply
         absent. The old shape — list every question, then append "do NOT ask these" underneath
@@ -338,9 +343,10 @@ class PlanTaskAgent(Agent):
         directive) re-narrows against fresher answers instead of stacking."""
         excluded = self._controller.excluded_fields(self._task_index)
         if not excluded or not self._task.panels:
-            return
+            return self._task.panels
         kept = drop_questions(self._task.panels, {f.path for f in excluded})
         await self.update_instructions(self._build_instructions(kept))
+        return kept
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage

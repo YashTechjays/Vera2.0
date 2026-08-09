@@ -3,6 +3,7 @@ skip-scan on applicable_when, wrap-up, and the agent-owned cursor write."""
 
 import asyncio
 import functools
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -1677,6 +1678,42 @@ def test_the_sweep_sees_a_question_whose_only_gap_carries_a_default() -> None:
     assert [f.path.split(".")[-1] for f in controller.gap_fields(index)] == ["telehealth_covered"]
 
 
+_COMPLETENESS_TOTAL_RE = re.compile(r"runs 1 to (\d+)|is exactly (\d+) question")
+
+
+def _stated_total(instructions: str) -> int:
+    """The task total the rendered COMPLETENESS block actually told the agent to ask, parsed
+    from the agent's OWN instructions — so the pin below reads the prompt, not a second
+    derivation of it."""
+    match = _COMPLETENESS_TOTAL_RE.search(instructions)
+    if match is None:
+        return 0  # no COMPLETENESS block: no compiled panels, or the task was skipped
+    return int(match.group(1) or match.group(2))
+
+
+class TestQuestionsAtEntryPinnedToTheStatedTotal:
+    """Regression fence for the entry-ceiling defect: `_questions_at_entry` used to snapshot
+    `owed_question_count`, which is answer-sensitive under `is_applicable` — at entry, before
+    anything is answered, a task whose follow-ups sit behind an unanswered gate reads as owing
+    almost nothing (`male_partner_coverage` snapshotted 0, and a guard compared against 0 can
+    never refuse). The ceiling must instead equal what COMPLETENESS actually told the agent to
+    ask — checked here across the real compiled catalog, not a hand-built fixture small enough
+    to hide the gap."""
+
+    @pytest.mark.asyncio
+    async def test_every_ibv_standard_task_ceiling_matches_its_own_stated_total(self) -> None:
+        controller, _ = _controller(_ibv_plan())
+        for index, task in enumerate(controller.plan.tasks):
+            agent = controller.agents[index]
+            session = MagicMock()
+            with _session_patch(agent, session):
+                await agent.on_enter()
+                await controller.drain_cursor_writes()
+            if session.update_agent.called:
+                continue  # every question gated out: skipped silently, ceiling never read
+            assert agent._questions_at_entry == _stated_total(agent.instructions), task.task_key
+
+
 class TestPrematureCompletion:
     @pytest.mark.asyncio
     async def test_task_complete_is_refused_while_required_questions_are_open(self) -> None:
@@ -1761,6 +1798,10 @@ class TestPrematureCompletion:
         agent = controller.agents[0]  # intro_task: rep_name required + unanswered
         with _session_patch(agent, MagicMock()):
             await agent.on_enter()
+            # intro_task's own list is 2 questions (rep_name + the optional "notes"), and the
+            # ceiling counts both — one turn per question on the fixture's own stated total,
+            # not a magic constant.
+            await _rep_turn(agent)
             await _rep_turn(agent)
             result = await _tool(agent, "task_complete")()
         assert isinstance(result, Agent)
