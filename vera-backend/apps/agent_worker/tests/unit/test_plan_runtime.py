@@ -2155,6 +2155,21 @@ class TestGapAgent:
         assert "supervisor" in result.lower()
 
     @pytest.mark.asyncio
+    async def test_two_gap_completes_in_one_turn_produce_one_handoff(self) -> None:
+        """Same P10 guard as PlanTaskAgent's task_complete (see
+        test_two_task_completes_in_one_turn_produce_one_handoff), mirrored for the gap
+        sweep's tool. The second call must be inert."""
+        controller, _ = _controller(_gap_plan())
+        agent = controller.gap_agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            controller.update_answers({"sections.intro.rep_name": "Pat"})
+            first = await _tool(agent, "gap_complete")()
+            second = await _tool(agent, "gap_complete")()
+        assert isinstance(first, Agent)
+        assert isinstance(second, str)
+
+    @pytest.mark.asyncio
     async def test_on_enter_awaits_the_attached_observers_drain(self) -> None:
         # Extraction lands ~15s after the turn that produced it, so the sweep must wait for
         # the retiring observer's final pass before it decides what is still owed.
