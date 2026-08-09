@@ -29,11 +29,21 @@ export type ReportMetrics = {
   intervention_rate: number | null
 }
 
+/** One field per intervention type — the backend zero-fills the types with no events. */
+export type InterventionDayRow = {
+  day: string
+  flag: number
+  coach: number
+  whisper: number
+  takeover: number
+}
+
 export type HistoryReport = {
   current: ReportMetrics
   previous: ReportMetrics
   calls_per_day: { day: string; calls: number }[]
   interventions_by_type: { type: string; count: number }[]
+  interventions_per_day: InterventionDayRow[]
 }
 
 export type ReportParams = {

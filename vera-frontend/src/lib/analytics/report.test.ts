@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest"
 
-import { deltaPct, formatDuration, formatPct, presetRange } from "@/lib/analytics/report"
+import {
+  deltaPct,
+  formatDay,
+  formatDuration,
+  formatPct,
+  mergeInterventionDays,
+  presetRange,
+} from "@/lib/analytics/report"
 
 const NOW = new Date("2026-08-04T10:30:00.000Z") // a Tuesday
 
@@ -33,7 +40,32 @@ describe("deltaPct", () => {
   })
 })
 
+describe("mergeInterventionDays", () => {
+  const zero = { flag: 0, coach: 0, whisper: 0, takeover: 0 }
+
+  it("unions days from both series, sorted, zero-filling days without interventions", () => {
+    const merged = mergeInterventionDays(
+      [{ day: "2026-08-02" }, { day: "2026-08-01" }],
+      [{ day: "2026-08-03", ...zero, whisper: 2 }],
+    )
+    expect(merged).toEqual([
+      { day: "2026-08-01", ...zero },
+      { day: "2026-08-02", ...zero },
+      { day: "2026-08-03", ...zero, whisper: 2 },
+    ])
+  })
+
+  it("is empty when neither series has days", () => {
+    expect(mergeInterventionDays([], [])).toEqual([])
+  })
+})
+
 describe("formatters", () => {
+  it("shortens ISO days to month + day for axis ticks", () => {
+    expect(formatDay("2026-08-05")).toBe("Aug 5")
+    expect(formatDay("2026-12-31")).toBe("Dec 31")
+  })
+
   it("formats seconds as m/s and handles null", () => {
     expect(formatDuration(360)).toBe("6m 0s")
     expect(formatDuration(null)).toBe("—")

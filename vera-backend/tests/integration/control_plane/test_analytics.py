@@ -250,23 +250,23 @@ async def _seed_report_world(
     admin_sessionmaker: async_sessionmaker[AsyncSession], world: RBACWorld
 ) -> tuple[list[UUID], list[UUID]]:
     """5 calls in the window (2 completed w/ known durations+completion, 1 active,
-    1 canceled, 1 no-answer that never connected), 1 whisper intervention on one of
-    them, 1 call in the previous window.
+    1 canceled, 1 no-answer that never connected; the second completed call lands a
+    day later), whisper+coach interventions on the first call and a whisper on the
+    second, 1 call in the previous window.
     Returns (call_ids, form_ids) for the caller to clean up."""
     specs = [
-        # (status, connected, ended offset minutes, completion_pct)
-        ("completed", True, 5, "80.00"),
-        ("completed", True, 10, "60.00"),
-        ("active", True, None, "0"),
-        ("canceled", True, 3, "20.00"),
+        # (status, connected, ended offset minutes, completion_pct, day offset)
+        ("completed", True, 5, "80.00", 0),
+        ("completed", True, 10, "60.00", 1),
+        ("active", True, None, "0", 0),
+        ("canceled", True, 3, "20.00", 0),
         # Dead dial: terminal with a frozen form completion but no started_at —
         # must count in volume yet stay out of the completion average.
-        ("no_answer", False, None, "50.00"),
+        ("no_answer", False, None, "50.00", 0),
     ]
-    started = _FROM.replace(hour=12)
     call_ids: list[UUID] = []
     form_ids: list[UUID] = []
-    for status, connected, end_min, completion in specs:
+    for status, connected, end_min, completion, day_off in specs:
         async with admin_sessionmaker() as session, session.begin():
             form_id = await _seed_form(session, world.tenant_id)
         form_ids.append(form_id)
@@ -278,6 +278,7 @@ async def _seed_report_world(
             status=status,
         )
         call_ids.append(call_id)
+        started = _FROM.replace(hour=12) + timedelta(days=day_off)
         values: dict[str, object] = {
             "created_at": started,
             # seed_call stamps started_at; a dead dial must clear it explicitly.
@@ -290,13 +291,14 @@ async def _seed_report_world(
             await session.execute(update(Call).where(Call.id == call_id).values(**values))
 
     async with admin_sessionmaker() as session, session.begin():
-        session.add(
+        session.add_all(
             InterventionEvent(
                 tenant_id=world.tenant_id,
-                call_id=call_ids[0],
+                call_id=call_ids[idx],
                 supervisor_id=world.supervisor_id,
-                type="whisper",
+                type=itype,
             )
+            for idx, itype in ((0, "whisper"), (0, "coach"), (1, "whisper"))
         )
 
     # One call in the PREVIOUS window.
@@ -341,14 +343,21 @@ async def test_report_matches_hand_computed_numbers(
         # Completion over CONNECTED terminal calls only: (80 + 60 + 20) / 3 —
         # the no-answer's frozen 50 must not enter the average.
         assert cur["avg_completion_pct"] == pytest.approx(160 / 3)
-        assert cur["intervened_calls"] == 1
-        assert cur["intervention_rate"] == pytest.approx(0.2)
+        assert cur["intervened_calls"] == 2
+        assert cur["intervention_rate"] == pytest.approx(0.4)
 
         assert data["previous"]["call_volume"] == 1
 
         days = {row["day"]: row["calls"] for row in data["calls_per_day"]}
-        assert days == {"2026-01-08": 5}
-        assert data["interventions_by_type"] == [{"type": "whisper", "count": 1}]
+        assert days == {"2026-01-08": 4, "2026-01-09": 1}
+        assert data["interventions_by_type"] == [
+            {"type": "coach", "count": 1},
+            {"type": "whisper", "count": 2},
+        ]
+        assert data["interventions_per_day"] == [
+            {"day": "2026-01-08", "flag": 0, "coach": 1, "whisper": 1, "takeover": 0},
+            {"day": "2026-01-09", "flag": 0, "coach": 0, "whisper": 1, "takeover": 0},
+        ]
     finally:
         await _delete_calls_and_forms(admin_sessionmaker, *form_ids)
 
