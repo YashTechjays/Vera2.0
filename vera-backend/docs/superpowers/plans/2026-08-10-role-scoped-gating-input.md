@@ -16,9 +16,30 @@
 - **No `CallPlan` schema change.** `PlanFieldDescriptor.role` already exists. The plan is `extra="forbid"` and persists in Redis; a new field is a rolling-deploy hazard.
 - Never log or trace a raw answer value — paths, counts and shapes only (repo `CLAUDE.md`, PHI bright lines).
 - PEP 695 type params only. `asyncio` only — never `import anyio`.
-- Run `just check` verbatim before claiming done — never a hand-picked subset. `ruff check` and `ruff format --check` are different gates.
-- After implementation and before the final commit, run the `/simplify` skill on the change, then re-run `just check`.
-- `just check` is currently red on two pre-existing `test_auth_audit_chain` failures unrelated to this work. Prove pre-existence against the merge-base before attributing anything to this branch.
+### Per-task verification — an explicit override of the repo rule
+
+**The repo `CLAUDE.md` tells you to run `/simplify` and full `just check` after every
+implementation. For this plan the author has overridden that: do NOT run either per task.**
+Both run ONCE, over the whole branch, in Task 6. A subagent implementing Task 1–5 that runs
+`just check` or dispatches the simplifier is burning ~3 minutes and an agent for no added
+signal, six times over.
+
+What each task DOES run, because it costs about five seconds in total and stops one task's
+mistake from being discovered five tasks later:
+
+```bash
+uv run pytest <the files named in that task's steps> -q   # ~20s worst case
+just lint                                                 # 0.3s  (ruff format --check + ruff check)
+just typecheck                                            # 1.7s  (mypy --strict, 371 files)
+```
+
+Measured on this tree: `ruff format --check` 0.28 s, `ruff check` 0.03 s, `mypy` 1.69 s, the
+agent-worker + forms unit suites 21.8 s, the whole unit tier 49.3 s, full `pytest` 173.9 s.
+Lint and typecheck are free; the full suite is what costs, and it is deferred.
+
+- `just check` is currently red on two pre-existing `test_auth_audit_chain` failures unrelated
+  to this work. Prove pre-existence against the merge-base before attributing anything to this
+  branch (Task 6 Step 3).
 
 ## The trap this plan exists to avoid
 
@@ -180,10 +201,19 @@ Rename the remaining 9 `self._answers` references in the file to `self._on_file`
 
 Update the 3 `_answers` references in `apps/agent_worker/tests/unit/test_observer.py` to `_on_file`.
 
-- [ ] **Step 7: Run the worker and forms suites**
+- [ ] **Step 7: Run this task's verification**
 
-Run: `uv run pytest apps/agent_worker/tests/unit tests/unit/forms -q`
-Expected: `777 passed, 1 xfailed`.
+```bash
+uv run pytest apps/agent_worker/tests/unit tests/unit/forms tests/unit/plan_store \
+              tests/unit/services/test_queue_dispatcher.py \
+              tests/unit/agent_worker tests/unit/test_evidence_seq_parity.py -q
+just lint && just typecheck
+```
+Expected: all pass; `777 passed, 1 xfailed` for the first two paths. Those extra four are every
+other suite that touches `call_plan` / `update_answers` / `prefilled` — cheap, and they are the
+only places outside the worker that could move.
+
+No `/simplify`, no `just check` — see the per-task override above.
 
 Every existing `update_answers` call site passes a call-answer map against a plan whose `prefilled` is empty (the fixtures build `CallPlan(...)` directly), so merge and replace are identical for them. If any test does fail here, it is asserting that `update_answers` CLEARS a prefilled value — read it before changing it, because that assertion is now wrong by design.
 
@@ -381,10 +411,13 @@ uv run pytest apps/agent_worker/tests/unit/test_plan_runtime.py::TestTheObserver
 ```
 Expected: `test_a_recorded_answer_does_not_restore_the_intake_default` FAILS. Restore the merge and re-run — both pass. Do not commit the temporary revert.
 
-- [ ] **Step 7: Run the whole file**
+- [ ] **Step 7: Run this task's verification**
 
-Run: `uv run pytest apps/agent_worker/tests/unit/test_plan_runtime.py -q`
-Expected: all pass.
+```bash
+uv run pytest apps/agent_worker/tests/unit/test_plan_runtime.py -q
+just lint && just typecheck
+```
+Expected: all pass. No `/simplify`, no `just check`.
 
 - [ ] **Step 8: Commit**
 
@@ -514,10 +547,13 @@ Wire it at line 745, beside its sibling:
 Run: `uv run pytest tests/unit/forms/test_schema_dsl.py -k "confirm" -v`
 Expected: 3 passed.
 
-- [ ] **Step 5: Run the full forms suite**
+- [ ] **Step 5: Run this task's verification**
 
-Run: `uv run pytest tests/unit/forms -q`
-Expected: all pass — both real catalogs must still validate.
+```bash
+uv run pytest tests/unit/forms -q
+just lint && just typecheck
+```
+Expected: all pass — both real catalogs must still validate. No `/simplify`, no `just check`.
 
 - [ ] **Step 6: Fix the spec's placement claim**
 
@@ -578,7 +614,10 @@ Leave the rest of the docstring unchanged.
 
 - [ ] **Step 3: Verify nothing moved**
 
-Run: `uv run pytest tests/unit/forms/test_conditions.py tests/unit/forms/test_review.py -q`
+```bash
+uv run pytest tests/unit/forms/test_conditions.py tests/unit/forms/test_review.py -q
+just lint    # a reflowed docstring is exactly what `ruff format --check` catches
+```
 Expected: all pass.
 
 - [ ] **Step 4: Commit**
@@ -629,22 +668,43 @@ git commit -m "docs(forms): record that role decides gate-time authority"
 
 ---
 
-### Task 6: Gates, simplification, and the live call
+### Task 6: Branch review — the single simplify pass, the full gate, and the live call
 
 **Files:** none new — verification only.
 
 **Interfaces:** none.
 
+This is where the deferred repo obligations are discharged, ONCE, over the whole change. Tasks
+1–5 deliberately skipped them (see the per-task override at the top).
+
 A change to spoken output is not verified by `pytest` (repo `CLAUDE.md`): the assertions are on strings and the deliverable is what the representative hears.
 
-- [ ] **Step 1: Run the simplifier**
+- [ ] **Step 1: Run the simplifier over the whole change**
 
-Invoke the `code-simplifier` agent on the change with the trigger phrase **"simplify code"** (repo `CLAUDE.md` — mandatory, same session as the implementation).
+Invoke the `code-simplifier` agent with the trigger phrase **"simplify code"**, scoped to every
+file Tasks 1–5 touched:
+
+```
+packages/vera_core/src/vera_core/forms/call_plan.py
+packages/vera_core/src/vera_core/forms/conditions.py
+packages/vera_core/src/vera_core/forms/dsl.py
+apps/agent_worker/src/agent_worker/plan_runtime.py
+apps/agent_worker/src/agent_worker/observer.py
+```
+
+One pass over the finished change sees what six per-task passes cannot: whether `_baseline`,
+`_on_file` and `_recorded` ended up as three names for a coherent set of ideas or three names
+for two.
 
 - [ ] **Step 2: Run the full gate**
 
 Run: `just check`
 Expected: green except the two pre-existing `test_auth_audit_chain` failures.
+
+This is the first full-suite run of the branch — ~174 s, and the first time the integration
+tier sees the change. If something fails here that the unit tier missed, it will be in
+`tests/integration/`; bisect it against the per-task commits rather than debugging the whole
+change at once.
 
 - [ ] **Step 3: Prove those two failures predate the branch**
 
