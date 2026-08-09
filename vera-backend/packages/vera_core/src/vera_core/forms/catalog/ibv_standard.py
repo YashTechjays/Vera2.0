@@ -487,7 +487,6 @@ def _benefit_coverage() -> Section:
                 "Infertility Plan Mandate",
                 "Is there an infertility plan mandate on this policy?",
                 YES_NO,
-                hints=["Pronounce as: in-fer-TIL-ih-tee plan MAN-date."],
             ),
         },
     )
@@ -917,10 +916,6 @@ def _admin_sections() -> dict[str, Section]:
                     "Infertility Specialty Pharmacy Exists",
                     "Does the plan have an infertility specialty pharmacy?",
                     YES_NO,
-                    hints=[
-                        'Always say "infertility specialty pharmacy" in full; never abbreviate '
-                        "to ISP when speaking."
-                    ],
                 ),
                 "isp_name": text_ask(
                     "Infertility Specialty Pharmacy Name",

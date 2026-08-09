@@ -43,7 +43,6 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
    - Answers: Small Group | Large Group
 16. Is there an infertility plan mandate on this policy?
    - Answers: Yes | No
-   - Hint: Pronounce as: in-fer-TIL-ih-tee plan MAN-date.
 
 TERMINATION RULE — no_out_of_network_coverage:
 If "Doctor Inside Network" is "No" and "Facility Inside Network" is "No" and "Out-of-Network Coverage" is "No": Both the doctor and facility are out of network and the plan has no out-of-network coverage. Skip all remaining tasks, collect the representative name and call reference number, then end the call. Stop the remaining questions and move to "Wrap Up".

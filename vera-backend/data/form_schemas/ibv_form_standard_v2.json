@@ -784,10 +784,7 @@
             "No"
           ],
           "prompt": {
-            "ask": "Is there an infertility plan mandate on this policy?",
-            "hints": [
-              "Pronounce as: in-fer-TIL-ih-tee plan MAN-date."
-            ]
+            "ask": "Is there an infertility plan mandate on this policy?"
           }
         }
       }
@@ -5009,10 +5006,7 @@
             "No"
           ],
           "prompt": {
-            "ask": "Does the plan have an infertility specialty pharmacy?",
-            "hints": [
-              "Always say \"infertility specialty pharmacy\" in full; never abbreviate to ISP when speaking."
-            ]
+            "ask": "Does the plan have an infertility specialty pharmacy?"
           }
         },
         "isp_name": {
