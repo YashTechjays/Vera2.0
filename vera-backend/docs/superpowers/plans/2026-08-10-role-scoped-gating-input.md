@@ -37,9 +37,19 @@ Measured on this tree: `ruff format --check` 0.28 s, `ruff check` 0.03 s, `mypy`
 agent-worker + forms unit suites 21.8 s, the whole unit tier 49.3 s, full `pytest` 173.9 s.
 Lint and typecheck are free; the full suite is what costs, and it is deferred.
 
-- `just check` is currently red on two pre-existing `test_auth_audit_chain` failures unrelated
-  to this work. Prove pre-existence against the merge-base before attributing anything to this
-  branch (Task 6 Step 3).
+- **`just check` is GREEN on this branch — 2248 passed — against a FRESH test database.** The
+  two `test_auth_audit_chain` failures inherited from the previous plan's handoff notes are
+  neither pre-existing nor a branch regression: they are stale-test-DB residue. The test DB
+  (`<dev-db>_test`) is create-if-absent and never dropped (`tests/integration/conftest.py:70-78`),
+  so a partial hash chain from an interrupted run survives every later run. Drop it and they go:
+
+  ```bash
+  docker exec vera-backend-postgres-1 psql -U vera -d postgres \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='<dev-db>_test';" \
+    -c 'DROP DATABASE IF EXISTS "<dev-db>_test";'
+  ```
+
+  Do NOT write a PR-body note claiming pre-existing failures.
 
 ## The trap this plan exists to avoid
 
@@ -706,15 +716,20 @@ tier sees the change. If something fails here that the unit tier missed, it will
 `tests/integration/`; bisect it against the per-task commits rather than debugging the whole
 change at once.
 
-- [ ] **Step 3: Prove those two failures predate the branch**
+- [ ] **Step 3: DONE during execution — no merge-base proof needed**
 
-```bash
-uv run pytest tests/ -k auth_audit_chain -q                       # on HEAD
-git stash push -u && git checkout $(git merge-base HEAD origin/dev)
-uv run pytest tests/ -k auth_audit_chain -q                       # on the merge-base
-git checkout - && git stash pop
+The investigation is recorded in the ledger. Summary: the failures are stale-test-DB residue,
+not pre-existing and not caused by this branch. Measured in this order —
+
 ```
-Record both outputs for the PR body. Never wave a red gate through on say-so.
+branch full suite, stale DB          -> 2 failed, 2246 passed
+merge-base (dec5c47a), file isolated -> 6 passed
+merge-base full suite, same stale DB -> 2087 passed, 0 failed
+branch full suite, FRESH test DB     -> 2248 passed, 0 failed   <- decisive
+```
+
+If Step 2 ever comes back red on `test_auth_audit_chain`, drop the test DB (command in Global
+Constraints) and re-run before investigating anything else.
 
 - [ ] **Step 4: Confirm the compiled artifacts did not drift**
 
@@ -758,6 +773,8 @@ git add -A && git commit -m "refactor: simplifier pass on the gating-seed change
 Two items required by repo `CLAUDE.md`:
 
 1. **Rolling deploy.** This change adds no `CallPlan` field, so it is not itself a deploy hazard — but the branch's existing plan-shape changes are. `PromptQuestion` is `extra="forbid"` and the plan persists in Redis; a mismatched blob falls back to the legacy monolithic agent with no guards and no sweep. Ship control plane and worker together.
-2. **`just check` red on two pre-existing `test_auth_audit_chain` failures** — include the merge-base proof from Task 6 Step 3.
+2. **`just check` is green — 2248 passed.** Earlier handoff notes for this branch claimed two
+   pre-existing `test_auth_audit_chain` failures; that was wrong. They are stale-test-DB
+   residue and disappear against a fresh `<dev-db>_test`. Nothing to caveat in the PR body.
 
 Also worth stating: the frontend still writes a `field_answer` row for every leaf `default` at create. Those rows are now inert for gating but remain misleading data. Removing the seeding is a follow-up, and it needs a decision about the rows already in the database.
