@@ -602,3 +602,67 @@ Each step lands independently and is revertible.
   "worker is DB-free" reason this spec retires. Not load-bearing for completion; revisit under
   the losslessness rule.
 - No TTFT instrumentation exists in-repo; the numbers here came from Langfuse spans.
+
+---
+
+## Live verification — 2026-08-09 — PASS
+
+Call `019fe71b-f789-72d1-8329-4aa12a248a53`, Langfuse trace
+`2627ad6faabf04c20dda39b4bf24357a`. Browser-callee transport, `gemini-3.6-flash`,
+`thinking_level=minimal`. 1,186 s, 87 rep turns, 137 distinct field paths recorded.
+
+### The guard fired, and the six questions got asked
+
+`insurance_basics` — the task that failed on trace `6e1f496cb72d0182af27281c90bdca64` — refused
+completion **three times** before advancing:
+
+```
+15:24:12  task_complete  REFUSED  owed=4
+15:24:20  task_complete  REFUSED  owed=3
+15:24:40  task_complete  REFUSED  owed=2
+15:24:53  task_complete  -> infertility_coverage   owed=0
+```
+
+16 rep turns against a ceiling of 16, and it advanced only at `owed=0`. All six questions the
+original call never asked were recorded:
+
+```
+plan_effective_date       RECORDED     plan_fund_type            RECORDED
+plan_year_information     RECORDED     employer_support_size     RECORDED
+telehealth_covered        RECORDED     infertility_plan_mandate  RECORDED
+```
+
+`pcp_referral_required` was correctly **not** asked — its HMO gate resolved false, exactly the
+"skip without dead-ending" behaviour the spec required.
+
+`telehealth_covered` carries `default="N/A"` and was structurally invisible to the old
+`gap_fields`; it is now asked. So is `enrollment_required`'s block — the end-of-call sweep asked
+for Enrollment Provider Name and Phone, which the pre-fix code could never owe.
+
+### The sweep behaved
+
+The gap sweep ran (`infertility_coverage`, then `closing_admin`) and asked genuinely-owed
+questions, not re-asks. **Audible silence at the sweep boundary: 2.0 s** — the drain barrier did
+not burn its 10 s budget, and no `drain timed out` fired. That retires the main latency worry
+about §5a, though the corrected understanding stands: the outro has already drained before the
+barrier runs, so that 2.0 s is unmasked.
+
+### Advanced with questions still open — the metric to watch
+
+`vera.completion.refused=false` with `owed_count>0` fired five times:
+
+| task | owed at handoff | outcome |
+| --- | --- | --- |
+| `introduction` | 1 | — |
+| `infertility_coverage` | 1 | — |
+| `diagnostic_coverage` | **8** | not swept (gaps filled before the sweep recomputed) |
+| `closing_admin` | **5** | swept, both fields collected |
+| `wrap_up` | 1 | — |
+
+`diagnostic_coverage` is the one worth understanding: 4 spoken questions fan across 33 CPT
+fields, so 4 rep turns satisfies a question-granular ceiling of 4 while 8 fields remain
+field-granularly owed. That is the documented "ceilings count asks, lists name fields"
+asymmetry behaving as designed, with the sweep as the backstop. Whether the ceiling should
+account for fan-out width is a real follow-up question, not a defect — see debt below.
+
+**Verdict: the defect this spec was written for does not reproduce.**
