@@ -30,6 +30,7 @@ from agent_worker.plan_runtime import (
     _field_lines,
 )
 from agent_worker.prompt import SCOPE_DISCIPLINE
+from agent_worker.rule_engine import RuleEngine
 from vera_core.forms.call_plan import (
     CallPlan,
     PlanFieldDescriptor,
@@ -1530,6 +1531,81 @@ async def test_run_b_shape_is_refused_after_eleven_turns() -> None:
         result = await _tool(agent, "task_complete")()
     assert isinstance(result, str)
     assert "Telehealth" in result
+
+
+def test_an_hmo_plan_owes_the_referral_question_and_a_ppo_plan_does_not() -> None:
+    """Completion must be allowed with a gated-out question unasked — the correct
+    behaviour the broken guard also produced, and which must survive the fix."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    hmo = dict(_RUN_B_ANSWERS) | {_S + "insurance_information.plan_type": "HMO"}
+    controller.update_answers(hmo)
+    assert "pcp_referral_required" in {f.path.split(".")[-1] for f in controller.gap_fields(index)}
+    controller.update_answers(dict(_RUN_B_ANSWERS))  # PPO
+    assert "pcp_referral_required" not in {
+        f.path.split(".")[-1] for f in controller.gap_fields(index)
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_task_with_every_question_answered_completes_immediately() -> None:
+    """No spurious refusal: a task owing nothing hands off on the first call, whatever
+    the turn count."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    answers = dict(_RUN_B_ANSWERS) | {
+        _S + "benefit_coverage." + key: "X"
+        for key in (
+            "plan_effective_date",
+            "plan_year_information",
+            "telehealth_covered",
+            "plan_fund_type",
+            "employer_support_size",
+            "infertility_plan_mandate",
+        )
+    }
+    controller.update_answers(answers)
+    agent = controller.agents[index]
+    with _session_patch(agent, MagicMock()):
+        await agent.on_enter()
+        assert isinstance(await _tool(agent, "task_complete")(), Agent)
+
+
+def test_small_group_plus_self_insured_still_fires_the_consistency_rule() -> None:
+    engine = RuleEngine(_ibv_plan())
+    directive = engine.evaluate(
+        {
+            _S + "benefit_coverage.employer_support_size": "Small Group",
+            _S + "benefit_coverage.plan_fund_type": "Self Insured",
+        }
+    )
+    assert getattr(directive, "rule_key", None) == "small_group_self_insured_conflict"
+
+
+def test_the_gap_sweep_still_fires_only_before_the_last_task() -> None:
+    """The sweep's position is deliberately unchanged (spec §5). A later refactor that
+    moves or repeats it must fail here, not on a live call."""
+    controller, _ = _controller(_ibv_plan())
+    assert controller._closing_task_index == len(controller.plan.tasks) - 1
+
+
+def test_the_sweep_sees_a_question_whose_only_gap_carries_a_default() -> None:
+    """telehealth_covered carries default="N/A", so `is_satisfied` hid it from every
+    guard AND from the sweep. This is the sweep's whole behaviour change."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    answers = dict(_RUN_B_ANSWERS) | {
+        _S + "benefit_coverage." + key: "X"
+        for key in (
+            "plan_effective_date",
+            "plan_year_information",
+            "plan_fund_type",
+            "employer_support_size",
+            "infertility_plan_mandate",
+        )
+    }
+    controller.update_answers(answers)
+    assert [f.path.split(".")[-1] for f in controller.gap_fields(index)] == ["telehealth_covered"]
 
 
 class TestPrematureCompletion:
