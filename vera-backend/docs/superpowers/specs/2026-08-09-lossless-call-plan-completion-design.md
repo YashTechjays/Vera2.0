@@ -303,6 +303,48 @@ never seeing them at all.
 The guard (§5) and the sweep therefore consume the *same* corrected owed set at two different
 times, which is what makes them agree.
 
+#### 6a. Settle extraction before the sweep decides — spend the stall that already exists
+
+One exposure remains: the **most recently swept task**'s answers may still be in flight when the
+sweep computes its gaps (extraction lag, p90 23 s). Tasks earlier than that are long settled by
+the time the terminal sweep runs, so this is not a general problem — it is specific to the last
+task before the sweep.
+
+The pause needed to fix it is **already authored and already spoken**. `closing_admin`'s outro:
+
+> *"Perfect, I have all the administrative details I need. Let me take a quick moment to review
+> my notes and make sure I haven't missed anything. One moment please."*
+
+and `wrap_up`'s intro, which lands *after* the sweep, already reads as though one occurred:
+*"Thanks so much for your patience — that covers everything on my list."* The flow was designed
+for this; the pause is simply not being spent.
+
+`_rotate` already **retires rather than closes** the outgoing observer — deliberately, because
+"the turn that triggered this rotation may itself be the answer to the outgoing task's final
+question" — and `_close_retiring` runs that final drain pass fire-and-forget. The pass exists;
+nothing awaits it.
+
+```
+closing_admin task_complete
+  └─ say(outro)                             not awaited — plays through the swap
+  └─ GapTaskAgent.on_enter
+       ├─ await manager.drain_pending(timeout)   NEW — runs concurrently with the outro
+       └─ gap_fields(...)                        computed against settled state
+```
+
+Requires one small addition: `ObserverManager.drain_pending()`, since the drain is currently
+reachable only via `_schedule_close`. Bounded by a timeout with graceful fallthrough — extraction
+duration is median 2.3 s / p90 6.2 s / max 8.0 s, so ~8–10 s covers it and the spoken outro
+absorbs most of the wall-clock.
+
+**Rejected: a lagged gap ledger** (compute task N's gaps at the end of task N+1, ask from the
+accumulated list at the terminal sweep). It adds no accuracy for tasks 0…N−2 — minutes have
+already passed against a 23 s p90 lag — and a frozen ledger is strictly *worse* than a fresh
+check, because a field gapped at n+1 can be answered incidentally several tasks later when the
+rep volunteers it; re-asking it is the `answer_handling FAIL [133]` this work exists to remove.
+`gap_fields` stays computed fresh, per gap agent, at ask time. The drain barrier gets the whole
+benefit with no ledger to keep in sync.
+
 ### 7. Per-turn tool idempotence (P10)
 
 A second `task_complete` / `gap_complete` in the same turn returns a plain string instead of a
@@ -387,8 +429,11 @@ Each step lands independently and is revertible.
    projection.
 5. **Fix the completion guard's window** — entry snapshot + bounded refusal. The sweep needs no
    change of its own: it consumes the corrected `gap_fields` from step 4.
-6. **P10 idempotence.**
-7. **Observability spans.**
+6. **Drain barrier before the sweep decides** — `ObserverManager.drain_pending()`, awaited in
+   `GapTaskAgent.on_enter` ahead of `gap_fields`. Independent of steps 1–5; can land first if
+   useful, since it fixes phantom gaps under today's logic too.
+7. **P10 idempotence.**
+8. **Observability spans.**
 
 ---
 
@@ -411,6 +456,9 @@ Each step lands independently and is revertible.
     is swept. This fails today and is the sweep's whole behaviour change.
   - Sweep position — the sweep still fires once, at the boundary into the closing task. Pin it,
     so a later change cannot move it silently.
+  - Drain barrier — a rep answer finalized in the last turn before the sweep is extracted before
+    `gap_fields` runs, so it is not re-asked. Assert the drain is awaited, and that a drain
+    exceeding the timeout falls through rather than stalling the call.
   - Losslessness — every collectable path reachable from exactly one question node.
 - **Existing tests that pin the deleted behaviour must be rewritten, not deleted silently:**
   `test_a_task_that_walked_its_questions_is_not_refused` (`:1483`) and
