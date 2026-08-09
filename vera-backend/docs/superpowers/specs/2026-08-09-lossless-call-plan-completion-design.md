@@ -13,7 +13,8 @@ artifacts, by different rules.** They cannot be made to agree by tuning either o
 
 This spec makes the compiled `CallPlan` **lossless with respect to the schema**, then derives
 the owed set from the same object the prompt was rendered from. Downstream, the completion
-heuristic is deleted rather than tuned, and the end-of-call gap sweep becomes reachable.
+heuristic is repaired at its window rather than tuned at its threshold, and the end-of-call gap
+sweep — which keeps its current position — starts sweeping the questions it could never see.
 
 ---
 
@@ -81,8 +82,13 @@ QUESTIONS WHOSE TARGETS ARE ALL DEFAULTED  (spoken, but can never be owed)
 really is the last task. The sweep never ran because the call ended in `closing_admin`
 (index 7): last agent turn 10:12:33, silence, `on_exit` 10:13:59. The callee hung up.
 
-A single terminal sweep is voided by any early hangup. Everything the per-task guard lets
-through depends on the call surviving to the final task.
+A single terminal sweep is voided by any early hangup: everything the per-task guard lets through
+depends on the call surviving to the final task.
+
+**Decision (2026-08-09): the sweep's position is NOT changed by this spec.** The response is to
+make the per-task guard (§5) strong enough that little reaches the sweep at all, and to fix what
+the sweep computes (§6) so what does reach it is actually seen. Moving or repeating the sweep is
+recorded as debt, not done here.
 
 ### Extraction lag is structural
 
@@ -249,42 +255,53 @@ Three consequences worth stating explicitly:
   names missing field paths, because rendering a partially-answered fan-out by its question
   text re-asks the half already on file.
 
-### 5. Delete the completion heuristic
+### 5. Fix the completion guard's measurement window
 
-`_refuse_premature_completion`'s turn ceiling, `_completion_refused`, and `PlanTaskAgent._rep_turns`
-are removed. Nothing replaces them.
+The guard stays. Its **window** is the bug, not its existence.
 
-The heuristic exists only to answer *"has the agent asked enough?"* at a moment when extraction
-lag makes the answer structurally unknowable. Once recovery is guaranteed elsewhere, that
-question is never asked. We ask *"are there gaps?"*, which is a fact.
+```python
+# today — two different windows compared to each other
+if self._rep_turns >= self._controller.owed_question_count(self._task_index):
+    return None                      # 11 >= 5 -> bail
+```
 
-Note why `GapTaskAgent`'s turn ceiling is sound while `PlanTaskAgent`'s is not, despite the same
+`_rep_turns` accumulates across the whole task; `owed_question_count` measures only what is
+outstanding right now. Align both sides to the **whole task**: snapshot the questions owed at
+task entry (exactly what `GapTaskAgent._questions_owed` already does) and compare `_rep_turns`
+against that.
+
+- 1-question task, 1 rep turn → `1 >= 1` → trust. Unchanged, still correct.
+- `insurance_basics`, 11 rep turns, 16 questions at entry → `11 < 16` → **refuses**.
+
+Note *why* `GapTaskAgent`'s ceiling is sound while `PlanTaskAgent`'s is not, despite the same
 expression: the sweep agent's lifetime equals the window it measures. **A guard is sound exactly
-when the agent's lifetime matches the set it measures.** The design below makes that true by
-construction.
+when the agent's lifetime matches the set it measures.** The entry snapshot makes that true for
+the task agent too.
 
-### 6. Lagged per-task sweep
+**Bounded refusal replaces one-shot-then-trust** (per decision, 2026-08-08): progress — the
+outstanding set shrank — resets the budget; a fruitless refusal increments it; cap 2. This is the
+shape `_refuse_premature_gap_complete` already uses. It preserves the no-deadlock property (a
+callee who cannot answer must never strand the call) while removing the single-escape-hatch
+weakness of refusing at most once per task.
 
-Sweep task N's gaps at the end of task **N+1**, not at task N's own boundary.
+Accepted cost: the bot sometimes merges questions into one turn ("group name and group number"),
+so a legitimately complete task can undershoot the turn count and absorb one spurious re-ask
+before the budget lets it through.
 
-Task durations ran 1–5 minutes in the trace against a 23 s p90 extraction lag, so time is the
-barrier — no drain await, no sequence barrier, no added latency at any boundary, and no phantom
-gaps from stale answer state.
+### 6. The gap sweep keeps its position — only its input changes
 
-`_maybe_enter_gap_pass` fires at **every** boundary, sweeping any visited task with index ≤ N−1
-that has gaps and has not been swept; swept tasks are tracked so nothing is swept twice. The
-existing terminal sweep is retained for the final task(s).
+**The sweep is not moved.** It continues to fire once, at the boundary into the closing task, so
+any re-ask still lands before the closer's reference-number collection and goodbye. `_gap_block`,
+its firing point, `_gap_pass_done` and `_next_gap_task` are all unchanged.
 
-This is not a new mechanism — `GapTaskAgent`, `_gap_block`'s mid-call framing ("this is a
-mid-call follow-up, NOT the end of the call") and the bounded-refusal budget all exist and are
-tested today. Only the firing points change.
+What changes is what it computes over: `gap_fields` now derives from the question tree
+(§4), so the sweep captures the **real** missing questions instead of the subset `default` left
+visible. On this trace that is the difference between sweeping 5 fields and sweeping 6 — and,
+across the call, the difference between seeing `telehealth_covered` / `enrollment_required` and
+never seeing them at all.
 
-Reachability follows: at end of call at most the final task or two can hold unswept gaps. The
-hangup in this trace would have cost the last task instead of the whole call.
-
-**Bounded refusal is retained inside the sweep** (per decision, 2026-08-08): progress resets the
-budget, a fruitless refusal increments it, cap 2. A callee who cannot answer must never strand
-the call.
+The guard (§5) and the sweep therefore consume the *same* corrected owed set at two different
+times, which is what makes them agree.
 
 ### 7. Per-turn tool idempotence (P10)
 
@@ -368,10 +385,10 @@ Each step lands independently and is revertible.
    `_entry_decided` / `_settled` / `_decided_false` once no caller remains.
 4. **Tree-derived owed set** — `gap_fields` computes from panels. `task.fields` becomes a
    projection.
-5. **Delete the completion heuristic.**
-6. **Lagged sweep firing points.**
-7. **P10 idempotence.**
-8. **Observability spans.**
+5. **Fix the completion guard's window** — entry snapshot + bounded refusal. The sweep needs no
+   change of its own: it consumes the corrected `gap_fields` from step 4.
+6. **P10 idempotence.**
+7. **Observability spans.**
 
 ---
 
@@ -390,7 +407,10 @@ Each step lands independently and is revertible.
     **permitted**.
   - Small group + self insured → existing consistency rule fires.
   - Doubled `task_complete` in one turn → exactly one handoff.
-  - Lagged sweep — gaps open in task N are swept at the end of task N+1.
+  - Sweep input — a task whose only gap is a `default`-carrying question (`telehealth_covered`)
+    is swept. This fails today and is the sweep's whole behaviour change.
+  - Sweep position — the sweep still fires once, at the boundary into the closing task. Pin it,
+    so a later change cannot move it silently.
   - Losslessness — every collectable path reachable from exactly one question node.
 - **Existing tests that pin the deleted behaviour must be rewritten, not deleted silently:**
   `test_a_task_that_walked_its_questions_is_not_refused` (`:1483`) and
@@ -413,8 +433,11 @@ Each step lands independently and is revertible.
 - **More questions asked per call.** Six additional required questions in `insurance_basics`
   alone become owed. Calls get longer; that is the intent, but it changes call duration and
   token spend.
-- **Mid-call re-asks become audible.** The lagged sweep can interject between tasks.
-  `_gap_block` already frames this, but it changes how a call sounds and needs live judgement.
+- **The terminal sweep is still voided by an early hangup — accepted, not fixed.** With the guard
+  repaired, far less should reach the sweep, so the exposure shrinks; it does not disappear. A
+  hangup before the closing task still loses whatever the guard's bounded refusal let through.
+- **Bounded refusal is deliberately escapable.** Cap 2 means a determined-but-unhelpful callee can
+  still advance a task with questions open. That is the no-deadlock property, chosen knowingly.
 - **Question-granular counting on partially-answered fan-outs.** Mitigated by keeping re-ask
   lists field-granular (Plan C), but the interaction deserves a live look on a CPT-heavy task.
 - ~~**Validator rule 1 may fail on schemas beyond `ibv_standard`.**~~ **Measured — the risk is
@@ -432,6 +455,12 @@ Each step lands independently and is revertible.
 
 ## Recorded debt
 
+- **Gap-sweep reachability.** The sweep fires once, at the boundary into the closing task, so a
+  hangup before that point recovers nothing — exactly what happened on trace
+  `6e1f496cb72d0182af27281c90bdca64`. Deliberately out of scope here (decision 2026-08-09):
+  position unchanged, logic fixed. If a repaired guard still leaves gaps reaching the sweep on
+  live calls, revisit — the measured extraction lag (23 s p90) versus task duration (1–5 min)
+  means a sweep lagged by one task would be safe without any new synchronisation.
 - `focus_call_plan` does not narrow `panels` (P7) — a focused retry renders the full list.
 - Misused `default` in both catalogs (see *Out of scope*).
 - `_exclusive_notes` still bakes routing-branch guidance to prose at compile time for the same
