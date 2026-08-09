@@ -941,8 +941,11 @@ def validate_question_coverage(doc: FormSchemaDoc) -> list[str]:
         if any(skey not in doc.sections for skey in task.sections):
             continue  # unknown section — already reported by the structural check above
         panels = build_question_plan(doc, task, anchors)
+        # `owed_now` (call_plan.py) skips every routes_between question unconditionally, so a
+        # routing question that carried a target would count as coverage here while staying
+        # permanently un-owed at runtime — exclude it, matching that skip.
         hits: Counter[str] = Counter(
-            path for q in iter_questions(panels) for path in q.target_paths
+            path for q in iter_questions(panels) if not q.routes_between for path in q.target_paths
         )
         for path, leaf, _gates in gated_leaves:
             if leaf.role not in COLLECTED_ROLES:

@@ -378,6 +378,10 @@ class PlanTaskAgent(Agent):
         self._tag_completion_decision(refusal)
         if refusal is not None:
             return refusal
+        # Set before the first await: LiveKit runs every function call from one LLM
+        # response as its own task, so a second task_complete can reach this guard
+        # while the first is still suspended below — the marker must already be up.
+        self._advanced_this_turn = True
         outro = self._task.outro
         self._controller.note_task_outro(outro)
         if outro:
@@ -388,7 +392,6 @@ class PlanTaskAgent(Agent):
         # tool-returned agent, so without this it re-greets and re-asks.
         await self._controller.prepare_successor(self, successor)
         self._tag_task_complete_handoff(successor)
-        self._advanced_this_turn = True
         return successor
 
     def _refuse_premature_completion(self) -> str | None:
@@ -546,8 +549,10 @@ class GapTaskAgent(Agent):
         self._controller.note_task_entered(self._task_index)
         if takeover_engaged(self.session):
             return
-        # The preceding task's outro is playing ("let me take a quick moment to review my
-        # notes... one moment please"), so this barrier costs the caller no extra silence.
+        # LiveKit drains queued speech BEFORE this activity starts (agent_session.py's
+        # update_agent awaits activity.drain), so the preceding task's outro has already
+        # finished playing by the time we get here — this wait is audible dead air, bounded
+        # by the drain timeout, accepted because a phantom re-ask is worse.
         await self._controller.drain_observer()
         fields = self._controller.gap_fields(self._task_index)
         if not fields:
@@ -598,9 +603,11 @@ class GapTaskAgent(Agent):
             return "Already moving on — continue with the next question."
         if (refusal := self._refuse_premature_gap_complete()) is not None:
             return refusal
+        # Set before the first await — see the matching comment in
+        # PlanTaskAgent._task_complete for why the ordering matters.
+        self._advanced_this_turn = True
         successor = await self._controller.advance_gap_from(self._task_index)
         await self._controller.prepare_successor(self, successor)
-        self._advanced_this_turn = True
         return successor
 
     def _refuse_premature_gap_complete(self) -> str | None:

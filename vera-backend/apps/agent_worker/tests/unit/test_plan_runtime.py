@@ -1774,6 +1774,34 @@ class TestPrematureCompletion:
         assert isinstance(second, str)
 
     @pytest.mark.asyncio
+    async def test_two_concurrent_task_completes_produce_one_handoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real shape behind P10: LiveKit dispatches every function call in one LLM
+        response as its OWN task (voice/generation.py), so two `task_complete` calls race
+        rather than run one after the other. `asyncio.Lock.acquire` on a free lock never
+        yields, so nothing suspends here by accident today — force the genuine checkpoint
+        `advance_from` would hit for real once a directive holds the controller lock across
+        an awaited `session.interrupt()` (see `apply_directive_now`)."""
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        agent = controller.agents[0]
+        real_advance_from = controller.advance_from
+
+        async def suspending_advance_from(index: int) -> Agent:
+            await asyncio.sleep(0)  # the checkpoint a contested lock would force for real
+            return await real_advance_from(index)
+
+        monkeypatch.setattr(controller, "advance_from", suspending_advance_from)
+        with _session_patch(agent, MagicMock()):
+            first, second = await asyncio.gather(
+                _tool(agent, "task_complete")(), _tool(agent, "task_complete")()
+            )
+        results = [first, second]
+        assert sum(isinstance(r, Agent) for r in results) == 1
+        assert sum(isinstance(r, str) for r in results) == 1
+
+    @pytest.mark.asyncio
     async def test_a_complete_task_is_never_refused(self) -> None:
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.intro.rep_name": "Pat"})
@@ -2261,6 +2289,32 @@ class TestGapAgent:
             second = await _tool(agent, "gap_complete")()
         assert isinstance(first, Agent)
         assert isinstance(second, str)
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_gap_completes_produce_one_handoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same real shape as PlanTaskAgent's task_complete (see
+        test_two_concurrent_task_completes_produce_one_handoff): two `gap_complete` calls
+        from one LLM response race on the SAME agent rather than run sequentially."""
+        controller, _ = _controller(_gap_plan())
+        agent = controller.gap_agents[0]
+        real_advance_gap_from = controller.advance_gap_from
+
+        async def suspending_advance_gap_from(index: int) -> Agent:
+            await asyncio.sleep(0)  # the checkpoint a contested lock would force for real
+            return await real_advance_gap_from(index)
+
+        monkeypatch.setattr(controller, "advance_gap_from", suspending_advance_gap_from)
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            controller.update_answers({"sections.intro.rep_name": "Pat"})
+            first, second = await asyncio.gather(
+                _tool(agent, "gap_complete")(), _tool(agent, "gap_complete")()
+            )
+        results = [first, second]
+        assert sum(isinstance(r, Agent) for r in results) == 1
+        assert sum(isinstance(r, str) for r in results) == 1
 
     @pytest.mark.asyncio
     async def test_on_enter_awaits_the_attached_observers_drain(self) -> None:

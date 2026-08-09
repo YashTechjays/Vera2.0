@@ -23,6 +23,7 @@ from vera_core.forms.dsl import (
     parse_date_format,
     validate_question_coverage,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 
@@ -720,6 +721,35 @@ def test_the_document_validator_rejects_an_uncovered_path(monkeypatch: pytest.Mo
     monkeypatch.setattr("vera_core.forms.question_plan.build_question_plan", lambda *a, **k: [])
     with pytest.raises(ValidationError, match="not reachable from any spoken question"):
         FormSchemaDoc.model_validate(minimal_doc())
+
+
+def test_a_routing_questions_target_does_not_count_as_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`owed_now` (call_plan.py) skips every `routes_between` question unconditionally, so a
+    routing question that carried a target would satisfy this rule while staying
+    permanently un-owed at runtime — the exact silent-miss class the rule exists to catch."""
+    doc_dict = minimal_doc()
+    del doc_dict["sections"]["basics"]["fields"]["notes"]
+
+    def fake_build_question_plan(doc: Any, task: Any, anchors: Any = None) -> list[PromptPanel]:
+        return [
+            PromptPanel(
+                items=[
+                    PromptQuestion(
+                        text="Which plan applies?",
+                        routes_between=["Plan A", "Plan B"],
+                        options=[PromptOption(target_paths=["sections.basics.plan_type"])],
+                    )
+                ]
+            )
+        ]
+
+    monkeypatch.setattr(
+        "vera_core.forms.question_plan.build_question_plan", fake_build_question_plan
+    )
+    with pytest.raises(ValidationError, match="not reachable from any spoken question"):
+        FormSchemaDoc.model_validate(doc_dict)
 
 
 def test_no_catalog_uses_an_end_of_task_confirm() -> None:
