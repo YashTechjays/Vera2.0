@@ -20,7 +20,8 @@
 - **Never log a field VALUE** — paths, titles, counts and shapes only. Values are PHI.
 - Any span whose body touches PHI takes `record_exception=False, set_status_on_exception=False`.
 - No DSL grammar change, no `dsl_version` bump, no migration, no frontend change.
-- **Tasks 1–2 must not change the rendered prompt.** `TestPanelsMatchThePrompt` (`tests/unit/forms/test_call_plan.py`) must stay green **without being modified**. If it needs editing, the task is wrong.
+- **Tasks 1–2 must not change the rendered prompt.** The binding pin is the byte-identical assertion inside `TestPanelsMatchThePrompt` (`tests/unit/forms/test_call_plan.py`): `assert "\n\n".join(p for p in parts if p) == task.prompt`. It must stay green **and must not be weakened, loosened or edited**. If it fails, the rendering change is wrong — fix the rendering, never the assertion.
+  Sibling tests in that class that merely *reference* a field this plan deletes (e.g. `test_the_stored_tree_keeps_the_immediate_confirmations` counting `q.immediate_confirms`) **must** be updated to the new representation while preserving their original intent — they cannot compile otherwise. Updating those is expected; weakening the byte-identical assertion is not.
 - **No task in this plan needs `just compile-schemas` or `just seed-schemas`.** Verified: `data/form_schemas/*.json` serializes `FormSchemaDoc` only — it contains no `panels`, `immediate_confirms`, `gate_text` or `routes_between`. No task here touches a `catalog/` module, so the artifacts cannot drift and the freshness test in `tests/unit/forms/test_schema_dsl.py` cannot fail from this work. Do **not** commit `data/form_schemas/`; if it shows a diff, something unrelated changed and you should stop and report it.
 - Commit after every task. Do not squash tasks together.
 
