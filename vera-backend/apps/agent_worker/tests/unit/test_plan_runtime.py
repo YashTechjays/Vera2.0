@@ -1571,6 +1571,29 @@ async def test_a_task_with_every_question_answered_completes_immediately() -> No
         assert isinstance(await _tool(agent, "task_complete")(), Agent)
 
 
+def test_a_termination_flow_rule_still_routes_the_call_to_wrap_up() -> None:
+    """Both networks No and out-of-network No must still end the call early, and the
+    completion work must not interfere with a deliberate early end.
+
+    This catalog terminates by SKIPPING to wrap_up, not by a bare `Terminate` — every
+    flow rule pairs `action="terminate_call"` with `skip_to_task="wrap_up"`, and the
+    engine prefers `skip_to_task` (`rule_engine.py:52`). The distinction matters:
+    `_terminated` is set only for `Terminate` (`plan_runtime.py:899-901`), so this path
+    leaves the end-of-call gap sweep enabled rather than suppressing it.
+    """
+    engine = RuleEngine(_ibv_plan())
+    directive = engine.evaluate(
+        {
+            _S + "insurance_information.doctor_inside_network": "No",
+            _S + "insurance_information.facility_inside_network": "No",
+            _S + "insurance_information.out_of_network_coverage": "No",
+        }
+    )
+    assert isinstance(directive, SkipToTask)
+    assert directive.rule_key == "no_out_of_network_coverage"
+    assert directive.task_key == "wrap_up"
+
+
 def test_small_group_plus_self_insured_still_fires_the_consistency_rule() -> None:
     engine = RuleEngine(_ibv_plan())
     directive = engine.evaluate(
