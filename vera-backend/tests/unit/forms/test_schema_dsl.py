@@ -21,6 +21,7 @@ from vera_core.forms.dsl import (
     format_date,
     load_document,
     parse_date_format,
+    validate_confirm_defaults,
     validate_question_coverage,
 )
 from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
@@ -761,3 +762,50 @@ def test_no_catalog_uses_an_end_of_task_confirm() -> None:
             for path, leaf, _ in leaf_gates(build())
             if leaf.confirm_in_task is not None and not leaf.confirm_in_task.confirm_immediate
         ] == []
+
+
+def test_no_catalog_gates_on_a_defaulted_confirm_leaf() -> None:
+    """`gating_seed` keeps confirm-role prefills authoritative (the member-ID read-back), so a
+    `default` on one would still settle its gate and delete the questions behind it — the
+    exact failure removed for ask-role leaves."""
+    for build in (build_ibv_standard, build_disease_only):
+        assert validate_confirm_defaults(build()) == []
+
+
+def test_the_document_validator_rejects_a_defaulted_confirm_gate() -> None:
+    """A build failure, not an advisory list."""
+    doc = minimal_doc()
+    doc["sections"]["basics"]["fields"]["member_id"] = {
+        "type": "text",
+        "title": "Member ID",
+        "role": "confirm",
+        "default": "N/A",
+        "prompt": {
+            "confirm": "I have {{value}} on file — is that right?",
+            "ask": "Can I get the member ID?",
+        },
+    }
+    doc["sections"]["basics"]["fields"]["notes"]["applicable_when"] = {
+        "field": "sections.basics.member_id",
+        "op": "eq",
+        "value": "Yes",
+    }
+    with pytest.raises(ValidationError, match="declares a default and is referenced by"):
+        FormSchemaDoc.model_validate(doc)
+
+
+def test_a_defaulted_confirm_leaf_that_gates_nothing_is_fine() -> None:
+    """The rule is about deleting other questions, not about defaults — `spouse_partner_name`
+    carries one legitimately."""
+    doc = minimal_doc()
+    doc["sections"]["basics"]["fields"]["member_id"] = {
+        "type": "text",
+        "title": "Member ID",
+        "role": "confirm",
+        "default": "N/A",
+        "prompt": {
+            "confirm": "I have {{value}} on file — is that right?",
+            "ask": "Can I get the member ID?",
+        },
+    }
+    assert validate_confirm_defaults(FormSchemaDoc.model_validate(doc)) == []

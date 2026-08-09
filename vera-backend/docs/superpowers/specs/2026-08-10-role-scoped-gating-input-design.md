@@ -267,9 +267,10 @@ fix, and it requires no catalog change:
 > **Validator rule.** A `confirm`-role leaf that declares a `default` may not be referenced by
 > another leaf's gate chain.
 
-It belongs in `compile_document` rather than `_validate_document` — `_validate_document` runs on
-every load, including the dispatcher's per-call path, where `validate_question_coverage` already
-costs ~1–2 s of control-plane CPU per call.
+It is wired into `_validate_document` beside `validate_question_coverage`, so it is a build
+failure rather than an advisory list. Unlike its sibling it costs nothing measurable — one pass
+over `leaf_gates`, no `build_question_plan` call — so it adds no meaningful load to the
+dispatcher's per-call document load.
 
 ---
 

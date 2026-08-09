@@ -743,6 +743,7 @@ class FormSchemaDoc(_Model):
                 )
 
         errors.extend(validate_question_coverage(self))
+        errors.extend(validate_confirm_defaults(self))
 
         # ask_groups / alternatives
         for skey, section in self.sections.items():
@@ -974,6 +975,34 @@ def validate_question_coverage(doc: FormSchemaDoc) -> list[str]:
                     f"{hits[path]} questions"
                 )
     return errors
+
+
+def validate_confirm_defaults(doc: FormSchemaDoc) -> list[str]:
+    """A `confirm` leaf that gates another question may not declare a `default`.
+
+    `call_plan.gating_seed` drops ask-role prefills from the worker's gate-evaluation set but
+    keeps confirm ones — a confirm value is on file precisely to be read back. So a `default`
+    on a gating confirm leaf still arrives as an answer and still deletes every question behind
+    it, which is the failure `gating_seed` removes for ask-role leaves."""
+    from vera_core.forms.conditions import leaf_gates
+
+    leaves = dict(doc.leaf_items())
+    shared = doc.shared_conditions or {}
+    referenced = {
+        ref
+        for _path, _leaf, chain in leaf_gates(doc)
+        for gate in chain
+        for ref in condition_field_paths(gate, shared)
+    }
+    return [
+        f"{path}: a confirm-role leaf that declares a default and is referenced by another "
+        "field's applicable_when would settle that gate from intake, deleting the questions "
+        "behind it"
+        for path in sorted(referenced)
+        if (leaf := leaves.get(path)) is not None
+        and leaf.role == "confirm"
+        and leaf.default is not None
+    ]
 
 
 # ---------------------------------------------------------------------------
