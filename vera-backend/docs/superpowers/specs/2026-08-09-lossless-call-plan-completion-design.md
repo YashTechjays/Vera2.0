@@ -86,8 +86,8 @@ A single terminal sweep is voided by any early hangup: everything the per-task g
 depends on the call surviving to the final task.
 
 **Decision (2026-08-09): the sweep's position is NOT changed by this spec.** The response is to
-make the per-task guard (§5) strong enough that little reaches the sweep at all, and to fix what
-the sweep computes (§6) so what does reach it is actually seen. Moving or repeating the sweep is
+make the per-task guard (§4) strong enough that little reaches the sweep at all, and to fix what
+the sweep computes (§5) so what does reach it is actually seen. Moving or repeating the sweep is
 recorded as debt, not done here.
 
 ### Extraction lag is structural
@@ -183,20 +183,37 @@ Enforced by a validator (below), not by convention.
 
 ## Design
 
-### 1. Artifact changes — make the question tree authoritative
+### 1. Artifact changes — make the question tree a complete index
 
-`PromptQuestion` gains the machine-readable data it currently discards. `gate_text` is
-retained and demoted from truth to display.
+> **Revised 2026-08-09, before implementation.** An earlier draft put
+> `gate: Condition` and `required` on `PromptQuestion`. **That design is wrong.** Measured
+> against both catalogs, **11 questions in `ibv_standard` have target paths with different
+> gate chains** — a fan-out such as *"What is the copay or coinsurance for IUI?"* spans three
+> CPT codes, each gated on its **own** `covered` field:
+>
+> ```
+> ibv_standard: multi-target questions -> same gate chain=20  DIFFERENT=11
+> disease_only: multi-target questions -> same gate chain=0   DIFFERENT=0
+> ```
+>
+> There is no single "gate of the question". Hoisting one would have to pick a representative
+> path and would silently mis-gate the other targets. It would also **duplicate** gates that
+> already live on `PlanFieldDescriptor`, recreating the very drift this spec exists to remove.
 
-```python
-class PromptQuestion(_Model):
-    text: str
-    options: list[PromptOption]          # already carries target_paths
-    gate: Condition | None = None        # NEW — the truth
-    gate_text: str | None = None         # retained, now a cached render of `gate`
-    required: bool | RequiredWhen = True # NEW
-    ...
-```
+The gates never needed to **move**. They needed to be **joinable**. `PlanFieldDescriptor`
+already carries `gates: tuple[Condition, ...]` and `required: bool | RequiredWhen` per path,
+and the worker already evaluates them. What is missing is that the question tree is not a
+*complete index* into those descriptors: some collectable paths are unreachable from any
+question node, so a computation that walks the tree cannot see them.
+
+So the only artifact change is: **every collectable path must be reachable from exactly one
+question node.** Today exactly two are not — the spouse confirms, which reach the agent as
+prose (§1 continued below). `gate_text` stays exactly as it is: display prose, never consulted for a
+decision.
+
+This is a substantially smaller change than the earlier draft, and strictly more correct: gates
+stay in one place, and the per-target granularity that the CPT fan-outs actually require comes
+for free.
 
 `immediate_confirms` stop being prose. Today a confirm-role field reaches the agent as the
 string `If "Coverage Type" is "Family": {{confirm:sections.patient_information.spouse_partner_name}}`
@@ -227,7 +244,7 @@ step — that is the proof the change is a true prompt no-op.
 these are unnumbered *but owed*. That is coherent — numbering is a rendering concern, owed-ness
 is a state concern — and it means that on a Family policy the guard's entry count is **18** while
 COMPLETENESS still reads "1 to 16". Correct, not a mismatch: the agent genuinely owes 18 asks
-(16 numbered + 2 nested follow-ups), and §5 compares rep turns against **asks**, not ordinals.
+(16 numbered + 2 nested follow-ups), and §4 compares rep turns against **asks**, not ordinals.
 It composes both ways — 16 numbered asks in 16 turns while skipping the spouse pair gives
 `16 < 18` and refuses, which is the bug class; an Individual policy leaves the gate false, so the
 pair is not owed and the count is 16 with no false refusal.
@@ -238,7 +255,7 @@ the `ask` wording remains the fallback when prefill is absent.
 **Flattening these into numbered items 12 and 13 is explicitly NOT part of this spec.** It is a
 plausible follow-up — the trace shows the walk ending immediately on exit from this indented
 block, and an ordinal would give the model a positional anchor — but it is a *hypothesis* about
-the pointer loss, not the demonstrated cause (§5's guard bail is), and it changes spoken
+the pointer loss, not the demonstrated cause (§4's guard bail is), and it changes spoken
 behaviour, which pytest cannot judge. Bundling it here would land a prompt change alongside the
 completion fix and destroy attribution. Run it afterwards as a deliberate experiment, gated on
 the eval harness plus a live call.
@@ -253,31 +270,44 @@ It stops being a *parallel* artifact and becomes a *projection of the tree*, ass
 the validator. This is what makes the 16-vs-20 divergence unrepresentable rather than merely
 fixed once.
 
-### 3. One applicability function, three knowledge levels
+### 3. The owed set: walk the tree, join the descriptors
 
-Replace the three implementations with one function parameterised by what the caller knows:
-
-```python
-def gate_state(cond, answers, shared, *, task_of_path, at_task) -> TRUE | FALSE | UNDECIDED
-```
-
-- **dispatch** — no answers; decides by task position. Governs whether gate prose is printed.
-- **task entry** — position + answers so far. Governs whether the question survives the list.
-- **gap time** — full answers. Governs whether the question is owed.
-
-Same rule, three inputs. This removes the hand-maintained "never less decisive" invariant: it
-becomes true by construction, because there is one rule.
-
-### 4. The owed set derives from the tree
+The owed set becomes a **join** — question units from the tree, gates and requiredness from the
+descriptors they point at:
 
 ```python
-def question_is_owed(q, answers, shared) -> bool:
-    return (gate_state(q.gate, ...) is TRUE
-            and is_required(q, answers, shared)
-            and not any(has_value(answers, p) for p in q.target_paths))
+def owed_now(task, answers, shared) -> list[PromptQuestion]:
+    """Questions still owed: question-granular, evaluated per target path."""
+    by_path = {f.path: f for f in task.fields}
+    owed = []
+    for q in iter_questions(task.panels):
+        if q.routes_between:
+            continue                      # a routing question collects nothing
+        targets = [by_path[p] for p in q.target_paths if p in by_path]
+        live = [f for f in targets if is_applicable(f.gates, answers, shared)]
+        if any(
+            is_required(f, answers, shared) and not has_value(answers, f.path)
+            for f in live
+        ):
+            owed.append(q)
+    return owed
 ```
 
-Three consequences worth stating explicitly:
+Per-target evaluation is what the CPT fan-outs require: the IUI copay question is owed while
+**any** covered code still lacks a copay, and drops out once every applicable code is answered.
+
+This needs **no new gate data on the artifact** — it uses `PlanFieldDescriptor.gates` and
+`.required`, which already ship and are already evaluated by the worker. The tree contributes
+question identity; the descriptors contribute truth. Validator rule 1 (§8) is what guarantees
+the join is total.
+
+**Unifying the three applicability implementations is no longer required for this fix and moves
+to recorded debt.** The earlier draft made it a migration step; with the owed set computed as a
+join, `is_applicable` is the only evaluator on this path, and the compile-time / task-entry
+variants are untouched. Collapsing them stays worth doing — just not here, and not bundled with
+a correctness fix.
+
+Four consequences worth stating explicitly:
 
 - **`default` is never consulted.** The `telehealth_covered` class of bug dissolves without a
   schema change and without a second predicate to keep in sync with `is_satisfied`.
@@ -289,8 +319,12 @@ Three consequences worth stating explicitly:
   asks, lists name missing fields.* The owed **count** is question-granular; the **re-ask list**
   names missing field paths, because rendering a partially-answered fan-out by its question
   text re-asks the half already on file.
+- **`gap_fields` keeps its field-granular signature.** It becomes the paths under the owed
+  questions rather than a separate walk of `task.fields`, so the re-ask lists and the Observer
+  are unaffected while the *set* becomes correct. `owed_question_count` stops reconstructing
+  question units via `owed_questions()` and simply returns `len(owed_now(...))`.
 
-### 5. Fix the completion guard's measurement window
+### 4. Fix the completion guard's measurement window
 
 The guard stays. Its **window** is the bug, not its existence.
 
@@ -323,7 +357,7 @@ Accepted cost: the bot sometimes merges questions into one turn ("group name and
 so a legitimately complete task can undershoot the turn count and absorb one spurious re-ask
 before the budget lets it through.
 
-### 6. The gap sweep keeps its position — only its input changes
+### 5. The gap sweep keeps its position — only its input changes
 
 **The sweep is not moved.** It continues to fire once, at the boundary into the closing task, so
 any re-ask still lands before the closer's reference-number collection and goodbye. `_gap_block`,
@@ -335,10 +369,10 @@ visible. On this trace that is the difference between sweeping 5 fields and swee
 across the call, the difference between seeing `telehealth_covered` / `enrollment_required` and
 never seeing them at all.
 
-The guard (§5) and the sweep therefore consume the *same* corrected owed set at two different
+The guard (§4) and the sweep therefore consume the *same* corrected owed set at two different
 times, which is what makes them agree.
 
-#### 6a. Settle extraction before the sweep decides — spend the stall that already exists
+#### 5a. Settle extraction before the sweep decides — spend the stall that already exists
 
 One exposure remains: the **most recently swept task**'s answers may still be in flight when the
 sweep computes its gaps (extraction lag, p90 23 s). Tasks earlier than that are long settled by
@@ -380,7 +414,7 @@ rep volunteers it; re-asking it is the `answer_handling FAIL [133]` this work ex
 `gap_fields` stays computed fresh, per gap agent, at ask time. The drain barrier gets the whole
 benefit with no ledger to keep in sync.
 
-### 7. Per-turn tool idempotence (P10)
+### 6. Per-turn tool idempotence (P10)
 
 A second `task_complete` / `gap_complete` in the same turn returns a plain string instead of a
 second `Agent`, using the same early-return shape as `takeover_engaged`, with the marker cleared
@@ -390,7 +424,7 @@ P10 did **not** cause this trace — 6 tool calls produced 6 handoffs, no doubli
 because it is real, cheap, filed since 2026-07-30, and retires P6. **This spec records that P8's
 attribution to P10 is disproven**: P8's symptom reproduced with no doubled call present.
 
-### 8. Completion observability
+### 7. Completion observability
 
 The trace recorded 233 answers and exposed zero field paths; reconstructing what was recorded
 required scraping the Observer's raw completions out of descendant `llm_request` spans.
@@ -401,7 +435,7 @@ required scraping the Observer's raw completions out of descendant `llm_request`
 
 Both with `record_exception=False, set_status_on_exception=False`, per the PHI span rules.
 
-### 9. Validator — losslessness as a build failure
+### 8. Validator — losslessness as a build failure
 
 Added to the existing document validator, so drift fails CI rather than a live call:
 
@@ -454,22 +488,19 @@ reached by a route with no safe intermediate landing states.
 
 Each step lands independently and is revertible.
 
-1. **Additive artifact fields** — `gate`, `required` on `PromptQuestion`; confirm nodes. Nothing
-   reads them yet. Compile output grows; **rendered prompt is byte-identical** — the step is done
-   when `TestPanelsMatchThePrompt` is still green without being modified.
-2. **Validator** — turn on rules 1–3. Expected to fail first on the confirm-node change; fix
-   forward.
-3. **Unified `gate_state`** — introduce it, migrate the three call sites one at a time, delete
-   `_entry_decided` / `_settled` / `_decided_false` once no caller remains.
-4. **Tree-derived owed set** — `gap_fields` computes from panels. `task.fields` becomes a
-   projection.
-5. **Fix the completion guard's window** — entry snapshot + bounded refusal. The sweep needs no
-   change of its own: it consumes the corrected `gap_fields` from step 4.
-6. **Drain barrier before the sweep decides** — `ObserverManager.drain_pending()`, awaited in
-   `GapTaskAgent.on_enter` ahead of `gap_fields`. Independent of steps 1–5; can land first if
+1. **Confirm nodes** — `immediate_confirms` become unnumbered question nodes carrying
+   `target_paths`. **Rendered prompt is byte-identical** — the step is done when
+   `TestPanelsMatchThePrompt` is still green *without being modified*.
+2. **Validator** — turn on rules 1–3. Rule 1 fails on exactly the two spouse paths before step 1
+   and passes after it, which is the step's proof.
+3. **Tree-joined owed set** — `gap_fields` / `owed_question_count` computed by `owed_now()`.
+4. **Fix the completion guard's window** — entry snapshot + bounded refusal. The sweep needs no
+   change of its own: it consumes the corrected owed set from step 3.
+5. **Drain barrier before the sweep decides** — `ObserverManager.drain_pending()`, awaited in
+   `GapTaskAgent.on_enter` ahead of `gap_fields`. Independent of steps 1–4; can land first if
    useful, since it fixes phantom gaps under today's logic too.
-7. **P10 idempotence.**
-8. **Observability spans.**
+6. **P10 idempotence.**
+7. **Observability spans.**
 
 ---
 
@@ -539,6 +570,13 @@ Each step lands independently and is revertible.
 
 ## Recorded debt
 
+- **Unify the three applicability implementations** (`question_plan._entry_decided`,
+  `PlanRunController._settled` / `_decided_false`, `conditions.is_applicable`) behind one
+  function parameterised by what the caller knows. Dropped from this spec's scope on 2026-08-09:
+  with the owed set computed as a join, `is_applicable` is the only evaluator on the completion
+  path, so unification is no longer required for the fix and should not ride along with a
+  correctness change. The "worker is never less decisive than the compiler" invariant stays
+  docstring-enforced until then.
 - **Gap-sweep reachability.** The sweep fires once, at the boundary into the closing task, so a
   hangup before that point recovers nothing — exactly what happened on trace
   `6e1f496cb72d0182af27281c90bdca64`. Deliberately out of scope here (decision 2026-08-09):
