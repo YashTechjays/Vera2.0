@@ -232,8 +232,8 @@ Across both catalogs, the full set of behavior changes on real data:
 
 | Path | Forms | Effect |
 |---|---|---|
-| `enrollment.enrollment_required` | 13 | 2 questions restored — the reported bug |
-| `coverage_summary.benefit_year_type` (disease_only) | — | 1 question restored |
+| `enrollment.enrollment_required` | 13 | 1 question restored (2 target paths) — the reported bug |
+| `coverage_summary.benefit_year_type` (disease_only) | 0 | 1 question restored — see note |
 | `insurance_information.plan_type` | 3 | 1 question moves *excluded* → *conditional* |
 | `insurance_information.doctor_inside_network` | 1 | 1 question moves *excluded* → *conditional* |
 | `insurance_information.facility_inside_network` | 1 | 1 question moves *excluded* → *conditional* |
@@ -241,6 +241,12 @@ Across both catalogs, the full set of behavior changes on real data:
 
 *Conditional* means the question stays listed with its prose gate for the agent to evaluate
 live — the normal path for any gate that is not decidable at entry.
+
+**Two grades of evidence, not one.** Every `patient_form` in the dev database is
+`infertility_treatment` (14 of 14), so the first four rows are observed in real data. No
+`disease_only` form has ever been created there, so `benefit_year_type` → `renewal_date` is
+proven mechanically — the frontend seeds every leaf `default`, and the exclusion reproduces
+against the real controller — but has not yet been hit on a call.
 
 A prototype of the seed change passes the worker + forms unit suites unchanged
 (`777 passed, 1 xfailed`). **That is also the problem:** no existing test pins the current
