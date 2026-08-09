@@ -17,6 +17,7 @@ from vera_core.forms.question_plan import (
     PromptPanel,
     PromptQuestion,
     build_question_plan,
+    drop_questions,
     hydrate_panels,
     iter_questions,
     owed_questions,
@@ -402,3 +403,19 @@ def test_confirm_nodes_are_not_numbered() -> None:
     task = next(t for t in doc.tasks if t.task_key == "insurance_basics")
     panels = build_question_plan(doc, task, _immediate_by_anchor(doc))
     assert numbered_questions(panels) == 16
+
+
+def test_dropping_the_anchor_drops_its_confirm_run_too() -> None:
+    """A confirm node's anchor is positional — whichever question precedes it in the same
+    panel's items — not modeled as a reference. Dropping the anchor without dropping the
+    confirm run it owns would silently re-anchor those bullets onto whatever question ends
+    up next to them instead."""
+    doc = build_ibv_standard()
+    task = next(t for t in doc.tasks if t.task_key == "insurance_basics")
+    panels = build_question_plan(doc, task, _immediate_by_anchor(doc))
+    dropped = drop_questions(panels, {"sections.benefit_coverage.coverage_type"})
+    questions = list(iter_questions(dropped))
+    assert not any(q.is_confirm for q in questions)
+    targets = {p for q in questions for p in q.target_paths}
+    assert "sections.patient_information.spouse_partner_name" not in targets
+    assert "sections.patient_information.spouse_partner_dob" not in targets

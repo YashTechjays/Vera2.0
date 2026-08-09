@@ -637,18 +637,42 @@ def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[Prompt
     A question keeping even one askable target stays whole: its options name their own
     paths, and pruning an option would leave the spoken sentence promising an answer slot
     that is no longer listed. A routing question has no targets and survives as long as the
-    panels it routes between do."""
+    panels it routes between do.
+
+    A confirm node's anchor is positional, not modeled — it's whatever question precedes
+    it in the same panel's items (the contract `_panel_lines` renders against). Dropping
+    the anchor without dropping the confirm run it owns would re-anchor those bullets onto
+    whatever question happens to end up in front of them next."""
     out: list[PromptPanel] = []
     for panel in panels:
+        source = list(panel.items)
         items: list[PromptItem] = []
-        for item in panel.items:
+        i = 0
+        while i < len(source):
+            item = source[i]
             if isinstance(item, PromptPanel):
                 items.extend(drop_questions([item], excluded))
-            elif not item.target_paths or not set(item.target_paths) <= excluded:
+                i += 1
+                continue
+            run: list[PromptQuestion] = []
+            j = i + 1
+            while j < len(source):
+                candidate = source[j]
+                if not (isinstance(candidate, PromptQuestion) and candidate.is_confirm):
+                    break
+                run.append(candidate)
+                j += 1
+            if not item.target_paths or not set(item.target_paths) <= excluded:
                 items.append(item)
+                items.extend(node for node in run if not set(node.target_paths) <= excluded)
+            i = j
         # A routing question with no surviving panel to route into says nothing useful.
-        if not any(isinstance(i, PromptPanel) for i in items):
-            items = [i for i in items if not (isinstance(i, PromptQuestion) and i.routes_between)]
+        if not any(isinstance(entry, PromptPanel) for entry in items):
+            items = [
+                entry
+                for entry in items
+                if not (isinstance(entry, PromptQuestion) and entry.routes_between)
+            ]
         if items:
             out.append(panel.model_copy(update={"items": items}))
     return out

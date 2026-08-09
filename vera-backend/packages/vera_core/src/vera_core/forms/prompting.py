@@ -453,7 +453,7 @@ def _numbered_question(
         )
     if confirms:
         lines.append("   - Immediately after this answer:")
-        lines.extend(f"     * {c.confirm_line}" for c in confirms)
+        lines.extend(f"     * {c.text}" for c in confirms)
     return lines
 
 
