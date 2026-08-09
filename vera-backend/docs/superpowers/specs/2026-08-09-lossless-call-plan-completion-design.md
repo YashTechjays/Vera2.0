@@ -204,9 +204,44 @@ attached to another question — while the *same* condition exists machine-reada
 as `required=when=RefCondition(ref='family_coverage')`. They become real question nodes
 carrying `target_paths` and a `gate`, so they are countable and gate-evaluable.
 
+**Representation only — the rendered prompt does not change.** Becoming a node is about what the
+runtime can compute; whether a node receives an **ordinal** is a separate renderer decision.
+`render_panels` numbers from one shared counter and `numbered_questions` decides eligibility
+(`0 if item.routes_between else 1`), so "a real node that is not numbered" is an established
+shape here — routing questions already work exactly that way. The spouse confirms keep their
+current nested rendering:
+
+```
+11. Is this an individual or a family policy? Please answer Individual or Family.
+   - Answers: Individual | Family
+   - Immediately after this answer:
+     * If "Coverage Type" is "Family": ask — Can we also check the spouse on the plan? ...
+     * If "Coverage Type" is "Family": ask — And what is the spouse's date of birth?
+12. Does this plan require a PCP referral?
+```
+
+`TestPanelsMatchThePrompt` (`tests/unit/forms/test_call_plan.py`) must stay green through this
+step — that is the proof the change is a true prompt no-op.
+
+**One asymmetry, stated deliberately.** Routing questions are unnumbered *and never owed*;
+these are unnumbered *but owed*. That is coherent — numbering is a rendering concern, owed-ness
+is a state concern — and it means that on a Family policy the guard's entry count is **18** while
+COMPLETENESS still reads "1 to 16". Correct, not a mismatch: the agent genuinely owes 18 asks
+(16 numbered + 2 nested follow-ups), and §5 compares rep turns against **asks**, not ordinals.
+It composes both ways — 16 numbered asks in 16 turns while skipping the spouse pair gives
+`16 < 18` and refuses, which is the bug class; an Individual policy leaves the gate false, so the
+pair is not owed and the count is 16 with no false refusal.
+
 The confirm mechanism itself is unchanged: a prefilled value is read back for confirmation, and
-the `ask` wording remains the fallback when prefill is absent. Only its **representation** in
-the tree changes.
+the `ask` wording remains the fallback when prefill is absent.
+
+**Flattening these into numbered items 12 and 13 is explicitly NOT part of this spec.** It is a
+plausible follow-up — the trace shows the walk ending immediately on exit from this indented
+block, and an ordinal would give the model a positional anchor — but it is a *hypothesis* about
+the pointer loss, not the demonstrated cause (§5's guard bail is), and it changes spoken
+behaviour, which pytest cannot judge. Bundling it here would land a prompt change alongside the
+completion fix and destroy attribution. Run it afterwards as a deliberate experiment, gated on
+the eval harness plus a live call.
 
 ### 2. `task.fields` becomes a derived projection
 
@@ -420,7 +455,8 @@ reached by a route with no safe intermediate landing states.
 Each step lands independently and is revertible.
 
 1. **Additive artifact fields** — `gate`, `required` on `PromptQuestion`; confirm nodes. Nothing
-   reads them yet. Compile output grows; no behaviour change.
+   reads them yet. Compile output grows; **rendered prompt is byte-identical** — the step is done
+   when `TestPanelsMatchThePrompt` is still green without being modified.
 2. **Validator** — turn on rules 1–3. Expected to fail first on the confirm-node change; fix
    forward.
 3. **Unified `gate_state`** — introduce it, migrate the three call sites one at a time, delete
