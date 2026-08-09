@@ -182,10 +182,12 @@ class TestTaskText:
         assert "Copay ($): also: $0, None; at least 0" in infertility
 
     def test_icd10_codes_render_for_speak_sections(self) -> None:
-        """Spelled "ICD-Ten", never "ICD-10": the agent copies this line into what it says,
-        and Cartesia voiced the digits as "I-C-D one zero" on a live call."""
-        assert "ICD-Ten Z31.41" in task("diagnostic_coverage").prompt
-        assert "ICD-10" not in task("diagnostic_coverage").prompt
+        """Spelled "ICD ten", never "ICD-10": the agent copies this line into what it says, and
+        Cartesia voiced the digits as "I-C-D one zero" on a live call. Space, not hyphen, so no
+        TTS provider can read the separator aloud as "dash"."""
+        prompt = task("diagnostic_coverage").prompt
+        assert "ICD ten Z31.41" in prompt
+        assert "ICD-10" not in prompt and "ICD-Ten" not in prompt
 
     def test_no_task_re_explains_the_structure_the_list_already_carries(self) -> None:
         # The old renderer flattened groups/ask_groups away, so every CPT-heavy task carried

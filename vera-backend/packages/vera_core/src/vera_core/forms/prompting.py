@@ -333,13 +333,15 @@ def _last_ref_task(
 def _codes_text(codes: Codes) -> str:
     """The codes line for a panel header. Prompt text only — never storage or export.
 
-    "ICD-Ten", not "ICD-10": the agent copies this string into what it says, and Cartesia
-    voiced the digits as "I-C-D one zero" on a live call."""
+    "ICD ten", not "ICD-10": the agent copies this string into what it says, and Cartesia
+    voiced the digits as "I-C-D one zero" on a live call. Spelled with a space rather than a
+    hyphen so no TTS provider can read the separator aloud as "dash". The export keeps
+    "ICD-10" — that column is read, not spoken."""
     parts: list[str] = []
     if codes.cpt:
         parts.append(f"CPT {', '.join(codes.cpt)}")
     if codes.icd10:
-        parts.append(f"ICD-Ten {', '.join(codes.icd10)}")
+        parts.append(f"ICD ten {', '.join(codes.icd10)}")
     return "; ".join(parts)
 
 
