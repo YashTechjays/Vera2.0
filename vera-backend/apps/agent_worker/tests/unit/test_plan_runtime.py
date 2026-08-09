@@ -1672,6 +1672,9 @@ class TestPrematureCompletion:
         assert isinstance(results[-1], Agent), results[-1]
         # ...but it refused first; a guard that never refuses would pass the line above vacuously
         assert any(isinstance(r, str) for r in results)
+        # Pins the CONTRACT, not just reachability: `_TASK_FRUITLESS_REFUSALS` is named for
+        # the count, and a check-before-increment ordering silently makes it 3.
+        assert sum(isinstance(r, str) for r in results) == _TASK_FRUITLESS_REFUSALS
 
 
 class TestFieldLines:
@@ -2091,6 +2094,9 @@ class TestGapCoverage:
         assert isinstance(results[-1], Agent), results[-1]
         # ...but it refused first; a guard that never refuses would pass the line above vacuously
         assert any(isinstance(r, str) for r in results)
+        # Pins the CONTRACT, not just reachability: `_GAP_FRUITLESS_REFUSALS` is named for
+        # the count, and a check-before-increment ordering would silently make it one more.
+        assert sum(isinstance(r, str) for r in results) == _GAP_FRUITLESS_REFUSALS
 
     @pytest.mark.asyncio
     async def test_a_swept_task_with_nothing_left_open_is_never_refused(self) -> None:
