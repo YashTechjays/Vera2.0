@@ -1513,12 +1513,31 @@ def test_run_b_owes_six_questions_including_the_defaulted_one() -> None:
     assert "pcp_referral_required" not in owed  # gated out: plan_type is not HMO
 
 
+@pytest.mark.asyncio
+async def test_run_b_shape_is_refused_after_eleven_turns() -> None:
+    """The trace: 11 rep turns into a 16-question task with 6 still owed. The old guard
+    compared whole-task turns (11) against the CURRENT outstanding count (5) and bailed.
+    Both sides must measure the same window."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    agent = controller.agents[index]
+    with _session_patch(agent, MagicMock()):
+        await agent.on_enter()
+        controller.update_answers(dict(_RUN_B_ANSWERS))
+        for _ in range(11):
+            await _rep_turn(agent)
+        result = await _tool(agent, "task_complete")()
+    assert isinstance(result, str)
+    assert "Telehealth" in result
+
+
 class TestPrematureCompletion:
     @pytest.mark.asyncio
     async def test_task_complete_is_refused_while_required_questions_are_open(self) -> None:
         controller, _ = _controller(_gap_plan())
         agent = controller.agents[0]  # intro_task: rep_name required + unanswered
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             result = await _tool(agent, "task_complete")()
         # A str parks the plan on this task; an Agent would have advanced it.
         assert isinstance(result, str)
@@ -1531,6 +1550,7 @@ class TestPrematureCompletion:
         controller.update_answers({"sections.a.in_network": "Yes"})
         agent = controller.agents[2]
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             result = cast(str, await _tool(agent, "task_complete")())
         assert "Deductible" in result
         assert "OON note" not in result  # inapplicable, so never outstanding
@@ -1539,13 +1559,21 @@ class TestPrematureCompletion:
     async def test_a_second_task_complete_advances_even_with_questions_still_open(self) -> None:
         # THE no-deadlock property. A rep who cannot answer never empties gap_fields, so an
         # unconditional guard would refuse every completion and strand the call on this task.
+        # A refusal budget of 2 needs three task_complete calls, with a real rep turn between
+        # retries — coverage_task owes 2 questions here, so the turn ceiling backstops the
+        # budget instead of racing ahead of it.
         controller, _ = _controller(_gap_plan())
-        agent = controller.agents[0]
+        controller.update_answers({"sections.a.in_network": "No"})  # opens oon_note too
+        agent = controller.agents[2]
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             assert isinstance(await _tool(agent, "task_complete")(), str)
-            second = await _tool(agent, "task_complete")()
-        assert isinstance(second, Agent)
-        assert second is not agent
+            await _rep_turn(agent)
+            assert isinstance(await _tool(agent, "task_complete")(), str)
+            await _rep_turn(agent)
+            third = await _tool(agent, "task_complete")()
+        assert isinstance(third, Agent)
+        assert third is not agent
 
     @pytest.mark.asyncio
     async def test_a_complete_task_is_never_refused(self) -> None:
@@ -1571,6 +1599,7 @@ class TestPrematureCompletion:
         controller, _ = _controller(_gap_plan())
         agent = controller.agents[0]  # intro_task: rep_name required + unanswered
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             await _rep_turn(agent)
             result = await _tool(agent, "task_complete")()
         assert isinstance(result, Agent)
@@ -1582,6 +1611,7 @@ class TestPrematureCompletion:
         controller.update_answers({"sections.a.in_network": "No"})  # opens oon_note too
         agent = controller.agents[2]
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             await _rep_turn(agent)
             result = cast(str, await _tool(agent, "task_complete")())
         assert "Deductible" in result
@@ -1594,6 +1624,7 @@ class TestPrematureCompletion:
         controller, _ = _controller(_panel_plan())
         agent = controller.agents[0]
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             await _rep_turn(agent, "Covered, twenty dollar copay, ten percent coinsurance.")
             result = await _tool(agent, "task_complete")()
         assert isinstance(result, Agent)
@@ -1606,6 +1637,7 @@ class TestPrematureCompletion:
         controller, _ = _controller(_panel_plan(extra_field=True))
         agent = controller.agents[0]
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             await _rep_turn(agent)
             result = await _tool(agent, "task_complete")()
         assert isinstance(result, Agent)

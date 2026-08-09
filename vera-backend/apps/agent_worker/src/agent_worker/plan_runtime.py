@@ -86,6 +86,9 @@ _GAP_REASK_DIRECTIVE = (
 # Consecutive gap_complete refusals that shrink nothing before the guard gives up.
 _GAP_FRUITLESS_REFUSALS = 2
 
+# Consecutive task_complete refusals that shrink nothing before the guard gives up.
+_TASK_FRUITLESS_REFUSALS = 2
+
 
 def _gap_block(title: str, fields: list[PlanFieldDescriptor]) -> str:
     """Instruction block for a gap agent, listing every question it still owes."""
@@ -226,8 +229,13 @@ class PlanTaskAgent(Agent):
         self._task_index = task_index
         self._task = controller.plan.tasks[task_index]
         self._task_block = f"# Current task: {self._task.title}\n{self._task.prompt}"
-        # Spent once per task: a premature task_complete is refused, a second one is honoured.
-        self._completion_refused = False
+        # Questions owed when the task was ENTERED. The ceiling must measure the same
+        # window as `_rep_turns` (which accumulates over the whole task); comparing it
+        # against the CURRENTLY outstanding count let an 11-turn task clear a 5-question
+        # bar and hand off with six questions unasked.
+        self._questions_at_entry = 0
+        self._refusals = 0
+        self._outstanding_at_last_refusal: int | None = None
         self._rep_turns = 0
         super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
 
@@ -265,6 +273,7 @@ class PlanTaskAgent(Agent):
         if await self._skip_when_nothing_applies():
             return
         await self._apply_gating()
+        self._questions_at_entry = self._controller.owed_question_count(self._task_index)
         # Read before opening_line — that call flips `opened` as a side effect.
         is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
@@ -365,26 +374,36 @@ class PlanTaskAgent(Agent):
         return successor
 
     def _refuse_premature_completion(self) -> str | None:
-        """Send the agent back for this task's still-open required questions, ONCE.
+        """Send the agent back for this task's still-open required questions.
 
-        The deterministic half of the gating fix: the prompt can only make a correct handoff
-        likely, and the financial task skipped itself on a lighter model despite it. A tool that
-        returns output sets LiveKit's `reply_required`, so the refusal buys a forced follow-up
-        turn in which the question actually gets asked (see VeraAgent._end_call).
+        Two bounds, because a rep who cannot answer never empties `gap_fields` and an
+        unconditional guard would strand the plan on this task:
 
-        Refuses at most once per task BY DESIGN. A rep who cannot answer never empties
-        `gap_fields`, so an unconditional guard would refuse every completion for the rest of
-        the call and strand the plan on this task. One retry, then the end-of-call gap pass
-        remains the backstop."""
+        * a turn ceiling measured over the SAME window on both sides — rep turns across the
+          task against the questions owed when the task was entered. N questions cannot be
+          asked in fewer than N exchanges;
+        * a refusal budget, since the Observer extracts in a detached pass and the answer to
+          the task's last question is never on file here. Progress — the outstanding set
+          shrank — resets it, so a task still landing answers keeps its runway.
+        """
         outstanding = self._controller.gap_fields(self._task_index)
-        if not outstanding or self._completion_refused:
+        if not outstanding:
             return None
-        # The Observer extracts in a detached pass, so the answer to the task's last question is
-        # never on file yet here; judge by turns instead, since N questions cannot have been asked
-        # in fewer than N exchanges. Coarse until answers carry the asking task's index.
-        if self._rep_turns >= self._controller.owed_question_count(self._task_index):
+        if self._rep_turns >= self._questions_at_entry:
             return None
-        self._completion_refused = True
+        shrank = (
+            self._outstanding_at_last_refusal is None
+            or len(outstanding) < self._outstanding_at_last_refusal
+        )
+        self._refusals = 0 if shrank else self._refusals + 1
+        if self._refusals >= _TASK_FRUITLESS_REFUSALS:
+            logger.info(
+                "task %s advancing with %d question(s) still open",
+                self._task.task_key,
+                len(outstanding),
+            )
+            return None
+        self._outstanding_at_last_refusal = len(outstanding)
         logger.info(
             "task %s: completion refused, %d required question(s) still open",
             self._task.task_key,
@@ -393,7 +412,7 @@ class PlanTaskAgent(Agent):
         return (
             "Not yet — these required questions of the current task have no answer on file. "
             "Ask the representative for them now (one at a time), and call task_complete once "
-            f"they are answered or the representative says they cannot answer:\n"
+            "they are answered or the representative says they cannot answer:\n"
             f"{_field_lines(outstanding)}"
         )
 
@@ -540,8 +559,8 @@ class GapTaskAgent(Agent):
         """Send the sweep back for the questions it has not asked yet, re-listing them.
 
         The prompt can only make full coverage likely; this is what enforces it. The main pass
-        refuses at most ONCE (see `_refuse_premature_completion`) because this pass backstops it
-        — but nothing backstops this one, and it runs once, so whatever it leaves unasked is
+        has its own turn ceiling and refusal budget (see `_refuse_premature_completion`) — but
+        nothing backstops this one, and it runs once, so whatever it leaves unasked is
         unreachable for the rest of the call.
 
         Two bounds, because a rep who cannot answer never empties `gap_fields` and an
