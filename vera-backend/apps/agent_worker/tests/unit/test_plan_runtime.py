@@ -1550,24 +1550,31 @@ def test_an_hmo_plan_owes_the_referral_question_and_a_ppo_plan_does_not() -> Non
 @pytest.mark.asyncio
 async def test_a_task_with_every_question_answered_completes_immediately() -> None:
     """No spurious refusal: a task owing nothing hands off on the first call, whatever
-    the turn count."""
+    the turn count.
+
+    `on_enter` must run BEFORE `update_answers` — entering against zero answers snapshots
+    a non-zero `_questions_at_entry`, so the turn ceiling (`_rep_turns >= _questions_at_entry`,
+    0 >= 14) stays False and cannot itself return None. Only the empty-`gap_fields` exit can
+    free `task_complete` here; entering after the answers were already on file would zero the
+    snapshot too and let the turn ceiling mask that exit instead of testing it.
+    """
     controller, _ = _controller(_ibv_plan())
     index = _task_index(controller, "insurance_basics")
-    answers = dict(_RUN_B_ANSWERS) | {
-        _S + "benefit_coverage." + key: "X"
-        for key in (
-            "plan_effective_date",
-            "plan_year_information",
-            "telehealth_covered",
-            "plan_fund_type",
-            "employer_support_size",
-            "infertility_plan_mandate",
-        )
-    }
-    controller.update_answers(answers)
     agent = controller.agents[index]
     with _session_patch(agent, MagicMock()):
         await agent.on_enter()
+        answers = dict(_RUN_B_ANSWERS) | {
+            _S + "benefit_coverage." + key: "X"
+            for key in (
+                "plan_effective_date",
+                "plan_year_information",
+                "telehealth_covered",
+                "plan_fund_type",
+                "employer_support_size",
+                "infertility_plan_mandate",
+            )
+        }
+        controller.update_answers(answers)
         assert isinstance(await _tool(agent, "task_complete")(), Agent)
 
 
