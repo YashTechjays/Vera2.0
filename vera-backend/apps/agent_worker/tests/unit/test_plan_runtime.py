@@ -281,6 +281,20 @@ class TestHandoff:
         assert span.attributes["vera.handoff.reason"] == "task_complete"
 
     @pytest.mark.asyncio
+    async def test_a_clean_completion_tags_zero_owed_and_not_refused(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()  # `_plan()` tasks carry no fields — nothing is ever owed
+        agent = controller.agents[0]
+        tracer = trace.get_tracer("test")
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.completion.owed_count"] == 0
+        assert span.attributes["vera.completion.refused"] is False
+
+    @pytest.mark.asyncio
     async def test_task_complete_to_wrap_up_tags_the_sentinel(self, otel_spans: Any) -> None:
         from opentelemetry import trace
 
@@ -1819,6 +1833,44 @@ class TestPrematureCompletion:
         # Pins the CONTRACT, not just reachability: `_TASK_FRUITLESS_REFUSALS` is named for
         # the count, and a check-before-increment ordering silently makes it 3.
         assert sum(isinstance(r, str) for r in results) == _TASK_FRUITLESS_REFUSALS
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_tags_its_owed_count_on_the_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, str)
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.completion.owed_count"] == 1  # rep_name only
+        assert span.attributes["vera.completion.refused"] is True
+
+    @pytest.mark.asyncio
+    async def test_advancing_via_the_refusal_budget_still_tags_the_owed_count(
+        self, otel_spans: Any
+    ) -> None:
+        """The motivating case: the refusal budget's escape valve advances a task while
+        `gap_fields` is still non-empty — what a model-authored `reason` string used to hide."""
+        from opentelemetry import trace
+
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        tracer = trace.get_tracer("test")
+        result: Any = None
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            for _ in range(_TASK_FRUITLESS_REFUSALS + 3):
+                result = await _tool(agent, "task_complete")()
+                if isinstance(result, Agent):
+                    break
+        assert isinstance(result, Agent)
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.completion.owed_count"] == 1  # rep_name still unanswered
+        assert span.attributes["vera.completion.refused"] is False
 
 
 class TestFieldLines:

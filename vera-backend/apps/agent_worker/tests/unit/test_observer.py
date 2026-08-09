@@ -239,6 +239,55 @@ class TestRecording:
         assert run_state.records[0][3] == 1  # evidence_seq = latest rep turn seq
 
 
+class TestAnswerRecordedSpan:
+    """Path, confidence and task only — never the value — fixing a call that recorded 233
+    answers and exposed zero field paths in its trace."""
+
+    @pytest.mark.asyncio
+    async def test_a_recorded_answer_emits_a_span_naming_the_path_but_not_the_value(
+        self, otel_spans: Any
+    ) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _rep("yes it is"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.observer.answer_recorded"
+        )
+        assert span.attributes["vera.field.path"] == "sections.a.x"
+        assert span.attributes["vera.field.confidence"] == 90
+        assert span.attributes["vera.task.key"] == "t1"
+        # PHI must never reach a span (design's per-span denylist check): substring-checked
+        # against the span name, every attribute VALUE, status description and events — not
+        # merely "the path is present but the value happens not to collide with it".
+        assert_no_phi_values(span, "Yes")
+        assert "Yes" not in str(span.attributes)
+
+    @pytest.mark.asyncio
+    async def test_confidence_is_omitted_rather_than_coerced_when_absent(
+        self, otel_spans: Any
+    ) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", None)])
+        manager, _, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _rep("yes it is"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.observer.answer_recorded"
+        )
+        assert "vera.field.confidence" not in span.attributes
+
+    @pytest.mark.asyncio
+    async def test_task_key_is_omitted_when_no_task_is_active(self, otel_spans: Any) -> None:
+        # `_active_index` is only ever None while no TaskObserver is feeding turns, so this
+        # is not reachable through the normal ingest path — exercised directly on the
+        # write-path method instead.
+        manager, _, _, _ = _manager(_plan(), FakeExtractor([]))
+        manager._active_index = None
+        await manager._record_locked(ExtractedAnswer("sections.a.x", "Yes", 90), None)
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.observer.answer_recorded"
+        )
+        assert "vera.task.key" not in span.attributes
+
+
 class TestStreamFiltering:
     """The Observer shares one mixed stream with the SSE/finalizer — non-transcript frames
     must be invisible to it (no pass, no seq slot, no task rotation)."""

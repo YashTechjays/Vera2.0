@@ -368,7 +368,9 @@ class PlanTaskAgent(Agent):
             # A second chain-advancing call in one turn traverses a task without ever
             # entering its question loop. Inert, not a second Agent.
             return "Already moving on — continue with the next question."
-        if (refusal := self._refuse_premature_completion()) is not None:
+        refusal = self._refuse_premature_completion()
+        self._tag_completion_decision(refusal)
+        if refusal is not None:
             return refusal
         outro = self._task.outro
         self._controller.note_task_outro(outro)
@@ -425,6 +427,26 @@ class PlanTaskAgent(Agent):
             "they are answered or the representative says they cannot answer:\n"
             f"{_field_lines(outstanding)}"
         )
+
+    def _tag_completion_decision(self, refusal: str | None) -> None:
+        """Owed-question count and refusal outcome, tagged on EVERY `task_complete` call —
+        including one that advances anyway (turn ceiling / refusal budget spent) with fields
+        still owed, the silently-missed-question failure a model-authored `reason` used to hide."""
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.completion.owed_count": len(
+                        self._controller.gap_fields(self._task_index)
+                    ),
+                    "vera.completion.refused": refusal is not None,
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-complete decision span tagging failed (%s)",
+                self._controller.room_name,
+                type(exc).__name__,
+            )
 
     def _tag_task_complete_handoff(self, successor: Agent) -> None:
         try:

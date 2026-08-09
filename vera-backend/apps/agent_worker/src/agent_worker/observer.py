@@ -529,6 +529,27 @@ class ObserverManager:
         # next pass (the CP consumer is idempotent under the redelivery).
         self._answers[answer.field_path] = answer.value
         self._controller.update_answers(self._answers)
+        # Path, confidence and task only — never the value (PHI). Both knobs off for the
+        # same reason as the rule-engine span below: this span's body sits beside raw
+        # extracted values.
+        with tracer.start_as_current_span(
+            "vera.observer.answer_recorded",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as answer_span:
+            try:
+                attrs: dict[str, str | int] = {"vera.field.path": answer.field_path}
+                if self._active_index is not None:
+                    attrs["vera.task.key"] = self._plan.tasks[self._active_index].task_key
+                if answer.confidence is not None:
+                    attrs["vera.field.confidence"] = answer.confidence
+                answer_span.set_attributes(attrs)
+            except Exception as exc:
+                logger.warning(
+                    "observer manager %s: answer-recorded span tagging failed (%s)",
+                    self._room,
+                    type(exc).__name__,
+                )
         # This span's body reads `self._answers`, raw extracted field values. `evaluate` is
         # pure string comparison and is documented not to raise, so the two knobs below are
         # defense-in-depth here — but they stay off, as on every Vera-owned span whose body
