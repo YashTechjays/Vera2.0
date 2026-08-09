@@ -38,7 +38,9 @@ from vera_core.forms.call_plan import (
     PlanSession,
     PlanTask,
     compile_call_plan,
+    fuse_prefill,
 )
+from vera_core.forms.catalog.disease_only import build_disease_only
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.dsl import AllCondition, Comparison, RefCondition, RequiredWhen
 from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
@@ -3135,3 +3137,114 @@ class TestAlternativesAwareGapFields:
         controller, _ = _controller(_pair_plan())
         controller.update_answers({})
         assert _GROUP_NAME in {f.path for f in controller.gap_fields(0)}
+
+
+def _fused_plan(build: Any, values: dict[str, Any]) -> CallPlan:
+    doc = build()
+    template = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+    return fuse_prefill(doc, template, values, current_year=2026)
+
+
+def _plan_task_index(plan: CallPlan, task_key: str) -> int:
+    return next(i for i, task in enumerate(plan.tasks) if task.task_key == task_key)
+
+
+class TestAnIntakeDefaultNeverDeletesAQuestion:
+    """The intake UI seeds every leaf `default`, so these arrive as real field_answer rows.
+    Before `gating_seed` they settled their gate at task entry and the dependent question was
+    dropped from the compiled list — recovered, if at all, by the end-of-call sweep."""
+
+    def test_enrollment_provider_survives_the_defaulted_gate(self) -> None:
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "closing_admin"))
+        }
+        assert "sections.enrollment.enrollment_provider_name" not in excluded
+        assert "sections.enrollment.enrollment_provider_phone" not in excluded
+
+    def test_renewal_date_survives_the_defaulted_gate(self) -> None:
+        plan = _fused_plan(
+            build_disease_only, {"sections.coverage_summary.benefit_year_type": "Calendar Year"}
+        )
+        controller, _ = _controller(plan)
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "policy_basics"))
+        }
+        assert "sections.coverage_summary.renewal_date" not in excluded
+
+    def test_the_gate_field_itself_becomes_owed(self) -> None:
+        """`owed_now` requires `not has_value`, so the intake row also hid the gate question
+        from the completion guard — the second half of the same failure."""
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        owed = {f.path for f in controller.gap_fields(_plan_task_index(plan, "closing_admin"))}
+        assert "sections.enrollment.enrollment_required" in owed
+
+
+class TestTheBoundsOfTheGatingChange:
+    """Both pass before the fix as well. They are the fence around it."""
+
+    def test_an_earlier_tasks_answer_still_decides_a_later_gate(self) -> None:
+        """The position half of `_settled` is untouched. `coverage_type` is collected in
+        `insurance_basics` and gates 17 questions in `financial` / `male_partner`, so those
+        stay excluded whether or not it was seeded — which is also what keeps the worker no
+        LESS decisive than the compiler (`question_plan._entry_decided`)."""
+        plan = _fused_plan(
+            build_ibv_standard, {"sections.benefit_coverage.coverage_type": "Individual"}
+        )
+        controller, _ = _controller(plan)
+        index = _plan_task_index(plan, "male_partner")
+        assert controller.applicable_fields(index) == []
+        assert len(controller.excluded_fields(index)) == 9
+        assert controller.conditional_fields(index) == []
+
+    def test_a_context_prefill_still_decides_its_gate(self) -> None:
+        """`context` is clinic-supplied background and stays authoritative — an absent spouse
+        gender must still exclude the male-partner questions rather than ask about them."""
+        plan = _fused_plan(
+            build_ibv_standard,
+            {
+                "sections.benefit_coverage.coverage_type": "Family",
+                "sections.patient_information.spouse_gender": "N/A",
+            },
+        )
+        controller, _ = _controller(plan)
+        assert len(controller.excluded_fields(_plan_task_index(plan, "male_partner"))) == 9
+
+    def test_a_confirm_prefill_still_settles_its_own_answered_check(self) -> None:
+        """`confirm` values stay in the baseline, so a prefilled member ID is not re-owed."""
+        path = "sections.insurance_information.policy_number"
+        plan = _fused_plan(build_ibv_standard, {path: "ABC123"})
+        controller, _ = _controller(plan)
+        owed = {f.path for f in controller.gap_fields(_plan_task_index(plan, "insurance_basics"))}
+        assert path not in owed
+
+
+class TestTheObserverCannotReArmTheDeletion:
+    """`ObserverManager` pushes through `update_answers` on every recorded answer. If that
+    replaced the controller's map with an unfiltered one — or if the Observer pushed its own
+    `_on_file` rather than `_recorded` — the intake default would be back in place by the time
+    `closing_admin` is entered, and the question would be deleted again on a real call while
+    every constructor-level test stayed green."""
+
+    def test_a_recorded_answer_does_not_restore_the_intake_default(self) -> None:
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        # What the Observer sends after extracting one unrelated answer earlier in the call.
+        controller.update_answers({"sections.insurance_representative.rep_name": "Pat"})
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "closing_admin"))
+        }
+        assert "sections.enrollment.enrollment_provider_name" not in excluded
+
+    def test_the_call_can_still_settle_the_gate_it_owns(self) -> None:
+        """The merge must not swallow a real answer: once the rep says "No", the provider
+        question is genuinely excluded."""
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.enrollment.enrollment_required": "No"})
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "closing_admin"))
+        }
+        assert "sections.enrollment.enrollment_provider_name" in excluded
