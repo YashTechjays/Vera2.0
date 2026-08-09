@@ -260,12 +260,7 @@ class TaskObserver:
         arrived since the last pass (so a turn finalized just before the handoff is still
         extracted, without a redundant LLM call when nothing is new)."""
         self._closed = True
-        # Discard each batch BEFORE awaiting it: `add_done_callback` runs via call_soon, so an
-        # already-finished pass stays in the set and a membership loop would spin forever.
-        while self._passes:
-            passes = list(self._passes)
-            self._passes.difference_update(passes)
-            await asyncio.gather(*passes, return_exceptions=True)
+        await self.drain_passes()
         try:
             await self._one_pass()
         except Exception as exc:
@@ -274,6 +269,18 @@ class TaskObserver:
                 self._task.task_key,
                 type(exc).__name__,
             )
+
+    async def drain_passes(self) -> None:
+        """Await in-flight passes WITHOUT closing — this observer stays live and keeps
+        taking turns afterward. Used at a handoff: the manager's own rotation is lazy (it
+        fires from the NEXT `ingest`), so the task that just finished is still `_active`,
+        not yet `_retiring`, and its last answer may still be mid-extraction."""
+        # Discard each batch BEFORE awaiting it: `add_done_callback` runs via call_soon, so an
+        # already-finished pass stays in the set and a membership loop would spin forever.
+        while self._passes:
+            passes = list(self._passes)
+            self._passes.difference_update(passes)
+            await asyncio.gather(*passes, return_exceptions=True)
 
 
 _SPEAKER_LABELS = {
@@ -304,6 +311,12 @@ class TranscriptSource(Protocol):
 # Bound how long shutdown waits for the tail loop to drain to the end sentinel before it
 # force-cancels (a crashed writer may never write the sentinel).
 _TAIL_DRAIN_TIMEOUT_S = 5.0
+
+# Default bound for drain_pending: measured extraction latency is a 15.3s median, 23.2s p90
+# (turn N's pass effectively starts around turn N+1). Since a timeout here no longer cancels
+# the pass (see drain_pending), generous is safe — this covers the p90 with headroom rather
+# than the pre-fix 10.0s, which would have timed out on the MAJORITY of real drains.
+_DRAIN_TIMEOUT_S = 25.0
 
 
 class ObserverManager:
@@ -342,6 +355,9 @@ class ObserverManager:
         self._active: TaskObserver | None = None
         # The task we just left, still taking turns for one more rep turn (see `_rotate`).
         self._retiring: TaskObserver | None = None
+        # Background tasks a drain still owes a wait to: aclose() tasks from `_schedule_close`,
+        # plus any drain_pending() batch member still pending past its timeout (kept here as a
+        # strong ref so it isn't GC'd mid-flight, and so a later drain/aclose still awaits it).
         self._closing: set[asyncio.Task[None]] = set()
         self._tail_task: asyncio.Task[None] | None = None
         # A retiring Observer's pass runs concurrently with the active one's, and `_record`
@@ -432,22 +448,34 @@ class ObserverManager:
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
 
-    async def drain_pending(self, timeout: float = 10.0) -> None:  # noqa: ASYNC109
-        """Await the retiring observer's final pass and any in-flight closes.
+    async def drain_pending(self, timeout: float = _DRAIN_TIMEOUT_S) -> None:  # noqa: ASYNC109
+        """Await whatever extraction is still in flight before a caller reads the answer map.
+
+        Three sources, because the manager's own rotation is LAZY (`_rotate` fires from the
+        NEXT `ingest`, not from a cursor change): the task that just finished is still
+        `_active`, not yet `_retiring`, so its last answer may be mid-pass right here; a
+        prior handoff may have left an observer in `_retiring` with its grace turn not yet
+        used; and `_closing` may hold aclose() tasks from an even earlier handoff.
 
         The gap sweep decides what is still owed; extraction lands ~15s after the turn that
-        produced it (p90 23s), so without this the sweep re-asks the last question the rep
-        just answered. Bounded and best-effort: on timeout the sweep proceeds on whatever
-        landed, because a barrier that can hang is worse than a stale answer set."""
+        produced it (p90 23s), so without draining all three the sweep re-asks the last
+        question the rep just answered. Bounded and best-effort: `asyncio.wait` (never
+        `wait_for`/`asyncio.timeout`) so a timeout returns the caller WITHOUT cancelling the
+        extraction it was waiting for — a cancelled pass is an answer lost for good, which is
+        worse than the phantom gap this exists to fix. Whatever is still pending on timeout is
+        kept in `_closing` (a strong ref, so it isn't GC'd mid-flight) for a later drain or the
+        final `aclose` to pick up; its answer still lands, just later than this call waited."""
         self._close_retiring()
-        if not self._closing:
+        batch: set[asyncio.Task[None]] = set(self._closing)
+        self._closing.difference_update(batch)
+        if self._active is not None:
+            batch.add(asyncio.create_task(self._active.drain_passes()))
+        if not batch:
             return
-        try:
-            async with asyncio.timeout(timeout):
-                while self._closing:
-                    await asyncio.gather(*list(self._closing), return_exceptions=True)
-        except TimeoutError:
+        _done, pending = await asyncio.wait(batch, timeout=timeout)
+        if pending:
             logger.warning("observer manager %s: drain timed out", self._room)
+            self._closing.update(pending)
 
     async def _record(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
         async with self._record_lock:

@@ -69,6 +69,20 @@ class FakeObserverManager:
         self.drains += 1
 
 
+class FillsDuringDrainObserverManager:
+    """A fake whose `drain_pending` fills the controller's answers itself — pins that
+    `on_enter` AWAITS the drain before reading `gap_fields`, not merely calls it. Moving the
+    `await` below the `gap_fields` read would keep `test_on_enter_awaits_the_attached_
+    observers_drain` green (it only counts calls) while re-introducing the phantom gap."""
+
+    def __init__(self, controller: PlanRunController, answers: dict[str, Any]) -> None:
+        self._controller = controller
+        self._answers = answers
+
+    async def drain_pending(self) -> None:
+        self._controller.update_answers(self._answers)
+
+
 def _plan() -> CallPlan:
     return CallPlan(
         schema_name="Test",
@@ -2149,6 +2163,26 @@ class TestGapAgent:
         agent = controller.gap_agents[0]
         with _session_patch(agent, MagicMock()):
             await agent.on_enter()  # must not raise or hang
+
+    @pytest.mark.asyncio
+    async def test_on_enter_reads_gap_fields_only_after_the_drain_lands(self) -> None:
+        # intro_task's only required field is rep_name; the fake fills it FROM INSIDE
+        # drain_pending. If on_enter read gap_fields before awaiting the drain, it would
+        # still see rep_name owed and re-ask it.
+        controller, _ = _controller(_gap_plan())
+        controller.attach_observer(
+            cast(
+                Any, FillsDuringDrainObserverManager(controller, {"sections.intro.rep_name": "Pat"})
+            )
+        )
+        agent = controller.gap_agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+        mock_session.generate_reply.assert_not_called()
+        # gated_task/coverage_task were never visited, so the pass skips straight to the
+        # closer — same landing spot as test_on_enter_with_no_gaps_moves_on_without_speaking.
+        mock_session.update_agent.assert_called_once_with(controller.agents[_CLOSER])
 
 
 class TestGapCoverage:

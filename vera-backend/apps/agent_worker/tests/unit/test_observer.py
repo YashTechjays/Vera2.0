@@ -764,10 +764,23 @@ def test_extraction_instructions_carry_the_routing_note() -> None:
 
 class TestDrainPending:
     @pytest.mark.asyncio
+    async def test_drain_awaits_the_still_active_observers_in_flight_pass(self) -> None:
+        """The real call site: `note_task_entered` then `drain_observer`, with no transcript
+        turn in between. `_rotate` is LAZY (it fires from the NEXT `ingest`), so the task that
+        just finished is still `_active` here — never `_retiring`. Draining only
+        `_retiring`/`_closing` (the fix's first cut) misses this pass entirely, and the sweep
+        re-asks a question the rep just answered."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.05)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))  # schedules a pass on the ACTIVE observer
+        await manager.drain_pending(timeout=5.0)
+        assert run_state.records, "the active observer's in-flight pass was not drained"
+
+    @pytest.mark.asyncio
     async def test_drain_awaits_the_retiring_observers_final_pass(self) -> None:
-        """A rep answer finalized in the last turn before a handoff is extracted by the
-        retiring observer's drain. The sweep must wait for it, or it re-asks a question
-        the rep has just answered."""
+        """The shutdown-adjacent case: by the time `aclose()` retires the active observer
+        (`_rotate(None)`), a straddling answer sits in `_retiring`, not `_active`. Still a
+        real path (final call teardown), just not the one the gap sweep hits."""
         extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.05)
         manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
         manager.ingest(_rep("yes it is"))
@@ -778,10 +791,56 @@ class TestDrainPending:
     @pytest.mark.asyncio
     async def test_drain_returns_on_timeout_instead_of_stalling(self) -> None:
         """The barrier must never become a hang: a slow extractor falls through."""
-        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=5.0)
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.2)
         manager, _run_state, _bus, _controller = _manager(
             _plan([_field("sections.a.b")]), extractor
         )
         manager.ingest(_rep("yes it is"))
         manager._rotate(None)
         await asyncio.wait_for(manager.drain_pending(timeout=0.05), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_drain_timeout_does_not_cancel_the_pending_extraction(self) -> None:
+        """`asyncio.timeout` cancels on expiry, and that cancellation cascades through
+        `gather` into every awaited child — including the extraction pass itself, which is
+        strictly worse than the phantom gap this barrier exists to fix (the answer is not
+        late, it is gone). `asyncio.wait` never cancels: the pass keeps running after
+        `drain_pending` returns, and its answer still lands, just later."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.1)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)
+        await manager.drain_pending(timeout=0.02)  # times out well before the 0.1s pass ends
+        assert run_state.records == [], "should not have landed yet at this point"
+        await asyncio.sleep(0.15)  # let the still-running pass finish in the background
+        assert run_state.records, "the pending extraction was cancelled, not just delayed"
+
+    @pytest.mark.asyncio
+    async def test_drain_does_not_wedge_the_loop_on_already_done_closing_entries(self) -> None:
+        """Regression fence for the hazard `TaskObserver.aclose` already guards against (see
+        its comment): gathering already-completed tasks without removing them from the
+        tracked set first can resolve WITHOUT ever yielding to the loop, so a `while
+        self._closing:` loop around it spins forever rather than merely lingering. Constructs
+        the state directly (a done task in `_closing` with no done_callback to discard it) so
+        the repro does not depend on winning a callback-timing race."""
+
+        async def _noop() -> None:
+            return None
+
+        done_task = asyncio.create_task(_noop())
+        await done_task  # already completed; never wired to a callback that discards it
+        manager, _run_state, _bus, _controller = _manager(_plan(), FakeExtractor([]))
+        manager._closing.add(done_task)
+
+        ticked = False
+
+        async def _tick() -> None:
+            nonlocal ticked
+            await asyncio.sleep(0)
+            ticked = True
+
+        ticker = asyncio.create_task(_tick())
+        await asyncio.wait_for(manager.drain_pending(timeout=1.0), timeout=1.0)
+        await ticker
+        assert ticked, "a concurrent task never got a turn — the loop was starved"
+        assert done_task not in manager._closing
