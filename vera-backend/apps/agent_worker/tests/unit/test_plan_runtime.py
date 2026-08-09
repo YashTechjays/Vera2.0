@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from conftest import chat_ctx_texts, ctx_texts
@@ -28,7 +29,14 @@ from agent_worker.plan_runtime import (
     _field_lines,
 )
 from agent_worker.prompt import SCOPE_DISCIPLINE
-from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
+from vera_core.forms.call_plan import (
+    CallPlan,
+    PlanFieldDescriptor,
+    PlanSession,
+    PlanTask,
+    compile_call_plan,
+)
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.dsl import AllCondition, Comparison, RefCondition, RequiredWhen
 from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
@@ -820,11 +828,25 @@ def _field(
     )
 
 
+def _panels_for(fields: list[PlanFieldDescriptor]) -> list[PromptPanel]:
+    """One question per field — the shape a plain (non-fanned) ask compiles to. Gives a
+    hand-built fixture the "every field reachable from exactly one question" shape Task 2's
+    validator guarantees for a real compiled plan, so `gap_fields`/`owed_question_count`
+    (now tree-joined) see the same fields the old field-only walk did."""
+    return [PromptPanel(items=[_question(f.title, f.path) for f in fields])]
+
+
 def _gap_plan() -> CallPlan:
     """Four tasks; the LAST (`closing_task`) is the closer — like the DSL's `wrap_up` task
     that collects the reference number and says goodbye. The gap pass sweeps the three
     substantive tasks BEFORE it. `gated_task` is only applicable when in_network == "Yes";
     `coverage_task.oon_note` gates the opposite way."""
+    intro_fields = [
+        _field("sections.intro.rep_name", "Representative name"),
+        _field("sections.intro.notes", "Notes", required=False),
+    ]
+    gated_fields = [_field("sections.gated.copay", "Copay")]
+    closing_fields = [_field("sections.close.ref_number", "Reference number")]
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -837,17 +859,16 @@ def _gap_plan() -> CallPlan:
                 title="Introduction",
                 intro="Hello rep.",
                 prompt="Intro.",
-                fields=[
-                    _field("sections.intro.rep_name", "Representative name"),
-                    _field("sections.intro.notes", "Notes", required=False),
-                ],
+                fields=intro_fields,
+                panels=_panels_for(intro_fields),
             ),
             PlanTask(
                 task_key="gated_task",
                 title="Gated",
                 prompt="In network only.",
                 applicable_when=Comparison(field="sections.a.in_network", op="eq", value="Yes"),
-                fields=[_field("sections.gated.copay", "Copay")],
+                fields=gated_fields,
+                panels=_panels_for(gated_fields),
             ),
             PlanTask(
                 task_key="coverage_task",
@@ -885,7 +906,8 @@ def _gap_plan() -> CallPlan:
                 title="Wrap Up",
                 prompt="Collect the reference number, then end the call.",
                 outro="have a wonderful day!",
-                fields=[_field("sections.close.ref_number", "Reference number")],
+                fields=closing_fields,
+                panels=_panels_for(closing_fields),
             ),
         ],
     )
@@ -1054,6 +1076,21 @@ def _intra_task_gate_plan() -> CallPlan:
     """closing_admin's shape: `tpa_name` is gated on `tpa_exists`, asked in the SAME task, so
     at entry that gate is undecided — not excluded. `auth_dept` is gated on a field the
     previous task collected, so at entry it IS decided."""
+    coverage_fields = [_field("sections.cov.prior_auth", "Prior auth", values=["Yes", "No"])]
+    admin_fields = [
+        _field("sections.admin.tpa_exists", "TPA Exists", values=["Yes", "No"]),
+        _field(
+            "sections.admin.tpa_name",
+            "TPA Name",
+            gates=(Comparison(field="sections.admin.tpa_exists", op="eq", value="Yes"),),
+        ),
+        _field(
+            "sections.admin.auth_dept",
+            "Authorization Department Name",
+            gates=(Comparison(field="sections.cov.prior_auth", op="eq", value="Yes"),),
+        ),
+    ]
+    closing_fields = [_field("sections.close.ref_number", "Reference number")]
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -1065,33 +1102,22 @@ def _intra_task_gate_plan() -> CallPlan:
                 task_key="coverage_task",
                 title="Coverage",
                 prompt="Coverage.",
-                fields=[_field("sections.cov.prior_auth", "Prior auth", values=["Yes", "No"])],
+                fields=coverage_fields,
+                panels=_panels_for(coverage_fields),
             ),
             PlanTask(
                 task_key="admin_task",
                 title="Administrative Details",
                 prompt="Admin.",
-                fields=[
-                    _field("sections.admin.tpa_exists", "TPA Exists", values=["Yes", "No"]),
-                    _field(
-                        "sections.admin.tpa_name",
-                        "TPA Name",
-                        gates=(
-                            Comparison(field="sections.admin.tpa_exists", op="eq", value="Yes"),
-                        ),
-                    ),
-                    _field(
-                        "sections.admin.auth_dept",
-                        "Authorization Department Name",
-                        gates=(Comparison(field="sections.cov.prior_auth", op="eq", value="Yes"),),
-                    ),
-                ],
+                fields=admin_fields,
+                panels=_panels_for(admin_fields),
             ),
             PlanTask(
                 task_key="closing_task",
                 title="Wrap Up",
                 prompt="Reference number then end.",
-                fields=[_field("sections.close.ref_number", "Reference number")],
+                fields=closing_fields,
+                panels=_panels_for(closing_fields),
             ),
         ],
     )
@@ -1216,10 +1242,22 @@ def _panel_plan(*, extra_field: bool = False) -> CallPlan:
     )
 
 
-def _multi_gap_plan() -> CallPlan:
+def _multi_gap_plan(*, with_panels: bool = True) -> CallPlan:
     """A sweepable task with FIVE required-and-unanswered fields — the shape one field per
     task cannot express. Two share the title "Covered" (the CPT shape), so its list exercises
-    numbering and path qualification together."""
+    numbering and path qualification together.
+
+    `with_panels=False` reproduces a task with no compiled question tree at all (never
+    produced by a real compile — Task 2 guarantees total coverage — but exercised here to
+    prove such a task owes nothing countable rather than falling back to its field list)."""
+    intake_fields = [
+        _field("sections.intake.rep_name", "Representative name"),
+        _field("sections.intake.call_ref", "Call reference"),
+        _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
+        _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
+        _field("sections.intake.deductible", "Deductible", values=["Met", "Not met"]),
+    ]
+    closing_fields = [_field("sections.close.ref_number", "Reference number")]
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -1232,20 +1270,16 @@ def _multi_gap_plan() -> CallPlan:
                 title="Intake",
                 intro="Hello rep.",
                 prompt="Intake.",
-                fields=[
-                    _field("sections.intake.rep_name", "Representative name"),
-                    _field("sections.intake.call_ref", "Call reference"),
-                    _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
-                    _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
-                    _field("sections.intake.deductible", "Deductible", values=["Met", "Not met"]),
-                ],
+                fields=intake_fields,
+                panels=_panels_for(intake_fields) if with_panels else [],
             ),
             PlanTask(task_key="coverage_task", title="Coverage", prompt="Coverage."),
             PlanTask(
                 task_key="closing_task",
                 title="Wrap Up",
                 prompt="Collect the reference number, then end the call.",
-                fields=[_field("sections.close.ref_number", "Reference number")],
+                fields=closing_fields,
+                panels=_panels_for(closing_fields),
             ),
         ],
     )
@@ -1380,7 +1414,7 @@ class TestCompletenessRule:
 
     def test_a_task_with_no_compiled_panels_gets_no_rule(self) -> None:
         # Nothing to be complete about, and a "0 questions" line would be worse than silence.
-        controller, _ = _controller(_multi_gap_plan())
+        controller, _ = _controller(_multi_gap_plan(with_panels=False))
         assert "COMPLETENESS" not in controller.agents[0].instructions
 
     @pytest.mark.asyncio
@@ -1408,13 +1442,19 @@ class TestOwedQuestionCount:
         assert len(controller.gap_fields(0)) == 3
         assert controller.owed_question_count(0) == 1
 
-    def test_a_task_with_no_compiled_panels_still_counts_fields(self) -> None:
-        controller, _ = _controller(_multi_gap_plan())
-        assert controller.owed_question_count(0) == 5
+    def test_a_task_with_no_compiled_panels_owes_nothing_countable(self) -> None:
+        # A field list is no longer a fallback source of truth: with no question tree to walk,
+        # there is nothing the guard can count against (never produced by a real compile, where
+        # Task 2's coverage validator guarantees every field has a covering question).
+        controller, _ = _controller(_multi_gap_plan(with_panels=False))
+        assert controller.owed_question_count(0) == 0
 
-    def test_a_gap_no_question_covers_counts_as_an_ask_of_its_own(self) -> None:
+    def test_an_orphan_field_no_question_covers_is_never_counted(self) -> None:
+        # Never produced by a real compile (Task 2's validator guarantees every field has a
+        # covering question); retired the old "+1 ask of its own" fallback that compensated
+        # for exactly the tree/field-list disagreement this task removes.
         controller, _ = _controller(_panel_plan(extra_field=True))
-        assert controller.owed_question_count(0) == 2
+        assert controller.owed_question_count(0) == 1
 
     def test_a_question_whose_targets_are_all_answered_is_not_owed(self) -> None:
         controller, _ = _controller(_panel_plan())
@@ -1426,6 +1466,50 @@ class TestOwedQuestionCount:
         controller.update_answers({_CPT_COVERED: "Yes"})
         assert len(controller.gap_fields(0)) == 2
         assert controller.owed_question_count(0) == 1
+
+
+def _ibv_plan() -> CallPlan:
+    return compile_call_plan(
+        build_ibv_standard(), None, schema_version_id=uuid4(), prompt_version_id=None
+    )
+
+
+# `_task_index` already exists above (TestEntryDecidability's `_gating_plan` fixtures) — reused
+# rather than redefined.
+_S = "sections."
+_RUN_B_ANSWERS = {
+    _S + "insurance_information.doctor_inside_network": "Yes",
+    _S + "insurance_information.facility_inside_network": "Yes",
+    _S + "insurance_information.plan_type": "PPO",
+    _S + "insurance_information.cob_status": "Secondary",
+    _S + "insurance_information.policy_number": "X",
+    _S + "insurance_information.group_name": "X",
+    _S + "insurance_information.group_number": "X",
+    _S + "insurance_information.policy_situs": "X",
+    _S + "benefit_coverage.benefit_year_type": "Calendar Year",
+    _S + "benefit_coverage.coverage_type": "Family",
+    _S + "patient_information.spouse_partner_name": "X",
+    _S + "patient_information.spouse_partner_dob": "X",
+}
+
+
+def test_run_b_owes_six_questions_including_the_defaulted_one() -> None:
+    """Live trace 6e1f496cb72d0182af27281c90bdca64. `gap_fields` reported 5 because
+    `is_satisfied` short-circuits on `default is not None`, hiding telehealth_covered.
+    The tree-joined owed set consults no default, so it is 6."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    controller.update_answers(dict(_RUN_B_ANSWERS))
+    owed = {f.path.split(".")[-1] for f in controller.gap_fields(index)}
+    assert owed == {
+        "plan_effective_date",
+        "plan_year_information",
+        "telehealth_covered",
+        "plan_fund_type",
+        "employer_support_size",
+        "infertility_plan_mandate",
+    }
+    assert "pcp_referral_required" not in owed  # gated out: plan_type is not HMO
 
 
 class TestPrematureCompletion:
@@ -1514,13 +1598,16 @@ class TestPrematureCompletion:
         assert isinstance(result, Agent)
 
     @pytest.mark.asyncio
-    async def test_a_gap_no_panel_question_covers_still_holds_the_ceiling_up(self) -> None:
+    async def test_an_orphan_field_cannot_hold_the_ceiling_up(self) -> None:
+        # Never produced by a real compile (Task 2's validator guarantees every field has a
+        # covering question) — an orphan field is invisible to gap_fields, so the one real
+        # panel question's turn heuristic is all that gates completion here.
         controller, _ = _controller(_panel_plan(extra_field=True))
         agent = controller.agents[0]
         with _session_patch(agent, MagicMock()):
             await _rep_turn(agent)
-            result = cast(str, await _tool(agent, "task_complete")())
-        assert "Prior Authorization Required" in result
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
 
     @pytest.mark.asyncio
     async def test_takeover_still_wins_over_the_guard(self) -> None:
@@ -2563,7 +2650,10 @@ _GROUP_NAME = "sections.svc.group_name"
 
 def _pair_plan() -> CallPlan:
     """One spoken question over an either/or cost pair, as `cost_pair` authors it, plus a
-    defaulted field and a second code's copay that must NOT be satisfied by the first's."""
+    second code's copay (its own question — a fan-out this task's join must not conflate
+    with the pair) that must NOT be satisfied by the first's, and a defaulted field left
+    with no covering question at all (default's `is_satisfied` exemption never reaches
+    something the tree can't see either way — see `TestAlternativesAwareGapFields`)."""
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -2586,7 +2676,11 @@ def _pair_plan() -> CallPlan:
                     PromptPanel(
                         title="CPT 1",
                         items=[_question("What is the copay or coinsurance?", _COPAY, _COINS)],
-                    )
+                    ),
+                    PromptPanel(
+                        title="CPT 2",
+                        items=[_question("What is the copay?", _OTHER_COPAY)],
+                    ),
                 ],
             ),
             PlanTask(task_key="closing_task", title="Wrap Up", prompt="Close."),

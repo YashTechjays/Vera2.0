@@ -36,7 +36,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from vera_core.forms.conditions import alternative_pairs, leaf_gates
+from vera_core.forms.conditions import (
+    alternative_pairs,
+    has_value,
+    is_applicable,
+    is_required,
+    leaf_gates,
+)
 from vera_core.forms.dsl import (
     PATH_PREFIX,
     PLACEHOLDER_RE,
@@ -52,7 +58,12 @@ from vera_core.forms.dsl import (
     Validation,
 )
 from vera_core.forms.prompting import PromptDocument, render_task_prompts
-from vera_core.forms.question_plan import PromptPanel, hydrate_panels
+from vera_core.forms.question_plan import (
+    PromptPanel,
+    PromptQuestion,
+    hydrate_panels,
+    iter_questions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +141,48 @@ class CallPlan(_Model):
     prefilled: dict[str, Any] = Field(default_factory=dict)  # {path: raw intake value}
     known_information: str | None = None  # "Title: value" lines, context-role leaves only
     on_file_values: str | None = None  # "Title: value" lines, confirm-role prefills (to confirm)
+
+
+def owed_now(
+    task: PlanTask, answers: Mapping[str, Any], shared: Mapping[str, Condition]
+) -> list[PromptQuestion]:
+    """The task's still-owed SPOKEN questions, in spoken order.
+
+    A join, not a second walk: question identity comes from the tree (so one spoken
+    question covering N fields counts once), while gates and requiredness come from the
+    descriptors those questions point at. Evaluated PER TARGET because a fan-out's targets
+    do not share a gate chain — the IUI copay question spans three CPT codes, each gated on
+    its own `covered` — so the question is owed while any covered code still lacks a copay.
+
+    `default` is deliberately not consulted: it declares the value a field takes when not
+    collected, never that the question need not be asked. `is_satisfied` keeps reading it,
+    so completion percentage, export and intake are unaffected.
+
+    Known limitation: this walks question NODES only, so an end-of-task confirm
+    (`confirm_in_task` with `confirm_immediate=False`) can never be owed here — it is spoken
+    by `render_task_prompts`'s separate `end_confirms` block, never a node in `task.panels`,
+    and `dsl.validate_question_coverage` deliberately exempts it for that reason. Zero such
+    leaves exist in either catalog (`test_no_catalog_uses_an_end_of_task_confirm` goes red
+    the moment one is authored) — do not union the end-confirm set in here to "fix" this;
+    lifting that loop into a named function and unioning it is the deferred follow-up.
+    """
+    by_path = {field.path: field for field in task.fields}
+    owed: list[PromptQuestion] = []
+    for question in iter_questions(task.panels):
+        if question.routes_between:
+            continue  # chooses between panels; collects nothing
+        live = [
+            field
+            for path in question.target_paths
+            if (field := by_path.get(path)) is not None
+            and is_applicable(field.gates, answers, shared)
+        ]
+        if any(
+            is_required(field, answers, shared) and not has_value(answers, field.path)
+            for field in live
+        ):
+            owed.append(question)
+    return owed
 
 
 def _exclusive_notes(doc: FormSchemaDoc) -> dict[str, str]:

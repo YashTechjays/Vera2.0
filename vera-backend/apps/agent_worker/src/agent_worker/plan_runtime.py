@@ -44,17 +44,17 @@ from agent_worker.prompt import (
     SCOPE_DISCIPLINE,
     TOOL_REASON_ARG,
 )
-from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
+from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, owed_now
 from vera_core.forms.conditions import (
     alternative_index,
     evaluate,
+    has_value,
     is_applicable,
     is_required,
-    is_satisfied,
 )
 from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
 from vera_core.forms.prompting import numbered_questions, render_panels
-from vera_core.forms.question_plan import PromptPanel, drop_questions, owed_questions
+from vera_core.forms.question_plan import PromptPanel, drop_questions
 from vera_core.plan_store import PlanRunStateService
 
 logger = logging.getLogger("agent_worker")
@@ -611,6 +611,9 @@ class PlanRunController:
             raise ValueError("call plan has no tasks")
         self.plan = plan
         # Built once: the either/or groups the compiler recovered from the authored sets.
+        # `gap_fields` reads it directly — an alternatives set is ONE tree question, but
+        # `is_required` is unconditional on both its members, so answering one side does not
+        # make the sibling's own `is_required` false; only consulting the group here does.
         self._alternatives = alternative_index(plan.alternative_pairs)
         self.room_name = room_name
         self.greeting = greeting
@@ -1018,28 +1021,38 @@ class PlanRunController:
         return any(self._decided_false(gate, shared, task_index) for gate in field.gates)
 
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
-        """A task's still-open gaps: applicable (gates hold) ∧ required ∧ owing an answer,
-        against the live answer snapshot — the same required/applicable set the form's
-        completion percentage counts, which is why `is_satisfied` is shared with it."""
+        """The unanswered applicable descriptors under this task's still-owed questions.
+
+        Field-granular by design (Plan C, 2026-08-07: ceilings count asks, lists name
+        missing fields) — re-asking a partially answered fan-out by its question text would
+        re-ask the half already on file. Consults `self._alternatives`, never `default`: an
+        either/or is one tree question, but `is_required` is unconditional on both its
+        members, so answering one side leaves the sibling's OWN required-and-unanswered
+        check true unless the group is checked here too."""
+        task = self.plan.tasks[task_index]
         shared = self.plan.shared_conditions
+        by_path = {field.path: field for field in task.fields}
+
+        def answered(path: str) -> bool:
+            return has_value(self._answers, path) or any(
+                has_value(self._answers, sibling) for sibling in self._alternatives.get(path, ())
+            )
+
         return [
             field
-            for field in self.applicable_fields(task_index)
-            if is_required(field, self._answers, shared)
-            and not is_satisfied(field.path, field.default, self._answers, self._alternatives)
+            for question in owed_now(task, self._answers, shared)
+            for path in question.target_paths
+            if (field := by_path.get(path)) is not None
+            and is_applicable(field.gates, self._answers, shared)
+            and is_required(field, self._answers, shared)
+            and not answered(path)
         ]
 
     def owed_question_count(self, task_index: int) -> int:
-        """`gap_fields` measured in SPOKEN questions — the turn ceiling both completion guards
-        judge by.
-
-        One compiled panel question answers several fields at once, so counting fields sets the
-        ceiling N times too high and the guard refuses a task the rep answered in one breath. A
-        gap no question covers still counts as an ask of its own."""
-        outstanding = {field.path for field in self.gap_fields(task_index)}
-        owed = owed_questions(self.plan.tasks[task_index].panels, outstanding)
-        covered = {path for question in owed for path in question.target_paths}
-        return len(owed) + len(outstanding - covered)
+        """`gap_fields` measured in SPOKEN questions — the ceiling both guards judge by."""
+        return len(
+            owed_now(self.plan.tasks[task_index], self._answers, self.plan.shared_conditions)
+        )
 
     def _is_answered(self, path: str) -> bool:
         value = self._answers.get(path)
