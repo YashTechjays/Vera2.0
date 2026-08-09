@@ -294,7 +294,7 @@ dispatcher's per-call document load.
 7. **Observer untouched** — its map still seeds from `prefilled`; the dedup behavior for a rep
    confirming a prefilled value is unchanged.
 8. **Validator** — a synthetic doc with a defaulted `confirm` leaf referenced by a gate fails
-   `compile_document`; both real catalogs compile clean.
+   `FormSchemaDoc.model_validate`; both real catalogs compile clean.
 
 A change to spoken output is not verified by `pytest` (repo `CLAUDE.md`). Sign-off needs a live
 call on browser-callee transport, confirming `closing_admin` speaks all 9 questions in order and

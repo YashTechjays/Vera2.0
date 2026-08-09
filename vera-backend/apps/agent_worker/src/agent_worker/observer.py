@@ -506,10 +506,13 @@ class ObserverManager:
 
     async def _record_locked(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
         if self._on_file.get(answer.field_path) == answer.value:
-            # Unchanged — do not re-write or re-emit. INTENTIONALLY covers the intake
-            # prefill seed too: a rep merely confirming a prefilled value leaves no
-            # ai_call row (the INTAKE row stays current). The form reads the same either
-            # way — only the answer's provenance differs.
+            # Unchanged — skip the write and the emit either way, so a rep merely confirming
+            # a prefilled value still leaves no ai_call row (the INTAKE row stays current).
+            # But the controller must still learn it: `gating_seed` drops ask-role prefills
+            # from its baseline, so this is the only place left that can tell it the call
+            # itself stated the value — otherwise the field is owed for the rest of the call.
+            if self._recorded.get(answer.field_path) != answer.value:
+                self._push_recorded(answer.field_path, answer.value)
             return
         ts = self._now_ms()
         await self._run_state.record_answer(
@@ -533,8 +536,7 @@ class ObserverManager:
         # Mark dedup only after the write+emit land, so a failed emit is retried on the
         # next pass (the CP consumer is idempotent under the redelivery).
         self._on_file[answer.field_path] = answer.value
-        self._recorded[answer.field_path] = answer.value
-        self._controller.update_answers(self._recorded)
+        self._push_recorded(answer.field_path, answer.value)
         # Path, confidence and task only — never the value (PHI). Both knobs off for the
         # same reason as the rule-engine span below: this span's body sits beside raw
         # extracted values.
@@ -583,6 +585,12 @@ class ObserverManager:
                 # serializes it against an in-flight task_complete handoff).
                 await self._controller.apply_directive_now(directive)
         await self._derive_remaining_locked(answer, evidence_seq)
+
+    def _push_recorded(self, field_path: str, value: str) -> None:
+        """Tell the controller the call collected this value — the one sync point onto
+        `_baseline`, which `gating_seed` may have excluded this path from entirely."""
+        self._recorded[field_path] = value
+        self._controller.update_answers(self._recorded)
 
     async def _derive_remaining_locked(
         self, trigger: ExtractedAnswer, evidence_seq: int | None

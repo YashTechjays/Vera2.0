@@ -230,6 +230,21 @@ class TestRecording:
         assert len(bus.events) == 1
 
     @pytest.mark.asyncio
+    async def test_confirming_an_ask_role_prefill_still_reaches_the_controller(self) -> None:
+        # sections.a.x is `ask`-role (see `_field`), which `gating_seed` drops from the
+        # controller's baseline — the dedup branch below is the only place left that can
+        # still tell the controller the call stated it.
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Family", 90)])
+        manager, run_state, bus, controller = _manager(
+            _plan(prefilled={"sections.a.x": "Family"}), extractor
+        )
+        await _feed(manager, _rep("It's family coverage."))
+        assert controller.answers["sections.a.x"] == "Family"
+        # No new ai_call row and no emit — a mere confirmation leaves the INTAKE row current.
+        assert run_state.records == []
+        assert bus.events == []
+
+    @pytest.mark.asyncio
     async def test_bot_turn_does_not_trigger_a_pass_but_counts_a_seq(self) -> None:
         extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
         manager, run_state, _, _ = _manager(_plan(), extractor)
