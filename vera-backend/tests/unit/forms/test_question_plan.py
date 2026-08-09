@@ -330,7 +330,9 @@ _OWED_TREE = [
 
 
 class TestOwedQuestions:
-    """The complement of `drop_questions`, and the unit both completion guards count in."""
+    """The complement of `drop_questions`. No longer what the completion guards count in —
+    they count `call_plan.owed_now` — but the standalone path-set query stays useful, so the
+    function is kept (unused by the worker) rather than deleted."""
 
     def test_a_multi_target_question_is_owed_once_however_many_targets_are_open(self) -> None:
         assert len(owed_questions(_OWED_TREE, {"a.covered", "a.copay", "a.coins"})) == 1

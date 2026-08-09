@@ -1455,6 +1455,7 @@ class TestOwedQuestionCount:
         # for exactly the tree/field-list disagreement this task removes.
         controller, _ = _controller(_panel_plan(extra_field=True))
         assert controller.owed_question_count(0) == 1
+        assert "Prior Authorization Required" not in [f.title for f in controller.gap_fields(0)]
 
     def test_a_question_whose_targets_are_all_answered_is_not_owed(self) -> None:
         controller, _ = _controller(_panel_plan())
@@ -2651,9 +2652,8 @@ _GROUP_NAME = "sections.svc.group_name"
 def _pair_plan() -> CallPlan:
     """One spoken question over an either/or cost pair, as `cost_pair` authors it, plus a
     second code's copay (its own question — a fan-out this task's join must not conflate
-    with the pair) that must NOT be satisfied by the first's, and a defaulted field left
-    with no covering question at all (default's `is_satisfied` exemption never reaches
-    something the tree can't see either way — see `TestAlternativesAwareGapFields`)."""
+    with the pair) that must NOT be satisfied by the first's, and a defaulted field WITH its
+    own reachable question — `default` must not hide it, the shape a real compile emits."""
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -2680,6 +2680,10 @@ def _pair_plan() -> CallPlan:
                     PromptPanel(
                         title="CPT 2",
                         items=[_question("What is the copay?", _OTHER_COPAY)],
+                    ),
+                    PromptPanel(
+                        title="Group",
+                        items=[_question("What is the group name?", _GROUP_NAME)],
                     ),
                 ],
             ),
@@ -2711,10 +2715,12 @@ class TestAlternativesAwareGapFields:
         open_paths = {f.path for f in controller.gap_fields(0)}
         assert {_COPAY, _COINS} <= open_paths
         # One spoken question covers both, so the turn ceiling counts them once.
-        assert controller.owed_question_count(0) == 2  # the pair's one ask + cpt_2's copay
+        assert controller.owed_question_count(0) == 3  # the pair + cpt_2's copay + group name
 
-    def test_a_defaulted_field_is_never_owed(self) -> None:
-        # completion_pct_v2 counts it filled and the export writes it; the bot chased it anyway.
+    def test_a_default_does_not_hide_a_reachable_question(self) -> None:
+        # This task's rule: `default` says what the field holds when uncollected, never that
+        # the question need not be asked. `is_satisfied` still reads it, so the percentage,
+        # the export and intake are unchanged.
         controller, _ = _controller(_pair_plan())
         controller.update_answers({})
-        assert _GROUP_NAME not in {f.path for f in controller.gap_fields(0)}
+        assert _GROUP_NAME in {f.path for f in controller.gap_fields(0)}

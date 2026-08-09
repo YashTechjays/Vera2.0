@@ -9,12 +9,14 @@ import pytest
 
 from vera_core.forms.call_plan import (
     CallPlan,
+    PlanFieldDescriptor,
     PlanTask,
     _render_value,
     bookend_paths,
     compile_call_plan,
     focus_call_plan,
     fuse_prefill,
+    owed_now,
 )
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
@@ -27,7 +29,7 @@ from vera_core.forms.prompting import (
     render_panels,
     render_task_prompts,
 )
-from vera_core.forms.question_plan import iter_questions
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion, iter_questions
 
 from .test_prompting import FORM_SCHEMA_DIR
 
@@ -545,3 +547,58 @@ class TestExclusiveNotes:
 
     def test_an_unrelated_leaf_gets_no_note(self) -> None:
         assert "sections.insurance_representative.rep_name" not in self._noted()
+
+
+def _plan_field(path: str, title: str, *, required: bool = True) -> PlanFieldDescriptor:
+    return PlanFieldDescriptor(path=path, title=title, type="text", role="ask", required=required)
+
+
+class TestOwedNow:
+    """`owed_now` is the tree↔descriptor join the worker's completion guards run on
+    (`agent_worker.plan_runtime.PlanRunController.gap_fields` / `owed_question_count`)."""
+
+    @staticmethod
+    def _task(panels: list[PromptPanel], fields: list[PlanFieldDescriptor]) -> PlanTask:
+        return PlanTask(task_key="t", title="T", prompt="p", panels=panels, fields=fields)
+
+    def test_a_routing_question_is_never_owed_even_if_it_carried_a_target(self) -> None:
+        # No real routing question carries a target today (`routes_between` questions collect
+        # nothing by construction), but the skip must not depend on that — it is keyed on
+        # `routes_between` alone, defensively, so a future builder bug can't resurrect the
+        # tree/descriptor disagreement this task exists to remove.
+        path = "sections.a.leaf"
+        field = _plan_field(path, "Leaf")
+        routing = PromptQuestion(
+            text="Which applies?",
+            routes_between=["Branch A", "Branch B"],
+            options=[PromptOption(target_paths=[path])],
+        )
+        task = self._task([PromptPanel(items=[routing])], [field])
+        assert owed_now(task, {}, {}) == []
+
+    def test_a_target_the_field_list_no_longer_carries_is_skipped_not_crashed(self) -> None:
+        # `focus_call_plan` narrows `fields` but leaves `panels` untouched, so a focused
+        # plan's tree can reference a path no descriptor backs any more.
+        kept_path, dropped_path = "sections.a.kept", "sections.a.dropped"
+        kept = _plan_field(kept_path, "Kept")
+        question = PromptQuestion(
+            text="Kept and dropped?",
+            options=[PromptOption(target_paths=[kept_path, dropped_path])],
+        )
+        task = self._task([PromptPanel(items=[question])], [kept])
+        assert owed_now(task, {}, {}) == [question]  # `kept` alone owes it; `dropped` never raises
+
+    def test_owed_questions_come_back_in_spoken_order(self) -> None:
+        first_path, second_path, third_path = (
+            "sections.a.first",
+            "sections.a.second",
+            "sections.a.third",
+        )
+        first = PromptQuestion(text="First?", options=[PromptOption(target_paths=[first_path])])
+        second = PromptQuestion(text="Second?", options=[PromptOption(target_paths=[second_path])])
+        third = PromptQuestion(text="Third?", options=[PromptOption(target_paths=[third_path])])
+        fields = [_plan_field(p, p) for p in (first_path, second_path, third_path)]
+        task = self._task([PromptPanel(items=[first, second]), PromptPanel(items=[third])], fields)
+        # `second` is answered and drops out; `first`/`third` must still come back in the order
+        # the tree speaks them, across a panel boundary, not in field or insertion order.
+        assert owed_now(task, {second_path: "X"}, {}) == [first, third]

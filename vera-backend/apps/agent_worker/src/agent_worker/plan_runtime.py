@@ -1049,7 +1049,11 @@ class PlanRunController:
         ]
 
     def owed_question_count(self, task_index: int) -> int:
-        """`gap_fields` measured in SPOKEN questions — the ceiling both guards judge by."""
+        """`gap_fields` measured in SPOKEN questions — the ceiling both guards judge by.
+
+        Unlike `gap_fields` this does not consult `self._alternatives`, so a fully-satisfied
+        either/or still counts its ask; the ceiling errs high, which only makes the guards
+        more patient."""
         return len(
             owed_now(self.plan.tasks[task_index], self._answers, self.plan.shared_conditions)
         )
