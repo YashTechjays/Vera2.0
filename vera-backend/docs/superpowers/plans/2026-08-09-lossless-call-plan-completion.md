@@ -21,7 +21,7 @@
 - Any span whose body touches PHI takes `record_exception=False, set_status_on_exception=False`.
 - No DSL grammar change, no `dsl_version` bump, no migration, no frontend change.
 - **Tasks 1–2 must not change the rendered prompt.** `TestPanelsMatchThePrompt` (`tests/unit/forms/test_call_plan.py`) must stay green **without being modified**. If it needs editing, the task is wrong.
-- Task 1 touches `packages/vera_core/src/vera_core/forms/`, so it needs `just compile-schemas` (the freshness test in `tests/unit/forms/test_schema_dsl.py` fails CI on drift). It does **not** need `just seed-schemas` — no stored prompt is invalidated, since rendered prompts are compiled fresh at dispatch.
+- **No task in this plan needs `just compile-schemas` or `just seed-schemas`.** Verified: `data/form_schemas/*.json` serializes `FormSchemaDoc` only — it contains no `panels`, `immediate_confirms`, `gate_text` or `routes_between`. No task here touches a `catalog/` module, so the artifacts cannot drift and the freshness test in `tests/unit/forms/test_schema_dsl.py` cannot fail from this work. Do **not** commit `data/form_schemas/`; if it shows a diff, something unrelated changed and you should stop and report it.
 - Commit after every task. Do not squash tasks together.
 
 ---
@@ -233,15 +233,7 @@ question would be a builder bug; Task 2's validator is what catches it.
 
 Remove `immediate_confirms` from `PromptQuestion` and from `hydrate_panels` (`question_plan.py:671`). Nothing populates or reads it now. Leaving it would be a second representation of the same fact — the defect this plan exists to remove.
 
-- [ ] **Step 7: Recompile the schema artifacts**
-
-```bash
-just compile-schemas
-```
-
-The compiled JSON is generated output — never hand-edit it. `tests/unit/forms/test_schema_dsl.py` fails CI on drift.
-
-- [ ] **Step 8: Run the full gate**
+- [ ] **Step 7: Run the full gate**
 
 ```bash
 just check
@@ -249,14 +241,14 @@ just check
 
 Expected: PASS. **`TestPanelsMatchThePrompt` in `tests/unit/forms/test_call_plan.py` must be green without having been modified** — that is this task's real exit criterion. If the rendered text moved, Step 5 is wrong; fix Step 5, do not edit the test.
 
-- [ ] **Step 9: Run `/simplify`, then re-run `just check`**
+- [ ] **Step 8: Run `/simplify`, then re-run `just check`**
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add packages/vera_core/src/vera_core/forms/question_plan.py \
         packages/vera_core/src/vera_core/forms/prompting.py \
-        data/form_schemas/ tests/unit/forms/
+        tests/unit/forms/
 git commit -m "refactor(forms): confirm anchors become question nodes, prompt byte-identical
 
 A confirm_immediate leaf reached the agent as a pre-rendered string on its
