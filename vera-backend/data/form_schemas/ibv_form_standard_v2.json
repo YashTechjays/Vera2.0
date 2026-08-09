@@ -2862,7 +2862,7 @@
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_84144.covered",
             "sections.diagnostic_testing.labs_xray_ultrasound.cpt_76830.covered"
           ],
-          "ask": "Are diagnostic labs, X-ray and ultrasound services covered under this plan?"
+          "ask": "Are diagnostic labs, X-ray and ultrasound services CPT codes: 58340, 82670, 83001, 83002, 84146, 84443, 84144, 76830 covered under this plan?"
         },
         {
           "fields": [

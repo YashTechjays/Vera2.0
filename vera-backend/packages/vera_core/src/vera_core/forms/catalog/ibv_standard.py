@@ -554,8 +554,13 @@ def _diagnostic_testing() -> Section:
     group_base = "sections.diagnostic_testing.labs_xray_ultrasound"
     _copay_ask, _coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
     # copay/coinsurance are merged into one either/or question by `panel_cost_pairs`.
+    # The codes go in the sentence, as `panel_ask_groups` does for every treatment: the panel's
+    # own code line is "provide only if asked", so a rep quoting benefits per code had to ask.
     panel_asks = {
-        "covered": "Are diagnostic labs, X-ray and ultrasound services covered under this plan?",
+        "covered": (
+            "Are diagnostic labs, X-ray and ultrasound services CPT codes: "
+            f"{', '.join(_DIAG_CODES)} covered under this plan?"
+        ),
         "prior_auth": prior_auth_ask,
     }
     return Section(
