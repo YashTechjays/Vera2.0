@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from vera_core.forms.catalog import SCHEMAS
 from vera_core.forms.catalog.disease_only import build_disease_only
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
+from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
     FieldPrompt,
     FormSchemaDoc,
@@ -714,8 +715,19 @@ def test_every_collectable_path_is_reachable_from_exactly_one_question() -> None
         assert validate_question_coverage(doc) == []
 
 
-def test_an_unreachable_collectable_path_is_reported() -> None:
-    doc = build_ibv_standard()
-    # Drop a section's questions but keep its collectable leaves.
-    errors = validate_question_coverage(doc, _drop_questions_for="benefit_coverage")
-    assert any("not reachable from any spoken question" in e for e in errors)
+def test_the_document_validator_rejects_an_uncovered_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule is a BUILD failure, not an advisory list — model_validate must raise."""
+    monkeypatch.setattr("vera_core.forms.question_plan.build_question_plan", lambda *a, **k: [])
+    with pytest.raises(ValidationError, match="not reachable from any spoken question"):
+        FormSchemaDoc.model_validate(minimal_doc())
+
+
+def test_no_catalog_uses_an_end_of_task_confirm() -> None:
+    """`validate_question_coverage` exempts them (spoken by the end_confirms block, not the
+    tree), so an authored one would be invisible to any tree-walking owed set — see Task 3."""
+    for build in (build_ibv_standard, build_disease_only):
+        assert [
+            path
+            for path, leaf, _ in leaf_gates(build())
+            if leaf.confirm_in_task is not None and not leaf.confirm_in_task.confirm_immediate
+        ] == []

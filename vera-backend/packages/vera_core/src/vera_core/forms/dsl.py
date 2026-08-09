@@ -921,42 +921,42 @@ class FormSchemaDoc(_Model):
         return self
 
 
-def validate_question_coverage(
-    doc: FormSchemaDoc, *, _drop_questions_for: str | None = None
-) -> list[str]:
+def validate_question_coverage(doc: FormSchemaDoc) -> list[str]:
     """Every collectable leaf must be reachable from exactly one spoken question.
 
     This is what makes `task.fields` a PROJECTION of the question tree rather than a
     parallel artifact. Without it the prompt can say 16 while the guard counts 20, which
-    is exactly how a live call ended a task with six required questions unasked.
-
-    `_drop_questions_for` is a test seam: a section key whose questions are pruned from
-    the built tree before counting, so a test can prove a real omission gets reported."""
+    is exactly how a live call ended a task with six required questions unasked."""
     # Function-scope imports: `conditions`, `prompting` and `question_plan` each import
     # `dsl`, so importing them at module scope here would be a cycle.
     from vera_core.forms.conditions import leaf_gates
     from vera_core.forms.prompting import immediate_confirms_by_anchor
-    from vera_core.forms.question_plan import build_question_plan, drop_questions, iter_questions
+    from vera_core.forms.question_plan import build_question_plan, iter_questions
 
     errors: list[str] = []
     section_to_task = doc.section_to_task()
     anchors = immediate_confirms_by_anchor(doc)
-    drop_targets = set(doc.collection_paths([_drop_questions_for])) if _drop_questions_for else None
+    gated_leaves = list(leaf_gates(doc))  # loop-invariant across tasks below
     for task in doc.tasks:
         if any(skey not in doc.sections for skey in task.sections):
             continue  # unknown section — already reported by the structural check above
         panels = build_question_plan(doc, task, anchors)
-        if drop_targets:
-            panels = drop_questions(panels, drop_targets)
         hits: Counter[str] = Counter(
             path for q in iter_questions(panels) for path in q.target_paths
         )
-        for path, leaf, _gates in leaf_gates(doc):
+        for path, leaf, _gates in gated_leaves:
             if leaf.role not in COLLECTED_ROLES:
                 continue
             cit = leaf.confirm_in_task
             if cit is not None and not cit.confirm_immediate:
-                continue  # spoken by the end-of-task confirm block, not a panel node
+                # Spoken by the end-of-task confirm block, never a panel node
+                # (`prompting._anchor` returns None unconditionally for these) — so this
+                # rule cannot see it. `test_no_catalog_uses_an_end_of_task_confirm` is the
+                # tripwire: Task 3's owed-set join walks the same tree this validator
+                # checks, so an end-of-task confirm would be exempt here AND silently
+                # never owed there, even though `task.prompt` still tells the agent to
+                # ask it — a regression from today's `gap_fields`, which owes it fine.
+                continue
             owner = cit.task_key if cit is not None else section_to_task.get(path.split(".")[1])
             if owner != task.task_key:
                 continue
