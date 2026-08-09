@@ -313,8 +313,21 @@ Four consequences worth stating explicitly:
   schema change and without a second predicate to keep in sync with `is_satisfied`.
   `is_satisfied` is left untouched, so completion percentage, export, auto-completion and
   intake are **unchanged** — this carries no product-visible risk.
-- **Either/or is satisfied structurally.** The tree already models an alternatives set as one
-  question with several options, so "one answer satisfies the group" needs no special rule.
+- ~~**Either/or is satisfied structurally.**~~ **WRONG — corrected 2026-08-09 during
+  implementation.** The claim was that because the tree models an alternatives set as one question
+  with several options, "one answer satisfies the group" falls out for free. It does not.
+  `owed_now`'s per-target rule is "owed while ANY applicable target is required and unanswered",
+  which is correct for a **fan-out** (eight CPT codes each need their own answer) and wrong for an
+  **either/or** (answering coinsurance must close copay). `PromptQuestion` carries no marker
+  distinguishing the two — an `AskGroup` fan-out and an `alternatives` pair produce the identical
+  shape — and `cost_pair` members are unconditionally `required=True` on both sides, so nothing in
+  the tree can tell them apart.
+
+  Left uncorrected this reproduces the exact live-call defect
+  `TestAlternativesAwareGapFields` was written to prevent (a gap sweep owing ten phantom fields,
+  each with the other side of its pair already answered). **`alternative_index` therefore stays**,
+  and `gap_fields`' per-target filter remains alternatives-aware — while still never consulting
+  `default`. Alternatives are a genuine second axis, not a duplication to be deleted.
 - **Granularity follows the decision already made in Plan C** (2026-08-07): *ceilings count
   asks, lists name missing fields.* The owed **count** is question-granular; the **re-ask list**
   names missing field paths, because rendering a partially-answered fan-out by its question
