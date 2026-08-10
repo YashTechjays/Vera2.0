@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import {
@@ -50,7 +50,7 @@ const DETAIL = {
   appointment_date: null,
   insurance_provider: null,
   fields: [],
-  // Stored opt-out from an earlier internal test — the hidden-toggle path must override it.
+  // New forms default to OFF; the toggle mirrors the stored value.
   ivr_navigation_enabled: false,
 }
 
@@ -76,7 +76,7 @@ async function openToQueueButton() {
   return { user, queueButton: await screen.findByRole("button", { name: "Send to queue" }) }
 }
 
-describe("IbvFormModal IVR toggle dev flag", () => {
+describe("IbvFormModal IVR toggle", () => {
   beforeEach(() => {
     mockedDetail.mockReset()
     mockedVersion.mockReset()
@@ -96,34 +96,38 @@ describe("IbvFormModal IVR toggle dev flag", () => {
     mockedStatus.mockResolvedValue({ id: FORM_ID, status: "in_queue" })
   })
 
-  afterEach(() => localStorage.removeItem("vera:show-ivr-toggle"))
-
-  it("hides the toggle and forces IVR navigation ON when enqueueing", async () => {
+  it("shows the toggle unchecked by default and enqueues with IVR off", async () => {
     const { user, queueButton } = await openToQueueButton()
-    expect(screen.queryByText("IVR navigation")).not.toBeInTheDocument()
+
+    const toggle = screen.getByRole("switch")
+    expect(toggle).not.toBeChecked()
 
     await user.click(queueButton)
-
     await waitFor(() =>
       expect(mockedStatus).toHaveBeenCalledWith(FORM_ID, "in_queue", {
-        enableIvrNavigation: true, // stored opt-out overridden while hidden
+        enableIvrNavigation: false,
         insuranceProviderId: undefined,
       }),
     )
   })
 
-  it("shows the toggle and honors it when the dev flag is set", async () => {
-    localStorage.setItem("vera:show-ivr-toggle", "true")
+  it("sends IVR on when the user turns the toggle on", async () => {
     const { user, queueButton } = await openToQueueButton()
-    expect(screen.getByText("IVR navigation")).toBeInTheDocument()
 
+    await user.click(screen.getByRole("switch"))
     await user.click(queueButton)
 
     await waitFor(() =>
       expect(mockedStatus).toHaveBeenCalledWith(FORM_ID, "in_queue", {
-        enableIvrNavigation: false, // the stored value, untouched
+        enableIvrNavigation: true,
         insuranceProviderId: undefined,
       }),
     )
+  })
+
+  it("pre-checks the toggle from a form stored with IVR enabled", async () => {
+    mockedDetail.mockResolvedValue({ ...DETAIL, ivr_navigation_enabled: true })
+    await openToQueueButton()
+    expect(screen.getByRole("switch")).toBeChecked()
   })
 })

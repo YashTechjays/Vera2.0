@@ -37,7 +37,6 @@ import {
   type DisputeFlags,
   type DisputeMap,
 } from "@/lib/ibv/disputes"
-import { showIvrToggle } from "@/lib/devFlags"
 import { canApplyLiveAnswer } from "@/lib/ibv/liveAnswers"
 import type { FormSchema, FormValues, LeafField } from "@/lib/ibv/types"
 import type { LiveDispute } from "@/lib/api/callEvents"
@@ -282,7 +281,7 @@ export function IbvProvider({
   const [statusError, setStatusError] = useState<string | null>(null)
   const [statusChanging, setStatusChanging] = useState(false)
   const [insuranceType, setInsuranceType] = useState<string | null>(null)
-  const [ivrNavigation, setIvrNavigation] = useState(true)
+  const [ivrNavigation, setIvrNavigation] = useState(false)
   const [providers, setProviders] = useState<ProviderOption[]>([])
   const [providerId, setProviderId] = useState<string>("")
   const [createModalOpen, setCreateModalOpen] = useState(false)
@@ -384,7 +383,7 @@ export function IbvProvider({
       setStatusError(null)
       setInsuranceType(null)
       setProvenance({})
-      setIvrNavigation(true)
+      setIvrNavigation(false)
       setProviders([])
       setProviderId("")
       setSchema(null)
@@ -453,7 +452,7 @@ export function IbvProvider({
     // Provenance is keyed by schema-relative path, so a previously-open form's map
     // would otherwise paint its badges onto the empty create form.
     setProvenance({})
-    setIvrNavigation(true)
+    setIvrNavigation(false)
     setProviders([])
     setProviderId("")
     setSchema(null)
@@ -657,8 +656,7 @@ export function IbvProvider({
           next,
           next === "in_queue"
             ? {
-                // Toggle hidden → always navigate, ignoring any stored opt-out.
-                enableIvrNavigation: showIvrToggle() ? ivrNavigation : true,
+                enableIvrNavigation: ivrNavigation,
                 insuranceProviderId: providerId || undefined,
               }
             : undefined,

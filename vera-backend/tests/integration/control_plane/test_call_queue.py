@@ -498,23 +498,23 @@ async def test_concurrent_enqueues_at_limit_admit_exactly_one(
 
 
 # ---------------------------------------------------------------------------
-# `ivr_navigation_enabled` — the per-form voice-lab-style toggle (default True),
+# `ivr_navigation_enabled` — the per-form voice-lab-style toggle (default False),
 # persisted on the row so a later dispatch (freed slot / sweeper / retry) and any
 # requeue keep the operator's choice.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_intake_defaults_ivr_navigation_on(
+async def test_intake_defaults_ivr_navigation_off(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     ibv_schema: tuple[UUID, UUID],
     cleanup_forms: None,
 ) -> None:
-    """A freshly-intaken form defaults `ivr_navigation_enabled` to True (column
-    default) — every real payer call navigates the IVR unless an operator opts out
-    at enqueue time."""
+    """A freshly-intaken form defaults `ivr_navigation_enabled` to False (column
+    default) — operators opt IN to IVR navigation at enqueue time (product
+    decision 2026-08-10; was True)."""
     form_type_id, version_id = ibv_schema
     token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
     resp = await client.post(
@@ -537,7 +537,7 @@ async def test_intake_defaults_ivr_navigation_on(
                 )
             )
         ).scalar_one()
-    assert enabled is True
+    assert enabled is False
 
 
 @pytest.mark.asyncio
@@ -617,10 +617,18 @@ async def test_requeue_without_toggle_keeps_stored_choice(
 async def test_detail_exposes_ivr_toggle(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
     queue_form_id: UUID,
 ) -> None:
     """`GET /patient-forms/{id}` mirrors the row's `ivr_navigation_enabled` so the
-    UI's requeue toggle can pre-load from it."""
+    UI's requeue toggle can pre-load from it. The row is set True (against the
+    False column default) so a hardcoded response value cannot pass."""
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE patient_form SET ivr_navigation_enabled = true WHERE id = :fid"
+            ).bindparams(fid=queue_form_id)
+        )
     resp = await client.get(
         f"/api/v1/patient-forms/{queue_form_id}",
         headers=_auth(rbac_world.admin_token),
