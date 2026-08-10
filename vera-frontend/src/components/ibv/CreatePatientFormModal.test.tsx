@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { toast } from "sonner"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import { createRequiredPaths, parseSchema } from "@/lib/ibv/schema"
@@ -104,6 +104,8 @@ async function atFormStep({ filled = false } = {}) {
 }
 
 describe("CreatePatientFormModal", () => {
+  afterEach(() => localStorage.removeItem("vera:show-form-picker"))
+
   beforeEach(() => {
     vi.mocked(toast.success).mockReset()
     mockedList.mockReset()
@@ -171,13 +173,21 @@ describe("CreatePatientFormModal", () => {
     expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled()
   })
 
-  it("Back lands on the picker without bouncing forward again", async () => {
-    const user = await atFormStep()
+  it("offers no Back after the auto-skip — the picker is hidden from clients", async () => {
+    await atFormStep()
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument()
+  })
 
-    await user.click(screen.getByRole("button", { name: "Back" }))
+  it("dev flag restores the picker as step 1, with Back working", async () => {
+    localStorage.setItem("vera:show-form-picker", "true")
+    const user = await openModal()
 
     const picker = await screen.findByRole("combobox")
-    expect(picker).toHaveValue(SCHEMA_ID) // preselected, but not auto-continued
+    expect(picker).toHaveValue(SCHEMA_ID) // preselected, but no auto-skip
+
+    await user.click(screen.getByRole("button", { name: "Continue" }))
+    await user.click(await screen.findByRole("button", { name: "Back" }))
+    expect(await screen.findByRole("combobox")).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "Submit" })).not.toBeInTheDocument()
   })
 

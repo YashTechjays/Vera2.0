@@ -22,6 +22,7 @@ import {
   statusLabel,
 } from "@/lib/patient-forms/display"
 import { exportPatientForm } from "@/lib/patient-forms/api"
+import { showIvrToggle } from "@/lib/devFlags"
 import { useIbv } from "./IbvProvider"
 import { SchemaForm } from "./SchemaForm"
 import { CallHistoryTab } from "./CallHistoryTab"
@@ -123,14 +124,17 @@ export function IbvFormModal() {
               <div className="flex items-center gap-2">
                 {transitions.includes("in_queue") && (
                   <>
-                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Switch
-                        checked={ivrNavigation}
-                        onCheckedChange={setIvrNavigation}
-                        disabled={statusChanging}
-                      />
-                      IVR navigation
-                    </label>
+                    {/* Internal-testing control, hidden from clients — see lib/devFlags.ts. */}
+                    {showIvrToggle() && (
+                      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <Switch
+                          checked={ivrNavigation}
+                          onCheckedChange={setIvrNavigation}
+                          disabled={statusChanging}
+                        />
+                        IVR navigation
+                      </label>
+                    )}
                     {/* Canonicalizes the form's provider so dispatch applies the
                         right IVR playbook; pre-selected from the intake string. */}
                     <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
