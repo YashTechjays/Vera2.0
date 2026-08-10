@@ -20,6 +20,8 @@ from vera_core.forms.authoring import (
     enum_ask,
     eq,
     money_triplet,
+    panel_ask_groups,
+    panel_cost_pairs,
     ref,
     service_asks,
     service_fields,
@@ -451,7 +453,7 @@ def _benefit_coverage() -> Section:
             ),
             "coverage_type": enum_ask(
                 "Coverage Type",
-                "Is this an individual or a family policy? Please answer Individual or Family.",
+                "Is this an individual or a family policy?",
                 ["Individual", "Family"],
             ),
             "pcp_referral_required": enum_ask(
@@ -485,7 +487,6 @@ def _benefit_coverage() -> Section:
                 "Infertility Plan Mandate",
                 "Is there an infertility plan mandate on this policy?",
                 YES_NO,
-                hints=["Pronounce as: in-fer-TIL-ih-tee plan MAN-date."],
             ),
         },
     )
@@ -495,7 +496,7 @@ def _infertility_treatment() -> Section:
     oi_base = "sections.infertility_treatment.ovulation_induction"
     oi_fields = service_fields(
         oi_base,
-        "Is ovulation induction covered under this plan? Please answer Yes, No, or N/A.",
+        "Is ovulation induction covered under this plan?",
         "treatment",
         referent="ovulation induction",
     )
@@ -532,15 +533,17 @@ def _infertility_treatment() -> Section:
                 "covered as elective, or for cancer-related fertility preservation?"
             ),
         ),
-        cost_pair(oi_base),
+        cost_pair(oi_base, "ovulation induction"),
     ]
-    for key, codes in ((t.key, t.cpt_codes) for t in _TREATMENTS):
-        alternatives.extend(
-            cost_pair(f"sections.infertility_treatment.{key}.cpt_{code}") for code in codes
-        )
+    ask_groups: list[AskGroup] = []
+    for t in _TREATMENTS:
+        base = f"sections.infertility_treatment.{t.key}"
+        ask_groups.extend(panel_ask_groups(base, t.title, t.cpt_codes))
+        alternatives.extend(panel_cost_pairs(base, t.service, t.cpt_codes))
     return Section(
         title="Infertility Treatment",
         ui=Ui(layout="table"),
+        ask_groups=ask_groups,
         alternatives=alternatives,
         fields=fields,
     )
@@ -548,14 +551,15 @@ def _infertility_treatment() -> Section:
 
 def _diagnostic_testing() -> Section:
     group_base = "sections.diagnostic_testing.labs_xray_ultrasound"
-    copay_ask, coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
+    _copay_ask, _coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
+    # copay/coinsurance are merged into one either/or question by `panel_cost_pairs`.
+    # The codes go in the sentence, as `panel_ask_groups` does for every treatment: the panel's
+    # own code line is "provide only if asked", so a rep quoting benefits per code had to ask.
     panel_asks = {
         "covered": (
-            "Are diagnostic labs, X-ray and ultrasound services covered under this plan? "
-            "Please answer Yes, No, or N/A."
+            "Are diagnostic labs, X-ray and ultrasound services CPT codes: "
+            f"{', '.join(_DIAG_CODES)} covered under this plan?"
         ),
-        "copay": copay_ask,
-        "coinsurance": coinsurance_ask,
         "prior_auth": prior_auth_ask,
     }
     return Section(
@@ -566,21 +570,20 @@ def _diagnostic_testing() -> Section:
             AskGroup(fields=[f"{group_base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
             for sub, panel_ask in panel_asks.items()
         ],
-        alternatives=[cost_pair(f"{group_base}.cpt_{c}") for c in _DIAG_CODES],
+        alternatives=panel_cost_pairs(group_base, _DIAG_SERVICE, _DIAG_CODES),
         fields={
             "diagnostic_testing_covered": enum_ask(
                 "Diagnostic Testing Covered",
                 "Is diagnostic testing covered under this plan?",
                 YES_NO,
             ),
+            # No panel intro: this section has ONE panel, so an intro phrased as a question
+            # ("Can you provide coverage and benefit details for…?") was spoken as a second
+            # coverage ask. The grouping lives in `codes`, not the sentence.
             "labs_xray_ultrasound": Group(
                 type="group",
                 title="Labs, Xray/Ultrasound",
                 codes=Codes(icd10=["Z31.41"]),
-                prompt=ask(
-                    "Can you provide coverage and benefit details for diagnostic labs, "
-                    "X-ray and ultrasound services?"
-                ),
                 fields=cpt_groups(
                     group_base,
                     _DIAG_CODES,
@@ -606,7 +609,7 @@ def _general_coverage() -> Section:
                     "center services — is that billed as professional or facility?"
                 ),
             ),
-            *(cost_pair(f"{base}.{g.key}.cpt_{g.code}") for g in _GENERAL),
+            *(cost_pair(f"{base}.{g.key}.cpt_{g.code}", g.service) for g in _GENERAL),
         ],
         fields={
             g.key: Group(
@@ -753,7 +756,7 @@ def _male_partner_coverage() -> Section:
         title="Male Partner Coverage",
         ui=Ui(layout="table"),
         applicable_when=ref("male_partner_in_scope"),
-        alternatives=[cost_pair(f"{base}.{m.key}.cpt_{m.code}") for m in _MALE],
+        alternatives=[cost_pair(f"{base}.{m.key}.cpt_{m.code}", m.service) for m in _MALE],
         fields={
             "male_partner_covered": enum_ask(
                 "Male Partner Services Covered",
@@ -791,7 +794,7 @@ def _admin_sections() -> dict[str, Section]:
             fields={
                 "enrollment_required": enum_ask(
                     "Enrollment Required",
-                    "Is enrollment required for this patient? Please answer Yes, No, or N/A.",
+                    "Is enrollment required for this patient?",
                     YES_NO_NA,
                     default="N/A",
                 ),
@@ -810,7 +813,7 @@ def _admin_sections() -> dict[str, Section]:
                 ),
                 "center_of_excellence_required": enum_ask(
                     "Center of Excellence Required",
-                    "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A.",
+                    "Is a center of excellence required for infertility treatment?",
                     YES_NO_NA,
                 ),
             },
@@ -913,10 +916,6 @@ def _admin_sections() -> dict[str, Section]:
                     "Infertility Specialty Pharmacy Exists",
                     "Does the plan have an infertility specialty pharmacy?",
                     YES_NO,
-                    hints=[
-                        'Always say "infertility specialty pharmacy" in full; never abbreviate '
-                        "to ISP when speaking."
-                    ],
                 ),
                 "isp_name": text_ask(
                     "Infertility Specialty Pharmacy Name",
@@ -1211,14 +1210,8 @@ def build_ibv_standard() -> FormSchemaDoc:
                 task_key="infertility_coverage",
                 title="Infertility Coverage",
                 prompt=(
-                    "Work through infertility treatment. Ask per service panel, fan answers "
-                    "out to the CPT codes the representative confirms, and skip sub-questions "
-                    "for services that are not covered. The list below runs through many "
-                    "procedure codes in a row, so vary how you open each question instead of "
-                    "reusing one pattern, keep the service name beside the code the way each "
-                    "listed question does, and move between codes with a short transition "
-                    "rather than restating what you are verifying. That is wording only — "
-                    "which questions you ask, and in what grouping, is set by the list."
+                    "Work through infertility treatment one service at a time, and move "
+                    "between services with a short transition naming the next one."
                 ),
                 intro="Now I'd like to verify some infertility coverage details.",
                 outro=(
@@ -1230,13 +1223,8 @@ def build_ibv_standard() -> FormSchemaDoc:
                 task_key="diagnostic_coverage",
                 title="Diagnostic Coverage",
                 prompt=(
-                    "Work through diagnostic details. Ask all the CPT codes at once unless the "
-                    "representative asks for them one at a time. Fan answers out to the CPT "
-                    "codes the representative confirms, and skip sub-questions for CPT codes "
-                    "that are not covered. The codes below differ only in the number, so vary "
-                    "how you introduce a batch and read the codes as a natural group rather "
-                    "than reciting one identical sentence per code. That is wording only — "
-                    "which questions you ask, and in what grouping, is set by the list."
+                    "Read the codes as a natural group rather than one at a time, unless the "
+                    "representative asks you to slow down and take them individually."
                 ),
                 intro="Now I'd like to verify some diagnostic coverage details.",
                 outro="Thank you. One moment while I organize these details.",
@@ -1245,15 +1233,7 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="general_office_coverage",
                 title="General Office Coverage",
-                prompt=(
-                    "Work through general office visits details. Ask per service panel, fan "
-                    "answers out to the CPT codes the representative confirms, and skip "
-                    "sub-questions for services that are not covered. Each service below "
-                    "carries a single code, so vary how you open each one instead of repeating "
-                    "one sentence shape, and keep the service name beside the code the way each "
-                    "listed question does. That is wording only — which questions you ask, and "
-                    "in what grouping, is set by the list."
-                ),
+                prompt="Work through general office visit coverage one service at a time.",
                 intro="Now I'd like to verify some general office visits coverage.",
                 outro="Thanks. One moment while I organize these details.",
                 sections=["general_coverage"],
@@ -1279,12 +1259,8 @@ def build_ibv_standard() -> FormSchemaDoc:
                 task_key="male_partner",
                 title="Male Partner Coverage",
                 prompt=(
-                    "Only reached for family plans with a male spouse. Establish whether "
-                    "male partner fertility services are covered before asking any "
-                    "per-service question. Vary how you open each service's questions "
-                    "instead of repeating one sentence shape, and keep the service name "
-                    "beside the code the way each listed question does. That is wording "
-                    "only — which questions you ask is set by the list."
+                    "Establish whether male partner fertility services are covered before "
+                    "asking any per-service question."
                 ),
                 intro="Now I'd like to ask about male partner fertility coverage.",
                 outro="Thanks, that covers the male partner benefits. Just a moment.",
@@ -1293,11 +1269,7 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="closing_admin",
                 title="Administrative Details",
-                prompt=(
-                    "Close out enrollment, authorization and third-party administration "
-                    "details. Ask the existence gate first and skip the contact questions "
-                    "when the entity does not exist."
-                ),
+                prompt="Ask all the questions listed below.",
                 intro="Just a few more questions about administrative details.",
                 outro=(
                     "Perfect, I have all the administrative details I need. Let me "

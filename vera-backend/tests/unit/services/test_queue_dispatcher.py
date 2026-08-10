@@ -238,6 +238,7 @@ class FakeLiveKit:
         self.dispatch_metadata: list[dict[str, object] | None] = []
         self.sip_dials: list[tuple[str, str, str]] = []
         self.deleted: list[str] = []
+        self.browser_callee_transport = False
         # When set, the matching method raises it instead of recording the call.
         self.room_error: Exception | None = None
         self.dial_error: Exception | None = None
@@ -567,6 +568,42 @@ async def test_dispatch_without_trunk_leaves_forms_queued(
     assert form.status == FormStatus.IN_QUEUE.value
     assert livekit.created == []
     assert livekit.sip_dials == []
+
+
+async def test_browser_callee_dispatches_without_a_trunk_and_never_dials(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    _stub_credentials["value"] = None  # no trunk: the SIP path would leave the form queued
+    tenant = _tenant()
+    form = _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.browser_callee_transport = True
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    assert len(livekit.created) == 1
+    assert livekit.sip_dials == []
+    metadata = livekit.dispatch_metadata[0]
+    assert metadata is not None
+    assert metadata["browser_callee"] is True
+
+
+async def test_sip_transport_still_needs_a_trunk(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """Regression guard: the default SIP path is unaffected by the browser-callee branch."""
+    _stub_credentials["value"] = None
+    tenant = _tenant()
+    form = _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 0
+    assert livekit.created == []
 
 
 async def test_dial_failure_marks_call_failed_and_requeues_form(

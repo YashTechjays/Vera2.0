@@ -100,6 +100,14 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   - **Do not overclaim from a green run.** No STT, no real DTMF, and extraction settles between turns
     so rules fire more reliably than on a real call; a scenario reporting `0 answers extracted`
     proves nothing. A live call is still required before shipping voice-path changes.
+- **Browser-callee transport is how you get that live call without working telephony** — set
+  `VERA_BROWSER_CALLEE_TRANSPORT=true` on both `just api` and `just worker` (plus
+  `VITE_BROWSER_CALLEE_TRANSPORT=true` on the frontend) and join the room from Live Monitoring as
+  the payer rep. The dispatcher skips the SIP dial; everything else — plan compile, STT, LLM, TTS,
+  Observer, closeout — runs exactly as in production, so it DOES count as a live call. Off by
+  default and refused when off (409), so it can never reach prod. Runbook, and the two constraints
+  that bite (a ~60s join window, one tab per call), in `README.md` → "Browser callee". Traces carry
+  `vera.transport` (`sip` | `browser`) — filter browser calls out of call-quality analysis.
 - **A change to spoken output is NOT verified by `pytest`** — the assertions are on strings; the
   defect lives in the audio. Synthesize and listen: `uv run --no-project --with certifi python
   scripts/tts_probe.py --set comma` (stdlib-only script; the `--no-project --with certifi` is

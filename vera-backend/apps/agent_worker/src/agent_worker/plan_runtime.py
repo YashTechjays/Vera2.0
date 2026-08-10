@@ -26,7 +26,7 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from livekit.agents import Agent, AgentSession, llm
 from livekit.agents.llm import ChatItem
@@ -44,10 +44,21 @@ from agent_worker.prompt import (
     SCOPE_DISCIPLINE,
     TOOL_REASON_ARG,
 )
-from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor
-from vera_core.forms.conditions import evaluate, is_applicable, is_required
+from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, gating_seed, owed_now
+from vera_core.forms.conditions import (
+    alternative_index,
+    evaluate,
+    has_value,
+    is_applicable,
+    is_required,
+)
 from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
+from vera_core.forms.prompting import numbered_questions, render_panels
+from vera_core.forms.question_plan import PromptPanel, drop_questions
 from vera_core.plan_store import PlanRunStateService
+
+if TYPE_CHECKING:
+    from agent_worker.observer import ObserverManager
 
 logger = logging.getLogger("agent_worker")
 
@@ -78,6 +89,9 @@ _GAP_REASK_DIRECTIVE = (
 # Consecutive gap_complete refusals that shrink nothing before the guard gives up.
 _GAP_FRUITLESS_REFUSALS = 2
 
+# Consecutive task_complete refusals that shrink nothing before the guard gives up.
+_TASK_FRUITLESS_REFUSALS = 2
+
 
 def _gap_block(title: str, fields: list[PlanFieldDescriptor]) -> str:
     """Instruction block for a gap agent, listing every question it still owes."""
@@ -104,6 +118,38 @@ def _gap_block(title: str, fields: list[PlanFieldDescriptor]) -> str:
         "do NOT say goodbye, do NOT thank the representative as if finishing, and do NOT "
         "claim you have everything you need — more questions may still follow. Once every "
         "question on the list has been asked, call gap_complete."
+    )
+
+
+def _completeness_block(panels: list[PromptPanel]) -> str:
+    """This task's LOWER bound: ask every question on the list above before completing.
+
+    Nothing else in a task agent's instructions states one — `SCOPE_DISCIPLINE` bounds the list
+    from above and `HANDOFF_DISCIPLINE` governs only timing — so the requirement lived solely in
+    `task_complete`'s tool description, and a live call ended every task early. `_gap_block`
+    states this same bound and its agent did not, which is why the wording mirrors it, and why
+    this sits directly under the list rather than after the trailing rules — one of which tells
+    the agent to skip the remaining questions when its condition holds.
+
+    The total is `render_panels`' last ordinal, so the agent can check the claim against the
+    list it can see instead of taking it on faith."""
+    total = numbered_questions(panels)
+    if not total:
+        return ""
+    if total == 1:
+        return (
+            "COMPLETENESS\n"
+            "The list above is exactly 1 question and is the complete set. Ask it, then call "
+            "task_complete once it has been asked — whether or not the representative could "
+            "answer it, and never before."
+        )
+    return (
+        "COMPLETENESS\n"
+        f"The list above runs 1 to {total} and is the complete set — every question on it is "
+        "owed, and the section headings group them without breaking the count. Ask every one of "
+        f"them, one at a time, in order. Call task_complete only once all {total} have been "
+        "asked, whether or not the representative could answer them, and never while one of them "
+        "is still unasked."
     )
 
 
@@ -141,64 +187,12 @@ def _field_lines(fields: list[PlanFieldDescriptor], *, numbered: bool = False) -
     )
 
 
-def _gating_block(
-    applicable: list[PlanFieldDescriptor],
-    excluded: list[PlanFieldDescriptor],
-    conditional: list[PlanFieldDescriptor],
-) -> str:
-    """This call's narrowed question list, or "" when the gates settle nothing.
-
-    Leads with what DOES apply. An exclusions-only list was read as "the whole task is
-    excluded" — the financial task announced itself and completed in the same turn, claiming
-    every question was gated out while its deductible fields were still open. A positive
-    enumeration cannot be over-generalized into an empty task.
-
-    A gate whose own input is unanswered is CONDITIONAL, never excluded: reporting it as
-    excluded contradicted the task prompt's own condition and the agent improvised.
-    """
-    if not excluded and not conditional:
-        return ""
-    sections: list[str] = []
-    if applicable:
-        sections.append(
-            "# Questions that apply on THIS call — ask every one of them\n"
-            f"{_field_lines(applicable)}"
-        )
-    if conditional:
-        sections.append(
-            "# Conditional on this call — ask only if the condition holds\n"
-            f"{_conditional_lines(conditional)}"
-        )
-    if excluded:
-        sections.append(
-            "# Excluded by the plan's gates — do NOT ask these, whatever the task list says\n"
-            f"{_field_lines(excluded)}"
-        )
-    return "\n\n".join(sections)
-
-
-def _conditional_lines(fields: list[PlanFieldDescriptor]) -> str:
-    """Same per-field disambiguation as `_field_lines`, plus the condition that gates it —
-    an undisambiguated "- Covered" repeated for every CPT code names nothing the agent could
-    act on, and this bucket tells the agent to ASK, so an unidentifiable field here is worse
-    than one merely omitted from the excluded bucket."""
-    title_counts = Counter(field.title for field in fields)
-    return "\n".join(
-        f"{_field_line(field, title_counts)} — only if {field.gate_text}"
-        if field.gate_text
-        else _field_line(field, title_counts)
-        for field in fields
-    )
-
-
 def _is_message(item: ChatItem, role: str) -> bool:
     """Whether `item` is a spoken message from `role` — a function call or its output is not."""
     return item.type == "message" and item.role == role
 
 
-def _instructions(
-    plan: CallPlan, task_block: str, *, extra_instructions: str | None, gating: str = ""
-) -> str:
+def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | None) -> str:
     """Session block (+ the form's Known-information prefill, + the tenant's
     persona-tweak extra instructions, when present) + one task-specific block +
     the discipline guardrails + the Cartesia TTS markup guide — fused once, at
@@ -222,10 +216,6 @@ def _instructions(
     if extra_instructions:
         parts.append(f"# Additional instructions\n{extra_instructions}")
     parts.append(task_block)
-    if gating:
-        # Directly after the task list it narrows, and inside the instructions rather than a
-        # per-reply directive — the latter lives for one inference only (see _apply_gating).
-        parts.append(gating)
     parts.append(SCOPE_DISCIPLINE)
     parts.append(HANDOFF_DISCIPLINE)
     parts.append(CLOSING_DISCIPLINE)
@@ -242,19 +232,45 @@ class PlanTaskAgent(Agent):
         self._task_index = task_index
         self._task = controller.plan.tasks[task_index]
         self._task_block = f"# Current task: {self._task.title}\n{self._task.prompt}"
-        # Spent once per task: a premature task_complete is refused, a second one is honoured.
-        self._completion_refused = False
+        # The task's own question total as rendered at ENTRY — the same count COMPLETENESS
+        # states, not the answer-sensitive `owed_question_count` (a task whose follow-ups sit
+        # behind an unanswered gate reads as owing almost nothing at entry, collapsing this to
+        # a number far short of what the agent was actually told to ask). The ceiling must also
+        # measure the same window as `_rep_turns` (which accumulates over the whole task);
+        # comparing it against the CURRENTLY outstanding count let an 11-turn task clear a
+        # 5-question bar and hand off with six questions unasked.
+        self._questions_at_entry = 0
+        self._refusals = 0
+        self._outstanding_at_last_refusal: int | None = None
         self._rep_turns = 0
+        self._advanced_this_turn = False
         super().__init__(instructions=self._build_instructions(), id=self._task.task_key)
 
-    def _build_instructions(self, gating: str = "") -> str:
-        """This task's full instruction text, narrowed by `gating` when the gates exclude some."""
+    def _build_instructions(self, panels: list[PromptPanel] | None = None) -> str:
+        """This task's full instruction text; `panels` replaces the compiled question list when
+        the gates rule some questions out on this call.
+
+        The completeness rule is counted off the SAME panels the list is rendered from, so a
+        narrowed task states the total the agent can actually see rather than the compiled one."""
         return _instructions(
             self._controller.plan,
-            self._task_block,
+            self._assembled_block(self._task.panels if panels is None else panels),
             extra_instructions=self._controller.extra_instructions,
-            gating=gating,
         )
+
+    def _assembled_block(self, panels: list[PromptPanel]) -> str:
+        """The task block rebuilt from the pieces the compiler shipped, with the completeness
+        rule seated directly under the question list.
+
+        Reassembled rather than string-edited because recovering the pieces by splitting
+        `prompt` dropped the TERMINATION RULE and CONSISTENCY CHECK blocks that follow the list
+        (`TestPanelsMatchThePrompt` pins the reassembly as byte-identical). A task the compiler
+        shipped no tree for keeps its `prompt` verbatim — there is nothing to count or narrow."""
+        task = self._task
+        if not task.panels:
+            return self._task_block
+        parts = (task.lead_in, render_panels(panels), _completeness_block(panels), task.trailing)
+        return f"# Current task: {task.title}\n" + "\n\n".join(p for p in parts if p)
 
     async def on_enter(self) -> None:
         self._controller.note_task_entered(self._task_index)
@@ -263,7 +279,8 @@ class PlanTaskAgent(Agent):
             return
         if await self._skip_when_nothing_applies():
             return
-        await self._apply_gating()
+        kept = await self._apply_gating()
+        self._questions_at_entry = numbered_questions(kept or self._task.panels)
         # Read before opening_line — that call flips `opened` as a side effect.
         is_opening_turn = not self._controller.opened
         opening = self._controller.opening_line(self._task.intro)
@@ -285,7 +302,10 @@ class PlanTaskAgent(Agent):
         Announcing a section and closing it in the same breath ("Now I'd like to ask about male
         partner coverage… Thanks, that covers the male partner benefits.") sounds broken, and
         asking those questions anyway is worse. A task with NO fields at all is a different thing
-        — it carries only speech, so it still runs."""
+        — it carries only speech, so it still runs.
+
+        A CONDITIONAL question counts as a reason to run: its gate is not yet decidable, so
+        skipping the task would settle it by omission."""
         if (
             not self._task.fields
             or self._controller.applicable_fields(self._task_index)
@@ -304,32 +324,36 @@ class PlanTaskAgent(Agent):
         self.session.update_agent(successor)
         return True
 
-    async def _apply_gating(self) -> None:
-        """Narrow this task's question list against the live answers, in the INSTRUCTIONS.
+    async def _apply_gating(self) -> list[PromptPanel]:
+        """Re-render this task's question list without the questions the gates rule out,
+        and return the panels actually rendered — `on_enter` snapshots its question-count
+        ceiling off this SAME list, so the two can never diverge.
 
-        `SCOPE_DISCIPLINE` tells the agent its task list is "the complete set of questions for
-        this call", which is what makes a gated-out question look mandatory; this is the only
-        place that list gets narrowed. It has to live in the instructions: a `generate_reply`
-        directive is stapled to a COPY of the chat context and discarded after that one
-        inference, so from the task's second turn on the agent could no longer see it and asked
-        the excluded questions anyway.
+        The list the agent reads IS the list it should ask, so a gated-out question is simply
+        absent. The old shape — list every question, then append "do NOT ask these" underneath
+        — needed the agent to reconcile two contradictory lists, and `SCOPE_DISCIPLINE` tells
+        it the list is complete.
 
-        Rebuilt from `_task_block` rather than appended to the current instructions, so a
-        re-entry (a ReAsk directive) re-narrows against fresher answers instead of stacking."""
-        gating = _gating_block(
-            self._controller.applicable_fields(self._task_index),
-            self._controller.excluded_fields(self._task_index),
-            self._controller.conditional_fields(self._task_index),
-        )
-        if not gating:
-            return
-        await self.update_instructions(self._build_instructions(gating))
+        Judged on decidably-false gates only (`excluded_fields`): a question whose gate is
+        still undecided stays in the list carrying its own prose gate, which the agent
+        re-evaluates every turn. That is why there is no separate "conditional" block — the
+        condition is already stated on the question it governs.
+
+        Rebuilt from the compiled tree rather than edited in place, so a re-entry (a ReAsk
+        directive) re-narrows against fresher answers instead of stacking."""
+        excluded = self._controller.excluded_fields(self._task_index)
+        if not excluded or not self._task.panels:
+            return self._task.panels
+        kept = drop_questions(self._task.panels, {f.path for f in excluded})
+        await self.update_instructions(self._build_instructions(kept))
+        return kept
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
         self._rep_turns += 1
+        self._advanced_this_turn = False
 
     @llm.function_tool(
         name="task_complete",
@@ -346,8 +370,18 @@ class PlanTaskAgent(Agent):
             # A str is a tool result, so the plan parks here. Returning `self` would
             # re-fire on_enter and speak the intro again.
             return "A human supervisor has taken over this call. Stay silent."
-        if (refusal := self._refuse_premature_completion()) is not None:
+        if self._advanced_this_turn:
+            # A second chain-advancing call in one turn traverses a task without ever
+            # entering its question loop. Inert, not a second Agent.
+            return "Already moving on — continue with the next question."
+        refusal = self._refuse_premature_completion()
+        self._tag_completion_decision(refusal)
+        if refusal is not None:
             return refusal
+        # Set before the first await: LiveKit runs every function call from one LLM
+        # response as its own task, so a second task_complete can reach this guard
+        # while the first is still suspended below — the marker must already be up.
+        self._advanced_this_turn = True
         outro = self._task.outro
         self._controller.note_task_outro(outro)
         if outro:
@@ -361,26 +395,36 @@ class PlanTaskAgent(Agent):
         return successor
 
     def _refuse_premature_completion(self) -> str | None:
-        """Send the agent back for this task's still-open required questions, ONCE.
+        """Send the agent back for this task's still-open required questions.
 
-        The deterministic half of the gating fix: the prompt can only make a correct handoff
-        likely, and the financial task skipped itself on a lighter model despite it. A tool that
-        returns output sets LiveKit's `reply_required`, so the refusal buys a forced follow-up
-        turn in which the question actually gets asked (see VeraAgent._end_call).
+        Two bounds, because a rep who cannot answer never empties `gap_fields` and an
+        unconditional guard would strand the plan on this task:
 
-        Refuses at most once per task BY DESIGN. A rep who cannot answer never empties
-        `gap_fields`, so an unconditional guard would refuse every completion for the rest of
-        the call and strand the plan on this task. One retry, then the end-of-call gap pass
-        remains the backstop."""
+        * a turn ceiling measured over the SAME window on both sides — rep turns across the
+          task against the questions owed when the task was entered. N questions cannot be
+          asked in fewer than N exchanges;
+        * a refusal budget, since the Observer extracts in a detached pass and the answer to
+          the task's last question is never on file here. Progress — the outstanding set
+          shrank — resets it, so a task still landing answers keeps its runway.
+        """
         outstanding = self._controller.gap_fields(self._task_index)
-        if not outstanding or self._completion_refused:
+        if not outstanding:
             return None
-        # The Observer extracts in a detached pass, so the answer to the task's last question is
-        # never on file yet here; judge by turns instead, since N questions cannot have been asked
-        # in fewer than N exchanges. Coarse until answers carry the asking task's index.
-        if self._rep_turns >= len(outstanding):
+        if self._rep_turns >= self._questions_at_entry:
             return None
-        self._completion_refused = True
+        shrank = (
+            self._outstanding_at_last_refusal is None
+            or len(outstanding) < self._outstanding_at_last_refusal
+        )
+        self._refusals = 0 if shrank else self._refusals + 1
+        if self._refusals >= _TASK_FRUITLESS_REFUSALS:
+            logger.info(
+                "task %s advancing with %d question(s) still open",
+                self._task.task_key,
+                len(outstanding),
+            )
+            return None
+        self._outstanding_at_last_refusal = len(outstanding)
         logger.info(
             "task %s: completion refused, %d required question(s) still open",
             self._task.task_key,
@@ -389,9 +433,29 @@ class PlanTaskAgent(Agent):
         return (
             "Not yet — these required questions of the current task have no answer on file. "
             "Ask the representative for them now (one at a time), and call task_complete once "
-            f"they are answered or the representative says they cannot answer:\n"
+            "they are answered or the representative says they cannot answer:\n"
             f"{_field_lines(outstanding)}"
         )
+
+    def _tag_completion_decision(self, refusal: str | None) -> None:
+        """Owed-question count and refusal outcome, tagged on EVERY `task_complete` call —
+        including one that advances anyway (turn ceiling / refusal budget spent) with fields
+        still owed, the silently-missed-question failure a model-authored `reason` used to hide."""
+        try:
+            trace.get_current_span().set_attributes(
+                {
+                    "vera.completion.owed_count": len(
+                        self._controller.gap_fields(self._task_index)
+                    ),
+                    "vera.completion.refused": refusal is not None,
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "plan run %s: task-complete decision span tagging failed (%s)",
+                self._controller.room_name,
+                type(exc).__name__,
+            )
 
     def _tag_task_complete_handoff(self, successor: Agent) -> None:
         try:
@@ -465,6 +529,7 @@ class GapTaskAgent(Agent):
         self._rep_turns = 0
         self._outstanding_at_last_refusal: int | None = None
         self._fruitless_refusals = 0
+        self._advanced_this_turn = False
         super().__init__(instructions=self._build_instructions([]))
 
     def _build_instructions(self, fields: list[PlanFieldDescriptor]) -> str:
@@ -484,13 +549,18 @@ class GapTaskAgent(Agent):
         self._controller.note_task_entered(self._task_index)
         if takeover_engaged(self.session):
             return
+        # LiveKit drains queued speech BEFORE this activity starts (agent_session.py's
+        # update_agent awaits activity.drain), so the preceding task's outro has already
+        # finished playing by the time we get here — this wait is audible dead air, bounded
+        # by the drain timeout, accepted because a phantom re-ask is worse.
+        await self._controller.drain_observer()
         fields = self._controller.gap_fields(self._task_index)
         if not fields:
             successor = await self._controller.advance_gap_from(self._task_index)
             await self._controller.prepare_successor(self, successor)
             self.session.update_agent(successor)
             return
-        self._questions_owed = len(fields)
+        self._questions_owed = self._controller.owed_question_count(self._task_index)
         await self._apply_gap_list(fields)
         self.session.generate_reply(instructions=_GAP_REASK_DIRECTIVE)
 
@@ -509,6 +579,7 @@ class GapTaskAgent(Agent):
     ) -> None:
         apply_pending_coaching_notes(self.session, turn_ctx)
         self._rep_turns += 1
+        self._advanced_this_turn = False
         # The Observer keeps writing during the pass, so re-narrow as answers land. Not when the
         # set empties: the agent's next move is then gap_complete, which the guard passes.
         if outstanding := self._controller.gap_fields(self._task_index):
@@ -526,8 +597,15 @@ class GapTaskAgent(Agent):
     async def _gap_complete(self, reason: str) -> Agent | str:
         if takeover_engaged(self.session):
             return "A human supervisor has taken over this call. Stay silent."
+        if self._advanced_this_turn:
+            # A second chain-advancing call in one turn traverses a task without ever
+            # entering its question loop. Inert, not a second Agent.
+            return "Already moving on — continue with the next question."
         if (refusal := self._refuse_premature_gap_complete()) is not None:
             return refusal
+        # Set before the first await — see the matching comment in
+        # PlanTaskAgent._task_complete for why the ordering matters.
+        self._advanced_this_turn = True
         successor = await self._controller.advance_gap_from(self._task_index)
         await self._controller.prepare_successor(self, successor)
         return successor
@@ -536,8 +614,8 @@ class GapTaskAgent(Agent):
         """Send the sweep back for the questions it has not asked yet, re-listing them.
 
         The prompt can only make full coverage likely; this is what enforces it. The main pass
-        refuses at most ONCE (see `_refuse_premature_completion`) because this pass backstops it
-        — but nothing backstops this one, and it runs once, so whatever it leaves unasked is
+        has its own turn ceiling and refusal budget (see `_refuse_premature_completion`) — but
+        nothing backstops this one, and it runs once, so whatever it leaves unasked is
         unreachable for the rest of the call.
 
         Two bounds, because a rep who cannot answer never empties `gap_fields` and an
@@ -554,7 +632,7 @@ class GapTaskAgent(Agent):
         outstanding = self._controller.gap_fields(self._task_index)
         if not outstanding:
             return None
-        owed = self._questions_owed or len(outstanding)
+        owed = self._questions_owed
         if self._rep_turns >= owed:
             return None
         shrank = (
@@ -571,7 +649,7 @@ class GapTaskAgent(Agent):
             return None
         self._outstanding_at_last_refusal = len(outstanding)
         logger.info(
-            "gap sweep of task %s: completion refused, %d of %d question(s) still open",
+            "gap sweep of task %s: completion refused, %d field(s) open across %d owed ask(s)",
             self._task.task_key,
             len(outstanding),
             owed,
@@ -606,6 +684,11 @@ class PlanRunController:
         if not plan.tasks:
             raise ValueError("call plan has no tasks")
         self.plan = plan
+        # Built once: the either/or groups the compiler recovered from the authored sets.
+        # `gap_fields` reads it directly — an alternatives set is ONE tree question, but
+        # `is_required` is unconditional on both its members, so answering one side does not
+        # make the sibling's own `is_required` false; only consulting the group here does.
+        self._alternatives = alternative_index(plan.alternative_pairs)
         self.room_name = room_name
         self.greeting = greeting
         # Tenant persona-tweak overlay, appended to every plan agent's instructions.
@@ -625,10 +708,18 @@ class PlanRunController:
         # closer a context in which VERA never introduced herself.
         self._anchor_items: list[ChatItem] = []
         self._run_state = run_state
-        # In-process answers snapshot for applicability/skip decisions, seeded
-        # with the form's intake prefill (so gates work from call start); the
-        # Phase-2 Observer keeps it current. Redis stays the cross-process truth.
-        self._answers: dict[str, Any] = dict(plan.prefilled)
+        # Pre-call baseline for gate evaluation: the intake values a gate may legitimately be
+        # judged against before the call collects anything. Role-scoped (`gating_seed`), so an
+        # ask leaf's prefill can never settle a gate. Immutable for the run.
+        self._baseline = gating_seed(plan)
+        # Baseline + what the call has collected. Redis stays the cross-process truth.
+        self._answers: dict[str, Any] = dict(self._baseline)
+        # Collectable path -> the task that asks it. A gate referencing a path in THIS task
+        # (or a later one) is undecided at entry; one referencing only earlier tasks is final,
+        # answered or gated-out-upstream alike. Paths absent here are context/prefilled.
+        self._task_of_path: dict[str, int] = {
+            field.path: index for index, task in enumerate(plan.tasks) for field in task.fields
+        }
         self.active_task_index: int | None = None
         # Tasks the call actually entered (main pass or gap pass).
         self._visited_tasks: set[int] = set()
@@ -650,6 +741,10 @@ class PlanRunController:
         # The live AgentSession, attached after session.start (see attach_session).
         # apply_directive_now drives it to interrupt/swap the bot on a rule fire.
         self._session: AgentSession[TakeoverState] | None = None
+        # The Observer, attached from main.py alongside the session (see attach_observer).
+        # None in Voice Lab and every test that builds a controller bare — drain_observer
+        # is then a no-op.
+        self._observer_manager: ObserverManager | None = None
         # Fire-and-forget cursor writes: strong refs (a bare create_task result
         # can be GC'd mid-flight), drained in tests via drain_cursor_writes.
         self._cursor_writes: set[asyncio.Task[None]] = set()
@@ -835,9 +930,24 @@ class PlanRunController:
         which requires a started session producing transcript turns."""
         self._session = session
 
-    def update_answers(self, answers: dict[str, Any]) -> None:
-        """Refresh the in-process answers snapshot (Observer-fed in Phase 2)."""
-        self._answers = dict(answers)
+    def attach_observer(self, manager: "ObserverManager") -> None:
+        """Hand the controller the Observer so `drain_observer` has something to await.
+        Wired from main.py alongside `attach_session`; left unset in Voice Lab and tests."""
+        self._observer_manager = manager
+
+    def update_answers(self, answers: Mapping[str, Any]) -> None:
+        """The answers the CALL has collected, laid over the pre-call baseline.
+
+        MERGED, never replaced. The Observer's own map is not role-scoped, so a wholesale
+        replace would put every ask-role intake value back and re-arm the question deletion
+        `gating_seed` exists to prevent — and it would do so invisibly, since the controller
+        cannot tell a pre-call value from one the rep just gave."""
+        self._answers = {**self._baseline, **answers}
+
+    async def drain_observer(self) -> None:
+        """Let extraction settle before a caller reads `gap_fields`. No-op without a manager."""
+        if self._observer_manager is not None:
+            await self._observer_manager.drain_pending()
 
     async def apply_directive_now(self, directive: Directive) -> None:
         """Apply a rule-engine redirect immediately, from the Observer's background task:
@@ -937,28 +1047,51 @@ class PlanRunController:
         for field in self.plan.tasks[task_index].fields:
             if is_applicable(field.gates, self._answers, shared):
                 applicable.append(field)
-            elif self._has_decided_false_gate(field):
+            elif self._has_decided_false_gate(field, task_index):
                 excluded.append(field)
             else:
                 conditional.append(field)
         return applicable, excluded, conditional
 
-    def _decided_true(self, cond: Condition, shared: Mapping[str, Condition]) -> bool:
+    def _settled(self, path: str, task_index: int) -> bool:
+        """Is this path's value final for the purposes of a gate evaluated at `task_index`?
+
+        Answered, or collected by an EARLIER task — an earlier task's unanswered field was
+        gated out upstream and no later answer is coming. Without the second half, a gate
+        over 27 prior-auth paths on a call where infertility was never covered reads as
+        undecided forever and the auth-department questions are asked anyway.
+
+        A path NO task collects is deliberately not settled by position: an absent context
+        value means "not supplied", which is unknown, not false.
+
+        Position alone IS the compiler's rule (`question_plan._entry_decided`), which runs at
+        dispatch with no answers; adding "answered" only makes this MORE decisive, never less.
+        That ordering is required, not incidental: the compiler omits the prose for every gate
+        it decides, so a worker less decisive than the compiler keeps a question whose
+        condition is stated nowhere."""
+        owner = self._task_of_path.get(path)
+        return self._is_answered(path) or (owner is not None and owner < task_index)
+
+    def _decided_true(
+        self, cond: Condition, shared: Mapping[str, Condition], task_index: int
+    ) -> bool:
         """Whether `cond` is decidably TRUE — recurses through `all`/`any`/`ref`/`not` the same
         way `evaluate` does, rather than flatly requiring every path anywhere in the tree
         answered (see `_decided_false`, which this and `_has_decided_false_gate` mirror)."""
         if isinstance(cond, RefCondition):
             target = shared.get(cond.ref)
-            return self._decided_true(target, shared) if target is not None else False
+            return self._decided_true(target, shared, task_index) if target is not None else False
         if isinstance(cond, AllCondition):
-            return all(self._decided_true(c, shared) for c in cond.all)
+            return all(self._decided_true(c, shared, task_index) for c in cond.all)
         if isinstance(cond, AnyCondition):
-            return any(self._decided_true(c, shared) for c in cond.any)
+            return any(self._decided_true(c, shared, task_index) for c in cond.any)
         if isinstance(cond, NotCondition):
-            return self._decided_false(cond.not_, shared)
-        return self._is_answered(cond.field) and evaluate(cond, self._answers, shared)
+            return self._decided_false(cond.not_, shared, task_index)
+        return self._settled(cond.field, task_index) and evaluate(cond, self._answers, shared)
 
-    def _decided_false(self, cond: Condition, shared: Mapping[str, Condition]) -> bool:
+    def _decided_false(
+        self, cond: Condition, shared: Mapping[str, Condition], task_index: int
+    ) -> bool:
         """Whether `cond` is decidably FALSE. An `all` is decided-false the moment ONE
         conjunct is decided-false — mirroring `evaluate`'s `all(...)` short-circuit — so a
         sibling conjunct reading a still-unanswered path never blocks the decision. Flattening
@@ -967,31 +1100,58 @@ class PlanRunController:
         before ever excluding it, even though `family_coverage` alone already decides it false."""
         if isinstance(cond, RefCondition):
             target = shared.get(cond.ref)
-            return self._decided_false(target, shared) if target is not None else True
+            return self._decided_false(target, shared, task_index) if target is not None else True
         if isinstance(cond, AllCondition):
-            return any(self._decided_false(c, shared) for c in cond.all)
+            return any(self._decided_false(c, shared, task_index) for c in cond.all)
         if isinstance(cond, AnyCondition):
-            return all(self._decided_false(c, shared) for c in cond.any)
+            return all(self._decided_false(c, shared, task_index) for c in cond.any)
         if isinstance(cond, NotCondition):
-            return self._decided_true(cond.not_, shared)
-        return self._is_answered(cond.field) and not evaluate(cond, self._answers, shared)
+            return self._decided_true(cond.not_, shared, task_index)
+        return self._settled(cond.field, task_index) and not evaluate(cond, self._answers, shared)
 
-    def _has_decided_false_gate(self, field: PlanFieldDescriptor) -> bool:
+    def _has_decided_false_gate(self, field: PlanFieldDescriptor, task_index: int) -> bool:
         """`is_applicable` is `all(gates)`, so ONE decidably-false gate settles the
         whole chain — regardless of other gates reading unanswered paths."""
         shared = self.plan.shared_conditions
-        return any(self._decided_false(gate, shared) for gate in field.gates)
+        return any(self._decided_false(gate, shared, task_index) for gate in field.gates)
 
     def gap_fields(self, task_index: int) -> list[PlanFieldDescriptor]:
-        """A task's still-open gaps: applicable (gates hold) ∧ required ∧ unanswered,
-        against the live answer snapshot — the same required/applicable set the form's
-        completion percentage counts."""
+        """The unanswered applicable descriptors under this task's still-owed questions.
+
+        Field-granular by design (Plan C, 2026-08-07: ceilings count asks, lists name
+        missing fields) — re-asking a partially answered fan-out by its question text would
+        re-ask the half already on file. Consults `self._alternatives`, never `default`: an
+        either/or is one tree question, but `is_required` is unconditional on both its
+        members, so answering one side leaves the sibling's OWN required-and-unanswered
+        check true unless the group is checked here too."""
+        task = self.plan.tasks[task_index]
         shared = self.plan.shared_conditions
+        by_path = {field.path: field for field in task.fields}
+
+        def answered(path: str) -> bool:
+            return has_value(self._answers, path) or any(
+                has_value(self._answers, sibling) for sibling in self._alternatives.get(path, ())
+            )
+
         return [
             field
-            for field in self.applicable_fields(task_index)
-            if is_required(field, self._answers, shared) and not self._is_answered(field.path)
+            for question in owed_now(task, self._answers, shared)
+            for path in question.target_paths
+            if (field := by_path.get(path)) is not None
+            and is_applicable(field.gates, self._answers, shared)
+            and is_required(field, self._answers, shared)
+            and not answered(path)
         ]
+
+    def owed_question_count(self, task_index: int) -> int:
+        """`gap_fields` measured in SPOKEN questions — the ceiling both guards judge by.
+
+        Unlike `gap_fields` this does not consult `self._alternatives`, so a fully-satisfied
+        either/or still counts its ask; the ceiling errs high, which only makes the guards
+        more patient."""
+        return len(
+            owed_now(self.plan.tasks[task_index], self._answers, self.plan.shared_conditions)
+        )
 
     def _is_answered(self, path: str) -> bool:
         value = self._answers.get(path)

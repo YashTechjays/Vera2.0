@@ -10,11 +10,14 @@ from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from vera_core.forms.catalog import SCHEMAS
+from vera_core.forms.conditions import alternative_fills, leaf_gates
 from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.export_form_sheet import (
     LEFT_TOP,
     RAIL,
     RIGHT_TOP,
+    _Ctx,
+    _leaf_value,
     render_form_sheet,
     section_table,
 )
@@ -459,3 +462,27 @@ def test_ui_palette_usage_tints_and_value_fill() -> None:
     assert str(ws.cell(row=2, column=2).fill.start_color.rgb).endswith("D0E0E3")
     # appointment_date is role=context -> green-100 label tint (right band).
     assert str(ws.cell(row=2, column=4).fill.start_color.rgb).endswith("DCFCE7")
+
+
+_IUI = "sections.infertility_treatment.intrauterine_insemination.cpt_58323"
+
+
+def test_a_filled_either_or_side_reaches_the_sheet_and_is_not_greyed() -> None:
+    """The whole point of writing the fill rather than showing a placeholder: the export is the
+    platform's final product, and an inapplicable cell is written blank and grey."""
+    doc = load_document((FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text("utf-8"))
+    answered = {
+        "sections.infertility_treatment.infertility_tx_covered": "Yes",
+        f"{_IUI}.covered": "Yes",
+        f"{_IUI}.coinsurance": "30",
+    }
+    fills = alternative_fills(doc, answered, f"{_IUI}.coinsurance")
+    assert fills == {f"{_IUI}.copay": "$0"}
+
+    ctx = _Ctx(doc, {**answered, **fills})
+    leaves = {path: leaf for path, leaf, _gates in leaf_gates(doc)}
+    # Applicable, so the renderer writes the value instead of blanking and graying the cell.
+    assert ctx.applicable(f"{_IUI}.copay")
+    assert _leaf_value(f"{_IUI}.copay", leaves[f"{_IUI}.copay"], ctx) == "$0"
+    # The rep's own answer is untouched on the other side of the pair.
+    assert _leaf_value(f"{_IUI}.coinsurance", leaves[f"{_IUI}.coinsurance"], ctx) == "30"

@@ -1,4 +1,11 @@
-import { allLeaves, createRequiredPaths, isApplicable, isRequired, titleOf } from "./schema"
+import {
+  allLeaves,
+  createRequiredPaths,
+  isApplicable,
+  isRequired,
+  isSatisfied,
+  titleOf,
+} from "./schema"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -145,8 +152,10 @@ function validateLeaf(
   const value = (values[leaf.path] ?? "").trim()
 
   if (value === "") {
-    // A declared default counts as filled (completion/export assume it).
-    if (isRequired(schema, f, values) && f.default === undefined) {
+    // A declared default counts as filled (completion/export assume it), and so does a
+    // sibling answering this leaf's either/or — one reply satisfies the pair.
+    const owed = isRequired(schema, f, values) && f.default === undefined
+    if (owed && !isSatisfied(schema, leaf, values)) {
       return `${f.title} is required`
     }
     return undefined

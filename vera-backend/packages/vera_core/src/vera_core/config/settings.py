@@ -167,6 +167,11 @@ class Settings(BaseSettings):
     # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
     livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
 
+    # Test transport: skip SIP entirely and let a browser participant join as the payer
+    # rep. Never enable outside local/dev.
+    # See docs/superpowers/specs/2026-08-08-browser-callee-transport-design.md.
+    browser_callee_transport: bool = False  # VERA_BROWSER_CALLEE_TRANSPORT
+
     # --- live-call summary (control plane) -----------------------------------
     # Fault-tolerant summarizer chain, "provider:model" selectors resolved by
     # vera_core.llm (google = Vertex Gemini; openai = GPT under the OpenAI BAA).

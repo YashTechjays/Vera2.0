@@ -101,15 +101,22 @@ class LiveKitGateway:
         api_key: str,
         api_secret: str,
         agent_name: str = AGENT_NAME,
+        browser_callee_transport: bool = False,
     ) -> None:
         self._url = url
         self._api_key = api_key
         self._api_secret = api_secret
         self._agent_name = agent_name
+        self._browser_callee_transport = browser_callee_transport
 
     @property
     def url(self) -> str:
         return self._url
+
+    @property
+    def browser_callee_transport(self) -> bool:
+        """True when no SIP call is placed — the callee joins the room from a browser."""
+        return self._browser_callee_transport
 
     @asynccontextmanager
     async def _client(self) -> AsyncIterator[api.LiveKitAPI]:
@@ -356,4 +363,5 @@ def build_livekit_gateway(settings: Settings, secrets: SecretProvider) -> LiveKi
         api_key=secrets.get("LIVEKIT_API_KEY"),
         api_secret=secrets.get("LIVEKIT_API_SECRET"),
         agent_name=settings.livekit_agent_name,
+        browser_callee_transport=settings.browser_callee_transport,
     )

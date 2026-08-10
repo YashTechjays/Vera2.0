@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date
 from typing import Annotated, Literal
@@ -741,6 +742,9 @@ class FormSchemaDoc(_Model):
                     f"must reference a collectable leaf inside task {cit.task_key!r}"
                 )
 
+        errors.extend(validate_question_coverage(self))
+        errors.extend(validate_confirm_defaults(self))
+
         # ask_groups / alternatives
         for skey, section in self.sections.items():
             prefix = f"{PATH_PREFIX}{skey}."
@@ -759,11 +763,49 @@ class FormSchemaDoc(_Model):
                     if member in seen_ag:
                         errors.append(f"{where}: member {member!r} in more than one ask group")
                     seen_ag.add(member)
+                # The prompt compiler collapses an ask group into ONE spoken question and
+                # gives each distinct member TITLE its own answer line. Members may differ in
+                # type (a "TPA Exists / TPA Name" pair is one question by design), but two
+                # members sharing a title must share their answer shape — only the first
+                # one's vocabulary and bounds would be spoken for both.
+                shapes: dict[str, set[str]] = {}
+                for member in ag.fields:
+                    member_leaf = leaves.get(member)
+                    if member_leaf is None:
+                        continue
+                    shapes.setdefault(member_leaf.title, set()).add(
+                        json.dumps(
+                            [
+                                member_leaf.type,
+                                member_leaf.values,
+                                member_leaf.special_values,
+                                member_leaf.validation.model_dump(mode="json", exclude_none=True)
+                                if member_leaf.validation
+                                else None,
+                            ],
+                            sort_keys=True,
+                        )
+                    )
+                for title, distinct in shapes.items():
+                    if len(distinct) > 1:
+                        errors.append(
+                            f"{where}: members titled {title!r} have different answer shapes; "
+                            "they collapse into one spoken option and only the first would be "
+                            "described"
+                        )
             seen_alt: set[str] = set()
             for i, alt in enumerate(section.alternatives or []):
                 where = f"section {skey}.alternatives[{i}]"
                 if len(alt.members) < 2:
                     errors.append(f"{where}: needs at least 2 members")
+                # An either/or between GROUPS is spoken as a routing question that picks which
+                # panel applies; there is no leaf prompt to fall back on, so it needs its own
+                # wording rather than a synthesized sentence.
+                if len([m for m in alt.members if m in groups]) >= 2 and not alt.ask:
+                    errors.append(
+                        f"{where}: an alternatives set over groups needs an `ask` — it is "
+                        "spoken as a question choosing between them"
+                    )
                 for member in alt.members:
                     if member not in leaves and member not in groups:
                         errors.append(f"{where}: member {member!r} is not a field or group")
@@ -878,6 +920,89 @@ class FormSchemaDoc(_Model):
                 "invalid form schema document:\n" + "\n".join(f"- {e}" for e in errors)
             )
         return self
+
+
+def validate_question_coverage(doc: FormSchemaDoc) -> list[str]:
+    """Every collectable leaf must be reachable from exactly one spoken question.
+
+    This is what makes `task.fields` a PROJECTION of the question tree rather than a
+    parallel artifact. Without it the prompt can say 16 while the guard counts 20, which
+    is exactly how a live call ended a task with six required questions unasked."""
+    # Function-scope imports: `conditions`, `prompting` and `question_plan` each import
+    # `dsl`, so importing them at module scope here would be a cycle.
+    from vera_core.forms.conditions import leaf_gates
+    from vera_core.forms.prompting import immediate_confirms_by_anchor
+    from vera_core.forms.question_plan import build_question_plan, iter_questions
+
+    errors: list[str] = []
+    section_to_task = doc.section_to_task()
+    anchors = immediate_confirms_by_anchor(doc)
+    gated_leaves = list(leaf_gates(doc))  # loop-invariant across tasks below
+    for task in doc.tasks:
+        if any(skey not in doc.sections for skey in task.sections):
+            continue  # unknown section — already reported by the structural check above
+        panels = build_question_plan(doc, task, anchors)
+        # `owed_now` (call_plan.py) skips every routes_between question unconditionally, so a
+        # routing question that carried a target would count as coverage here while staying
+        # permanently un-owed at runtime — exclude it, matching that skip.
+        hits: Counter[str] = Counter(
+            path for q in iter_questions(panels) if not q.routes_between for path in q.target_paths
+        )
+        for path, leaf, _gates in gated_leaves:
+            if leaf.role not in COLLECTED_ROLES:
+                continue
+            cit = leaf.confirm_in_task
+            if cit is not None and not cit.confirm_immediate:
+                # Spoken by the end-of-task confirm block, never a panel node
+                # (`prompting._anchor` returns None unconditionally for these) — so this
+                # rule cannot see it. `test_no_catalog_uses_an_end_of_task_confirm` is the
+                # tripwire: Task 3's owed-set join walks the same tree this validator
+                # checks, so an end-of-task confirm would be exempt here AND silently
+                # never owed there, even though `task.prompt` still tells the agent to
+                # ask it — a regression from today's `gap_fields`, which owes it fine.
+                continue
+            owner = cit.task_key if cit is not None else section_to_task.get(path.split(".")[1])
+            if owner != task.task_key:
+                continue
+            if hits[path] == 0:
+                errors.append(
+                    f"{task.task_key}: collectable path {path} is not reachable "
+                    "from any spoken question"
+                )
+            elif hits[path] > 1:
+                errors.append(
+                    f"{task.task_key}: collectable path {path} is reachable from "
+                    f"{hits[path]} questions"
+                )
+    return errors
+
+
+def validate_confirm_defaults(doc: FormSchemaDoc) -> list[str]:
+    """A `confirm` leaf that gates another question may not declare a `default`.
+
+    `call_plan.gating_seed` drops ask-role prefills from the worker's gate-evaluation set but
+    keeps confirm ones — a confirm value is on file precisely to be read back. So a `default`
+    on a gating confirm leaf still arrives as an answer and still deletes every question behind
+    it, which is the failure `gating_seed` removes for ask-role leaves."""
+    from vera_core.forms.conditions import leaf_gates
+
+    leaves = dict(doc.leaf_items())
+    shared = doc.shared_conditions or {}
+    referenced = {
+        ref
+        for _path, _leaf, chain in leaf_gates(doc)
+        for gate in chain
+        for ref in condition_field_paths(gate, shared)
+    }
+    return [
+        f"{path}: a confirm-role leaf that declares a default and is referenced by another "
+        "field's applicable_when would settle that gate from intake, deleting the questions "
+        "behind it"
+        for path in sorted(referenced)
+        if (leaf := leaves.get(path)) is not None
+        and leaf.role == "confirm"
+        and leaf.default is not None
+    ]
 
 
 # ---------------------------------------------------------------------------

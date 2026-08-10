@@ -1424,7 +1424,7 @@ async def update_patient_form_status(
     # Hard dialability gate: a form that can never be dialed must not enter the queue.
     canonicalized_provider = False
     if target == FormStatus.IN_QUEUE:
-        await ensure_queueable(session, kms, form)
+        await ensure_queueable(session, kms, form, browser_callee=livekit.browser_callee_transport)
         await ensure_va_capacity(session, tenant, caller.user_id)
         # Canonicalize the provider from the operator's pick so the async dispatcher
         # resolves the right catalog provider (and its IVR playbook) — the string, not

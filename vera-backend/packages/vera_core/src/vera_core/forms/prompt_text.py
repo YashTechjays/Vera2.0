@@ -18,8 +18,16 @@ from vera_core.forms.dsl import (
 )
 
 
-def build_condition_renderer(doc: FormSchemaDoc) -> Callable[[Condition], str]:
-    """A renderer bound to one document (title lookup + shared-ref expansion)."""
+def build_condition_renderer(
+    doc: FormSchemaDoc, scope: str | None = None
+) -> Callable[[Condition], str]:
+    """A renderer bound to one document (title lookup + shared-ref expansion).
+
+    ``scope`` is the root-anchored path of the panel currently being rendered. Inside a
+    panel a leaf's disambiguating breadcrumb is redundant — the heading already supplies
+    it — so labels drop the shared prefix and a gate that only asks "is the thing this
+    panel is about covered?" reads as exactly that. Unscoped output is unchanged, which
+    is what flow rules and contradictions still use."""
     leaves = dict(doc.leaf_items())
     title_counts = Counter(leaf.title for leaf in leaves.values())
     shared = doc.shared_conditions or {}
@@ -30,6 +38,13 @@ def build_condition_renderer(doc: FormSchemaDoc) -> Callable[[Condition], str]:
         leaf = leaves.get(path)
         if leaf is None:
             return path
+        if scope is not None and path.startswith(f"{scope}."):
+            rest = path[len(scope) + 1 :].split(".")
+            if len(rest) == 1:
+                return f'"{leaf.title}"'
+            owner = fields_by_path.get(f"{scope}.{rest[0]}")
+            owner_title = owner.title if owner is not None else rest[0]
+            return f'{owner_title} "{leaf.title}"'
         if title_counts[leaf.title] == 1:
             return f'"{leaf.title}"'
         parts = path.split(".")  # ["sections", <section>, *groups, <leaf>]
@@ -81,3 +96,13 @@ def build_condition_renderer(doc: FormSchemaDoc) -> Callable[[Condition], str]:
         return render(cond)
 
     return entry
+
+
+def confirm_slot(path: str, *, bare: bool = False) -> str:
+    """The fuse-time slot for a confirm leaf's spoken line — sentence and confirm/ask
+    verb are chosen per form, once the prefilled value is known (`call_plan.expand_slots`).
+    `bare` drops the `confirm — `/`ask — ` label for the numbered-question list, whose
+    numbering already marks it as a question; the bullet contexts keep it because they mix
+    confirms and asks, and the label is what disambiguates them."""
+    token = "confirm_bare" if bare else "confirm"
+    return f"{{{{{token}:{path}}}}}"
