@@ -43,6 +43,13 @@ const OPTION = {
   published_version: 3,
 }
 
+const OTHER_OPTION = {
+  ...OPTION,
+  schema_id: "other",
+  name: "Disease Only",
+  insurance_type: "disease_only",
+}
+
 /** The create modal only opens through the provider, so drive it from a child. */
 function OpenCreate() {
   const { openCreate } = useIbv()
@@ -62,16 +69,14 @@ function renderModal() {
   )
 }
 
-/** Open the picker, choose the only family, and land on the filled form step. */
-async function reachFormStep(user: ReturnType<typeof userEvent.setup>) {
+/** Open the modal and let its catalog read land. An infertility family then
+ *  auto-continues past the picker; anything else stops at it. */
+async function openModal() {
+  const user = userEvent.setup({ delay: null })
+  renderModal()
   await user.click(screen.getByRole("button", { name: "Add patient form" }))
   await waitFor(() => expect(mockedList).toHaveBeenCalled())
-  await user.selectOptions(
-    await screen.findByRole("combobox"),
-    screen.getByRole("option", { name: /IBV Form Standard/ }),
-  )
-  await user.click(screen.getByRole("button", { name: "Continue" }))
-  await screen.findByRole("button", { name: "Submit" })
+  return user
 }
 
 /** Seed every create-required leaf through its input. `fireEvent.change`, not
@@ -89,11 +94,11 @@ function fillRequired() {
   }
 }
 
-/** Open the modal, pick the family, and (optionally) fill the required fields. */
+/** Open the modal, land on the auto-continued form step, and (optionally) fill
+ *  the required fields. */
 async function atFormStep({ filled = false } = {}) {
-  const user = userEvent.setup({ delay: null })
-  renderModal()
-  await reachFormStep(user)
+  const user = await openModal()
+  await screen.findByRole("button", { name: "Submit" })
   if (filled) fillRequired()
   return user
 }
@@ -117,10 +122,63 @@ describe("CreatePatientFormModal", () => {
   })
 
   it("labels each family with its published version", async () => {
-    const user = userEvent.setup({ delay: null })
-    renderModal()
-    await user.click(screen.getByRole("button", { name: "Add patient form" })) // picker only
+    mockedList.mockResolvedValue([OTHER_OPTION]) // no infertility family → picker stays
+    await openModal()
     expect(await screen.findByRole("option", { name: /· v3$/ })).toBeInTheDocument()
+  })
+
+  it("skips the picker and opens the infertility-treatment form directly", async () => {
+    mockedList.mockResolvedValue([OTHER_OPTION, OPTION])
+    await openModal()
+    expect(await screen.findByRole("button", { name: "Submit" })).toBeInTheDocument()
+    expect(mockedVersion).toHaveBeenCalledWith(VERSION_ID)
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument()
+  })
+
+  it("never paints the picker while the auto-continued schema is loading", async () => {
+    // A fresh version id: loadSchema caches by id at module scope, so VERSION_ID would resolve without ever calling getSchemaVersion.
+    const pendingVersionId = "99999999-9999-9999-9999-999999999999"
+    mockedList.mockResolvedValue([{ ...OPTION, published_version_id: pendingVersionId }])
+    let releaseVersion!: () => void
+    mockedVersion.mockReturnValue(
+      new Promise((resolve) => {
+        releaseVersion = () =>
+          resolve({
+            id: pendingVersionId,
+            schema_id: SCHEMA_ID,
+            version: 4,
+            status: "published",
+            insurance_type: "infertility_treatment",
+            name: "IBV Form Standard",
+            document: rawSchema,
+          })
+      }),
+    )
+    await openModal()
+    await waitFor(() => expect(mockedVersion).toHaveBeenCalledWith(pendingVersionId))
+    expect(screen.getByText("Loading…")).toBeInTheDocument()
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument()
+
+    releaseVersion()
+    expect(await screen.findByRole("button", { name: "Submit" })).toBeInTheDocument()
+  })
+
+  it("shows the picker when no infertility-treatment family is published", async () => {
+    mockedList.mockResolvedValue([OTHER_OPTION])
+    await openModal()
+    expect(await screen.findByRole("combobox")).toHaveValue("")
+    expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled()
+  })
+
+  it("Back lands on the picker without bouncing forward again", async () => {
+    const user = await atFormStep()
+
+    await user.click(screen.getByRole("button", { name: "Back" }))
+
+    const picker = await screen.findByRole("combobox")
+    expect(picker).toHaveValue(SCHEMA_ID) // preselected, but not auto-continued
+    expect(screen.queryByRole("button", { name: "Submit" })).not.toBeInTheDocument()
   })
 
   it("names the blocking fields instead of a bare 'required fields' banner", async () => {

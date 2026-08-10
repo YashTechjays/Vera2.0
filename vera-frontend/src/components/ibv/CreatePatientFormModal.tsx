@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState, type RefObject } from "react"
 
 import {
   Dialog,
@@ -38,17 +38,21 @@ function revealField(dialog: HTMLElement | null, path: string): void {
 function SchemaPicker({
   createError,
   loading,
+  autoPickedRef,
   onContinue,
   onCancel,
 }: {
   createError: string | null
   loading: boolean
+  /** Guards the one auto-skip per dialog open; the parent resets it on close. */
+  autoPickedRef: RefObject<boolean>
   onContinue: (option: IntakeSchemaOption) => void
   onCancel: () => void
 }) {
   const [options, setOptions] = useState<IntakeSchemaOption[] | null>(null)
   const [optionsError, setOptionsError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState("")
+  const [forwarding, setForwarding] = useState(false)
 
   // Fresh catalog read on mount — cheap read, and it avoids offering a family
   // whose version was demoted since the dialog was last opened.
@@ -56,18 +60,36 @@ function SchemaPicker({
     let cancelled = false
     listIntakeSchemas()
       .then((res) => {
-        if (!cancelled) setOptions(res)
+        if (cancelled) return
+        setOptions(res)
+        // Infertility treatment is the dominant intake — open it directly; the picker stays as fallback.
+        const preferred = res.find((o) => o.insurance_type === "infertility_treatment")
+        if (!preferred) return
+        setSelectedId(preferred.schema_id)
+        if (autoPickedRef.current) return
+        autoPickedRef.current = true
+        setForwarding(true)
+        onContinue(preferred)
       })
       .catch((err) => {
-        if (!cancelled)
-          setOptionsError(
-            err instanceof Error ? err.message : "Could not load form schemas.",
-          )
+        if (cancelled) return
+        setOptionsError(
+          err instanceof Error ? err.message : "Could not load form schemas.",
+        )
       })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [autoPickedRef, onContinue])
+
+  // Auto-forward in flight — never flash the picker; createError falls back to it.
+  if (forwarding && !createError) {
+    return (
+      <div className="space-y-4 p-4">
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4 p-4">
@@ -136,6 +158,12 @@ export function CreatePatientFormModal() {
 
   const picking = createSelection === null
 
+  // Reset only on close: Back re-opens the picker, which must not bounce forward again.
+  const autoPickedRef = useRef(false)
+  useEffect(() => {
+    if (!createModalOpen) autoPickedRef.current = false
+  }, [createModalOpen])
+
   return (
     <Dialog open={createModalOpen} onOpenChange={(o) => (o ? null : closeCreate())}>
       <DialogContent
@@ -166,7 +194,8 @@ export function CreatePatientFormModal() {
           <SchemaPicker
             createError={createError}
             loading={loading}
-            onContinue={(option) => void beginCreate(option)}
+            autoPickedRef={autoPickedRef}
+            onContinue={beginCreate}
             onCancel={closeCreate}
           />
         ) : (
