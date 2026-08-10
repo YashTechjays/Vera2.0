@@ -75,6 +75,7 @@ echo "Starting livekit-server (wss://${DOMAIN} via Caddy; internal ws://<private
 docker run -d \
   --name livekit-server \
   --restart unless-stopped \
+  --log-driver gcplogs \
   --network host \
   -e "LIVEKIT_KEYS=${API_KEY}: ${API_SECRET}" \
   -v "/etc/livekit/livekit.yaml:/etc/livekit.yaml" \
@@ -87,6 +88,7 @@ echo "Starting caddy (TLS termination for wss://${DOMAIN})..."
 docker run -d \
   --name caddy \
   --restart unless-stopped \
+  --log-driver gcplogs \
   --network host \
   -v "/etc/livekit/Caddyfile:/etc/caddy/Caddyfile:ro" \
   -v "caddy_data:/data" \

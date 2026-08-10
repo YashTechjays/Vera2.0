@@ -54,6 +54,7 @@ echo "Starting livekit-sip..."
 docker run -d \
   --name livekit-sip \
   --restart unless-stopped \
+  --log-driver gcplogs \
   --network host \
   -v "/etc/livekit/sip.yaml:/sip/config.yaml" \
   livekit/sip:latest

@@ -63,6 +63,7 @@ echo "Starting livekit-egress..."
 docker run -d \
   --name livekit-egress \
   --restart unless-stopped \
+  --log-driver gcplogs \
   --network host \
   --shm-size=1g \
   -e EGRESS_CONFIG_BODY \
