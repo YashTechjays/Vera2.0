@@ -37,6 +37,7 @@ import {
   type DisputeFlags,
   type DisputeMap,
 } from "@/lib/ibv/disputes"
+import { showIvrToggle } from "@/lib/devFlags"
 import { canApplyLiveAnswer } from "@/lib/ibv/liveAnswers"
 import type { FormSchema, FormValues, LeafField } from "@/lib/ibv/types"
 import type { LiveDispute } from "@/lib/api/callEvents"
@@ -656,7 +657,8 @@ export function IbvProvider({
           next,
           next === "in_queue"
             ? {
-                enableIvrNavigation: ivrNavigation,
+                // Toggle hidden → always navigate, ignoring any stored opt-out.
+                enableIvrNavigation: showIvrToggle() ? ivrNavigation : true,
                 insuranceProviderId: providerId || undefined,
               }
             : undefined,

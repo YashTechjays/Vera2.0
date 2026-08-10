@@ -32,21 +32,19 @@ import {
 } from "@/lib/api/voiceLab"
 import { streamTranscription, type TranscriptEvent } from "@/lib/api/transcription"
 import { VoiceLabDialpad } from "@/components/voice-lab/VoiceLabDialpad"
+import { showBrowserSessionButton } from "@/lib/devFlags"
 import { parseCallFailure } from "@/lib/voice-lab/callFailure"
 import { hasAgentParticipant, useAgentJoinTimeout } from "@/lib/voice-lab/agentPresence"
 
 /** Visibility of the "Start in-browser session" button. Hidden by default.
  *  Two ways to bring it back:
  *   - Permanently, in source: set DEFAULT to `true` and rebuild.
- *   - Ad hoc in a deployed browser, no redeploy: run
- *       localStorage.setItem("vera.showBrowserSession", "1")
- *     in the devtools console and reload (removeItem to hide it again).
+ *   - Ad hoc in a deployed browser, no redeploy: the dev flag (see lib/devFlags.ts).
  *  A build-time const alone can't do the second — minification inlines `false`
  *  and drops the dead branch from the bundle — so the runtime localStorage check
  *  is what keeps the in-browser unhide possible. */
 const SHOW_IN_BROWSER_SESSION_DEFAULT: boolean = false
-const SHOW_IN_BROWSER_SESSION =
-  SHOW_IN_BROWSER_SESSION_DEFAULT || localStorage.getItem("vera.showBrowserSession") === "1"
+const SHOW_IN_BROWSER_SESSION = SHOW_IN_BROWSER_SESSION_DEFAULT || showBrowserSessionButton()
 
 /** How long (ms) after connecting before we warn that no agent has joined. */
 const AGENT_JOIN_TIMEOUT_MS = 15_000
