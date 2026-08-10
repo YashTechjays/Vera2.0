@@ -100,11 +100,9 @@ class PatientForm(Base, TenantScopedMixin):
     enqueued_by_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
-    # Operator's per-form choice at queue time (voice-lab-style toggle): should the
-    # dispatched worker boot the IVR navigator for this call? Defaults FALSE — the
-    # operator opts in per enqueue (product decision 2026-08-10; was TRUE). Persisted
-    # on the row because dispatch runs later (freed slot / sweeper / auto-retry) and
-    # retries keep the choice. Non-PHI config.
+    # Operator's per-enqueue opt-in: should the dispatched worker boot the IVR
+    # navigator for this call? Persisted on the row because dispatch runs later
+    # (freed slot / sweeper / auto-retry) and retries keep the choice. Non-PHI config.
     ivr_navigation_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )

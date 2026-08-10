@@ -504,6 +504,19 @@ async def test_concurrent_enqueues_at_limit_admit_exactly_one(
 # ---------------------------------------------------------------------------
 
 
+async def _stored_ivr_flag(sessionmaker: async_sessionmaker[AsyncSession], form_id: UUID) -> bool:
+    """Read `ivr_navigation_enabled` off the row, bypassing the API."""
+    async with sessionmaker() as session:
+        enabled = (
+            await session.execute(
+                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
+                    fid=form_id
+                )
+            )
+        ).scalar_one()
+    return bool(enabled)
+
+
 @pytest.mark.asyncio
 async def test_intake_defaults_ivr_navigation_off(
     client: httpx.AsyncClient,
@@ -514,7 +527,7 @@ async def test_intake_defaults_ivr_navigation_off(
 ) -> None:
     """A freshly-intaken form defaults `ivr_navigation_enabled` to False (column
     default) — operators opt IN to IVR navigation at enqueue time (product
-    decision 2026-08-10; was True)."""
+    decision 2026-08-10)."""
     form_type_id, version_id = ibv_schema
     token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
     resp = await client.post(
@@ -529,15 +542,7 @@ async def test_intake_defaults_ivr_navigation_off(
     assert resp.status_code == 200, resp.text
     form_id = UUID(resp.json()["data"]["id"])
 
-    async with admin_sessionmaker() as session:
-        enabled = (
-            await session.execute(
-                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
-                    fid=form_id
-                )
-            )
-        ).scalar_one()
-    assert enabled is False
+    assert await _stored_ivr_flag(admin_sessionmaker, form_id) is False
 
 
 @pytest.mark.asyncio
@@ -557,15 +562,7 @@ async def test_enqueue_can_disable_ivr_navigation(
     )
     assert resp.status_code == 200, resp.text
 
-    async with admin_sessionmaker() as session:
-        enabled = (
-            await session.execute(
-                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
-                    fid=queue_form_id
-                )
-            )
-        ).scalar_one()
-    assert enabled is False
+    assert await _stored_ivr_flag(admin_sessionmaker, queue_form_id) is False
 
 
 @pytest.mark.asyncio
@@ -602,15 +599,7 @@ async def test_requeue_without_toggle_keeps_stored_choice(
     )
     assert resp.status_code == 200, resp.text
 
-    async with admin_sessionmaker() as session:
-        enabled = (
-            await session.execute(
-                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
-                    fid=queue_form_id
-                )
-            )
-        ).scalar_one()
-    assert enabled is False
+    assert await _stored_ivr_flag(admin_sessionmaker, queue_form_id) is False
 
 
 @pytest.mark.asyncio

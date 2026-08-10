@@ -50,7 +50,6 @@ const DETAIL = {
   appointment_date: null,
   insurance_provider: null,
   fields: [],
-  // New forms default to OFF; the toggle mirrors the stored value.
   ivr_navigation_enabled: false,
 }
 
@@ -98,9 +97,7 @@ describe("IbvFormModal IVR toggle", () => {
 
   it("shows the toggle unchecked by default and enqueues with IVR off", async () => {
     const { user, queueButton } = await openToQueueButton()
-
-    const toggle = screen.getByRole("switch")
-    expect(toggle).not.toBeChecked()
+    expect(screen.getByRole("switch")).not.toBeChecked()
 
     await user.click(queueButton)
     await waitFor(() =>
