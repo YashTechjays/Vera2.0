@@ -15,12 +15,6 @@ function devMode(): boolean {
   return readDevFlag("vera:dev-mode")
 }
 
-/** Show the queue-time "IVR navigation" toggle; while hidden, calls always run it.
- *  Key: `vera:show-ivr-toggle` */
-export function showIvrToggle(): boolean {
-  return devMode() || readDevFlag("vera:show-ivr-toggle")
-}
-
 /** Bring back the Add Patient Form type picker (step 1 + Back); while hidden, the
  *  modal opens the infertility-treatment form directly.
  *  Key: `vera:show-form-picker` */
