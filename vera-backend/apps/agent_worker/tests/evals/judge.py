@@ -68,8 +68,9 @@ DIMENSIONS: dict[str, str] = {
         "confirming, and never silently re-asked later?"
     ),
     "gap_conduct": (
-        "If a follow-up (gap) pass ran, did it read as a MID-CALL follow-up? Saying goodbye, "
-        "thanking the rep as if finishing, or claiming everything was collected is a fail."
+        "If a follow-up (gap) pass ran, did it re-ask EVERY question it set out to, and read as a "
+        "MID-CALL follow-up? Dropping part of its own follow-up list is a fail, as is saying "
+        "goodbye, thanking the rep as if finishing, or claiming everything was collected."
     ),
     "closing": (
         "Did the call collect the representative's name and a call reference number, and sign off "

@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from "vitest"
 
 // Stub CallTranscript so the test doesn't open the SSE.
 vi.mock("@/components/monitoring/CallTranscript", () => ({
-  CallTranscript: ({ callId }: { callId: string }) => <div>transcript:{callId}</div>,
+  CallTranscript: ({ callId, autoScroll }: { callId: string; autoScroll?: boolean }) => (
+    <div>
+      transcript:{callId}:autoScroll={String(autoScroll)}
+    </div>
+  ),
 }))
 
 import { TranscriptDialog } from "./TranscriptDialog"
@@ -17,7 +21,7 @@ describe("TranscriptDialog", () => {
       />,
     )
     expect(screen.getByText(/Transcript — Jane Doe/)).toBeTruthy()
-    expect(screen.getByText("transcript:c1")).toBeTruthy()
+    expect(screen.getByText("transcript:c1:autoScroll=false")).toBeTruthy()
   })
 
   it("renders nothing when call is null (closed)", () => {

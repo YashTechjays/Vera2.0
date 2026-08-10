@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from vera_core.forms.consistency import TRIPLET_KEYS
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # {{token}} placeholders in task-level text; token = a system_fields key or the
@@ -319,12 +322,15 @@ class Leaf(_Model):
         if self.prompt is not None:
             if self.prompt.confirm is not None and self.role != "confirm":
                 raise ValueError("prompt.confirm on non-confirm role")
-            if self.prompt.ask is not None and self.role != "ask":
+            if self.prompt.ask is not None and self.role not in ("ask", "confirm"):
                 raise ValueError(f"prompt.ask on role {self.role}")
         if self.role == "ask" and not (self.prompt and self.prompt.ask):
             raise ValueError("ask field needs prompt.ask")
         if self.role == "confirm" and not (self.prompt and self.prompt.confirm):
             raise ValueError("confirm field needs prompt.confirm")
+        if self.role == "confirm" and not (self.prompt and self.prompt.ask):
+            # The open question spoken when no value is on file to read back.
+            raise ValueError("confirm field needs prompt.ask")
         if self.confirm_in_task is not None and self.role != "confirm":
             raise ValueError("confirm_in_task only valid on role=confirm")
         if self.tags is not None and not all(KEY_RE.match(t) for t in self.tags):
@@ -433,6 +439,15 @@ class Contradiction(_Model):
     clarify: str | None = None
 
 
+class NumericConsistency(_Model):
+    """Money-triplet consistency rule: met/remaining must not exceed total and
+    met + remaining must equal total; a violation pushes back and re-clarifies."""
+
+    rule_key: str
+    triplet: str
+    clarify: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Document
 # ---------------------------------------------------------------------------
@@ -491,6 +506,7 @@ class FormSchemaDoc(_Model):
     tasks: list[Task]
     flow_rules: list[FlowRule] | None = None
     contradictions: list[Contradiction] | None = None
+    numeric_consistencies: list[NumericConsistency] | None = None
 
     # -- documented walk helpers -------------------------------------------------
 
@@ -632,6 +648,38 @@ class FormSchemaDoc(_Model):
         # tasks: every collect section in exactly one task
         assigned: list[str] = []
         context_paths = {p for p, leaf in leaves.items() if leaf.role == "context"}
+
+        def check_leaf_prompt(path: str, leaf: Leaf) -> None:
+            for attr in ("ask", "confirm"):
+                text = getattr(leaf.prompt, attr, None) if leaf.prompt else None
+                if text is None:
+                    continue
+                for token in PLACEHOLDER_RE.findall(text):
+                    if token == "value":
+                        if not (attr == "confirm" and leaf.role == "confirm"):
+                            errors.append(
+                                f"{path}.prompt.{attr}: {{{{value}}}} is only valid in a "
+                                "confirm-role leaf's prompt.confirm"
+                            )
+                        continue
+                    if (
+                        token not in RESERVED_PLACEHOLDER_TOKENS
+                        and token not in (self.system_fields or {})
+                        and token not in context_paths
+                    ):
+                        errors.append(
+                            f"{path}.prompt.{attr}: unknown placeholder {{{{{token}}}}} "
+                            "(not a system_fields key or context-leaf path)"
+                        )
+                for snippet in malformed_placeholders(text or ""):
+                    errors.append(
+                        f"{path}.prompt.{attr}: malformed placeholder {snippet!r} "
+                        "(use {{token}} — word characters and dots only, no spaces)"
+                    )
+
+        for path, leaf in leaves.items():
+            check_leaf_prompt(path, leaf)
+
         for task in self.tasks:
             check_key(f"task {task.task_key}", task.task_key)
             if task.applicable_when is not None:
@@ -652,6 +700,12 @@ class FormSchemaDoc(_Model):
             for attr in ("intro", "outro", "prompt"):
                 text: str | None = getattr(task, attr)
                 for token in PLACEHOLDER_RE.findall(text or ""):
+                    if token == "value":
+                        errors.append(
+                            f"task {task.task_key}.{attr}: {{{{value}}}} is only valid in a "
+                            "confirm-role leaf's prompt.confirm"
+                        )
+                        continue
                     if (
                         token not in RESERVED_PLACEHOLDER_TOKENS
                         and token not in (self.system_fields or {})
@@ -688,6 +742,9 @@ class FormSchemaDoc(_Model):
                     f"must reference a collectable leaf inside task {cit.task_key!r}"
                 )
 
+        errors.extend(validate_question_coverage(self))
+        errors.extend(validate_confirm_defaults(self))
+
         # ask_groups / alternatives
         for skey, section in self.sections.items():
             prefix = f"{PATH_PREFIX}{skey}."
@@ -706,11 +763,49 @@ class FormSchemaDoc(_Model):
                     if member in seen_ag:
                         errors.append(f"{where}: member {member!r} in more than one ask group")
                     seen_ag.add(member)
+                # The prompt compiler collapses an ask group into ONE spoken question and
+                # gives each distinct member TITLE its own answer line. Members may differ in
+                # type (a "TPA Exists / TPA Name" pair is one question by design), but two
+                # members sharing a title must share their answer shape — only the first
+                # one's vocabulary and bounds would be spoken for both.
+                shapes: dict[str, set[str]] = {}
+                for member in ag.fields:
+                    member_leaf = leaves.get(member)
+                    if member_leaf is None:
+                        continue
+                    shapes.setdefault(member_leaf.title, set()).add(
+                        json.dumps(
+                            [
+                                member_leaf.type,
+                                member_leaf.values,
+                                member_leaf.special_values,
+                                member_leaf.validation.model_dump(mode="json", exclude_none=True)
+                                if member_leaf.validation
+                                else None,
+                            ],
+                            sort_keys=True,
+                        )
+                    )
+                for title, distinct in shapes.items():
+                    if len(distinct) > 1:
+                        errors.append(
+                            f"{where}: members titled {title!r} have different answer shapes; "
+                            "they collapse into one spoken option and only the first would be "
+                            "described"
+                        )
             seen_alt: set[str] = set()
             for i, alt in enumerate(section.alternatives or []):
                 where = f"section {skey}.alternatives[{i}]"
                 if len(alt.members) < 2:
                     errors.append(f"{where}: needs at least 2 members")
+                # An either/or between GROUPS is spoken as a routing question that picks which
+                # panel applies; there is no leaf prompt to fall back on, so it needs its own
+                # wording rather than a synthesized sentence.
+                if len([m for m in alt.members if m in groups]) >= 2 and not alt.ask:
+                    errors.append(
+                        f"{where}: an alternatives set over groups needs an `ask` — it is "
+                        "spoken as a question choosing between them"
+                    )
                 for member in alt.members:
                     if member not in leaves and member not in groups:
                         errors.append(f"{where}: member {member!r} is not a field or group")
@@ -806,11 +901,108 @@ class FormSchemaDoc(_Model):
                         "only ask/confirm fields can be re-clarified"
                     )
 
+        # numeric consistencies
+        for consistency in self.numeric_consistencies or []:
+            rk = consistency.rule_key
+            check_key(f"numeric_consistency {rk}", rk)
+            if rk in rule_keys:
+                errors.append(f"duplicate rule_key {rk!r}")
+            rule_keys.add(rk)
+            for child in TRIPLET_KEYS:
+                path = f"{consistency.triplet}.{child}"
+                if path not in leaves:
+                    errors.append(f"numeric_consistency {rk}: {path!r} is not a leaf field")
+                elif leaves[path].type != "currency":
+                    errors.append(f"numeric_consistency {rk}: {path!r} must be a currency leaf")
+
         if errors:
             raise ValueError(
                 "invalid form schema document:\n" + "\n".join(f"- {e}" for e in errors)
             )
         return self
+
+
+def validate_question_coverage(doc: FormSchemaDoc) -> list[str]:
+    """Every collectable leaf must be reachable from exactly one spoken question.
+
+    This is what makes `task.fields` a PROJECTION of the question tree rather than a
+    parallel artifact. Without it the prompt can say 16 while the guard counts 20, which
+    is exactly how a live call ended a task with six required questions unasked."""
+    # Function-scope imports: `conditions`, `prompting` and `question_plan` each import
+    # `dsl`, so importing them at module scope here would be a cycle.
+    from vera_core.forms.conditions import leaf_gates
+    from vera_core.forms.prompting import immediate_confirms_by_anchor
+    from vera_core.forms.question_plan import build_question_plan, iter_questions
+
+    errors: list[str] = []
+    section_to_task = doc.section_to_task()
+    anchors = immediate_confirms_by_anchor(doc)
+    gated_leaves = list(leaf_gates(doc))  # loop-invariant across tasks below
+    for task in doc.tasks:
+        if any(skey not in doc.sections for skey in task.sections):
+            continue  # unknown section — already reported by the structural check above
+        panels = build_question_plan(doc, task, anchors)
+        # `owed_now` (call_plan.py) skips every routes_between question unconditionally, so a
+        # routing question that carried a target would count as coverage here while staying
+        # permanently un-owed at runtime — exclude it, matching that skip.
+        hits: Counter[str] = Counter(
+            path for q in iter_questions(panels) if not q.routes_between for path in q.target_paths
+        )
+        for path, leaf, _gates in gated_leaves:
+            if leaf.role not in COLLECTED_ROLES:
+                continue
+            cit = leaf.confirm_in_task
+            if cit is not None and not cit.confirm_immediate:
+                # Spoken by the end-of-task confirm block, never a panel node
+                # (`prompting._anchor` returns None unconditionally for these) — so this
+                # rule cannot see it. `test_no_catalog_uses_an_end_of_task_confirm` is the
+                # tripwire: Task 3's owed-set join walks the same tree this validator
+                # checks, so an end-of-task confirm would be exempt here AND silently
+                # never owed there, even though `task.prompt` still tells the agent to
+                # ask it — a regression from today's `gap_fields`, which owes it fine.
+                continue
+            owner = cit.task_key if cit is not None else section_to_task.get(path.split(".")[1])
+            if owner != task.task_key:
+                continue
+            if hits[path] == 0:
+                errors.append(
+                    f"{task.task_key}: collectable path {path} is not reachable "
+                    "from any spoken question"
+                )
+            elif hits[path] > 1:
+                errors.append(
+                    f"{task.task_key}: collectable path {path} is reachable from "
+                    f"{hits[path]} questions"
+                )
+    return errors
+
+
+def validate_confirm_defaults(doc: FormSchemaDoc) -> list[str]:
+    """A `confirm` leaf that gates another question may not declare a `default`.
+
+    `call_plan.gating_seed` drops ask-role prefills from the worker's gate-evaluation set but
+    keeps confirm ones — a confirm value is on file precisely to be read back. So a `default`
+    on a gating confirm leaf still arrives as an answer and still deletes every question behind
+    it, which is the failure `gating_seed` removes for ask-role leaves."""
+    from vera_core.forms.conditions import leaf_gates
+
+    leaves = dict(doc.leaf_items())
+    shared = doc.shared_conditions or {}
+    referenced = {
+        ref
+        for _path, _leaf, chain in leaf_gates(doc)
+        for gate in chain
+        for ref in condition_field_paths(gate, shared)
+    }
+    return [
+        f"{path}: a confirm-role leaf that declares a default and is referenced by another "
+        "field's applicable_when would settle that gate from intake, deleting the questions "
+        "behind it"
+        for path in sorted(referenced)
+        if (leaf := leaves.get(path)) is not None
+        and leaf.role == "confirm"
+        and leaf.default is not None
+    ]
 
 
 # ---------------------------------------------------------------------------

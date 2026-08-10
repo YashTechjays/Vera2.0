@@ -22,6 +22,7 @@ import {
   createRequiredPaths,
   isApplicable,
   isRequired,
+  isSatisfied,
   leafByPath,
   parseSchema,
 } from "@/lib/ibv/schema"
@@ -338,7 +339,10 @@ export function IbvProvider({
           String(values[leaf.path] ?? "").trim() === "" &&
           String(originalValues[leaf.path] ?? "").trim() !== "" &&
           isApplicable(schema, leaf.gates, values) &&
-          isRequired(schema, leaf.field, values),
+          isRequired(schema, leaf.field, values) &&
+          // A pair its either/or sibling answers owes nothing, so clearing a derived "$0"
+          // must not lock Save with no way out but retyping a value the rep never gave.
+          !isSatisfied(schema, leaf, values),
       )
       .map((leaf) => leaf.path)
   }, [schema, values, originalValues])

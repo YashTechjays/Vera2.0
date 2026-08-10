@@ -7,17 +7,23 @@ the compiled JSON is the runtime artifact.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from vera_core.forms.authoring import (
     DATE_VALIDATION,
     YES_NO,
     YES_NO_NA,
     ask,
     cost_pair,
-    cpt_group,
+    coverage_ask,
+    cpt_groups,
     enum_ask,
     eq,
     money_triplet,
+    panel_ask_groups,
+    panel_cost_pairs,
     ref,
+    service_asks,
     service_fields,
     text_ask,
     treatment_group,
@@ -39,6 +45,7 @@ from vera_core.forms.dsl import (
     FormSchemaDoc,
     Group,
     Leaf,
+    NumericConsistency,
     PromotedFields,
     RequiredWhen,
     Section,
@@ -55,92 +62,110 @@ _DEDUCTIBLE_NOOPS = ["$0", "None", "No Deductible", "Unlimited", "No Limit"]
 _OOP_NOOPS = ["$0", "None", "Unlimited", "No Limit"]
 _NO_LIMIT = ["No Limit", "Unlimited"]
 
-_TREATMENTS: list[tuple[str, str, str | None, list[str], str]] = [
-    # key, title, icd10, cpt codes, group ask
-    (
+
+class _Treatment(NamedTuple):
+    """A service with its own CPT code list. `service` is the spoken name, said alongside
+    each code; `group_ask` defaults to the standard `coverage_ask(service)` sentence and is
+    set only where the spoken question carries an alias the service name does not."""
+
+    key: str
+    title: str
+    icd10: str | None
+    cpt_codes: list[str]
+    service: str
+    group_ask: str | None = None
+
+    @property
+    def ask(self) -> str:
+        return self.group_ask or coverage_ask(self.service)
+
+
+class _CodeService(NamedTuple):
+    """A service billed under a single CPT code. Fields as `_Treatment`."""
+
+    key: str
+    title: str
+    code: str
+    service: str
+    group_ask: str | None = None
+
+    @property
+    def ask(self) -> str:
+        return self.group_ask or coverage_ask(self.service)
+
+
+_TREATMENTS = [
+    _Treatment(
         "intrauterine_insemination",
         "Intrauterine Insemination (IUI)",
         "Z31.89",
         ["58323", "58322", "89261"],
+        "IUI",
         "Can you provide coverage and benefit details for intrauterine insemination, or IUI?",
     ),
-    (
+    _Treatment(
         "in_vitro_fertilization",
         "In Vitro Fertilization (IVF)",
         "Z31.83",
         ["58970", "89280", "89253"],
+        "IVF",
         "Can you provide coverage and benefit details for in vitro fertilization, or IVF?",
     ),
-    (
+    _Treatment(
         "embryo_cryopreservation",
         "Embryo Cryopreservation",
         "Z31.83",
         ["89258", "89342"],
-        "Can you provide coverage and benefit details for embryo cryopreservation?",
+        "embryo cryopreservation",
     ),
-    (
+    _Treatment(
         "egg_cryopreservation_elective",
         "Egg Cryopreservation Elective",
         "Z31.83",
         ["89337"],
-        "Can you provide coverage and benefit details for elective egg cryopreservation?",
+        "elective egg cryopreservation",
     ),
-    (
+    _Treatment(
         "egg_cryopreservation_cancer",
         "Egg Cryopreservation Cancer",
         None,
         ["89337"],
-        "Can you provide coverage and benefit details for egg cryopreservation related to cancer treatment?",
+        "egg cryopreservation related to cancer treatment",
     ),
-    (
+    _Treatment(
         "frozen_embryo_transfer",
         "Frozen Embryo Transfer (FET)",
         "Z31.83",
         ["58974"],
+        "frozen embryo transfer",
         "Can you provide coverage and benefit details for frozen embryo transfer, or FET?",
     ),
-    (
+    _Treatment(
         "embryo_biopsy",
         "Embryo Biopsy",
         "Z31.83",
         ["89290", "89291"],
-        "Can you provide coverage and benefit details for embryo biopsy?",
+        "embryo biopsy",
     ),
 ]
 _DIAG_CODES = ["58340", "82670", "83001", "83002", "84146", "84443", "84144", "76830"]
-_GENERAL: list[tuple[str, str, str, str]] = [
-    # key, title, cpt code, group ask
-    (
-        "office_visits",
-        "Office Visits",
-        "99211",
-        "Can you provide coverage and benefit details for office visits?",
-    ),
-    (
+_DIAG_SERVICE = "diagnostic testing"
+_GENERAL = [
+    _CodeService("office_visits", "Office Visits", "99211", "office visits"),
+    _CodeService(
         "asc_professional",
         "ASC Professional Services",
         "58555",
-        "Can you provide coverage and benefit details for ambulatory surgical center professional services?",
+        "ambulatory surgical center professional services",
     ),
-    (
-        "asc_facility",
-        "ASC Facility",
-        "58555",
-        "Can you provide coverage and benefit details for the ambulatory surgical center facility?",
+    _CodeService(
+        "asc_facility", "ASC Facility", "58555", "the ambulatory surgical center facility"
     ),
 ]
-_MALE: list[tuple[str, str, str, str]] = [
-    (
-        "semen_analysis",
-        "Semen Analysis",
-        "89320",
-        "Can you provide coverage and benefit details for semen analysis?",
-    ),
-    (
-        "sperm_cryopreservation",
-        "Sperm Cryopreservation",
-        "89259",
-        "Can you provide coverage and benefit details for sperm cryopreservation?",
+_MALE = [
+    _CodeService("semen_analysis", "Semen Analysis", "89320", "semen analysis"),
+    _CodeService(
+        "sperm_cryopreservation", "Sperm Cryopreservation", "89259", "sperm cryopreservation"
     ),
 ]
 
@@ -191,7 +216,11 @@ def _context_sections() -> dict[str, Section]:
                         confirm=(
                             "Can we also check the spouse on the plan? I have the spouse listed "
                             "as {{value}} — can you confirm that is correct?"
-                        )
+                        ),
+                        ask=(
+                            "Can we also check the spouse on the plan? "
+                            "Can I get the spouse's full name?"
+                        ),
                     ),
                 ),
                 "spouse_partner_dob": Leaf(
@@ -204,7 +233,8 @@ def _context_sections() -> dict[str, Section]:
                     applicable_when=_FAMILY,
                     required=_REQUIRED_WHEN_FAMILY,
                     prompt=FieldPrompt(
-                        confirm="And the spouse's date of birth I have is {{value}} — is that right?"
+                        confirm="And the spouse's date of birth I have is {{value}} — is that right?",
+                        ask="And what is the spouse's date of birth?",
                     ),
                 ),
                 "spouse_gender": Leaf(
@@ -364,7 +394,8 @@ def _insurance_information() -> Section:
                 role="confirm",
                 required=True,
                 prompt=FieldPrompt(
-                    confirm="I have the member ID as {{value}} — can you confirm that is correct?"
+                    confirm="I have the member ID as {{value}} — can you confirm that is correct?",
+                    ask="Can I get the member ID for this policy?",
                 ),
             ),
             "group_name": text_ask(
@@ -422,7 +453,7 @@ def _benefit_coverage() -> Section:
             ),
             "coverage_type": enum_ask(
                 "Coverage Type",
-                "Is this an individual or a family policy? Please answer Individual or Family.",
+                "Is this an individual or a family policy?",
                 ["Individual", "Family"],
             ),
             "pcp_referral_required": enum_ask(
@@ -456,7 +487,6 @@ def _benefit_coverage() -> Section:
                 "Infertility Plan Mandate",
                 "Is there an infertility plan mandate on this policy?",
                 YES_NO,
-                hints=["Pronounce as: in-fer-TIL-ih-tee plan MAN-date."],
             ),
         },
     )
@@ -466,10 +496,11 @@ def _infertility_treatment() -> Section:
     oi_base = "sections.infertility_treatment.ovulation_induction"
     oi_fields = service_fields(
         oi_base,
-        "Is ovulation induction covered under this plan? Please answer Yes, No, or N/A.",
+        "Is ovulation induction covered under this plan?",
         "treatment",
+        referent="ovulation induction",
     )
-    oi_fields.update(treatment_tail(eq(f"{oi_base}.covered", "Yes")))
+    oi_fields.update(treatment_tail(eq(f"{oi_base}.covered", "Yes"), service="ovulation induction"))
 
     fields: dict[str, FormField] = {
         "infertility_tx_covered": enum_ask(
@@ -482,12 +513,14 @@ def _infertility_treatment() -> Section:
             title="Ovulation Induction/Timed Intercourse (OI/TI)",
             applicable_when=ref("infertility_covered"),
             codes=Codes(icd10=["Z31.89"]),
-            prompt=ask("Can you provide coverage and benefit details for ovulation induction?"),
+            prompt=ask(coverage_ask("ovulation induction")),
             fields=oi_fields,
         ),
     }
-    for key, title, icd10, codes, group_ask in _TREATMENTS:
-        fields[key] = treatment_group("infertility_treatment", key, title, icd10, codes, group_ask)
+    for t in _TREATMENTS:
+        fields[t.key] = treatment_group(
+            "infertility_treatment", t.key, t.title, t.icd10, t.cpt_codes, t.ask, service=t.service
+        )
 
     alternatives = [
         Alternatives(
@@ -500,15 +533,17 @@ def _infertility_treatment() -> Section:
                 "covered as elective, or for cancer-related fertility preservation?"
             ),
         ),
-        cost_pair(oi_base),
+        cost_pair(oi_base, "ovulation induction"),
     ]
-    for key, _title, _icd10, codes, _ask_text in _TREATMENTS:
-        alternatives.extend(
-            cost_pair(f"sections.infertility_treatment.{key}.cpt_{code}") for code in codes
-        )
+    ask_groups: list[AskGroup] = []
+    for t in _TREATMENTS:
+        base = f"sections.infertility_treatment.{t.key}"
+        ask_groups.extend(panel_ask_groups(base, t.title, t.cpt_codes))
+        alternatives.extend(panel_cost_pairs(base, t.service, t.cpt_codes))
     return Section(
         title="Infertility Treatment",
         ui=Ui(layout="table"),
+        ask_groups=ask_groups,
         alternatives=alternatives,
         fields=fields,
     )
@@ -516,14 +551,16 @@ def _infertility_treatment() -> Section:
 
 def _diagnostic_testing() -> Section:
     group_base = "sections.diagnostic_testing.labs_xray_ultrasound"
+    _copay_ask, _coinsurance_ask, prior_auth_ask = service_asks(_DIAG_SERVICE)
+    # copay/coinsurance are merged into one either/or question by `panel_cost_pairs`.
+    # The codes go in the sentence, as `panel_ask_groups` does for every treatment: the panel's
+    # own code line is "provide only if asked", so a rep quoting benefits per code had to ask.
     panel_asks = {
         "covered": (
-            "Are diagnostic labs, X-ray and ultrasound services covered under this plan? "
-            "Please answer Yes, No, or N/A."
+            "Are diagnostic labs, X-ray and ultrasound services CPT codes: "
+            f"{', '.join(_DIAG_CODES)} covered under this plan?"
         ),
-        "copay": "What is the copay amount for diagnostic testing?",
-        "coinsurance": "What is the coinsurance percentage for diagnostic testing?",
-        "prior_auth": "Is prior authorization required for diagnostic testing? Please answer Yes, No, or N/A.",
+        "prior_auth": prior_auth_ask,
     }
     return Section(
         title="Diagnostic Testing (Labs, X-ray & Ultrasound)",
@@ -533,27 +570,27 @@ def _diagnostic_testing() -> Section:
             AskGroup(fields=[f"{group_base}.cpt_{c}.{sub}" for c in _DIAG_CODES], ask=panel_ask)
             for sub, panel_ask in panel_asks.items()
         ],
-        alternatives=[cost_pair(f"{group_base}.cpt_{c}") for c in _DIAG_CODES],
+        alternatives=panel_cost_pairs(group_base, _DIAG_SERVICE, _DIAG_CODES),
         fields={
             "diagnostic_testing_covered": enum_ask(
                 "Diagnostic Testing Covered",
                 "Is diagnostic testing covered under this plan?",
                 YES_NO,
             ),
+            # No panel intro: this section has ONE panel, so an intro phrased as a question
+            # ("Can you provide coverage and benefit details for…?") was spoken as a second
+            # coverage ask. The grouping lives in `codes`, not the sentence.
             "labs_xray_ultrasound": Group(
                 type="group",
                 title="Labs, Xray/Ultrasound",
                 codes=Codes(icd10=["Z31.41"]),
-                prompt=ask(
-                    "Can you provide coverage and benefit details for diagnostic labs, "
-                    "X-ray and ultrasound services?"
+                fields=cpt_groups(
+                    group_base,
+                    _DIAG_CODES,
+                    "plain",
+                    service=_DIAG_SERVICE,
+                    applicable_when=ref("diagnostic_testing_covered"),
                 ),
-                fields={
-                    f"cpt_{c}": cpt_group(
-                        group_base, c, "plain", applicable_when=ref("diagnostic_testing_covered")
-                    )
-                    for c in _DIAG_CODES
-                },
             ),
         },
     )
@@ -572,17 +609,17 @@ def _general_coverage() -> Section:
                     "center services — is that billed as professional or facility?"
                 ),
             ),
-            *(cost_pair(f"{base}.{key}.cpt_{code}") for key, _t, code, _a in _GENERAL),
+            *(cost_pair(f"{base}.{g.key}.cpt_{g.code}", g.service) for g in _GENERAL),
         ],
         fields={
-            key: Group(
+            g.key: Group(
                 type="group",
-                title=title,
+                title=g.title,
                 codes=Codes(icd10=["Z31.41"]),
-                prompt=ask(group_ask),
-                fields={f"cpt_{code}": cpt_group(f"{base}.{key}", code, "plain")},
+                prompt=ask(g.ask),
+                fields=cpt_groups(f"{base}.{g.key}", [g.code], "plain", service=g.service),
             )
-            for key, title, code, group_ask in _GENERAL
+            for g in _GENERAL
         },
     )
 
@@ -719,7 +756,7 @@ def _male_partner_coverage() -> Section:
         title="Male Partner Coverage",
         ui=Ui(layout="table"),
         applicable_when=ref("male_partner_in_scope"),
-        alternatives=[cost_pair(f"{base}.{key}.cpt_{code}") for key, _t, code, _a in _MALE],
+        alternatives=[cost_pair(f"{base}.{m.key}.cpt_{m.code}", m.service) for m in _MALE],
         fields={
             "male_partner_covered": enum_ask(
                 "Male Partner Services Covered",
@@ -727,15 +764,15 @@ def _male_partner_coverage() -> Section:
                 YES_NO,
             ),
             **{
-                key: Group(
+                m.key: Group(
                     type="group",
-                    title=title,
+                    title=m.title,
                     codes=Codes(icd10=["Z31.84"]),
                     applicable_when=eq(f"{base}.male_partner_covered", "Yes"),
-                    prompt=ask(group_ask),
-                    fields={f"cpt_{code}": cpt_group(f"{base}.{key}", code, "male")},
+                    prompt=ask(m.ask),
+                    fields=cpt_groups(f"{base}.{m.key}", [m.code], "male", service=m.service),
                 )
-                for key, title, code, group_ask in _MALE
+                for m in _MALE
             },
         },
     )
@@ -757,7 +794,7 @@ def _admin_sections() -> dict[str, Section]:
             fields={
                 "enrollment_required": enum_ask(
                     "Enrollment Required",
-                    "Is enrollment required for this patient? Please answer Yes, No, or N/A.",
+                    "Is enrollment required for this patient?",
                     YES_NO_NA,
                     default="N/A",
                 ),
@@ -776,7 +813,7 @@ def _admin_sections() -> dict[str, Section]:
                 ),
                 "center_of_excellence_required": enum_ask(
                     "Center of Excellence Required",
-                    "Is a center of excellence required for infertility treatment? Please answer Yes, No, or N/A.",
+                    "Is a center of excellence required for infertility treatment?",
                     YES_NO_NA,
                 ),
             },
@@ -879,10 +916,6 @@ def _admin_sections() -> dict[str, Section]:
                     "Infertility Specialty Pharmacy Exists",
                     "Does the plan have an infertility specialty pharmacy?",
                     YES_NO,
-                    hints=[
-                        'Always say "infertility specialty pharmacy" in full; never abbreviate '
-                        "to ISP when speaking."
-                    ],
                 ),
                 "isp_name": text_ask(
                     "Infertility Specialty Pharmacy Name",
@@ -1174,20 +1207,36 @@ def build_ibv_standard() -> FormSchemaDoc:
                 sections=["insurance_information", "benefit_coverage"],
             ),
             Task(
-                task_key="coverage",
-                title="Coverage Verification",
+                task_key="infertility_coverage",
+                title="Infertility Coverage",
                 prompt=(
-                    "Work through infertility treatment, diagnostic testing and general "
-                    "coverage. Ask per service panel, fan answers out to the CPT codes the "
-                    "representative confirms, and skip sub-questions for services that are "
-                    "not covered."
+                    "Work through infertility treatment one service at a time, and move "
+                    "between services with a short transition naming the next one."
                 ),
-                intro="Now I'd like to verify some coverage details.",
+                intro="Now I'd like to verify some infertility coverage details.",
                 outro=(
-                    "Thank you, that's really helpful. One moment while I organize these "
-                    "coverage details."
+                    "Thank you, that's really helpful. One moment while I organize these details."
                 ),
-                sections=["infertility_treatment", "diagnostic_testing", "general_coverage"],
+                sections=["infertility_treatment"],
+            ),
+            Task(
+                task_key="diagnostic_coverage",
+                title="Diagnostic Coverage",
+                prompt=(
+                    "Read the codes as a natural group rather than one at a time, unless the "
+                    "representative asks you to slow down and take them individually."
+                ),
+                intro="Now I'd like to verify some diagnostic coverage details.",
+                outro="Thank you. One moment while I organize these details.",
+                sections=["diagnostic_testing"],
+            ),
+            Task(
+                task_key="general_office_coverage",
+                title="General Office Coverage",
+                prompt="Work through general office visit coverage one service at a time.",
+                intro="Now I'd like to verify some general office visits coverage.",
+                outro="Thanks. One moment while I organize these details.",
+                sections=["general_coverage"],
             ),
             Task(
                 task_key="financial",
@@ -1210,9 +1259,8 @@ def build_ibv_standard() -> FormSchemaDoc:
                 task_key="male_partner",
                 title="Male Partner Coverage",
                 prompt=(
-                    "Only reached for family plans with a male spouse. Establish whether "
-                    "male partner fertility services are covered before asking any "
-                    "per-service question."
+                    "Establish whether male partner fertility services are covered before "
+                    "asking any per-service question."
                 ),
                 intro="Now I'd like to ask about male partner fertility coverage.",
                 outro="Thanks, that covers the male partner benefits. Just a moment.",
@@ -1221,11 +1269,7 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="closing_admin",
                 title="Administrative Details",
-                prompt=(
-                    "Close out enrollment, authorization and third-party administration "
-                    "details. Ask the existence gate first and skip the contact questions "
-                    "when the entity does not exist."
-                ),
+                prompt="Ask all the questions listed below.",
                 intro="Just a few more questions about administrative details.",
                 outro=(
                     "Perfect, I have all the administrative details I need. Let me "
@@ -1334,6 +1378,48 @@ def build_ibv_standard() -> FormSchemaDoc:
                     "but infertility treatment is showing as not covered — with a mandate, "
                     "infertility services should be covered. Could you double-check whether "
                     "infertility treatment is covered under this plan?"
+                ),
+            ),
+        ],
+        numeric_consistencies=[
+            NumericConsistency(
+                rule_key="lifetime_maximum_triplet_consistency",
+                triplet="sections.lifetime_maximum",
+                clarify=(
+                    "Could you double-check the total lifetime maximum for infertility "
+                    "services, how much of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="deductible_individual_triplet_consistency",
+                triplet="sections.deductibles.individual",
+                clarify=(
+                    "Could you double-check the total individual deductible, how much "
+                    "of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="deductible_family_triplet_consistency",
+                triplet="sections.deductibles.family",
+                clarify=(
+                    "Could you double-check the total family deductible, how much of "
+                    "it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="oop_individual_triplet_consistency",
+                triplet="sections.out_of_pocket.individual",
+                clarify=(
+                    "Could you double-check the total individual out-of-pocket "
+                    "maximum, how much of it has been met, and how much remains?"
+                ),
+            ),
+            NumericConsistency(
+                rule_key="oop_family_triplet_consistency",
+                triplet="sections.out_of_pocket.family",
+                clarify=(
+                    "Could you double-check the total family out-of-pocket maximum, "
+                    "how much of it has been met, and how much remains?"
                 ),
             ),
         ],

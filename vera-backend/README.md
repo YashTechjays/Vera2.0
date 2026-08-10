@@ -56,7 +56,7 @@ Needs Vertex ADC (`gcloud auth application-default login`) and a seeded Postgres
 (`just up && just migrate && just seed`) — the plan comes from the published `schema_version` row.
 
 ```bash
-# full: 3 scenarios over all 7 tasks / 182 fields (~12 min). Drop VERA_EVALS_FULL for a ~3-min
+# full: 3 scenarios over all 9 tasks / 182 fields (~12 min). Drop VERA_EVALS_FULL for a ~3-min
 # focused loop; add -k inactive for one scenario; VERA_EVALS_JUDGE_STRICT=1 to gate on the verdict.
 VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs
 ```
@@ -69,8 +69,37 @@ VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/eva
   could fire, yet most dimensions still read `pass`.
 
 No STT, no real DTMF (`press_keypad` is mocked), and extraction settles between turns so rules fire
-more reliably than on a real call. It shortens the loop; it does not replace a live call. Defects
-found so far: `docs/superpowers/plans/2026-07-30-call-flow-eval-findings-remediation.md`.
+more reliably than on a real call. It shortens the loop; it does not replace a live call — for that
+without telephony, see browser callee below. Defects found so far:
+`docs/superpowers/plans/2026-07-30-call-flow-eval-findings-remediation.md`.
+
+### Browser callee (a live call without telephony) — opt-in
+
+A real call in every respect except the transport: the queue dispatcher places no SIP call, and you
+join the LiveKit room from Live Monitoring **as the payer rep**. Real STT, real LLM, real TTS, real
+Observer — so unlike the eval harness it *does* count as a live call for voice-path changes.
+
+Off by default and refused when off (`?callee=true` → 409), so it can never reach production. Both
+flags must be set — the backend is the authority; the frontend one only decides whether the button
+renders.
+
+```bash
+just up && just migrate && just seed
+VERA_BROWSER_CALLEE_TRANSPORT=true just api       # terminal 1
+VERA_BROWSER_CALLEE_TRANSPORT=true just worker    # terminal 2
+cd ../vera-frontend && VITE_BROWSER_CALLEE_TRANSPORT=true npm run dev
+```
+
+Send a patient form to the queue, open it in Live Monitoring (it appears as **Initiated**), click
+**Join as payer rep**, allow the mic — the agent greets you and you answer as the payer would.
+Closing the tab hangs up, exactly like a phone hangup.
+
+- **You have ~60s** from enqueue to joining (`_SPEAKER_TIMEOUT_S`). Miss it and the worker gives up
+  with `NO_ANSWER`; with `auto_retry_enabled` the form re-dispatches and burns retry budget.
+- **One tab per call.** The identity is `caller-{user_id}` with no session suffix, so the same user
+  in a second tab evicts the first and tears the room down.
+- The form still needs a valid E.164 payer number — only the SIP trunk requirement is waived.
+- Traces carry `vera.transport` (`sip` | `browser`), so filter it out of call-quality analysis.
 
 ### Seeding a dev login
 

@@ -55,12 +55,18 @@ def _to_response(row: SsoProvider) -> ProviderResponse:
     ),
 )
 async def list_providers(
-    _tenant_id: TenantId,
+    tenant_id: TenantId,
     session: TenantSession,
     _caller: VerifiedIdentity = require("tenant:auth:configure"),
 ) -> ResponseModel[list[ProviderResponse]]:
     rows = (
-        (await session.execute(select(SsoProvider).order_by(SsoProvider.provider_type)))
+        (
+            await session.execute(
+                select(SsoProvider)
+                .where(SsoProvider.tenant_id == tenant_id)
+                .order_by(SsoProvider.provider_type)
+            )
+        )
         .scalars()
         .all()
     )
@@ -93,7 +99,12 @@ async def update_provider(
         raise BadRequestError(message="password provider requires MFA enforcement")
 
     row = (
-        await session.execute(select(SsoProvider).where(SsoProvider.provider_type == provider_type))
+        await session.execute(
+            select(SsoProvider).where(
+                SsoProvider.tenant_id == tenant_id,
+                SsoProvider.provider_type == provider_type,
+            )
+        )
     ).scalar_one_or_none()
     if row is None:
         row = SsoProvider(

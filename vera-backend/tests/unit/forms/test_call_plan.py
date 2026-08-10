@@ -3,16 +3,23 @@ the agent worker builds PlanTaskAgents from. Pure fusion — prompt text comes f
 render_task_prompts, field descriptors from leaf_gates; nothing is recompiled here."""
 
 import uuid
+from uuid import uuid4
+
+import pytest
 
 from vera_core.forms.call_plan import (
     CallPlan,
+    PlanFieldDescriptor,
     PlanTask,
     _render_value,
     bookend_paths,
     compile_call_plan,
     focus_call_plan,
     fuse_prefill,
+    gating_seed,
+    owed_now,
 )
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc, Leaf, load_document
 from vera_core.forms.prompting import (
@@ -20,8 +27,10 @@ from vera_core.forms.prompting import (
     PromptDocument,
     SessionBlock,
     TaskTextOverride,
+    render_panels,
     render_task_prompts,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion, iter_questions
 
 from .test_prompting import FORM_SCHEMA_DIR
 
@@ -261,6 +270,14 @@ class TestRenderCosmetics:
         assert "April 12, 1991" in fused.known_information
         assert "1991-04-12" not in fused.known_information
 
+    @pytest.mark.parametrize("raw", ["N/A", "n/a", " N/A ", "", "   "])
+    def test_render_value_drops_placeholder_strings(self, raw: str) -> None:
+        assert _render_value(raw) is None
+
+    def test_render_value_keeps_real_values(self) -> None:
+        assert _render_value("Jane Doe") == "Jane Doe"
+        assert _render_value("1991-04-12") == "April 12, 1991"
+
 
 class TestFieldDescriptors:
     def test_only_collectable_roles_in_document_order(self) -> None:
@@ -299,6 +316,15 @@ class TestRulesAndRoundTrip:
         assert PLAN.flow_rules == (IBV.flow_rules or [])
         assert PLAN.contradictions == (IBV.contradictions or [])
         assert PLAN.shared_conditions == (IBV.shared_conditions or {})
+
+    def test_plan_carries_numeric_consistencies(self) -> None:
+        assert [(r.rule_key, r.triplet) for r in PLAN.numeric_consistencies] == [
+            ("lifetime_maximum_triplet_consistency", "sections.lifetime_maximum"),
+            ("deductible_individual_triplet_consistency", "sections.deductibles.individual"),
+            ("deductible_family_triplet_consistency", "sections.deductibles.family"),
+            ("oop_individual_triplet_consistency", "sections.out_of_pocket.individual"),
+            ("oop_family_triplet_consistency", "sections.out_of_pocket.family"),
+        ]
 
     def test_json_round_trip(self) -> None:
         assert CallPlan.model_validate_json(PLAN.model_dump_json()) == PLAN
@@ -352,10 +378,266 @@ class TestBookendPaths:
     def test_focused_retry_retains_greeting_and_wrapup_when_those_fields_satisfied(self) -> None:
         """Even when the intro/wrap-up fields are already satisfied (excluded from the
         retryable set), unioning bookends keeps both tasks in the focused plan."""
-        coverage_field = next(
-            f.path for t in PLAN.tasks if t.task_key == "coverage" for f in t.fields
-        )
-        focus = [coverage_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
+        mid_field = next(f.path for t in PLAN.tasks[1:-1] for f in t.fields)
+        focus = [mid_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
         keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
         assert "introduction" in keys
         assert "wrap_up" in keys
+
+
+SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
+MEMBER_ID = "sections.insurance_information.policy_number"
+
+
+class TestPanelsMatchThePrompt:
+    """The plan carries the prompt twice — as text and as the tree the worker re-renders.
+    Anything that transforms one must transform the other, or narrowing a task silently
+    changes what it says."""
+
+    def _plan(self) -> CallPlan:
+        return compile_call_plan(
+            build_ibv_standard(), None, schema_version_id=uuid4(), prompt_version_id=None
+        )
+
+    def test_every_task_reassembles_from_its_pieces(self) -> None:
+        for task in self._plan().tasks:
+            parts = (task.lead_in, render_panels(task.panels), task.trailing)
+            assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
+
+    def test_every_fused_task_reassembles_from_its_pieces(self) -> None:
+        # The FUSED tree is what `_narrowed_block` re-renders, and `fuse_prefill` rewrites
+        # `prompt` as one whole string: a spoken string the fuse touches in the text but not
+        # in the tree diverges only here, never in the compile-time check above.
+        fused = fuse_prefill(
+            build_ibv_standard(),
+            self._plan(),
+            {SPOUSE_NAME: "Jane Doe", MEMBER_ID: "ABC123"},
+            current_year=2026,
+        )
+        for task in fused.tasks:
+            parts = (task.lead_in, render_panels(task.panels), task.trailing)
+            assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
+
+    def test_the_stored_tree_keeps_the_immediate_confirmations(self) -> None:
+        # Built once and shared: building it a second time without the confirm nodes gave the
+        # worker a tree whose re-render dropped every "Immediately after this answer" block.
+        plan = self._plan()
+        confirms = sum(q.is_confirm for t in plan.tasks for q in iter_questions(t.panels))
+        assert confirms > 0
+
+    def test_fusing_hydrates_the_tree_as_well_as_the_text(self) -> None:
+        # A task-entry re-render must not speak a raw {{token}}.
+        doc = build_ibv_standard()
+        fused = fuse_prefill(doc, self._plan(), {}, current_year=2026)
+        for task in fused.tasks:
+            assert "{{current_year}}" not in render_panels(task.panels), task.task_key
+
+
+class TestConfirmSlot:
+    def test_expands_to_confirm_when_value_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "confirm — Can we also check the spouse on the plan?" in text
+        assert "I have the spouse listed as Jane Doe" in text
+        assert "{{value}}" not in text
+        assert "{{confirm:" not in text
+
+    def test_expands_to_ask_when_nothing_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "ask — Can we also check the spouse on the plan?" in text
+        assert "Can I get the spouse's full name?" in text
+        assert "{{value}}" not in text
+        assert "{{confirm:" not in text
+
+    def test_treats_na_as_nothing_on_file(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "N/A"}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "ask — Can we also check the spouse on the plan?" in text
+
+    def test_speaks_iso_date_in_confirm_variant(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_DOB: "1991-04-12"}, current_year=2026)
+        assert "April 12, 1991" in plan_task(plan, "insurance_basics").prompt
+
+    def test_focused_retry_still_reads_back_the_value(self) -> None:
+        """focus_call_plan clears on_file_values; the value must survive inline."""
+        plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
+        focused = focus_call_plan(plan, [SPOUSE_NAME])
+        assert focused.on_file_values is None
+        assert "Jane Doe" in plan_task(focused, "insurance_basics").prompt
+
+    def test_numbered_question_confirm_branch_is_bare(self) -> None:
+        """The numbered-question list never carried the confirm/ask label — only the
+        two bullet contexts (immediate/end-of-task) do."""
+        plan = fuse_prefill(IBV, PLAN, {MEMBER_ID: "ABC123"}, current_year=2026)
+        # matched by content, not by ordinal: the ordinal moves whenever a question is added.
+        line = next(
+            line
+            for line in plan_task(plan, "insurance_basics").prompt.splitlines()
+            if "member ID" in line
+        )
+        assert line.endswith("I have the member ID as ABC123 — can you confirm that is correct?")
+        assert "confirm — " not in line
+
+
+class TestAlternativePairs:
+    """The grouping rule itself is covered in test_conditions.py; this asserts only that the
+    compiled plan CARRIES it, since the worker is DB-free and cannot derive it."""
+
+    def test_the_plan_carries_per_code_pairs(self) -> None:
+        assert PLAN.alternative_pairs
+        for pair in PLAN.alternative_pairs:
+            assert len({path.rsplit(".", 1)[0] for path in pair}) == 1, pair
+
+
+class TestDescriptorCarriesDefault:
+    """`completion_pct_v2` counts a leaf with a `default` as filled and the export writes it, but
+    the descriptor did not carry it — so the bot chased six fields the form already called done."""
+
+    def test_default_reaches_the_descriptor(self) -> None:
+        by_path = {f.path: f for task in PLAN.tasks for f in task.fields}
+        group_name = by_path["sections.insurance_information.group_name"]
+        assert group_name.default == "N/A"
+        assert group_name.required is True
+
+    def test_a_leaf_without_a_default_carries_none(self) -> None:
+        by_path = {f.path: f for task in PLAN.tasks for f in task.fields}
+        assert by_path["sections.insurance_representative.rep_name"].default is None
+
+
+class TestExclusiveNotes:
+    """A routing `alternatives` picks ONE branch but gates none of them, so the Observer inferred
+    `No` for the branch not taken — a coverage claim, at confidence 90 on a live call, where `N/A`
+    is the truth. The schema has to tell it; it cannot know from the transcript."""
+
+    def _noted(self) -> dict[str, str]:
+        return {f.path: f.exclusive_note for t in PLAN.tasks for f in t.fields if f.exclusive_note}
+
+    def test_a_routing_branchs_leaves_name_their_sibling(self) -> None:
+        noted = self._noted()
+        elective = noted[
+            "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered"
+        ]
+        assert "Egg Cryopreservation Cancer" in elective
+        assert "record N/A here" in elective
+        assert "never No" in elective
+
+    def test_the_note_is_symmetric(self) -> None:
+        noted = self._noted()
+        cancer = noted[
+            "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered"
+        ]
+        assert "Egg Cryopreservation Elective" in cancer
+
+    def test_both_asc_branches_are_noted(self) -> None:
+        noted = self._noted()
+        professional = noted["sections.general_coverage.asc_professional.cpt_58555.covered"]
+        assert "ASC Facility" in professional
+        assert (
+            "ASC Professional Services"
+            in (noted["sections.general_coverage.asc_facility.cpt_58555.covered"])
+        )
+
+    def test_a_leaf_level_either_or_gets_no_note(self) -> None:
+        # cost pairs are alternatives over LEAVES — an either/or over two answers, not a routing
+        # choice between services. Answering coinsurance says nothing about applicability.
+        noted = self._noted()
+        cost = "sections.infertility_treatment.intrauterine_insemination.cpt_58323.copay"
+        assert cost not in noted
+
+    def test_an_unrelated_leaf_gets_no_note(self) -> None:
+        assert "sections.insurance_representative.rep_name" not in self._noted()
+
+
+def _plan_field(path: str, title: str, *, required: bool = True) -> PlanFieldDescriptor:
+    return PlanFieldDescriptor(path=path, title=title, type="text", role="ask", required=required)
+
+
+class TestOwedNow:
+    """`owed_now` is the tree↔descriptor join the worker's completion guards run on
+    (`agent_worker.plan_runtime.PlanRunController.gap_fields` / `owed_question_count`)."""
+
+    @staticmethod
+    def _task(panels: list[PromptPanel], fields: list[PlanFieldDescriptor]) -> PlanTask:
+        return PlanTask(task_key="t", title="T", prompt="p", panels=panels, fields=fields)
+
+    def test_a_routing_question_is_never_owed_even_if_it_carried_a_target(self) -> None:
+        # No real routing question carries a target today (`routes_between` questions collect
+        # nothing by construction), but the skip must not depend on that — it is keyed on
+        # `routes_between` alone, defensively, so a future builder bug can't resurrect the
+        # tree/descriptor disagreement this task exists to remove.
+        path = "sections.a.leaf"
+        field = _plan_field(path, "Leaf")
+        routing = PromptQuestion(
+            text="Which applies?",
+            routes_between=["Branch A", "Branch B"],
+            options=[PromptOption(target_paths=[path])],
+        )
+        task = self._task([PromptPanel(items=[routing])], [field])
+        assert owed_now(task, {}, {}) == []
+
+    def test_a_target_the_field_list_no_longer_carries_is_skipped_not_crashed(self) -> None:
+        # `focus_call_plan` narrows `fields` but leaves `panels` untouched, so a focused
+        # plan's tree can reference a path no descriptor backs any more.
+        kept_path, dropped_path = "sections.a.kept", "sections.a.dropped"
+        kept = _plan_field(kept_path, "Kept")
+        question = PromptQuestion(
+            text="Kept and dropped?",
+            options=[PromptOption(target_paths=[kept_path, dropped_path])],
+        )
+        task = self._task([PromptPanel(items=[question])], [kept])
+        assert owed_now(task, {}, {}) == [question]  # `kept` alone owes it; `dropped` never raises
+
+    def test_owed_questions_come_back_in_spoken_order(self) -> None:
+        first_path, second_path, third_path = (
+            "sections.a.first",
+            "sections.a.second",
+            "sections.a.third",
+        )
+        first = PromptQuestion(text="First?", options=[PromptOption(target_paths=[first_path])])
+        second = PromptQuestion(text="Second?", options=[PromptOption(target_paths=[second_path])])
+        third = PromptQuestion(text="Third?", options=[PromptOption(target_paths=[third_path])])
+        fields = [_plan_field(p, p) for p in (first_path, second_path, third_path)]
+        task = self._task([PromptPanel(items=[first, second]), PromptPanel(items=[third])], fields)
+        # `second` is answered and drops out; `first`/`third` must still come back in the order
+        # the tree speaks them, across a panel boundary, not in field or insertion order.
+        assert owed_now(task, {second_path: "X"}, {}) == [first, third]
+
+
+class TestGatingSeed:
+    """`ask` is collected ON the call, so a pre-call value for one must not settle a gate."""
+
+    def _fused(self, values: dict[str, object]) -> CallPlan:
+        return fuse_prefill(IBV, PLAN, values, current_year=2026)
+
+    def test_ask_role_prefill_is_dropped(self) -> None:
+        path = "sections.enrollment.enrollment_required"
+        plan = self._fused({path: "N/A"})
+        assert plan.prefilled[path] == "N/A"
+        assert path not in gating_seed(plan)
+
+    def test_confirm_role_prefill_survives(self) -> None:
+        # On file to be read back — the member-ID pattern.
+        path = "sections.insurance_information.policy_number"
+        plan = self._fused({path: "ABC123"})
+        assert gating_seed(plan)[path] == "ABC123"
+
+    def test_context_role_prefill_survives(self) -> None:
+        # No task collects it; it is what the clinic supplied.
+        path = "sections.patient_information.spouse_gender"
+        plan = self._fused({path: "Male"})
+        assert gating_seed(plan)[path] == "Male"
+
+    def test_prefilled_itself_is_not_mutated(self) -> None:
+        path = "sections.enrollment.enrollment_required"
+        plan = self._fused({path: "N/A"})
+        gating_seed(plan)
+        assert plan.prefilled == {path: "N/A"}
+
+    def test_a_human_typed_ask_value_is_dropped_too(self) -> None:
+        """Provenance is not consulted, only role: `field_answer.source` never reaches the
+        worker, and the payer's representative is the authority on an ask leaf either way."""
+        path = "sections.benefit_coverage.coverage_type"
+        plan = self._fused({path: "Family"})
+        assert path not in gating_seed(plan)

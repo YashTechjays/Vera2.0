@@ -26,6 +26,21 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid4())}
 
 
+# Module-level, not per-call: some tests reference the same invited address twice
+# (e.g. asserting on email_sender.sent[-1].to), so it must be stable within a run.
+_RUN = uuid4().hex[:8]
+
+
+def _email(label: str) -> str:
+    """An invited address, unique to this run.
+
+    Accepting an invite writes user_identity.provider_subject, which is UNIQUE with
+    provider_type across ALL tenants, and rbac_world's teardown is skipped whenever a run
+    dies early — so a hardcoded address is burned for every later run against that database.
+    """
+    return f"{label}-{_RUN}@test.example"
+
+
 def _extract_token(invite_resp: httpx.Response) -> str:
     """Extract the raw invite token from the invite_url returned by POST /users/invitations."""
     invite_url: str = invite_resp.json()["data"]["invite_url"]
@@ -67,7 +82,7 @@ async def test_invite_returns_link_and_captures_email(
     resp = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "newhire@test.example", "name": "New Hire", "send_email": True},
+        json={"email": _email("newhire"), "name": "New Hire", "send_email": True},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
@@ -77,7 +92,7 @@ async def test_invite_returns_link_and_captures_email(
     # Email captured by the in-memory sender, link present, raw token never logged.
     assert len(email_sender.sent) == before + 1
     assert "token=" in email_sender.sent[-1].body
-    assert email_sender.sent[-1].to == "newhire@test.example"
+    assert email_sender.sent[-1].to == _email("newhire")
 
 
 async def test_invite_records_inviter_and_role_grant_provenance(
@@ -92,7 +107,7 @@ async def test_invite_records_inviter_and_role_grant_provenance(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
         json={
-            "email": "provenance@test.example",
+            "email": _email("provenance"),
             "send_email": False,
             "role_ids": [supervisor_id],
         },
@@ -140,7 +155,7 @@ async def test_invite_link_only_skips_email(
     resp = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "linkonly@test.example", "name": "", "send_email": False},
+        json={"email": _email("linkonly"), "name": "", "send_email": False},
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["data"]["email_sent"] is False
@@ -156,7 +171,7 @@ async def test_invite_then_accept_activates_user(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "accepts@test.example", "name": "Accepts", "send_email": False},
+        json={"email": _email("accepts"), "name": "Accepts", "send_email": False},
     )
     assert invite.status_code == 200, invite.text
     user_id = invite.json()["data"]["user_id"]
@@ -189,7 +204,7 @@ async def test_accept_is_single_use(client: httpx.AsyncClient, rbac_world: RBACW
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "once@test.example", "send_email": False},
+        json={"email": _email("once"), "send_email": False},
     )
     token = _extract_token(invite)
     first = await client.post(
@@ -212,7 +227,7 @@ async def test_deactivate_user(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "deactivate@test.example", "send_email": False},
+        json={"email": _email("deactivate"), "send_email": False},
     )
     user_id = invite.json()["data"]["user_id"]
     resp = await client.post(
@@ -236,7 +251,7 @@ async def test_validate_valid_token(client: httpx.AsyncClient, rbac_world: RBACW
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "validate_valid@test.example", "send_email": False},
+        json={"email": _email("validate_valid"), "send_email": False},
     )
     assert invite.status_code == 200, invite.text
     token = _extract_token(invite)
@@ -264,7 +279,7 @@ async def test_validate_deactivated_user_token(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "validate_deactivated@test.example", "send_email": False},
+        json={"email": _email("validate_deactivated"), "send_email": False},
     )
     assert invite.status_code == 200, invite.text
     user_id = invite.json()["data"]["user_id"]
@@ -308,7 +323,7 @@ async def test_validate_used_token_returns_invalid(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "validate_used@test.example", "send_email": False},
+        json={"email": _email("validate_used"), "send_email": False},
     )
     assert invite.status_code == 200, invite.text
     token = _extract_token(invite)
@@ -347,7 +362,7 @@ async def test_list_users_includes_role_names(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "rolecolumn@test.example", "send_email": False},
+        json={"email": _email("rolecolumn"), "send_email": False},
     )
     user_id = invite.json()["data"]["user_id"]
     roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
@@ -396,7 +411,7 @@ async def test_assign_and_revoke_role(client: httpx.AsyncClient, rbac_world: RBA
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "roleme@test.example", "send_email": False},
+        json={"email": _email("roleme"), "send_email": False},
     )
     user_id = invite.json()["data"]["user_id"]
     roles = await client.get("/api/v1/roles", headers=_auth(rbac_world.admin_token))
@@ -438,7 +453,7 @@ async def test_super_admin_role_not_tenant_assignable(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "noescalate@test.example", "send_email": False},
+        json={"email": _email("noescalate"), "send_email": False},
     )
     user_id = invite.json()["data"]["user_id"]
     # SUPER_ADMIN carries platform perms, so a tenant must not be able to assign it
@@ -470,7 +485,7 @@ async def test_invite_cannot_grant_platform_role(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
         json={
-            "email": "viainvite@test.example",
+            "email": _email("viainvite"),
             "send_email": False,
             "role_ids": [str(super_admin_id)],
         },
@@ -979,7 +994,7 @@ async def test_list_user_roles(client: httpx.AsyncClient, rbac_world: RBACWorld)
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "haroles@test.example", "send_email": False, "role_ids": [supervisor_id]},
+        json={"email": _email("haroles"), "send_email": False, "role_ids": [supervisor_id]},
     )
     user_id = invite.json()["data"]["user_id"]
 
@@ -1020,7 +1035,7 @@ async def test_list_role_holders(client: httpx.AsyncClient, rbac_world: RBACWorl
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
         json={
-            "email": "holder@test.example",
+            "email": _email("holder"),
             "name": "Holder",
             "send_email": False,
             "role_ids": [role_id],
@@ -1236,7 +1251,7 @@ async def test_resend_invitation_reissues_a_working_token(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "stuck@test.example", "name": "Stuck", "send_email": False},
+        json={"email": _email("stuck"), "name": "Stuck", "send_email": False},
     )
     assert invite.status_code == 200, invite.text
     user_id = invite.json()["data"]["user_id"]
@@ -1271,7 +1286,7 @@ async def test_resend_invitation_409s_if_already_accepted(
     invite = await client.post(
         "/api/v1/users/invitations",
         headers={**_auth(rbac_world.admin_token), **_idem()},
-        json={"email": "already-active@test.example", "name": "", "send_email": False},
+        json={"email": _email("already-active"), "name": "", "send_email": False},
     )
     user_id = invite.json()["data"]["user_id"]
     token = _extract_token(invite)

@@ -100,6 +100,8 @@ type DisputeControlsProps = {
   className: string
   onSwap: () => void
   onApply: () => void
+  /** false on a disabled input: Swap writes the value, which the reviewer could not type back (VR2-166) */
+  canSwap: boolean
 }
 
 /**
@@ -112,12 +114,13 @@ export function CompactDisputeControls({
   className,
   onSwap,
   onApply,
+  canSwap,
 }: DisputeControlsProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <div className={cn("absolute flex items-center gap-0.5", className)}>
-          <SwapButton swapped={flags.swapped} onClick={onSwap} />
+          {canSwap && <SwapButton swapped={flags.swapped} onClick={onSwap} />}
           <ApplyButton applied={flags.applied} onClick={onApply} />
         </div>
       </TooltipTrigger>
@@ -136,6 +139,7 @@ export function InlineDisputeControls({
   onSwap,
   onApply,
   bareBadge,
+  canSwap,
 }: DisputeControlsProps & {
   /** drop the chip's label — for the tightest columns (enums) */
   bareBadge?: boolean
@@ -143,7 +147,7 @@ export function InlineDisputeControls({
   const label = flags.swapped ? "Captured" : "Prior"
   return (
     <div className={cn("absolute top-1/2 flex -translate-y-1/2 items-center gap-1", className)}>
-      <SwapButton swapped={flags.swapped} onClick={onSwap} />
+      {canSwap && <SwapButton swapped={flags.swapped} onClick={onSwap} />}
       <ApplyButton applied={flags.applied} onClick={onApply} />
       <DisputeBadge
         value={badgeValue(dispute, flags)}

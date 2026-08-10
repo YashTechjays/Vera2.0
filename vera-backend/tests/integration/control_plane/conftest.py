@@ -79,6 +79,10 @@ class FakeLiveKit(LiveKitGateway):
     """Minimal LiveKitGateway stand-in: records created rooms and mints a
     deterministic token so tests can assert without a real LiveKit server."""
 
+    # A plain attribute shadowing the parent's read-only property, so tests can flip
+    # the browser-callee transport the way they flip every other knob below.
+    browser_callee_transport: bool = False
+
     def __init__(self) -> None:
         # Skip the parent __init__ — we don't need real LiveKit credentials.
         self.created: list[str] = []
@@ -92,6 +96,7 @@ class FakeLiveKit(LiveKitGateway):
         self.known_trunks: set[str] = set()  # outbound_trunk_exists membership
         self.lookup_unavailable = False  # outbound_trunk_exists raises LiveKitUnavailable
         self.dial_error = False  # create_sip_participant raises OutboundDialError
+        self.room_error: Exception | None = None  # create_call_room raises it
         # room -> current participants; rooms absent from the map are "gone"
         # (room_participants returns None), mirroring LiveKit.
         self.participants: dict[str, list[RoomParticipant]] = {}
@@ -102,6 +107,8 @@ class FakeLiveKit(LiveKitGateway):
     async def create_call_room(
         self, room_name: str, metadata: dict[str, object] | None = None
     ) -> None:
+        if self.room_error is not None:
+            raise self.room_error
         self.created.append(room_name)
         self.dispatch_metadata.append(metadata)
 
@@ -156,12 +163,16 @@ def reset_fake_bus(fake_post_call_bus: FakePostCallBus) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def reset_livekit_knobs(fake_livekit: FakeLiveKit) -> Iterator[None]:
-    """The fake is session-scoped; reset its per-test validation/dial knobs before each
-    test so state set by one test never leaks into the next."""
+    """The fake is session-scoped; reset its per-test validation/dial/transport knobs
+    before each test so state set by one test never leaks into the next — e.g. a stale
+    browser_callee_transport would make ensure_queueable skip the trunk check for the
+    rest of the suite."""
     fake_livekit.known_trunks = set()
     fake_livekit.lookup_unavailable = False
     fake_livekit.dial_error = False
+    fake_livekit.room_error = None
     fake_livekit.participants = {}
+    fake_livekit.browser_callee_transport = False
     yield
 
 

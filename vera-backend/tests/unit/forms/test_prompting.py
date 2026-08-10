@@ -2,10 +2,18 @@
 
 import logging
 import os
+import uuid
 from pathlib import Path
 
 import pytest
 
+from vera_core.forms.call_plan import (
+    CONFIRM_SLOT_RE,
+    CallPlan,
+    PlanTask,
+    compile_call_plan,
+    fuse_prefill,
+)
 from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
@@ -14,8 +22,16 @@ from vera_core.forms.prompting import (
     RenderedTaskPrompt,
     SessionBlock,
     TaskTextOverride,
+    numbered_questions,
+    render_panels,
     render_task_prompts,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
+
+
+def _q(text: str, *paths: str) -> PromptQuestion:
+    return PromptQuestion(text=text, options=[PromptOption(target_paths=list(paths))])
+
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
@@ -24,10 +40,26 @@ IBV: FormSchemaDoc = load_document(
     (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
 )
 RENDERED: RenderedPrompts = render_task_prompts(IBV)
+# Loaded locally (not imported from test_call_plan) to avoid a circular import:
+# test_call_plan.py already imports FORM_SCHEMA_DIR from this module.
+PLAN: CallPlan = compile_call_plan(
+    IBV, None, schema_version_id=uuid.uuid4(), prompt_version_id=None
+)
 
 
 def task(key: str) -> RenderedTaskPrompt:
     return next(t for t in RENDERED.tasks if t.task_key == key)
+
+
+def plan_task(plan: CallPlan, key: str) -> PlanTask:
+    return next(t for t in plan.tasks if t.task_key == key)
+
+
+def disease_only_prompts() -> RenderedPrompts:
+    doc = load_document(
+        (FORM_SCHEMA_DIR / "disease_only_verification.json").read_text(encoding="utf-8")
+    )
+    return render_task_prompts(doc)
 
 
 class TestSession:
@@ -101,7 +133,7 @@ class TestTaskText:
     def test_immediate_confirm_attaches_to_anchor(self) -> None:
         basics = task("insurance_basics").prompt
         assert "Immediately after this answer" in basics
-        assert "spouse listed" in basics  # spouse name confirm text
+        assert "{{confirm:sections.patient_information.spouse_partner_name}}" in basics
         assert (
             "Before finishing this task" not in basics
             or "spouse" not in basics.split("Before finishing this task")[-1]
@@ -110,7 +142,8 @@ class TestTaskText:
     def test_flow_rules_attach_to_firing_task(self) -> None:
         assert "TERMINATION RULE — insurance_not_active" in task("introduction").prompt
         assert "TERMINATION RULE — no_out_of_network_coverage" in task("insurance_basics").prompt
-        assert "TERMINATION RULE" not in task("coverage").prompt
+        firing = {t.task_key for t in RENDERED.tasks if "TERMINATION RULE" in t.prompt}
+        assert firing == {"introduction", "insurance_basics"}
 
     def test_contradictions_attach_to_last_field_task(self) -> None:
         assert (
@@ -118,7 +151,8 @@ class TestTaskText:
             in task("insurance_basics").prompt
         )
         assert (
-            "CONSISTENCY CHECK — mandate_requires_infertility_coverage" in task("coverage").prompt
+            "CONSISTENCY CHECK — mandate_requires_infertility_coverage"
+            in task("infertility_coverage").prompt
         )
 
     def test_derive_note_renders(self) -> None:
@@ -126,29 +160,50 @@ class TestTaskText:
         assert 'record "01/01/{{current_year}}" without asking' in basics
 
     def test_every_catalog_schema_renders(self) -> None:
-        disease = load_document(
-            (FORM_SCHEMA_DIR / "disease_only_verification.json").read_text(encoding="utf-8")
-        )
-        out = render_task_prompts(disease)
+        out = disease_only_prompts()
         assert out.tasks and all(t.prompt for t in out.tasks)
 
     def test_no_raw_paths_leak_into_any_prompt(self) -> None:
+        # The compiled {{confirm:<path>}} slot deliberately carries the raw path — it
+        # is fuse-time-only surface, expanded before the prompt ever reaches the agent.
         for t in RENDERED.tasks:
-            assert "sections." not in t.prompt, t.task_key
+            assert "sections." not in CONFIRM_SLOT_RE.sub("", t.prompt), t.task_key
 
-    def test_multi_gate_or_condition_parenthesized(self) -> None:
-        coverage = task("coverage").prompt
-        assert " and (" in coverage
-        assert " or " in coverage.split(" and (", 1)[1]
+    def test_a_covered_gate_reads_as_prose_not_a_field_comparison(self) -> None:
+        # Inside a panel `"Covered" is "Yes"` has no antecedent, and on a fanned-out question
+        # there is no single field it could name.
+        infertility = task("infertility_coverage").prompt
+        assert "Ask only if this service is covered." in infertility
+        assert 'Ask only if "Covered" is "Yes"' not in infertility
 
-    def test_numeric_range_note_renders(self) -> None:
-        coverage = task("coverage").prompt
-        assert "Expected numeric range: 0 to 100." in coverage
-        assert "Expected numeric range: at least 0." in coverage
+    def test_numeric_bounds_render_on_the_option_line(self) -> None:
+        infertility = task("infertility_coverage").prompt
+        assert "Coinsurance (%): 0-100" in infertility
+        assert "Copay ($): also: $0, None; at least 0" in infertility
 
     def test_icd10_codes_render_for_speak_sections(self) -> None:
-        coverage = task("coverage").prompt
-        assert "ICD-10 Z31.41" in coverage
+        """Spelled "ICD ten", never "ICD-10": the agent copies this line into what it says, and
+        Cartesia voiced the digits as "I-C-D one zero" on a live call. Space, not hyphen, so no
+        TTS provider can read the separator aloud as "dash"."""
+        prompt = task("diagnostic_coverage").prompt
+        assert "ICD ten Z31.41" in prompt
+        assert "ICD-10" not in prompt and "ICD-Ten" not in prompt
+
+    def test_no_task_re_explains_the_structure_the_list_already_carries(self) -> None:
+        # The old renderer flattened groups/ask_groups away, so every CPT-heavy task carried
+        # prose re-describing the grouping and asking for phrasing variety. The panels carry
+        # it now, so that prose is gone — and cannot silently come back.
+        for rendered in (RENDERED, disease_only_prompts()):
+            for t in rendered.tasks:
+                assert "vary how you" not in t.prompt.lower()
+                assert "That is wording only" not in t.prompt
+
+    def test_cpt_questions_carry_no_answer_instruction(self) -> None:
+        # The rendered "- Answers: Yes | No | N/A" line already states the vocabulary.
+        for t in RENDERED.tasks:
+            for line in t.prompt.splitlines():
+                if "CPT code" in line:
+                    assert "Please answer" not in line, (t.task_key, line)
 
 
 class TestSnapshots:
@@ -168,3 +223,73 @@ class TestSnapshots:
 
     def test_insurance_basics_snapshot(self) -> None:
         self._check("ibv_insurance_basics.prompt.txt", task("insurance_basics").prompt)
+
+    def test_fused_insurance_basics_with_spouse_on_file(self) -> None:
+        plan = fuse_prefill(
+            IBV,
+            PLAN,
+            {
+                "sections.patient_information.spouse_partner_name": "Jane Doe",
+                "sections.patient_information.spouse_partner_dob": "1991-04-12",
+            },
+            current_year=2026,
+        )
+        self._check(
+            "ibv_insurance_basics.fused_with_spouse.prompt.txt",
+            plan_task(plan, "insurance_basics").prompt,
+        )
+
+    def test_fused_insurance_basics_without_spouse(self) -> None:
+        plan = fuse_prefill(IBV, PLAN, {}, current_year=2026)
+        text = plan_task(plan, "insurance_basics").prompt
+        assert "{{" not in text
+        self._check("ibv_insurance_basics.fused_without_spouse.prompt.txt", text)
+
+
+class TestContinuousNumbering:
+    """A task's list is numbered once end to end, so its last ordinal IS its question total.
+    The voice agent is told that total; if the two ever diverge the prompt lies about the list
+    right in front of it."""
+
+    def test_every_real_task_numbers_1_to_n_across_its_sections(self) -> None:
+        for task in PLAN.tasks:
+            ordinals = [
+                int(line.split(".", 1)[0])
+                for line in render_panels(task.panels).splitlines()
+                if line[:1].isdigit()
+            ]
+            assert ordinals == list(range(1, len(ordinals) + 1)), task.task_key
+            assert numbered_questions(task.panels) == len(ordinals), task.task_key
+
+    def test_a_nested_panel_continues_the_parents_count(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Outer",
+                items=[
+                    _q("First?", "a.one"),
+                    PromptPanel(title="Inner", items=[_q("Second?", "a.two")]),
+                    _q("Third?", "a.three"),
+                ],
+            )
+        ]
+        rendered = render_panels(panels)
+        assert "1. First?" in rendered
+        assert "2. Second?" in rendered  # was "1." while numbering restarted per panel
+        assert "3. Third?" in rendered
+        assert numbered_questions(panels) == 3
+
+    def test_a_routing_question_is_neither_numbered_nor_counted(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Coverage",
+                items=[
+                    PromptQuestion(text="Individual or family?", routes_between=["Ind", "Fam"]),
+                    _q("Spouse name?", "a.spouse"),
+                ],
+            )
+        ]
+        assert numbered_questions(panels) == 1
+        assert "1. Spouse name?" in render_panels(panels)
+
+    def test_an_empty_tree_counts_nothing(self) -> None:
+        assert numbered_questions([]) == 0

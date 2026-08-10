@@ -16,7 +16,8 @@ Pure and DB-free; consumed by the seeder and the call-time prompt pipeline.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from itertools import count
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,7 +37,8 @@ from vera_core.forms.dsl import (
     condition_field_paths,
     malformed_placeholders,
 )
-from vera_core.forms.prompt_text import build_condition_renderer
+from vera_core.forms.prompt_text import build_condition_renderer, confirm_slot
+from vera_core.forms.question_plan import PromptPanel, PromptQuestion, build_question_plan
 
 
 class _Doc(BaseModel):
@@ -114,15 +116,21 @@ FACTORY_SESSION = SessionBlock(
     ),
     base_instructions=(
         "Ask one question at a time and wait for the answer before moving on. "
-        "Record exactly what the representative says — never invent, assume or "
+        "Record exactly what the representative says, and never invent, assume or "
         "round an answer. If an answer is partial or ambiguous, read it back and "
-        "ask for confirmation. If the representative asks you to hold, say 'take "
-        "your time' once and stay silent until they return. You are the caller "
-        "asking the questions: do not answer benefits questions yourself and do "
-        "not volunteer information you were not asked for. Do not repeat a "
-        "question that has already been answered. Never re-introduce yourself "
-        "mid-call. If the representative cannot provide an answer after checking, "
-        "note that and move on rather than pressing."
+        "ask for confirmation. Keep confirmations short and vary the wording, for "
+        "example 'So that's 80% after deductible?' or 'Got it, $1,500, correct?' "
+        "or 'That's in-network only?', instead of starting every one with 'Just to "
+        "confirm.' If a response is unclear, add a brief natural phrase before "
+        "re-asking, such as 'Sorry, I didn't catch that,' 'Could you repeat "
+        "that?' or 'Just to make sure I heard that right,' and rotate them so the "
+        "same phrase is never used twice in a row. If the representative asks you "
+        "to hold, say 'take your time' once and stay silent until they return. "
+        "You are the caller asking the questions, so do not answer benefits "
+        "questions yourself and do not volunteer information you were not asked "
+        "for. Do not repeat a question that has already been answered. Never "
+        "re-introduce yourself mid-call. If the representative cannot provide an "
+        "answer after checking, note that and move on rather than pressing."
     ),
 )
 
@@ -132,7 +140,14 @@ class RenderedTaskPrompt(_Doc):
     title: str
     intro: str | None = None  # AgentTask entry speech — verbatim
     outro: str | None = None  # AgentTask exit speech — verbatim
-    prompt: str  # compiled instruction text
+    prompt: str  # compiled instruction text: lead_in + the question list + trailing
+    # The same text in its three pieces, so a consumer that re-renders the question list
+    # (the worker, narrowing against the live gates) reassembles the rest instead of
+    # recovering it by splitting the compiled string — which silently dropped the
+    # TERMINATION RULE / CONSISTENCY CHECK blocks that follow the list.
+    lead_in: str = ""
+    panels: list[PromptPanel] = Field(default_factory=list)
+    trailing: str = ""
 
 
 class RenderedPrompts(_Doc):
@@ -162,6 +177,30 @@ def _join_gates(gates: tuple[Condition, ...], render_cond: Callable[[Condition],
     return " and ".join(parts)
 
 
+def immediate_confirms_by_anchor(doc: FormSchemaDoc) -> dict[str, list[tuple[str, str]]]:
+    """`{anchor path: [(collected path, rendered confirm line)]}` for every
+    `confirm_immediate` leaf — the anchor rule `render_task_prompts` already applies,
+    exposed so the question-plan builder and the validator cannot drift from it."""
+    render_cond = build_condition_renderer(doc)
+    shared = doc.shared_conditions or {}
+    leaves = dict(doc.leaf_items())
+    order = {path: i for i, path in enumerate(leaves)}
+    section_to_task = doc.section_to_task()
+    result: dict[str, list[tuple[str, str]]] = {}
+    for path, leaf, gates in leaf_gates(doc):
+        cit = leaf.confirm_in_task
+        if cit is None:
+            continue
+        anchor = _anchor(cit, gates, shared, leaves, order, section_to_task)
+        if anchor is None:
+            continue
+        # The confirm SLOT, not the confirm sentence: `fuse_prefill` picks confirm-vs-ask
+        # wording once it knows whether this form prefilled a value (`prompting.confirm_slot`).
+        line = f"If {_join_gates(gates, render_cond)}: {confirm_slot(path)}"
+        result.setdefault(anchor, []).append((path, line))
+    return result
+
+
 def render_task_prompts(
     doc: FormSchemaDoc, prompt_doc: PromptDocument | None = None
 ) -> RenderedPrompts:
@@ -187,19 +226,12 @@ def render_task_prompts(
     titles = {path: field.title for path, field in doc._iter_fields()}
     task_titles = {t.task_key: t.title for t in doc.tasks}
 
-    questions: dict[str, list[_QuestionItem]] = {}
-    immediate_by_anchor: dict[str, list[_QuestionItem]] = {}
+    immediate_by_anchor = immediate_confirms_by_anchor(doc)
     end_confirms: dict[str, list[_QuestionItem]] = {}
     for path, leaf, gates in leaf_gates(doc):
         cit = leaf.confirm_in_task
-        if cit is not None:
-            anchor = _anchor(cit, gates, shared, leaves, order, section_to_task)
-            if cit.confirm_immediate and anchor is not None:
-                immediate_by_anchor.setdefault(anchor, []).append((path, leaf, gates))
-            else:
-                end_confirms.setdefault(cit.task_key, []).append((path, leaf, gates))
-        elif leaf.role in ("ask", "confirm"):
-            questions.setdefault(path.split(".")[1], []).append((path, leaf, gates))
+        if cit is not None and _anchor(cit, gates, shared, leaves, order, section_to_task) is None:
+            end_confirms.setdefault(cit.task_key, []).append((path, leaf, gates))
 
     flow_by_task: dict[str, list[FlowRule]] = {}
     for rule in doc.flow_rules or []:
@@ -215,25 +247,28 @@ def render_task_prompts(
     tasks_out: list[RenderedTaskPrompt] = []
     for task in doc.tasks:
         override = overrides.get(task.task_key, TaskTextOverride())
+        text = _task_text(
+            doc,
+            task,
+            override,
+            render_cond,
+            immediate_by_anchor,
+            end_confirms.get(task.task_key, []),
+            flow_by_task.get(task.task_key, []),
+            contra_by_task.get(task.task_key, []),
+            titles,
+            task_titles,
+        )
         tasks_out.append(
             RenderedTaskPrompt(
                 task_key=task.task_key,
                 title=task.title,
                 intro=task.intro if override.intro is None else override.intro,
                 outro=task.outro if override.outro is None else override.outro,
-                prompt=_task_text(
-                    doc,
-                    task,
-                    override,
-                    render_cond,
-                    questions,
-                    immediate_by_anchor,
-                    end_confirms.get(task.task_key, []),
-                    flow_by_task.get(task.task_key, []),
-                    contra_by_task.get(task.task_key, []),
-                    titles,
-                    task_titles,
-                ),
+                prompt=text.prompt,
+                lead_in=text.lead_in,
+                panels=text.panels,
+                trailing=text.trailing,
             )
         )
     return RenderedPrompts(
@@ -296,72 +331,148 @@ def _last_ref_task(
 
 
 def _codes_text(codes: Codes) -> str:
+    """The codes line for a panel header. Prompt text only — never storage or export.
+
+    "ICD ten", not "ICD-10": the agent copies this string into what it says, and Cartesia
+    voiced the digits as "I-C-D one zero" on a live call. Spelled with a space rather than a
+    hyphen so no TTS provider can read the separator aloud as "dash". The export keeps
+    "ICD-10" — that column is read, not spoken."""
     parts: list[str] = []
     if codes.cpt:
         parts.append(f"CPT {', '.join(codes.cpt)}")
     if codes.icd10:
-        parts.append(f"ICD-10 {', '.join(codes.icd10)}")
+        parts.append(f"ICD ten {', '.join(codes.icd10)}")
     return "; ".join(parts)
 
 
-def _question_lines(
-    idx: int,
-    path: str,
-    leaf: Leaf,
-    gates: tuple[Condition, ...],
-    render_cond: Callable[[Condition], str],
-    immediate: list[_QuestionItem],
-) -> list[str]:
-    prompt = leaf.prompt
-    # ask/confirm coherence is validator-enforced (dsl.py Leaf._coherent), so an
-    # ask/confirm-role leaf always carries the matching prompt text.
-    assert prompt is not None, f"{path}: {leaf.role} leaf missing prompt text"
-    text = prompt.ask if leaf.role == "ask" else prompt.confirm
-    lines = [f"{idx}. {text}"]
-    if leaf.values:
-        lines.append(f"   - Answers: {' | '.join(leaf.values)}")
-    if leaf.special_values:
-        lines.append(f"   - Also accepted: {', '.join(leaf.special_values)}")
-    for hint in prompt.hints or []:
-        lines.append(f"   - Hint: {hint}")
-    if leaf.validation is not None and leaf.validation.date_format is not None:
-        lines.append(f"   - Expected date format: {leaf.validation.date_format}")
-    if leaf.validation is not None and leaf.validation.range is not None:
-        rng = leaf.validation.range
-        if rng.min is not None and rng.max is not None:
-            lines.append(f"   - Expected numeric range: {rng.min} to {rng.max}.")
-        elif rng.min is not None:
-            lines.append(f"   - Expected numeric range: at least {rng.min}.")
-        else:
-            lines.append(f"   - Expected numeric range: at most {rng.max}.")
-    if gates:
-        conds = _join_gates(gates, render_cond)
-        skip = (
-            f' If skipped, record "{leaf.inapplicable_value}".'
-            if leaf.inapplicable_value is not None
-            else ""
+def render_panels(panels: list[PromptPanel]) -> str:
+    """The question list for a set of panels, numbered CONTINUOUSLY across all of them.
+
+    Pure string assembly over an already-resolved tree — every condition was rendered to
+    text in `build_question_plan`, so the DB-free worker can call this to re-render the list
+    with entry-decided gates applied, and can never render the tree differently than the
+    compiler did.
+
+    One counter spans every panel so the last ordinal IS the task's question total. Numbering
+    per panel instead made a multi-section task read as several separately finishable lists,
+    and a live call ended `insurance_basics` after its first section."""
+    numbering = count(1)
+    return "\n\n".join(
+        "\n".join(_panel_lines(panel, depth=0, numbering=numbering)) for panel in panels
+    )
+
+
+def numbered_questions(panels: list[PromptPanel]) -> int:
+    """How many questions `render_panels` gives an ordinal — so also its LAST ordinal.
+
+    Lives here, next to `_panel_lines`, because it describes what that function emits: one
+    continuous count across every panel, skipping routing questions. A caller that tells the
+    agent "this task has N questions" has to move whenever the numbering does."""
+    return sum(
+        numbered_questions([item])
+        if isinstance(item, PromptPanel)
+        else (0 if item.routes_between or item.is_confirm else 1)
+        for panel in panels
+        for item in panel.items
+    )
+
+
+def _panel_lines(panel: PromptPanel, depth: int, numbering: Iterator[int]) -> list[str]:
+    """One panel: heading, codes, its gate stated once, then its questions.
+
+    `numbering` is the whole task's counter, shared with every sibling and nested panel."""
+    lines: list[str] = []
+    if panel.title is not None:
+        lines.append(f"{'#' * (3 + depth)} {panel.title}")
+    if panel.intro:
+        lines.append(panel.intro)
+    if panel.codes is not None and (codes := _codes_text(panel.codes)):
+        speak = (
+            "Read these codes aloud when asking"
+            if panel.codes.speak_cpt
+            else "Provide these codes only if the representative asks"
         )
-        lines.append(f"   - Ask only if {conds}.{skip}")
-    if leaf.derive is not None:
-        lines.append(
-            f'   - When {render_cond(leaf.derive.when)}: record "{leaf.derive.value}" '
-            "without asking."
-        )
-    if leaf.required is False:
-        lines.append("   - Optional; skip gracefully if the representative has nothing.")
-    elif not isinstance(leaf.required, bool):
-        lines.append(f"   - Required only when {render_cond(leaf.required.when)}.")
-    if leaf.codes is not None:
-        codes_text = _codes_text(leaf.codes)
-        if codes_text:
-            lines.append(f"   - Codes: {codes_text}")
-    if immediate:
-        lines.append("   - Immediately after this answer:")
-        for _cpath, cleaf, cgates in immediate:
-            cond_txt = _join_gates(cgates, render_cond)
-            ctext = cleaf.prompt.confirm if cleaf.prompt else cleaf.title
-            lines.append(f"     * If {cond_txt}: confirm — {ctext}")
+        lines.append(f"{speak}: {codes}.")
+    if panel.gate_text is not None:
+        lines.append(f"Ask only if {panel.gate_text}.")
+    items = list(panel.items)
+    i = 0
+    while i < len(items):
+        item = items[i]
+        if isinstance(item, PromptPanel):
+            lines.append("")
+            lines.extend(_panel_lines(item, depth + 1, numbering))
+            i += 1
+            continue
+        if item.routes_between:
+            # Unnumbered: it routes between the panels below rather than recording an answer
+            # of its own — the choice shows up as which panel's Covered is "Yes".
+            lines.append(f"Ask first: {item.text}")
+            lines.append(
+                "Then take only the matching panel below — "
+                f"{' or '.join(item.routes_between)} — and skip the other."
+            )
+            i += 1
+            continue
+        # Absorb the run of confirm nodes this question anchors — they render nested
+        # under it rather than starting numbered lines of their own.
+        run: list[PromptQuestion] = []
+        j = i + 1
+        while j < len(items):
+            candidate = items[j]
+            if not (isinstance(candidate, PromptQuestion) and candidate.is_confirm):
+                break
+            run.append(candidate)
+            j += 1
+        lines.extend(_numbered_question(next(numbering), item, run))
+        i = j
     return lines
+
+
+def _numbered_question(
+    number: int, question: PromptQuestion, confirms: list[PromptQuestion] | None = None
+) -> list[str]:
+    lines = [f"{number}. {question.text}"]
+    for option in question.options:
+        if option.label is None:
+            if option.answers:
+                lines.append(f"   - Answers: {option.answers}")
+        else:
+            suffix = f": {option.answers}" if option.answers else ""
+            lines.append(f"   - {option.label}{suffix}")
+        if option.date_format is not None:
+            lines.append(f"   - Expected date format: {option.date_format}")
+    for hint in question.hints:
+        lines.append(f"   - Hint: {hint}")
+    if question.gate_text is not None:
+        lines.append(f"   - Ask only if {question.gate_text}.")
+    if question.derive_text is not None:
+        lines.append(f"   - {question.derive_text}")
+    if question.required_text is not None:
+        lines.append(f"   - {question.required_text}")
+    elif question.optional:
+        lines.append("   - Optional; move on if the representative has nothing.")
+    if len(question.fanned_codes) > 1:
+        lines.append(
+            "   - One question for all of these codes; apply the answer to every code the "
+            f"representative confirms: {', '.join(question.fanned_codes)}."
+        )
+    if confirms:
+        lines.append("   - Immediately after this answer:")
+        lines.extend(f"     * {c.text}" for c in confirms)
+    return lines
+
+
+class _TaskText(_Doc):
+    lead_in: str
+    panels: list[PromptPanel]
+    trailing: str
+
+    @property
+    def prompt(self) -> str:
+        return "\n\n".join(
+            p for p in (self.lead_in, render_panels(self.panels), self.trailing) if p
+        )
 
 
 def _task_text(
@@ -369,59 +480,28 @@ def _task_text(
     task: Task,
     override: TaskTextOverride,
     render_cond: Callable[[Condition], str],
-    questions: dict[str, list[_QuestionItem]],
-    immediate_by_anchor: dict[str, list[_QuestionItem]],
+    immediate_by_anchor: dict[str, list[tuple[str, str]]],
     end_confirms: list[_QuestionItem],
     flow_rules: list[FlowRule],
     contradictions: list[Contradiction],
     titles: dict[str, str],
     task_titles: dict[str, str],
-) -> str:
-    blocks: list[str] = []
+) -> _TaskText:
+    lead: list[str] = []
     if task.applicable_when is not None:
-        blocks.append(f"This task runs only when {render_cond(task.applicable_when)}.")
+        lead.append(f"This task runs only when {render_cond(task.applicable_when)}.")
     instructions = override.prompt or task.prompt
     if instructions:
-        blocks.append(instructions)
+        lead.append(instructions)
 
-    n = 1
-    for section_key in task.sections:
-        section = doc.sections[section_key]
-        lines = [f"### {section.title}"]
-        if section.prompt is not None:
-            lines.append(section.prompt.intro)
-        if section.codes is not None:
-            codes_text = _codes_text(section.codes)
-            if codes_text:
-                speak = (
-                    "Read these codes aloud when asking"
-                    if section.codes.speak_cpt
-                    else "Provide these codes only if the representative asks"
-                )
-                lines.append(f"{speak}: {codes_text}.")
-        for path, leaf, gates in questions.get(section_key, []):
-            lines.extend(
-                _question_lines(
-                    n, path, leaf, gates, render_cond, immediate_by_anchor.get(path, [])
-                )
-            )
-            n += 1
-        for group in section.ask_groups or []:
-            members = ", ".join(titles.get(m, m) for m in group.fields)
-            lines.append(f'Ask together on the first pass: "{group.ask}" (covers: {members}).')
-        for alt in section.alternatives or []:
-            members = ", ".join(titles.get(m, m) for m in alt.members)
-            lines.append(
-                f'Either/or — once one of these is answered, record "N/A" for the rest: {members}.'
-            )
-        blocks.append("\n".join(lines))
+    panels = build_question_plan(doc, task, immediate_by_anchor)
+    blocks: list[str] = []
 
     if end_confirms:
-        lines = ["Before finishing this task, confirm:"]
-        for _path, leaf, gates in end_confirms:
-            text = leaf.prompt.confirm if leaf.prompt else leaf.title
+        lines = ["Before finishing this task:"]
+        for cpath, _leaf, gates in end_confirms:
             only = f" (only if {_join_gates(gates, render_cond)})" if gates else ""
-            lines.append(f"- {text}{only}")
+            lines.append(f"- {confirm_slot(cpath)}{only}")
         blocks.append("\n".join(lines))
 
     for rule in flow_rules:
@@ -446,7 +526,7 @@ def _task_text(
             f"If {render_cond(contra.when)}: {contra.reason}{clarify} "
             f"Then re-confirm: {fields}."
         )
-    return "\n\n".join(blocks)
+    return _TaskText(lead_in="\n\n".join(lead), panels=panels, trailing="\n\n".join(blocks))
 
 
 def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> list[str]:
@@ -454,8 +534,8 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
 
     Shape errors are pydantic's job; this checks the parts that need the schema:
     task keys exist, no override entry is entirely empty, placeholders resolve.
-    Reserved runtime tokens ({{value}}, {{current_year}}) are exempt — the
-    call-plan fuse handles them, not field lookup."""
+    Reserved runtime tokens ({{current_year}}) are exempt — the call-plan fuse
+    handles them, not field lookup."""
     errors: list[str] = []
     valid_tokens = (
         set(schema_doc.system_fields or {})
@@ -479,6 +559,12 @@ def validate_prompt_document(doc: PromptDocument, schema_doc: FormSchemaDoc) -> 
         )
     for where, text in texts:
         for token in PLACEHOLDER_RE.findall(text or ""):
+            if token == "value":
+                errors.append(
+                    f"{where}: {{{{value}}}} is only valid in a schema field's "
+                    "prompt.confirm, not in session or task text"
+                )
+                continue
             if token not in valid_tokens:
                 errors.append(f"{where}: unknown placeholder {{{{{token}}}}}")
         for snippet in malformed_placeholders(text or ""):

@@ -25,11 +25,13 @@ import {
   getRecordingPlayback,
   listCallHistory,
   listCalls,
+  listCompletedCalls,
   publishCall,
   type CallStats,
   type CallSummary,
   type JoinTokenResponse,
   type LiveCallSummary,
+  type Paginated,
   type PaginatedCalls,
 } from "./calls"
 
@@ -52,6 +54,7 @@ const call: CallSummary = {
   health_reason: null,
   health_analyzed_at: null,
   completion_pct: null,
+  verified_pct: null,
 }
 
 const joinToken: JoinTokenResponse = {
@@ -70,12 +73,19 @@ describe("calls API client", () => {
     expect(apiRequest).toHaveBeenCalledWith("/calls")
   })
 
-  it("lists terminal calls with GET /calls?scope=history", async () => {
+  it("lists completed calls as a page with GET /calls?scope=history", async () => {
     const done = { ...call, status: "completed", ended_at: "2026-07-04T10:05:00Z" }
-    vi.mocked(apiRequest).mockResolvedValue([done])
-    const out = await listCalls("history")
-    expect(out).toEqual([done])
-    expect(apiRequest).toHaveBeenCalledWith("/calls?scope=history")
+    const page: Paginated<CallSummary> = { items: [done], page: 2, page_size: 20, total: 41 }
+    vi.mocked(apiRequest).mockResolvedValue(page)
+    const out = await listCompletedCalls({ page: 2 })
+    expect(out).toEqual(page)
+    expect(apiRequest).toHaveBeenCalledWith("/calls?scope=history&page=2&page_size=20")
+  })
+
+  it("listCompletedCalls defaults to page 1, size 20", async () => {
+    vi.mocked(apiRequest).mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 })
+    await listCompletedCalls()
+    expect(apiRequest).toHaveBeenCalledWith("/calls?scope=history&page=1&page_size=20")
   })
 
   it("fetches stat-card counts with GET /calls/stats", async () => {
@@ -102,8 +112,14 @@ describe("calls API client", () => {
 
   it("requests a publishable token for intervene", async () => {
     vi.mocked(apiRequest).mockResolvedValue(joinToken)
-    await getJoinToken("c1", true)
+    await getJoinToken("c1", "intervene")
     expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token?intervene=true")
+  })
+
+  it("requests a callee token", async () => {
+    vi.mocked(apiRequest).mockResolvedValue(joinToken)
+    await getJoinToken("c1", "callee")
+    expect(apiRequest).toHaveBeenCalledWith("/calls/c1/join-token?callee=true")
   })
 
   it("ends a call (POST, no body)", async () => {
@@ -116,7 +132,7 @@ describe("calls API client", () => {
     vi.mocked(apiRequest).mockRejectedValue(
       new ApiError(409, "CONFLICT", "another supervisor is currently intervening on this call"),
     )
-    await expect(getJoinToken("c1", true)).rejects.toBeInstanceOf(ApiError)
+    await expect(getJoinToken("c1", "intervene")).rejects.toBeInstanceOf(ApiError)
   })
 
   it("propagates ApiError when a non-owner tries to publish (403)", async () => {

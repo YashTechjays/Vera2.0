@@ -94,7 +94,11 @@ async def close_call(
         previous_form_status = form.status if form is not None else None
         if form is not None:
             requeued = apply_terminal_call_status(
-                call, form, status, tenant_max_retries=tenant.max_retries
+                call,
+                form,
+                status,
+                tenant_max_retries=tenant.max_retries,
+                auto_retry_enabled=tenant.auto_retry_enabled,
             )
             if requeued:
                 form.enqueued_at = func.now()

@@ -140,8 +140,8 @@ export function createRequiredPaths(schema: FormSchema): Set<string> {
 
 const _titlesBySchema = new WeakMap<FormSchema, Map<string, string>>()
 
-/** The title of the leaf at `path`, for describing a gate in human terms. */
-function titleOf(schema: FormSchema, path: string): string {
+/** The title of the leaf at `path`, for gate and validation messages in human terms. */
+export function titleOf(schema: FormSchema, path: string): string {
   let titles = _titlesBySchema.get(schema)
   if (!titles) {
     titles = new Map(allLeaves(schema).map((l) => [l.path, l.field.title]))
@@ -254,6 +254,59 @@ export function fieldUsageOf(
   return "asked"
 }
 
+const _alternativesBySchema = new WeakMap<FormSchema, Map<string, string[]>>()
+
+/**
+ * Each either/or member path mapped to the OTHER members of its group.
+ *
+ * Mirrors `conditions.alternative_index(alternative_pairs(doc))`. Grouped by PARENT PATH, not by
+ * the authored set: `panel_cost_pairs` flattens every CPT code's copay AND coinsurance into one
+ * `alternatives`, so the diagnostic panel is 16 members over 8 codes — treating the whole set as
+ * satisfied by any one member would mark eight codes answered off a single reply. A member that
+ * resolves to no leaf is a routing branch, not an either/or, and drops out.
+ */
+export function alternativeSiblings(schema: FormSchema): Map<string, string[]> {
+  let index = _alternativesBySchema.get(schema)
+  if (!index) {
+    index = new Map()
+    const leaves = leafByPath(schema)
+    for (const [, section] of sectionEntriesOf(schema)) {
+      for (const alternative of section.alternatives ?? []) {
+        const byParent = new Map<string, string[]>()
+        for (const member of alternative.members) {
+          if (!leaves.has(member)) continue
+          const parent = member.slice(0, member.lastIndexOf("."))
+          byParent.set(parent, [...(byParent.get(parent) ?? []), member])
+        }
+        for (const group of byParent.values()) {
+          if (group.length < 2) continue
+          for (const path of group) {
+            index.set(
+              path,
+              group.filter((other) => other !== path)
+            )
+          }
+        }
+      }
+    }
+    _alternativesBySchema.set(schema, index)
+  }
+  return index
+}
+
+/**
+ * Whether a required, applicable leaf owes nothing: it has a value, declares a default, or a
+ * sibling in its either/or group is answered — one reply satisfies the pair, so a rep who gave
+ * coinsurance has answered the cost question and the copay is moot.
+ *
+ * Mirrors `conditions.is_satisfied`; `forms/CLAUDE.md` requires the two stay in step.
+ */
+export function isSatisfied(schema: FormSchema, leaf: FlatLeaf, values: FormValues): boolean {
+  if (isFilled(leaf, values)) return true
+  const siblings = alternativeSiblings(schema).get(leaf.path) ?? []
+  return siblings.some((other) => (values[other] ?? "").trim() !== "")
+}
+
 /** A field counts as filled when it has a value or a declared default. */
 function isFilled(leaf: FlatLeaf, values: FormValues): boolean {
   return (values[leaf.path] ?? "").trim() !== "" || leaf.field.default !== undefined
@@ -265,7 +318,7 @@ export function completionPercent(schema: FormSchema, values: FormValues): numbe
     (l) => isApplicable(schema, l.gates, values) && isRequired(schema, l.field, values)
   )
   if (relevant.length === 0) return 100
-  const filled = relevant.filter((l) => isFilled(l, values)).length
+  const filled = relevant.filter((l) => isSatisfied(schema, l, values)).length
   return Math.round((filled / relevant.length) * 100)
 }
 

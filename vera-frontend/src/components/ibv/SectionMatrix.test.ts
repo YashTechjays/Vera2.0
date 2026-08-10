@@ -4,10 +4,6 @@ import { hasDispute } from "./SectionMatrix"
 import { defaultFlags, type DisputeFlagMap, type DisputeMap } from "@/lib/ibv/disputes"
 import { demoSchema as schema } from "@/lib/ibv/mock"
 import { getSectionTable } from "@/lib/ibv/schema"
-import type { FormValues } from "@/lib/ibv/types"
-
-const COVERAGE = "sections.benefit_coverage.coverage_type"
-const SPOUSE_GENDER = "sections.patient_information.spouse_gender"
 
 const general = getSectionTable("general_coverage", schema.sections.general_coverage)!
 const GENERAL_CELL = "sections.general_coverage.office_visits.cpt_99211.covered"
@@ -22,17 +18,11 @@ const disputeOn = (path: string): DisputeMap => ({
   [path]: { previousValue: "No", currentValue: "Yes" },
 })
 
-function context(over: {
-  disputes?: DisputeMap
-  flags?: DisputeFlagMap
-  values?: FormValues
-}) {
+function context(over: { disputes?: DisputeMap; flags?: DisputeFlagMap }) {
   const flags = over.flags ?? {}
   return {
     disputes: over.disputes ?? {},
     flagsFor: (path: string) => flags[path] ?? defaultFlags(),
-    schema,
-    values: over.values ?? {},
   }
 }
 
@@ -53,14 +43,7 @@ describe("hasDispute (wide-width gating)", () => {
     expect(hasDispute(general, ctx)).toBe(false)
   })
 
-  it("ignores disputes on cells whose gates make them inapplicable", () => {
-    const disputes = disputeOn(MALE_CELL)
-    expect(hasDispute(malePartner, context({ disputes }))).toBe(false)
-    const values = {
-      [COVERAGE]: "Family",
-      [SPOUSE_GENDER]: "Male",
-      "sections.male_partner_coverage.male_partner_covered": "Yes",
-    }
-    expect(hasDispute(malePartner, context({ disputes, values }))).toBe(true)
+  it("counts disputes on cells whose gates currently fail — they still block completion (VR2-166)", () => {
+    expect(hasDispute(malePartner, context({ disputes: disputeOn(MALE_CELL) }))).toBe(true)
   })
 })

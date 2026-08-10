@@ -5,9 +5,10 @@ plain LLM chat loop — deliberately NOT an `Agent`, because it must not partici
 AgentSession under test; it only turns VERA's last utterance into a rep-style reply.
 
 The fact sheet states RULES, not 184 answers, because the plan's field space is repeating
-structure: `coverage`/`male_partner` are `Covered → Copay → Coinsurance → Prior Auth` quads per
-CPT code, and `financial` is `Total → Met → Remaining` triples per bucket. Enumerating them
-would be unmaintainable; the rules cover any code or bucket VERA happens to ask about.
+structure: the coverage and `male_partner_coverage` sections are `Covered → Copay → Coinsurance →
+Prior Auth` quads per CPT code, and `financial` is `Total → Met → Remaining` triples per bucket.
+Enumerating them would be unmaintainable; the rules cover any code or bucket VERA happens to ask
+about.
 
 Answers are improvised within those rules, so evals built on this may assert on conversational
 FLOW (handoffs, carried context, re-asking) but never on extracted values — value correctness
@@ -128,7 +129,7 @@ class SimulatedRep:
 # The default FACT_SHEET deliberately fires NO rule (out-of-network IS covered; the mandate and
 # infertility coverage agree), so a rule scenario has to supply its own facts.
 
-# ibv_standard.py:1316 `mandate_requires_infertility_coverage` — a plan mandate obliges coverage,
+# `mandate_requires_infertility_coverage` (ibv_standard.py) — a plan mandate obliges coverage,
 # so claiming it is not covered is self-contradictory. This is the push-back seen in the reference
 # call: "With a mandate, infertility services should be covered. Could you double-check…"
 MANDATE_CONTRADICTION_FACTS = """\
@@ -142,7 +143,43 @@ You are looking at the member's plan in your system.
 - Your name is Martha Reed. Your call reference number is 841026.
 """
 
-# ibv_standard.py:1265 `insurance_not_active` — an inactive policy ends the call, so the plan
+# `lifetime_maximum_triplet_consistency` (ibv_standard.py) — the rep misreads the screen into an
+# arithmetically impossible pair (met > total) and sticks to it if asked again, so the numeric
+# rule's ReAsk is the only thing that can challenge it.
+TRIPLET_MISQUOTE_FACTS = """\
+You are looking at the member's plan in your system.
+
+- Plan: UnitedHealthcare Choice Plus, plan type PPO, active, effective January 1 2026.
+- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
+- There IS an infertility plan mandate on this policy. Infertility treatment IS covered.
+- Infertility lifetime maximum: the total is $10,000, with $12,000 met so far. Quote exactly
+  those two numbers whenever asked. If the assistant questions the numbers or asks you to
+  double-check them, apologize and correct yourself: the total is $10,000 and exactly $1,000
+  has been met. Never quote $12,000 again after correcting yourself.
+- You CANNOT see the remaining lifetime maximum amount in your system. If asked what remains,
+  say you don't have that figure in front of you. Never state a remaining amount and never do
+  the subtraction yourself.
+- The lifetime maximum applies to DIAGNOSTIC AND INFERTILITY TREATMENT.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""
+
+# The Observer's auto-derived remaining — the rep gives a consistent total and met amount but can
+# never state the remaining, so only the worker's own Total - Met derivation can fill it.
+DERIVED_REMAINING_FACTS = """\
+You are looking at the member's plan in your system.
+
+- Plan: UnitedHealthcare Choice Plus, plan type PPO, active, effective January 1 2026.
+- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
+- There IS an infertility plan mandate on this policy. Infertility treatment IS covered.
+- Infertility lifetime maximum: the total is $10,000, and exactly $1,000 has been met so far.
+- You CANNOT see the remaining lifetime maximum amount in your system. If asked what remains,
+  say you don't have that figure in front of you. Never state a remaining amount and never do
+  the subtraction yourself.
+- The lifetime maximum applies to DIAGNOSTIC AND INFERTILITY TREATMENT.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""
+
+# `insurance_not_active` (ibv_standard.py) — an inactive policy ends the call, so the plan
 # skips straight to wrap_up instead of collecting benefits nobody can use.
 INACTIVE_POLICY_FACTS = """\
 You are looking at the member's plan in your system.
@@ -151,5 +188,20 @@ You are looking at the member's plan in your system.
 - The insurance is NOT active. The policy terminated on December 31 2025.
 - Because the policy is inactive you have no benefit details to give: if asked about deductibles,
   coverage or CPT codes, say the plan is not active so there are no active benefits.
+- Your name is Martha Reed. Your call reference number is 841026.
+"""
+
+# `spouse_partner_name`/`spouse_partner_dob` (ibv_standard.py) are `confirm`-role fields, gated
+# on a FAMILY policy, with no prefill anywhere in this harness (CASE has no `system_fields` entry
+# for either) — exactly the empty-value path the `{{confirm:<path>}}` fix targets. The rep is the
+# ONLY source of the spouse's name/DOB, so VERA must ask rather than read back or invent one.
+FAMILY_SPOUSE_NAME = "Sam Rivera"
+FAMILY_COVERAGE_FACTS = f"""\
+You are looking at the member's plan in your system.
+
+- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
+- This is a FAMILY policy, not an individual one.
+- Spouse/partner on the policy: {FAMILY_SPOUSE_NAME}, date of birth November 19 1988. Only give
+  this name and date of birth if the assistant asks about the spouse or partner on the policy.
 - Your name is Martha Reed. Your call reference number is 841026.
 """

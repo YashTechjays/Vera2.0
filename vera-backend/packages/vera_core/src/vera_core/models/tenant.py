@@ -42,8 +42,11 @@ class Tenant(Base, UUIDv7PKMixin, TimestampMixin):
     # in-flight cap above, which gates each VA at enqueue time.
     max_concurrent_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=25)
     retry_fill_threshold: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.50)
-    # Per-tenant auto-retry switch, ANDed with the deployment kill-switch
-    # (VERA_FORM_AUTO_RETRY_ENABLED); platform-managed, on until a platform operator opts out.
+    # Per-tenant auto-retry switch; platform-managed, on until a platform operator opts out.
+    # The post-call eval path ANDs it with the deployment kill-switch
+    # (VERA_FORM_AUTO_RETRY_ENABLED) via allows_auto_retry(); the failed/no-answer redial
+    # path (call_lifecycle.fail_and_requeue) reads it RAW — do NOT route that through
+    # allows_auto_retry, or a default-off kill-switch would kill no-answer redials fleet-wide.
     auto_retry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     persona_tweak: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=5)

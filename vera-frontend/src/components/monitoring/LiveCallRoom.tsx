@@ -26,7 +26,6 @@ import {
 import { ApiError } from "@/lib/api/client"
 import { getJoinToken, type JoinTokenResponse } from "@/lib/api/calls"
 import { terminalStatusMessage } from "@/lib/api/callEvents"
-import { LIVE_CALL_ACTIVITY_EVENT, LIVE_CALL_ACTIVITY_INTERVAL_MS } from "@/lib/auth/idle"
 import {
   CONNECTION_PHASE_LABEL,
   PARTICIPANT_MODE_BADGE,
@@ -39,6 +38,7 @@ import {
   rosterVisible,
   speakerButtonState,
   type ConnectionPhase,
+  type LiveCallMode,
   type ParticipantLike,
   type ParticipantMode,
   type RoomStatus,
@@ -57,20 +57,6 @@ const MODE_BADGE_CLASS: Record<ParticipantMode, string> = {
   listener: "text-muted-foreground",
   agent: "text-emerald-600",
   callee: "text-muted-foreground",
-}
-
-// Keeps the session alive while connected — a passive listener sends no input, so without this it
-// idle-expires and logs the supervisor out mid-call. Must render inside <LiveKitRoom>.
-function LiveActivityBeacon() {
-  const state = useConnectionState()
-  useEffect(() => {
-    if (state !== ConnectionState.Connected) return
-    const beat = () => window.dispatchEvent(new Event(LIVE_CALL_ACTIVITY_EVENT))
-    beat()
-    const id = window.setInterval(beat, LIVE_CALL_ACTIVITY_INTERVAL_MS)
-    return () => window.clearInterval(id)
-  }, [state])
-  return null
 }
 
 function toParticipantLike(p: Participant): ParticipantLike {
@@ -177,12 +163,14 @@ function RoomNotice({
 
 function RoomView({
   microphone,
+  intervening,
   onStatus,
   ended,
   onReconnect,
   replaced,
 }: {
   microphone: boolean
+  intervening: boolean
   onStatus?: (status: RoomStatus) => void
   ended: boolean
   onReconnect: () => void
@@ -200,7 +188,8 @@ function RoomView({
   const phase = connectionPhase(state, everConnected, replaced)
   const otherIntervener = otherIntervenerPresent(likes)
   const supervisorLabel = intervenerLabel(likes)
-  const takeoverLive = microphone || otherIntervener
+  // Callee mode publishes too, but never silences the agent — only a takeover hides the agent row.
+  const takeoverLive = intervening || otherIntervener
   const roster = participants.filter((p) => rosterVisible(toParticipantLike(p), takeoverLive))
   // Our connection dropped, but the call itself isn't over (SSE, via `ended`) — offer a rejoin.
   const connectionLost = phase === "ended" && !ended
@@ -266,20 +255,22 @@ function RoomView({
 /**
  * Joins a call's LiveKit room via a server-minted token and renders the live panel.
  *
- * Changing `microphone` needs a new token, and LiveKit ignores a token swap while
+ * Changing `mode` needs a new token, and LiveKit ignores a token swap while
  * connected — the parent must remount (key on the mode) to switch.
  */
 export function LiveCallRoom({
   callId,
-  microphone = false,
+  mode = "listen",
   ended = false,
   endedStatus = null,
   onStatus,
   onJoinFailed,
 }: {
   callId: string
-  /** Publish the local mic (intervene only) — a viewer must never be audible, and getUserMedia may be blocked (e.g. incognito). */
-  microphone?: boolean
+  /** Publishing mode: "intervene" is a supervisor speaking over the agent, "callee" the
+   *  browser standing in for the payer rep (test transport). Only "listen" stays silent;
+   *  publishing can still fail if getUserMedia is blocked (e.g. incognito). */
+  mode?: LiveCallMode
   /** Call hit a terminal status (events stream). The room can outlive the call while a supervisor
    *  sits in it, so room state alone would keep reading "Live" after the callee hung up. */
   ended?: boolean
@@ -290,6 +281,8 @@ export function LiveCallRoom({
   /** Token fetch failed (e.g. 409 while another supervisor holds the mic); modal falls back to listen-only. */
   onJoinFailed?: (error: unknown) => void
 }) {
+  const microphone = mode !== "listen"
+  const intervening = mode === "intervene"
   const [join, setJoin] = useState<JoinTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -303,7 +296,7 @@ export function LiveCallRoom({
   useEffect(() => {
     if (ended) return
     let cancelled = false
-    getJoinToken(callId, microphone)
+    getJoinToken(callId, mode)
       .then((res) => {
         if (!cancelled) setJoin(res)
       })
@@ -320,7 +313,7 @@ export function LiveCallRoom({
     }
     // onJoinFailed is intentionally not a dep: modals pass a fresh closure each render, which would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [callId, microphone, ended, reconnectNonce])
+  }, [callId, mode, ended, reconnectNonce])
 
   if (ended) {
     return (
@@ -367,9 +360,9 @@ export function LiveCallRoom({
       // !h-auto: .lk-room-container's height:100% would collapse the transcript below.
       className="flex !h-auto flex-col"
     >
-      <LiveActivityBeacon />
       <RoomView
         microphone={microphone}
+        intervening={intervening}
         onStatus={onStatus}
         ended={ended}
         onReconnect={reconnect}

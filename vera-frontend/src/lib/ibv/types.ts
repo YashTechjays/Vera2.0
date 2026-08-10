@@ -107,6 +107,13 @@ export type Contradiction = {
   clarify?: string
 }
 
+/** Money-triplet consistency rule over `<triplet>.total|met_amount|remaining`. */
+export type NumericConsistency = {
+  rule_key: string
+  triplet: string
+  clarify?: string
+}
+
 export type FormSchema = {
   dsl_version: string
   name: string
@@ -118,6 +125,7 @@ export type FormSchema = {
   /** object keyed by section_key; key order = UI order */
   sections: Record<string, Section>
   contradictions?: Contradiction[]
+  numeric_consistencies?: NumericConsistency[]
 }
 
 /**

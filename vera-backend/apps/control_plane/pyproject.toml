@@ -16,6 +16,8 @@ dependencies = [
     "pyotp>=2.9",
     "aiosmtplib>=3.0",
     "httpx>=0.28",
+    # livekit_gateway.py imports this directly; SECURITY floor (test_dependency_floors.py)
+    "aiohttp>=3.14.3",
     "livekit-api>=1.0",
     "google-genai>=1.0",
     "email-validator>=2.0",

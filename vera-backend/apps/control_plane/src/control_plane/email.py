@@ -94,11 +94,11 @@ class EmailDeliveryError(Exception):
 
 class TwilioEmailSender:
     """Twilio Email API over Basic auth, taking either credential pair Twilio accepts:
-    the account SID + auth token, or an API key SID + secret (preferred in production).
+    an API key SID + secret (preferred), or the account SID + auth token.
     One client per send — invite/reset volume is far too low to pool."""
 
-    def __init__(self, *, account_sid: str, auth_token: str, sender: str) -> None:
-        self._auth = (account_sid, auth_token)
+    def __init__(self, *, sid: str, secret: str, sender: str) -> None:
+        self._auth = (sid, secret)
         self._sender = sender
 
     async def send(self, message: EmailMessage) -> None:
@@ -119,13 +119,13 @@ class TwilioEmailSender:
             return
         if response.status_code in (401, 403):
             # Auth/config failure, not a per-message bounce — every send will fail
-            # identically until the SID/token/sender is fixed. Every caller catches
+            # identically until the SID/secret/sender is fixed. Every caller catches
             # EmailDeliveryError and logs a per-message warning (by design, so a
             # requester is never told a send failed) — that alone would leave a full
             # outage invisible, so this case also gets its own loud, alertable line.
             logger.error(
                 "Twilio email auth/config failure (HTTP %s) — every send will fail "
-                "until the account SID, token, or sender identity is fixed",
+                "until the SID/secret pair or the sender identity is fixed",
                 response.status_code,
             )
         raise EmailDeliveryError(f"twilio email rejected the send: HTTP {response.status_code}")
@@ -159,31 +159,52 @@ class InMemoryEmailSender:
         self.sent.append(message)
 
 
-def build_email_sender(settings: Settings, secrets: SecretProvider) -> EmailSender:
-    """Factory: TwilioEmailSender when `twilio_account_sid` is set, else SmtpEmailSender.
+def _resolved_secret(secrets: SecretProvider, name: str) -> str | None:
+    """A usable secret value, or None when it is missing or blank — an empty secret version
+    (or `NAME=` in a .env) resolves without raising, and Basic auth with a blank password
+    401s every send."""
+    try:
+        value = secrets.get(name)
+    except SecretNotFoundError:
+        return None
+    return value if value.strip() else None
 
-    Falsy (not just missing) SID falls through to SMTP too — pydantic-settings assigns
-    "" for `VERA_TWILIO_ACCOUNT_SID=` with no `env_ignore_empty`, and an empty SID is
-    not a usable one. And the token lookup is never allowed to take the whole app down:
-    a resolvable SID with an unresolvable token (secret rotation lag) degrades to SMTP
-    with a loud warning instead of crashing the lifespan.
+
+def build_email_sender(settings: Settings, secrets: SecretProvider) -> EmailSender:
+    """Factory: Twilio via the API key SID, else the account SID, else SmtpEmailSender.
+
+    Falsy (not just missing) SIDs fall through too — pydantic-settings assigns "" for
+    `VERA_TWILIO_API_KEY_SID=` with no `env_ignore_empty`, and an empty SID is not a
+    usable one. Nor is a secret lookup ever allowed to take the whole app down: a
+    resolvable SID with an unusable secret (rotation lag, blank version) degrades to
+    the next sender with a loud error instead of crashing the lifespan.
     """
-    if settings.twilio_account_sid:
-        try:
-            auth_token = secrets.get("TWILIO_AUTH_TOKEN")
-        except SecretNotFoundError:
-            # ERROR, not WARNING: in prod this silently swaps every send onto the
-            # SMTP sandbox sender — an outage, not a one-off bounce.
-            logger.error(
-                "VERA_TWILIO_ACCOUNT_SID is set but TWILIO_AUTH_TOKEN did not resolve; "
-                "falling back to the SMTP sender instead of failing app startup"
-            )
-        else:
+    if settings.twilio_api_key_sid:
+        key_secret = _resolved_secret(secrets, "TWILIO_API_KEY_SECRET")
+        if key_secret is not None:
             return TwilioEmailSender(
-                account_sid=settings.twilio_account_sid,
-                auth_token=auth_token,
+                sid=settings.twilio_api_key_sid,
+                secret=key_secret,
                 sender=settings.email_from,
             )
+        # ERROR, not WARNING: in prod this silently swaps every send onto a
+        # fallback sender — an outage, not a one-off bounce.
+        logger.error(
+            "VERA_TWILIO_API_KEY_SID is set but TWILIO_API_KEY_SECRET did not "
+            "resolve to a value; falling back to the next configured sender"
+        )
+    if settings.twilio_account_sid:
+        auth_token = _resolved_secret(secrets, "TWILIO_AUTH_TOKEN")
+        if auth_token is not None:
+            return TwilioEmailSender(
+                sid=settings.twilio_account_sid,
+                secret=auth_token,
+                sender=settings.email_from,
+            )
+        logger.error(
+            "VERA_TWILIO_ACCOUNT_SID is set but TWILIO_AUTH_TOKEN did not resolve "
+            "to a value; falling back to the SMTP sender instead of failing app startup"
+        )
     return SmtpEmailSender(
         host=settings.smtp_host, port=settings.smtp_port, sender=settings.email_from
     )

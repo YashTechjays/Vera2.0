@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
 import {
   allLeaves,
+  alternativeSiblings,
   applicabilityReason,
   completionPercent,
   contradictionWarnings,
@@ -11,13 +12,15 @@ import {
   getSectionTable,
   isApplicable,
   isRequired,
+  isSatisfied,
+  leafByPath,
   optionsOf,
   parseSchema,
   sectionEntriesOf,
   suggestionsOf,
   systemFieldPaths,
 } from "./schema"
-import type { FormValues } from "./types"
+import type { FormSchema, FormValues } from "./types"
 
 // The backend's compiled artifact (imported from its source of truth) is the
 // test fixture — the same document the backend serves per schema_version_id.
@@ -344,5 +347,66 @@ describe("contradictionWarnings", () => {
       "mandate_requires_infertility_coverage",
     ])
     expect(warnings[0].reason).toBeTruthy()
+  })
+})
+
+describe("alternativeSiblings / isSatisfied", () => {
+  const schema = {
+    dsl_version: "2.1",
+    sections: {
+      svc: {
+        title: "Service",
+        alternatives: [
+          {
+            members: [
+              "sections.svc.cpt_1.copay",
+              "sections.svc.cpt_2.copay",
+              "sections.svc.cpt_1.coinsurance",
+              "sections.svc.cpt_2.coinsurance",
+            ],
+          },
+        ],
+        fields: {
+          cpt_1: {
+            type: "group",
+            title: "1",
+            fields: {
+              copay: { type: "currency", title: "Copay ($)", required: true },
+              coinsurance: { type: "percent", title: "Coinsurance (%)", required: true },
+            },
+          },
+          cpt_2: {
+            type: "group",
+            title: "2",
+            fields: {
+              copay: { type: "currency", title: "Copay ($)", required: true },
+              coinsurance: { type: "percent", title: "Coinsurance (%)", required: true },
+            },
+          },
+        },
+      },
+    },
+  } as unknown as FormSchema
+
+  const leaf = (path: string) => leafByPath(schema).get(path)!
+
+  it("groups a flattened set by parent, not across codes", () => {
+    expect(alternativeSiblings(schema).get("sections.svc.cpt_1.copay")).toEqual([
+      "sections.svc.cpt_1.coinsurance",
+    ])
+  })
+
+  it("treats a pair as satisfied from either side", () => {
+    const values = { "sections.svc.cpt_1.coinsurance": "30" }
+    expect(isSatisfied(schema, leaf("sections.svc.cpt_1.copay"), values)).toBe(true)
+  })
+
+  it("does not let one code satisfy another", () => {
+    const values = { "sections.svc.cpt_1.copay": "$25" }
+    expect(isSatisfied(schema, leaf("sections.svc.cpt_2.copay"), values)).toBe(false)
+  })
+
+  it("owes both when neither side is answered", () => {
+    expect(isSatisfied(schema, leaf("sections.svc.cpt_1.copay"), {})).toBe(false)
   })
 })

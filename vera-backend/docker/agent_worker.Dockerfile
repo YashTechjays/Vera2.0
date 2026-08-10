@@ -1,5 +1,13 @@
-# Build from the repo root:
-#   docker build -f docker/agent_worker.Dockerfile -t vera-agent-worker .
+# Build from the repo root, ALWAYS pinning the platform CI builds:
+#   docker build --platform linux/amd64 -f docker/agent_worker.Dockerfile -t vera-agent-worker .
+#
+# On Apple Silicon the native (linux/arm64) build FAILS at the download-files step below
+# with `thread 'tokio-rt-worker' panicked ... panic in a function that cannot unwind` and
+# exit 134. The assets download fine — livekit's Rust runtime aborts on teardown, after the
+# work is done, and docker sees the non-zero exit. It arrived with livekit-agents 1.6.x
+# (which adds the native `livekit-local-inference` wheel and moves rtc 1.1.8 -> 1.1.13);
+# 1.5.17 builds clean on arm64. linux/amd64 is unaffected, so CI never sees it — which is
+# exactly why it is easy to lose an afternoon to locally.
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never

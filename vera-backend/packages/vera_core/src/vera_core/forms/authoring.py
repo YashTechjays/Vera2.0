@@ -14,6 +14,7 @@ from typing import Literal
 from vera_core.forms.dsl import (
     Alternatives,
     AnyCondition,
+    AskGroup,
     Codes,
     Comparison,
     Condition,
@@ -35,9 +36,30 @@ YES_NO_NA = ["Yes", "No", "N/A"]
 # `text_ask(type_="date")` applies it automatically, raw Leaf sites use the constant.
 DATE_VALIDATION = Validation(date_format="M/D/YYYY")
 
-PRIOR_AUTH_ASK = "Is prior authorization required for this service? Please answer Yes, No, or N/A."
-COPAY_ASK = "What is the copay amount for this service?"
-COINSURANCE_ASK = "What is the coinsurance percentage for this service?"
+
+def coverage_ask(service: str) -> str:
+    """The standard service-level coverage question."""
+    return f"Can you provide coverage and benefit details for {service}?"
+
+
+def cost_ask(referent: str) -> str:
+    """The single cost question. Copay and coinsurance are alternatives — one answer
+    satisfies the pair — so they are asked together, not as two questions."""
+    return f"What is the copay or coinsurance for {referent}?"
+
+
+def service_asks(referent: str) -> tuple[str, str, str]:
+    """The copay / coinsurance / prior-auth questions naming ``referent``.
+
+    One canonical shape each: the compiler emits at most one of these per service, so there
+    is no run of near-identical sentences left for a rotation to break up.
+    """
+    return (
+        f"What is the copay amount for {referent}?",
+        f"What is the coinsurance percentage for {referent}?",
+        f"Is prior authorization required for {referent}?",
+    )
+
 
 Flavor = Literal["treatment", "male", "plain"]
 _INAPPLICABLE: dict[Flavor, dict[str, str]] = {
@@ -71,11 +93,15 @@ def service_fields(
     base: str,
     covered_ask: str,
     flavor: Flavor,
+    *,
+    referent: str,
 ) -> dict[str, FormField]:
     """The standard covered/copay/coinsurance/prior_auth service item.
 
     ``base`` is the root-anchored path of the containing group; sub-field gates are
-    wired to ``{base}.covered``. ``flavor`` picks the skip-fill defaults.
+    wired to ``{base}.covered``. ``flavor`` picks the skip-fill defaults. ``referent``
+    is how the copay/coinsurance/prior-auth questions name their subject aloud (a CPT
+    code, or the service itself where there is no code).
 
     ``"plain"`` flavor omits a ``covered`` inapplicable default because plain sections
     may have no ancestor ``applicable_when`` gate — a DSL invariant enforced by
@@ -84,6 +110,7 @@ def service_fields(
     """
     inapplicable = _INAPPLICABLE[flavor]
     gate = eq(f"{base}.covered", "Yes")
+    copay_ask, coinsurance_ask, prior_auth_ask = service_asks(referent)
     return {
         "covered": Leaf(
             type="enum",
@@ -103,7 +130,7 @@ def service_fields(
             inapplicable_value=inapplicable.get("copay"),
             validation=Validation(range=Range(min=0)),
             applicable_when=gate,
-            prompt=ask(COPAY_ASK),
+            prompt=ask(copay_ask),
         ),
         "coinsurance": Leaf(
             type="percent",
@@ -113,7 +140,7 @@ def service_fields(
             inapplicable_value=inapplicable.get("coinsurance"),
             validation=Validation(range=Range(min=0, max=100)),
             applicable_when=gate,
-            prompt=ask(COINSURANCE_ASK),
+            prompt=ask(coinsurance_ask),
         ),
         "prior_auth": Leaf(
             type="enum",
@@ -125,31 +152,107 @@ def service_fields(
             tags=["prior_auth"],
             inapplicable_value=inapplicable.get("prior_auth"),
             applicable_when=gate,
-            prompt=ask(PRIOR_AUTH_ASK),
+            prompt=ask(prior_auth_ask),
         ),
     }
 
 
 def cpt_group(
-    parent_base: str, code: str, flavor: Flavor, *, applicable_when: Condition | None = None
+    parent_base: str,
+    code: str,
+    flavor: Flavor,
+    *,
+    service: str,
+    applicable_when: Condition | None = None,
 ) -> Group:
-    """A per-CPT-code service item under ``parent_base`` (group key = ``cpt_<code>``)."""
+    """A per-CPT-code service item under ``parent_base`` (group key = ``cpt_<code>``).
+
+    ``service`` is the spoken name of the service the code belongs to, said alongside the
+    code. A multi-code service asks these as ONE panel question per sub-field (see
+    `panel_ask_groups`); the per-code text below is what a single-code service says.
+    """
     base = f"{parent_base}.cpt_{code}"
     return Group(
         type="group",
         title=f"CPT {code}",
         codes=Codes(cpt=[code]),
         applicable_when=applicable_when,
+        # Documents the group. The panel heading the compiler emits carries the code, so this
+        # is not the spoken question — the leaf asks below (or the panel ask group) are.
         prompt=ask(f"Can you provide coverage details for CPT code {code}?"),
         fields=service_fields(
             base,
-            f"Is CPT code {code} covered under this plan? Please answer Yes, No, or N/A.",
+            f"Is CPT code {code} for {service} covered under this plan?",
             flavor,
+            referent=f"CPT code {code} under {service}",
         ),
     )
 
 
-def treatment_tail(gate: Condition) -> dict[str, FormField]:
+def cpt_groups(
+    parent_base: str,
+    codes: list[str],
+    flavor: Flavor,
+    *,
+    service: str,
+    applicable_when: Condition | None = None,
+) -> dict[str, FormField]:
+    """One `cpt_group` per code."""
+    return {
+        f"cpt_{code}": cpt_group(
+            parent_base, code, flavor, service=service, applicable_when=applicable_when
+        )
+        for code in codes
+    }
+
+
+# copay and coinsurance are absent on purpose: `panel_cost_pairs` merges them into one
+# either/or question, so asking them here as well would ask the cost twice.
+_PANEL_ASKS = {
+    "covered": "Are {title} codes {codes} covered under this plan?",
+    "prior_auth": "Is prior authorization required for {title}?",
+}
+
+
+def panel_ask_groups(base: str, title: str, codes: list[str]) -> list[AskGroup]:
+    """One spoken question per sub-field, fanned out over a service's CPT codes.
+
+    A rep quotes benefits per service, not per code — reading eight codes back one at a time
+    is what made these tasks long. Below two codes there is nothing to merge (an `AskGroup`
+    needs >= 2 members), so a single-code service keeps its per-code wording.
+    """
+    if len(codes) < 2:
+        return []
+    listed = ", ".join(codes)
+    return [
+        AskGroup(
+            fields=[f"{base}.cpt_{code}.{sub}" for code in codes],
+            ask=template.format(title=title, codes=listed),
+        )
+        for sub, template in _PANEL_ASKS.items()
+    ]
+
+
+def panel_cost_pairs(base: str, title: str, codes: list[str]) -> list[Alternatives]:
+    """The cost question for a service, fanned out over its codes.
+
+    Copay and coinsurance are an either/or, so they are ONE question with two acceptable
+    answers rather than two questions plus a footnote nobody can act on.
+    """
+    if len(codes) < 2:
+        return [cost_pair(f"{base}.cpt_{code}") for code in codes]
+    return [
+        Alternatives(
+            members=[
+                *(f"{base}.cpt_{code}.copay" for code in codes),
+                *(f"{base}.cpt_{code}.coinsurance" for code in codes),
+            ],
+            ask=cost_ask(title),
+        )
+    ]
+
+
+def treatment_tail(gate: Condition, *, service: str) -> dict[str, FormField]:
     """Treatment-level cycle_limit + additional_notes, gated on the service being covered."""
     return {
         "cycle_limit": Leaf(
@@ -160,7 +263,7 @@ def treatment_tail(gate: Condition) -> dict[str, FormField]:
             inapplicable_value="N/A",
             special_values=["No Limit"],
             applicable_when=gate,
-            prompt=ask("What is the cycle limit for this service?"),
+            prompt=ask(f"What is the cycle limit for {service}?"),
         ),
         "additional_notes": Leaf(
             type="text",
@@ -168,7 +271,7 @@ def treatment_tail(gate: Condition) -> dict[str, FormField]:
             role="ask",
             ui=Ui(widget="textarea"),
             applicable_when=gate,
-            prompt=ask("Are there any additional notes or limitations for this service?"),
+            prompt=ask(f"Are there any additional notes or limitations for {service}?"),
             inapplicable_value="N/A",
         ),
     }
@@ -181,14 +284,16 @@ def treatment_group(
     icd10: str | None,
     cpt_codes: list[str],
     group_ask: str,
+    *,
+    service: str,
 ) -> Group:
     """An infertility treatment: per-CPT service items + cycle limit + notes."""
     base = f"sections.{section}.{key}"
-    fields: dict[str, FormField] = {
-        f"cpt_{code}": cpt_group(base, code, "treatment") for code in cpt_codes
-    }
+    fields: dict[str, FormField] = cpt_groups(base, cpt_codes, "treatment", service=service)
     covered = [eq(f"{base}.cpt_{code}.covered", "Yes") for code in cpt_codes]
-    fields.update(treatment_tail(covered[0] if len(covered) == 1 else any_of(*covered)))
+    fields.update(
+        treatment_tail(covered[0] if len(covered) == 1 else any_of(*covered), service=service)
+    )
     return Group(
         type="group",
         title=title,
@@ -199,9 +304,10 @@ def treatment_group(
     )
 
 
-def cost_pair(base: str) -> Alternatives:
-    """Ask-less either/or: copay OR coinsurance satisfies the cost-share requirement."""
-    return Alternatives(members=[f"{base}.copay", f"{base}.coinsurance"])
+def cost_pair(base: str, referent: str = "this service") -> Alternatives:
+    """Either/or: copay OR coinsurance satisfies the cost-share requirement, so the pair is
+    one spoken question with two acceptable answers."""
+    return Alternatives(members=[f"{base}.copay", f"{base}.coinsurance"], ask=cost_ask(referent))
 
 
 def money_leaf(

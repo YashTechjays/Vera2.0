@@ -4,7 +4,7 @@ import { Search } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
-import { Button } from "@/components/ui/button"
+import { PaginationFooter } from "@/components/ui/pagination-footer"
 import {
   Table,
   TableBody,
@@ -117,7 +117,6 @@ export function CallHistory() {
   }
 
   const rows = items ?? []
-  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   return (
     <div className="space-y-6">
@@ -230,31 +229,14 @@ export function CallHistory() {
           </p>
         )}
 
-        <div className="flex items-center justify-between gap-4 px-4 py-3">
-          <span className="text-sm text-muted-foreground">
-            {items
-              ? `${total} call${total === 1 ? "" : "s"} · page ${page} of ${lastPage}`
-              : "Loading…"}
-          </span>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-            >
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page >= lastPage}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
+        <PaginationFooter
+          page={page}
+          pageSize={PAGE_SIZE}
+          total={total}
+          loaded={items !== null}
+          noun="call"
+          onPageChange={setPage}
+        />
       </Card>
 
       <TranscriptDialog

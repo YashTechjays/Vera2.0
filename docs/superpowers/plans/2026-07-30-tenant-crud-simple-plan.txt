@@ -1,0 +1,202 @@
+VR2-30 — Tenant CRUD for Platform Users
+Simple Plan  (branch: feat/tenant-crud, based on dev 5df379b4)
+Updated after Azad's corrections (2026-07-30)
+=============================================================
+
+
+WHAT WE ARE BUILDING
+--------------------
+A "Tenants" screen so a platform operator (super admin) can onboard and
+run a client organisation by himself, without a developer touching the
+database.
+
+He should be able to:
+
+  1. Create a new tenant (client organisation)
+  2. See the list of all tenants, and open one to see its details
+  3. Edit ALL of a tenant's settings (not just name and region)
+  4. Turn a tenant OFF (deactivate) so its users cannot log in,
+     and turn it back ON (reactivate)
+  5. Invite users INTO that tenant, from inside tenant management
+
+Right now creating a tenant is only possible by running a seed script or
+writing SQL by hand, there is no way to switch a client off, and there is
+no way for a platform operator to invite a user into a tenant at all.
+
+
+THE TWO CORRECTIONS AZAD MADE
+-----------------------------
+1. EDIT EVERYTHING, not just name and region.
+   The earlier draft limited the edit form to name and region. Wrong.
+   The form must cover every editable tenant setting (list below).
+
+2. WE NEED A NEW INVITE FLOW FOR TENANT USERS.
+   This was checked in the code and Azad is right:
+     - The platform Users screen invites PLATFORM operators only
+       (it creates accounts with no tenant attached).
+     - The tenant Users screen can invite tenant users, but it only
+       works for someone already logged in AS that tenant. A platform
+       operator has no tenant attached, so he cannot use it.
+   So today a platform operator simply cannot invite a user into a
+   tenant. We build that as part of tenant management.
+
+   Creating a tenant still does NOT auto-invite anybody. Create the
+   tenant first, then invite its users — two separate actions, but both
+   now live inside tenant management.
+
+
+WHICH SETTINGS THE EDIT FORM COVERS
+-----------------------------------
+Editable:
+  name, region, max_agents_per_va, max_concurrent_calls,
+  retry_fill_threshold, auto_retry_enabled, max_retries,
+  queue_expiry_hours, observer_enabled, recording_retention_days
+
+NOT editable:
+  slug    - it is part of the login URL, changing it locks the client out
+  status  - changed only by the deactivate / reactivate buttons
+  gcip_tenant_id - identity-provider plumbing, not a user setting
+
+Note: observer_enabled and the auto-retry settings already have their own
+small endpoints (used by existing screens). Those keep working. Our new
+edit form writes the same database columns, so both stay in agreement.
+Whether to retire the small endpoints later is a separate cleanup, not
+part of this ticket.
+
+
+WHAT ALREADY EXISTS — DO NOT REBUILD IT
+---------------------------------------
+  - The permission already exists: "platform:tenants:manage".
+    Only super admins have it. We REUSE it.
+  - An endpoint that lists tenants already exists (the Tenant Access
+    screen uses it).
+  - Small endpoints for observer on/off and auto-retry settings.
+  - The invite machinery itself (tokens, emails, accept screens) exists
+    and works. We reuse it — we only need a new way for a PLATFORM user
+    to point it at a chosen tenant.
+
+
+THE MAIN DECISIONS
+------------------
+1. Reuse the existing "platform:tenants:manage" permission. No new one.
+
+2. The slug can NEVER change after creation.
+
+3. No delete button. Deactivate is the only off switch.
+
+4. HOW WE WRITE TO THE DATABASE.
+   The database deliberately does NOT let a platform login write to the
+   tenant table directly (it can only read). Every existing tenant write
+   goes through a small database function instead (a "definer function"),
+   for example platform_set_tenant_observer_enabled. We follow the same
+   pattern for create / update / status.
+
+5. HOW DEACTIVATE BLOCKS LOGIN.
+   Login finds the tenant by its slug using the database function
+   resolve_tenant_by_slug. We change it to only find ACTIVE tenants, so
+   a deactivated tenant's login just says "invalid" with no hint that
+   the tenant exists.
+   NOTE: someone already logged in keeps working until their session
+   expires. We are not kicking people out mid-session. Known gap, will
+   be written in the pull request.
+
+6. Every create / edit / deactivate / reactivate / invite is written to
+   the audit log, following the existing naming style, so ours become:
+     tenant_created, tenant_updated, tenant_deactivated,
+     tenant_reactivated, tenant_user_invited
+
+
+DECIDED: NO ELEVATION NEEDED TO INVITE A TENANT USER
+----------------------------------------------------
+Azad chose Option B (2026-07-30).
+
+The super admin invites a user into a tenant in ONE step. He does not
+have to take a temporary access grant on that tenant first.
+
+How it works underneath: the database normally blocks a platform login
+from writing into a tenant's rows. So we add one narrow definer function
+whose only job is "create this invited user inside the tenant you name".
+It is gated by platform:tenants:manage and every use is written to the
+audit log (event: tenant_user_invited).
+
+Why this is acceptable: the temporary-access (elevation) system exists to
+control who reads a client's PATIENT data. Inviting a user is
+administration, not patient data, so it does not need to go through it.
+
+Keep the function narrow on purpose — it creates a user and nothing else.
+It must never become a general "write anything into any tenant" tool.
+
+
+THE STEPS, IN ORDER
+-------------------
+BACKEND (vera-backend):
+
+  Step 1. Add the 5 new audit event names to the AuthEvent list,
+          with a unit test.
+
+  Step 2. Two database migrations:
+          a) allow the 5 new event names in the audit-log check
+          b) add the database functions for create / update / set-status,
+             and change resolve_tenant_by_slug to find ACTIVE tenants only
+
+  Step 3. Create platform_tenants.py and MOVE the three existing tenant
+          endpoints into it (list, observer, retry-config). Paths and
+          behaviour stay exactly the same — tidying only, because
+          platform.py has grown and mixes elevation with tenant admin.
+
+  Step 4. Add: create a tenant (POST) and read one tenant (GET).
+
+  Step 5. Add: edit a tenant (PATCH) covering every editable setting.
+
+  Step 6. Add: deactivate and reactivate, plus a test proving a
+          deactivated tenant really cannot log in any more.
+
+  Step 7. Add: invite a user into a chosen tenant, and list that
+          tenant's users. (Waits on the Option A / B answer above.)
+
+FRONTEND (vera-frontend):
+
+  Step 8. Add the API calls in src/lib/api/platform.ts, with tests.
+          Make the Tenant Access picker ask for ACTIVE tenants only, so
+          a switched-off client does not appear there.
+
+  Step 9. New "Tenants" page in the sidebar, in the style of the
+          existing Platform Operators page:
+            - table of tenants: name, slug, region, status, created
+            - "New tenant" button opening a create form
+            - an edit form with all the settings
+            - a confirm popup for deactivate / reactivate
+
+  Step 10. Inside a tenant's detail view: its users, and an
+           "Invite user" button using the Step 7 endpoint.
+
+WRAP UP:
+
+  Step 11. Run the code simplifier, then all the checks
+           (backend: just check | frontend: tsc, eslint, tests, build),
+           then test by hand:
+             create a tenant -> invite a user into it -> that user logs
+             in -> deactivate -> login blocked -> reactivate -> works.
+
+
+TESTS WE WILL WRITE
+-------------------
+  - Unit test for the new audit event names.
+  - API tests for every new endpoint: happy path, duplicate slug (409),
+    bad slug, missing idempotency key, unknown tenant (404), and a
+    normal tenant user being refused (403).
+  - A test proving the audit rows are written.
+  - A test proving login is blocked after deactivate and works again
+    after reactivate.
+  - A test proving an invited tenant user lands in the RIGHT tenant and
+    cannot see another tenant's data.
+  - Frontend tests for the new API functions and the page.
+
+
+HOW WE WORK
+-----------
+  - Changes are left STAGED after each step. Azad reviews them in the
+    IDE before any commit is made.
+  - Commit messages mention (VR2-30). No Claude co-author lines.
+  - Migrations must form one straight chain off the current dev head.
+  - Remote is Bitbucket only now (GitHub was removed).

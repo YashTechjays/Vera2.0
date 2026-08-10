@@ -1,0 +1,41 @@
+LIVE MONITORING PAGINATION (VR2-160) — THE PLAN IN PLAIN WORDS
+================================================================
+
+THE PROBLEM
+-----------
+The Live Monitoring page shows every call in one long list. Worse, the
+Completed tab secretly only shows the 50 newest finished calls — older
+ones are unreachable no matter how far you scroll.
+
+THE FIX (approved design)
+-------------------------
+Add page controls ("Previous / Next · page 2 of 7") to all three tabs,
+but with two different engines underneath:
+
+  ACTIVE + CRITICAL tabs — the browser already receives the full live
+  list every 8 seconds (it has to: alert deep-links and the stat cards
+  depend on it). So we just show it 20 rows at a time. No server change.
+
+  COMPLETED tab — the server starts serving real pages ("give me page 3,
+  20 per page, and tell me the total"), exactly the way the Call History
+  page already works. This makes ALL past calls reachable, not just 50.
+
+THE SIX BUILD STEPS
+-------------------
+1. Backend: teach GET /calls?scope=history to return pages with a total
+   count (same envelope as /call-history). Live scope untouched.
+2. Frontend API layer: a new listCompletedCalls(page) function.
+3. A tiny shared math helper (which rows belong on page N, what's the
+   last page) with its own tests.
+4. A shared footer component (count + Previous/Next buttons), extracted
+   from the Call History page so both pages use one implementation.
+5. Wire it all into the Live Monitoring page: page state, reset to page
+   1 when switching tabs, snap back if your page disappears (e.g. calls
+   ended while you watched page 3).
+6. Simplify pass + full check gates on both repos, then hand over for
+   review.
+
+WHAT DOESN'T CHANGE
+-------------------
+The stat cards, the 8-second refresh, notification deep-links, the
+intervene/publish buttons, and the Call History page's behavior.

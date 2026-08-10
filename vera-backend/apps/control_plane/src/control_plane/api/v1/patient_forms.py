@@ -71,6 +71,7 @@ from vera_core.forms.intake import (
     phone_promoted_paths,
     promote_columns,
     unknown_payload_paths,
+    validate_enum_answers,
 )
 from vera_core.forms.review import (
     AnswerRow,
@@ -182,6 +183,14 @@ def _normalize_date_value_or_422(value: Any, field_path: str, date_format: str |
         _raise_422(exc)
 
 
+def _validate_enum_answers_or_422(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> None:
+    """`validate_enum_answers`, translated to the API's validation-error contract."""
+    try:
+        validate_enum_answers(answers, doc)
+    except InvalidIntakeValue as exc:
+        _raise_422(exc)
+
+
 @dataclass(frozen=True)
 class CreatedPatientForm:
     """What both create paths (API-key intake, in-app create) hand back to their
@@ -232,6 +241,7 @@ async def _create_patient_form(
             )
         answers = normalize_phone_answers(answers, doc)
         answers = _normalize_date_answers_or_422(answers, doc)
+        _validate_enum_answers_or_422(answers, doc)
         promoted = _promote_or_422(dict(answers).get, doc)
     else:
         answers = list(iter_leaf_answers(intake_payload))
@@ -1414,7 +1424,7 @@ async def update_patient_form_status(
     # Hard dialability gate: a form that can never be dialed must not enter the queue.
     canonicalized_provider = False
     if target == FormStatus.IN_QUEUE:
-        await ensure_queueable(session, kms, form)
+        await ensure_queueable(session, kms, form, browser_callee=livekit.browser_callee_transport)
         await ensure_va_capacity(session, tenant, caller.user_id)
         # Canonicalize the provider from the operator's pick so the async dispatcher
         # resolves the right catalog provider (and its IVR playbook) — the string, not

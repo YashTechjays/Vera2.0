@@ -16,6 +16,7 @@ import { ForgotPassword } from "@/pages/ForgotPassword"
 import { ResetPassword } from "@/pages/ResetPassword"
 import { PlatformAcceptInvite } from "@/pages/PlatformAcceptInvite"
 import { PlatformOperators } from "@/pages/PlatformOperators"
+import { PlatformTenants } from "@/pages/PlatformTenants"
 import { PlatformSettings } from "@/pages/PlatformSettings"
 import { LiveMonitoring } from "@/pages/LiveMonitoring"
 import { DataManagement } from "@/pages/DataManagement"
@@ -35,6 +36,11 @@ import { Placeholder } from "@/pages/Placeholder"
 // initial bundle — only operators who open the page pay for it.
 const VoiceLab = lazy(() =>
   import("@/pages/VoiceLab").then((m) => ({ default: m.VoiceLab })),
+)
+
+// Lazy-loaded: Analytics pulls in recharts (+ its d3 dependencies).
+const Analytics = lazy(() =>
+  import("@/pages/Analytics").then((m) => ({ default: m.Analytics })),
 )
 
 function App() {
@@ -89,9 +95,11 @@ function App() {
             />
             <Route
               path="analytics"
-              element={<RequireNavRoute to="/analytics"><Placeholder title="Analytics" /></RequireNavRoute>}
+              element={<RequireNavRoute to="/analytics"><Analytics /></RequireNavRoute>}
             />
             <Route path="tenant-access" element={<TenantAccess />} />
+            {/* Super-admin-only tenant catalog: create / edit / deactivate (VR2-30). */}
+            <Route path="platform-tenants" element={<PlatformTenants />} />
             {/* Super-admin-only platform-operator roster. */}
             <Route path="platform-operators" element={<PlatformOperators />} />
             {/* Super-admin-only per-tenant AI form-filling toggle. */}

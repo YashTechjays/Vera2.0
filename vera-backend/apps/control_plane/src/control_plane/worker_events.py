@@ -11,9 +11,10 @@ import logging
 import os
 import socket
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
+from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -39,12 +40,21 @@ from vera_core.events import (
     CallFailedEvent,
     CallFailureReason,
     CallHealthEvent,
+    IvrExitedEvent,
     PostCallJob,
     PostCallJobBus,
     WorkerEvent,
     WorkerEventBus,
     parse_worker_event,
 )
+from vera_core.forms.conditions import (
+    alternative_fills,
+    alternative_index,
+    alternative_pairs,
+    is_v2,
+    routing_branch_fills,
+)
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import dispute_view
 from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -178,6 +188,7 @@ class WorkerEventConsumer:
         self._handlers: dict[str, EventHandler] = {
             "call.failed": self._handle_call_failed,
             "call.answered": self._handle_call_answered,
+            "ivr.exited": self._handle_ivr_exited,
             "call.ended": self._handle_call_ended,
             "call.answer_recorded": self._handle_call_answer_recorded,
             "call.health": self._handle_call_health,
@@ -424,12 +435,90 @@ class WorkerEventConsumer:
                 )
             )
 
+    async def _handle_ivr_exited(self, event: WorkerEvent) -> None:
+        """Stamp the VR2-45 IVR Success numerator on the DB clock — the NULL guard
+        makes redelivery a no-op."""
+        if not isinstance(event, IvrExitedEvent):
+            return
+        ref = parse_room_name(event.room_name)
+        if ref is None:
+            return  # non-vera / console room
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id).with_for_update())
+            ).scalar_one_or_none()
+            if call is None:
+                _retry_young_or_drop(event.room_name, event.ts)
+                return  # voice-lab room (or the Call row hasn't committed yet → retry)
+            if call.ivr_exited_at is None:
+                call.ivr_exited_at = func.now()
+
     async def _handle_call_ended(self, event: WorkerEvent) -> None:
         if not isinstance(event, CallEndedEvent):
             return
         await self._close_and_refill(
             event.room_name, CallStatus.COMPLETED, trigger="call.ended", ts=event.ts
         )
+
+    @staticmethod
+    def _under_a_routing_branch(doc: FormSchemaDoc, path: str) -> bool:
+        """Whether `path` sits under either side of a routing `alternatives`, in which case
+        answering it may make the OTHER branch fillable."""
+        return any(
+            path.startswith(f"{member}.")
+            for section in doc.sections.values()
+            for alternatives in section.alternatives or []
+            for member in alternatives.members
+        )
+
+    async def _fill_alternatives(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        form_id: UUID,
+        call_id: UUID,
+        answered: str,
+        schema_json: Mapping[str, Any],
+    ) -> None:
+        """Record the unused side of an either/or the answer just satisfied — see
+        `alternative_fills`, which owns what may be written and refuses anything unsafe.
+
+        Written as `ai_call` because it is derived from a call answer, so `record_answer`'s replay
+        and no-blank guards make a redelivery a no-op.
+
+        Worker-safe like `recompute_form_projection`: the answer itself is already written, and a
+        cosmetic fill must never raise here — an exception leaves the event unacked and stalls the
+        whole answer stream on reclaim. A schema that will not validate just skips the fill."""
+        if not is_v2(schema_json):
+            return  # v1 has no `alternatives` concept
+        try:
+            doc = FormSchemaDoc.model_validate(schema_json)
+        except Exception as exc:
+            # Type name only — a pydantic ValidationError's message embeds the document verbatim.
+            logger.warning("alternatives fill skipped, schema invalid (%s)", type(exc).__name__)
+            return
+        # Pair membership needs no values, but a routing fill can be triggered by ANY leaf under a
+        # branch, so the snapshot is only skippable when neither applies.
+        in_pair = answered in alternative_index(alternative_pairs(doc))
+        if not in_pair and not self._under_a_routing_branch(doc, answered):
+            return
+        values = await current_values_by_path(session, form_id)
+        fills = dict(routing_branch_fills(doc, values))
+        if in_pair:
+            fills.update(alternative_fills(doc, values, answered))
+        for path, value in fills.items():
+            await record_answer(
+                session,
+                tenant_id=tenant_id,
+                form_id=form_id,
+                call_id=call_id,
+                field_path=path,
+                raw_value=value,
+                source=AnswerSource.AI_CALL.value,
+                confidence=None,
+                evidence_seq=None,
+            )
 
     async def _handle_call_answer_recorded(self, event: WorkerEvent) -> None:
         """Persist an Observer-extracted answer as an ai_call field_answer, then re-derive
@@ -474,6 +563,15 @@ class WorkerEventConsumer:
                     select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
                 )
             ).scalar_one()
+            # Before the projection, so completion_pct counts the fills this answer closes out.
+            await self._fill_alternatives(
+                session,
+                tenant_id=ref.tenant_id,
+                form_id=form.id,
+                call_id=call.id,
+                answered=event.field_path,
+                schema_json=version.schema_json,
+            )
             await recompute_form_projection(session, form, version.schema_json)
             await self._audit.emit(
                 AuditRecord(

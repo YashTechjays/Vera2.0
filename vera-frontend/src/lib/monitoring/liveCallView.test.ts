@@ -84,10 +84,9 @@ describe("participantMode", () => {
     )
   })
 
-  it("treats human-prefixed identities without the attribute as listeners", () => {
+  it("treats supervisor-/monitor- identities without the attribute as listeners", () => {
     expect(participantMode({ identity: "supervisor-u1" })).toBe("listener")
     expect(participantMode({ identity: "monitor-x" })).toBe("listener")
-    expect(participantMode({ identity: "caller-x" })).toBe("listener")
   })
 
   it("reads a session-suffixed supervisor identity (two browsers, one account)", () => {
@@ -285,5 +284,25 @@ describe("speakerButtonState", () => {
       title: "Unmute audio",
       slashed: true,
     })
+  })
+})
+
+describe("browser-callee participant", () => {
+  it("labels a caller- identity as the insurance rep", () => {
+    expect(participantMode({ identity: "caller-abc" })).toBe("callee")
+    expect(participantLabel({ identity: "caller-abc" })).toBe("Insurance Rep")
+  })
+
+  it("still labels the SIP callee as the insurance rep", () => {
+    expect(participantMode({ identity: "phone-callee" })).toBe("callee")
+  })
+
+  it("keeps supervisors and monitors as listeners", () => {
+    expect(participantMode({ identity: "supervisor-abc~1" })).toBe("listener")
+    expect(participantMode({ identity: "monitor-abc" })).toBe("listener")
+  })
+
+  it("does not close-lock the modal in callee mode", () => {
+    expect(shouldAllowClose("callee", false, false)).toBe(true)
   })
 })

@@ -48,6 +48,7 @@ export function CallTranscript({
   onHealth,
   onFieldAnswer,
   supervisorLabel = "Supervisor",
+  autoScroll = true,
 }: {
   callId: string
   /** Fires for every call_status envelope on the stream ("active", "ended", or a
@@ -63,6 +64,8 @@ export function CallTranscript({
   onFieldAnswer?: (a: FieldAnswerEvent) => void
   /** Label for supervisor (takeover) turns — the intervener's email when known. */
   supervisorLabel?: string
+  /** Follow new turns by scrolling to the bottom — disable for completed-call replays. */
+  autoScroll?: boolean
 }) {
   const [turns, setTurns] = useState<StampedTurn[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -113,8 +116,9 @@ export function CallTranscript({
   }, [callId])
 
   useEffect(() => {
+    if (!autoScroll) return
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [turns.length])
+  }, [turns.length, autoScroll])
 
   if (error) {
     return <p className="p-4 text-sm text-muted-foreground">{error}</p>

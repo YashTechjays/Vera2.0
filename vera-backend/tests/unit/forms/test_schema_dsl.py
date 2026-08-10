@@ -8,15 +8,23 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
+from vera_core.forms.catalog.disease_only import build_disease_only
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
+from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
+    FieldPrompt,
     FormSchemaDoc,
+    Leaf,
     PromotedFields,
     Validation,
     compile_document,
     format_date,
     load_document,
     parse_date_format,
+    validate_confirm_defaults,
+    validate_question_coverage,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 
@@ -325,7 +333,10 @@ class TestDocumentValidation:
                         "value": "PPO",
                     },
                     "confirm_in_task": cit,
-                    "prompt": {"confirm": "Spouse is {{value}} — correct?"},
+                    "prompt": {
+                        "confirm": "Spouse is {{value}} — correct?",
+                        "ask": "Can I get the spouse's name?",
+                    },
                 }
             },
         }
@@ -403,7 +414,10 @@ class TestDocumentValidation:
                         "value": "x",
                     },
                     "confirm_in_task": {"task_key": "main", "confirm_immediate": True},
-                    "prompt": {"confirm": "Spouse is {{value}}?"},
+                    "prompt": {
+                        "confirm": "Spouse is {{value}}?",
+                        "ask": "Can I get the spouse's name?",
+                    },
                 }
             },
         }
@@ -450,6 +464,47 @@ class TestDocumentValidation:
         doc = minimal_doc()
         doc["rep_call_reference_number_field"] = "sections.basics.missing"
         with pytest.raises(ValidationError, match="does not resolve to a leaf"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_leaf_prompt_unknown_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["plan_type"]["prompt"]["ask"] = (
+            "What is the {{not_a_token}}?"
+        )
+        with pytest.raises(ValidationError, match="unknown placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_leaf_prompt_malformed_placeholder_rejected(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["plan_type"]["prompt"]["ask"] = (
+            "What is the {{ value }}?"
+        )
+        with pytest.raises(ValidationError, match="malformed placeholder"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_value_token_rejected_in_prompt_ask(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["plan_type"]["prompt"]["ask"] = "Is it {{value}}?"
+        with pytest.raises(ValidationError, match=r"only valid in a confirm-role"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_value_token_allowed_in_confirm_prompt(self) -> None:
+        doc = minimal_doc()
+        doc["sections"]["basics"]["fields"]["member_id"] = {
+            "type": "text",
+            "title": "Policy / Member ID",
+            "role": "confirm",
+            "prompt": {
+                "confirm": "I have the member ID as {{value}} — right?",
+                "ask": "Can I get the member ID?",
+            },
+        }
+        FormSchemaDoc.model_validate(doc)
+
+    def test_value_token_rejected_in_task_prompt(self) -> None:
+        doc = minimal_doc()
+        doc["tasks"][0]["prompt"] = "Please confirm {{value}} with the rep."
+        with pytest.raises(ValidationError, match=r"only valid in a confirm-role"):
             FormSchemaDoc.model_validate(doc)
 
 
@@ -547,6 +602,40 @@ class TestDateFormatRequiresOneOfEachToken:
             Validation(date_format="D/DD/YYYY")
 
 
+def test_confirm_leaf_accepts_prompt_ask() -> None:
+    leaf = Leaf(
+        type="text",
+        title="Policy / Member ID",
+        role="confirm",
+        prompt=FieldPrompt(
+            confirm="I have the member ID as {{value}} — can you confirm that is correct?",
+            ask="Can I get the member ID for this policy?",
+        ),
+    )
+    assert leaf.prompt is not None
+    assert leaf.prompt.ask == "Can I get the member ID for this policy?"
+
+
+def test_confirm_leaf_without_prompt_ask_is_rejected() -> None:
+    with pytest.raises(ValidationError, match=r"confirm field needs prompt\.ask"):
+        Leaf(
+            type="text",
+            title="Policy / Member ID",
+            role="confirm",
+            prompt=FieldPrompt(confirm="I have the member ID as {{value}} — right?"),
+        )
+
+
+def test_prompt_ask_still_rejected_on_context_role() -> None:
+    with pytest.raises(ValidationError, match=r"prompt\.ask on role context"):
+        Leaf(
+            type="text",
+            title="Spouse Gender",
+            role="context",
+            prompt=FieldPrompt(ask="What is the spouse's gender?"),
+        )
+
+
 class TestPromotedColumnParity:
     """PromotedFields (DSL contract), PromotedIdentifiers (intake value carrier) and
     PatientForm (the table) must agree on the promoted column set — a future column
@@ -571,3 +660,152 @@ class TestPromotedColumnParity:
         from vera_core.models.patient_form import PatientForm
 
         assert {c.name for c in PatientForm.__table__.columns} >= self.EXPECTED
+
+
+def triplet_doc(**overrides: Any) -> dict[str, Any]:
+    """minimal_doc plus a currency triplet section and one NumericConsistency rule."""
+    money = {"type": "currency", "title": "Money", "role": "ask", "prompt": {"ask": "How much?"}}
+    doc = minimal_doc()
+    doc["sections"]["ltm"] = {
+        "title": "LTM",
+        "fields": {
+            "total": dict(money, title="Total"),
+            "met_amount": dict(money, title="Met Amount"),
+            "remaining": dict(money, title="Remaining"),
+        },
+    }
+    doc["tasks"][0]["sections"].append("ltm")
+    doc["numeric_consistencies"] = [{"rule_key": "ltm_consistency", "triplet": "sections.ltm"}]
+    doc.update(overrides)
+    return doc
+
+
+class TestNumericConsistencyValidation:
+    def test_valid_triplet_rule_is_accepted(self) -> None:
+        doc = FormSchemaDoc.model_validate(triplet_doc())
+        assert doc.numeric_consistencies is not None
+        assert doc.numeric_consistencies[0].rule_key == "ltm_consistency"
+
+    def test_missing_triplet_child_is_rejected(self) -> None:
+        doc = triplet_doc()
+        del doc["sections"]["ltm"]["fields"]["remaining"]
+        with pytest.raises(ValidationError, match=r"sections\.ltm\.remaining.*not a leaf"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_non_currency_child_is_rejected(self) -> None:
+        doc = triplet_doc()
+        doc["sections"]["ltm"]["fields"]["met_amount"]["type"] = "text"
+        with pytest.raises(ValidationError, match=r"sections\.ltm\.met_amount.*currency"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_duplicate_rule_key_is_rejected(self) -> None:
+        doc = triplet_doc()
+        doc["numeric_consistencies"].append(dict(doc["numeric_consistencies"][0]))
+        with pytest.raises(ValidationError, match=r"duplicate.*ltm_consistency"):
+            FormSchemaDoc.model_validate(doc)
+
+    def test_round_trips_through_compile_and_load(self) -> None:
+        doc = FormSchemaDoc.model_validate(triplet_doc())
+        assert load_document(compile_document(doc)) == doc
+
+
+def test_every_collectable_path_is_reachable_from_exactly_one_question() -> None:
+    """The completion guard walks questions; a path no question targets can never be
+    asked for, and a path two questions target would be double-counted (spec §8)."""
+    for build in (build_ibv_standard, build_disease_only):
+        doc = build()
+        assert validate_question_coverage(doc) == []
+
+
+def test_the_document_validator_rejects_an_uncovered_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule is a BUILD failure, not an advisory list — model_validate must raise."""
+    monkeypatch.setattr("vera_core.forms.question_plan.build_question_plan", lambda *a, **k: [])
+    with pytest.raises(ValidationError, match="not reachable from any spoken question"):
+        FormSchemaDoc.model_validate(minimal_doc())
+
+
+def test_a_routing_questions_target_does_not_count_as_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`owed_now` (call_plan.py) skips every `routes_between` question unconditionally, so a
+    routing question that carried a target would satisfy this rule while staying
+    permanently un-owed at runtime — the exact silent-miss class the rule exists to catch."""
+    doc_dict = minimal_doc()
+    del doc_dict["sections"]["basics"]["fields"]["notes"]
+
+    def fake_build_question_plan(doc: Any, task: Any, anchors: Any = None) -> list[PromptPanel]:
+        return [
+            PromptPanel(
+                items=[
+                    PromptQuestion(
+                        text="Which plan applies?",
+                        routes_between=["Plan A", "Plan B"],
+                        options=[PromptOption(target_paths=["sections.basics.plan_type"])],
+                    )
+                ]
+            )
+        ]
+
+    monkeypatch.setattr(
+        "vera_core.forms.question_plan.build_question_plan", fake_build_question_plan
+    )
+    with pytest.raises(ValidationError, match="not reachable from any spoken question"):
+        FormSchemaDoc.model_validate(doc_dict)
+
+
+def test_no_catalog_uses_an_end_of_task_confirm() -> None:
+    """`validate_question_coverage` exempts them (spoken by the end_confirms block, not the
+    tree), so an authored one would be invisible to any tree-walking owed set — see Task 3."""
+    for build in (build_ibv_standard, build_disease_only):
+        assert [
+            path
+            for path, leaf, _ in leaf_gates(build())
+            if leaf.confirm_in_task is not None and not leaf.confirm_in_task.confirm_immediate
+        ] == []
+
+
+def test_no_catalog_gates_on_a_defaulted_confirm_leaf() -> None:
+    """`gating_seed` keeps confirm-role prefills authoritative (the member-ID read-back), so a
+    `default` on one would still settle its gate and delete the questions behind it — the
+    exact failure removed for ask-role leaves."""
+    for build in (build_ibv_standard, build_disease_only):
+        assert validate_confirm_defaults(build()) == []
+
+
+def test_the_document_validator_rejects_a_defaulted_confirm_gate() -> None:
+    """A build failure, not an advisory list."""
+    doc = minimal_doc()
+    doc["sections"]["basics"]["fields"]["member_id"] = {
+        "type": "text",
+        "title": "Member ID",
+        "role": "confirm",
+        "default": "N/A",
+        "prompt": {
+            "confirm": "I have {{value}} on file — is that right?",
+            "ask": "Can I get the member ID?",
+        },
+    }
+    doc["sections"]["basics"]["fields"]["notes"]["applicable_when"] = {
+        "field": "sections.basics.member_id",
+        "op": "eq",
+        "value": "Yes",
+    }
+    with pytest.raises(ValidationError, match="declares a default and is referenced by"):
+        FormSchemaDoc.model_validate(doc)
+
+
+def test_a_defaulted_confirm_leaf_that_gates_nothing_is_fine() -> None:
+    """The rule is about deleting other questions, not about defaults — `spouse_partner_name`
+    carries one legitimately."""
+    doc = minimal_doc()
+    doc["sections"]["basics"]["fields"]["member_id"] = {
+        "type": "text",
+        "title": "Member ID",
+        "role": "confirm",
+        "default": "N/A",
+        "prompt": {
+            "confirm": "I have {{value}} on file — is that right?",
+            "ask": "Can I get the member ID?",
+        },
+    }
+    assert validate_confirm_defaults(FormSchemaDoc.model_validate(doc)) == []

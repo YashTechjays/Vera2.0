@@ -10,11 +10,16 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from vera_core.forms.conditions import (
+    alternative_fills,
+    alternative_index,
+    alternative_pairs,
     evaluate,
     is_applicable,
     is_required,
+    is_satisfied,
     is_v2,
     leaf_gates,
+    routing_branch_fills,
 )
 from vera_core.forms.dsl import FormSchemaDoc, PromotedFields, load_document
 from vera_core.forms.intake import missing_required, required_intake_fields
@@ -253,3 +258,137 @@ class TestIntakeV2:
             "sections.provider_reference_information.provider_name",
             "sections.provider_reference_information.npi",
         }
+
+
+PAIR = ("sections.s.cpt_1.copay", "sections.s.cpt_1.coinsurance")
+OTHER_PAIR = ("sections.s.cpt_2.copay", "sections.s.cpt_2.coinsurance")
+INDEX = alternative_index([PAIR, OTHER_PAIR])
+
+
+class TestIsSatisfied:
+    """The one owed-set rule shared by the gap sweep, both completion guards and the form's
+    completion percentage. Satisfaction, never applicability — see the both-answered case."""
+
+    def test_a_sibling_answer_satisfies_the_empty_side(self) -> None:
+        values = {PAIR[1]: "30"}
+        assert is_satisfied(PAIR[0], None, values, INDEX)
+        assert is_satisfied(PAIR[1], None, values, INDEX)
+
+    def test_neither_answered_owes_both(self) -> None:
+        assert not is_satisfied(PAIR[0], None, {}, INDEX)
+        assert not is_satisfied(PAIR[1], None, {}, INDEX)
+
+    def test_one_codes_answer_does_not_satisfy_another_code(self) -> None:
+        # `panel_cost_pairs` flattens every code into ONE authored set; treating the whole set as
+        # satisfied would mark eight codes answered off one reply.
+        values = {PAIR[0]: "$25"}
+        assert not is_satisfied(OTHER_PAIR[0], None, values, INDEX)
+        assert not is_satisfied(OTHER_PAIR[1], None, values, INDEX)
+
+    def test_a_declared_default_owes_nothing(self) -> None:
+        assert is_satisfied("sections.s.group_name", "N/A", {}, INDEX)
+        assert not is_satisfied("sections.s.group_name", None, {}, INDEX)
+
+    def test_blank_and_whitespace_are_not_answers(self) -> None:
+        for blank in ("", "   ", None):
+            assert not is_satisfied(PAIR[0], None, {PAIR[1]: blank}, INDEX), repr(blank)
+
+    def test_a_field_in_no_pair_is_unaffected(self) -> None:
+        assert not is_satisfied("sections.s.lonely", None, {PAIR[0]: "$25"}, INDEX)
+
+
+class TestAlternativePairsFromTheRealSchema:
+    def test_the_flattened_diagnostic_set_yields_one_pair_per_code(self) -> None:
+        pairs = alternative_pairs(V2_DOC)
+        diagnostic = [p for p in pairs if "labs_xray_ultrasound" in p[0]]
+        assert len(diagnostic) == 8
+        assert all(len(p) == 2 for p in diagnostic)
+
+    def test_routing_alternatives_over_groups_are_excluded(self) -> None:
+        flat = {path for pair in alternative_pairs(V2_DOC) for path in pair}
+        assert all(p.rsplit(".", 1)[1] in {"copay", "coinsurance"} for p in flat)
+
+
+_IUI = "sections.infertility_treatment.intrauterine_insemination.cpt_58323"
+_CRYO = "sections.infertility_treatment.embryo_cryopreservation.cpt_89342"
+
+
+class TestAlternativeFills:
+    """The export is the final product, so the unused side of an either/or must read $0 / 0%
+    rather than blank. Values come from the leaf's own authored `inapplicable_value`."""
+
+    def test_answering_coinsurance_fills_the_copay(self) -> None:
+        fills = alternative_fills(V2_DOC, {f"{_IUI}.coinsurance": "30"}, f"{_IUI}.coinsurance")
+        assert fills == {f"{_IUI}.copay": "$0"}
+
+    def test_answering_copay_fills_the_coinsurance(self) -> None:
+        fills = alternative_fills(V2_DOC, {f"{_IUI}.copay": "$25"}, f"{_IUI}.copay")
+        assert fills == {f"{_IUI}.coinsurance": "0%"}
+
+    def test_a_sibling_that_already_has_a_value_is_never_overwritten(self) -> None:
+        values = {f"{_IUI}.copay": "$25", f"{_IUI}.coinsurance": "30"}
+        assert alternative_fills(V2_DOC, values, f"{_IUI}.coinsurance") == {}
+
+    def test_it_fills_only_the_answered_code_not_its_panel_siblings(self) -> None:
+        # The authored set spans three IUI codes; one reply must not fill the other two.
+        fills = alternative_fills(V2_DOC, {f"{_IUI}.copay": "$25"}, f"{_IUI}.copay")
+        assert set(fills) == {f"{_IUI}.coinsurance"}
+
+    def test_a_blank_answer_fills_nothing(self) -> None:
+        assert alternative_fills(V2_DOC, {f"{_IUI}.copay": "   "}, f"{_IUI}.copay") == {}
+
+    def test_a_field_in_no_pair_fills_nothing(self) -> None:
+        path = "sections.insurance_representative.rep_name"
+        assert alternative_fills(V2_DOC, {path: "Martha"}, path) == {}
+
+    def test_no_fill_opens_a_gated_field(self) -> None:
+        # storage_time_coverage exists only when cpt_89342.covered is "Yes"; a cost fill must
+        # never flip that gate. Filling the cost pair leaves it shut.
+        values = {f"{_CRYO}.covered": "Yes", f"{_CRYO}.coinsurance": "30"}
+        fills = alternative_fills(V2_DOC, values, f"{_CRYO}.coinsurance")
+        assert fills == {f"{_CRYO}.copay": "$0"}
+        assert "storage_time_coverage" not in " ".join(fills)
+
+
+_ELECTIVE = "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337"
+_CANCER = "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337"
+_ASC_PRO = "sections.general_coverage.asc_professional.cpt_58555"
+_ASC_FAC = "sections.general_coverage.asc_facility.cpt_58555"
+
+
+class TestRoutingBranchFills:
+    """A routing `alternatives` gates none of its branches, so the untaken one stays owed forever
+    and blocks auto-completion. `N/A` closes it, and the cost-sharing cascade follows."""
+
+    def test_the_untaken_asc_branch_is_marked_not_applicable(self) -> None:
+        fills = routing_branch_fills(V2_DOC, {f"{_ASC_FAC}.covered": "Yes"})
+        assert fills == {f"{_ASC_PRO}.covered": "N/A"}
+
+    def test_it_works_the_other_way_round(self) -> None:
+        fills = routing_branch_fills(V2_DOC, {f"{_ASC_PRO}.covered": "Yes"})
+        assert fills == {f"{_ASC_FAC}.covered": "N/A"}
+
+    def test_both_branches_answered_fills_nothing(self) -> None:
+        # ASC professional and facility genuinely both applying is not unusual — observed on a
+        # live call — and must never be overwritten.
+        values = {f"{_ASC_PRO}.covered": "Yes", f"{_ASC_FAC}.covered": "Yes"}
+        assert routing_branch_fills(V2_DOC, values) == {}
+
+    def test_neither_answered_fills_nothing(self) -> None:
+        assert routing_branch_fills(V2_DOC, {}) == {}
+
+    def test_the_untaken_egg_cryo_branch_gets_na_not_no(self) -> None:
+        # The live-call defect: the Observer wrote `No` here at confidence 90, asserting the plan
+        # does not cover elective egg cryopreservation, for a service never discussed.
+        values = {
+            "sections.infertility_treatment.infertility_tx_covered": "Yes",
+            f"{_CANCER}.covered": "Yes",
+        }
+        fills = routing_branch_fills(V2_DOC, values)
+        assert fills.get(f"{_ELECTIVE}.covered") == "N/A"
+
+    def test_cost_sharing_is_left_to_the_gate_cascade(self) -> None:
+        # copay/coinsurance/prior_auth are gated on `covered == "Yes"`, so filling covered=N/A
+        # keeps them inapplicable — never owed, never written.
+        fills = routing_branch_fills(V2_DOC, {f"{_ASC_FAC}.covered": "Yes"})
+        assert not any(p.endswith((".copay", ".coinsurance", ".prior_auth")) for p in fills)

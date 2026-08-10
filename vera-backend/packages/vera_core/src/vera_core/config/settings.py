@@ -121,11 +121,13 @@ class Settings(BaseSettings):
     password_reset_rate_limit_window_seconds: int = 15 * 60
 
     # --- email (invites + password resets) ----------------------------------
-    # Deployed environments send via the Twilio Email API, authenticated with the
-    # same Twilio account as outbound SIP (auth token via SecretProvider, never a
-    # setting). Setting the account SID selects it; unset falls back to the local
-    # msztolcman/sendria SMTP sandbox (docker-compose: SMTP 1025, captured mail at
-    # http://localhost:1080). `email_from` must be a Twilio-verified sender.
+    # Deployed environments send via the Twilio Email API (same Twilio account as
+    # outbound SIP). Either SID selects it, the API key pair first; with neither set
+    # we fall back to the local msztolcman/sendria SMTP sandbox (docker-compose: SMTP
+    # 1025, captured mail at http://localhost:1080). The matching secrets are
+    # TWILIO_API_KEY_SECRET and TWILIO_AUTH_TOKEN, read via SecretProvider and never
+    # settings. `email_from` must be a Twilio-verified sender.
+    twilio_api_key_sid: str | None = None
     twilio_account_sid: str | None = None
     smtp_host: str = "localhost"
     smtp_port: int = 1025
@@ -164,6 +166,11 @@ class Settings(BaseSettings):
     # LiveKit project — e.g. `VERA_LIVEKIT_AGENT_NAME=vera-agent-local` on a laptop that
     # points at the shared Cloud project, so local dispatches don't land on a deployed worker.
     livekit_agent_name: str = "vera-agent"  # VERA_LIVEKIT_AGENT_NAME
+
+    # Test transport: skip SIP entirely and let a browser participant join as the payer
+    # rep. Never enable outside local/dev.
+    # See docs/superpowers/specs/2026-08-08-browser-callee-transport-design.md.
+    browser_callee_transport: bool = False  # VERA_BROWSER_CALLEE_TRANSPORT
 
     # --- live-call summary (control plane) -----------------------------------
     # Fault-tolerant summarizer chain, "provider:model" selectors resolved by

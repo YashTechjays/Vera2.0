@@ -49,16 +49,22 @@ from judge import Report, render_facts, render_rules, render_tasks
 from livekit.agents import AgentSession
 from livekit.agents.voice.run_result import mock_tools
 from rep import (
+    DERIVED_REMAINING_FACTS,
     FACT_SHEET,
+    FAMILY_COVERAGE_FACTS,
+    FAMILY_SPOUSE_NAME,
     INACTIVE_POLICY_FACTS,
     MANDATE_CONTRADICTION_FACTS,
+    TRIPLET_MISQUOTE_FACTS,
     SimulatedRep,
 )
 from transcript import Turn, collect, echo, tail
 
+from agent_worker.directives import ReAsk
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import IvrNavigatorAgent
 from agent_worker.plan_runtime import GapTaskAgent, PlanRunController, PlanTaskAgent, WrapUpAgent
+from vera_core.forms.consistency import derive_remaining
 
 pytestmark = [
     pytest.mark.evals,
@@ -69,7 +75,7 @@ pytestmark = [
 ]
 
 # Hard stop so a plan that never reaches wrap-up cannot run forever. Generous: the full IBV walk
-# is 7 tasks over 184 fields.
+# is 9 tasks over 184 fields.
 _MAX_PLAN_TURNS = 250
 
 # How VERA names herself. Deliberately only self-identification: "calling on behalf of Dr. Smith"
@@ -98,6 +104,38 @@ INACTIVE_SCENARIO = Scenario(
     facts=INACTIVE_POLICY_FACTS,
     expect_rule="insurance_not_active",
     focus_fields=("sections.patient_verification.is_insurance_active",),
+)
+
+# The spouse fields only apply once coverage_type is "Family", so narrow to those three plus the
+# closer.
+FAMILY_COVERAGE_SCENARIO = Scenario(
+    label="family coverage, no spouse on file",
+    facts=FAMILY_COVERAGE_FACTS,
+    focus_fields=(
+        "sections.benefit_coverage.coverage_type",
+        "sections.patient_information.spouse_partner_name",
+        "sections.patient_information.spouse_partner_dob",
+    ),
+)
+
+TRIPLET_RULE = "lifetime_maximum_triplet_consistency"
+
+_TRIPLET_FIELDS = (
+    "sections.lifetime_maximum.total",
+    "sections.lifetime_maximum.met_amount",
+    "sections.lifetime_maximum.remaining",
+)
+
+TRIPLET_SCENARIO = Scenario(
+    label="rep quotes an impossible lifetime max",
+    facts=TRIPLET_MISQUOTE_FACTS,
+    expect_rule=TRIPLET_RULE,
+    focus_fields=_TRIPLET_FIELDS,
+)
+DERIVED_REMAINING_SCENARIO = Scenario(
+    label="rep cannot see the remaining lifetime max",
+    facts=DERIVED_REMAINING_FACTS,
+    focus_fields=_TRIPLET_FIELDS,
 )
 
 
@@ -332,6 +370,21 @@ async def inactive_call() -> CallRun:
     return await _run_call(INACTIVE_SCENARIO)
 
 
+@pytest.fixture(scope="module")
+async def family_coverage_call() -> CallRun:
+    return await _run_call(FAMILY_COVERAGE_SCENARIO)
+
+
+@pytest.fixture(scope="module")
+async def triplet_call() -> CallRun:
+    return await _run_call(TRIPLET_SCENARIO)
+
+
+@pytest.fixture(scope="module")
+async def derived_remaining_call() -> CallRun:
+    return await _run_call(DERIVED_REMAINING_SCENARIO)
+
+
 async def test_plan_came_from_a_published_schema_version(call: CallRun) -> None:
     # Compiled, not hand-written: real lineage and real per-form prefill.
     plan = call.controller.plan
@@ -457,6 +510,41 @@ async def test_contradiction_makes_vera_push_back(contradiction_call: CallRun) -
     assert "mandate" in spoken or "covered" in spoken
 
 
+async def test_impossible_triplet_amounts_make_vera_push_back(triplet_call: CallRun) -> None:
+    """Met > Total is arithmetically impossible, so the NumericConsistency rule returns ReAsk
+    and the controller re-asks on the SAME agent — the numeric mirror of the authored
+    contradiction path. The re-ask utterance itself is generated outside the driven run
+    windows, so the recorded directive (not the captured speech) is the honest evidence."""
+    fired = triplet_call.fired(TRIPLET_RULE)
+    if fired is None:
+        # Extraction is a live LLM call: the rep may never land the impossible pair verbatim.
+        pytest.skip("the impossible total/met pair was never extracted, so the rule had no trigger")
+
+    window = triplet_call.plan[fired.turn : fired.turn + 2]
+    assert not [h for turn in window for h in turn.handoffs], (
+        f"a numeric inconsistency must re-ask, not hand off (turn {fired.turn})"
+    )
+    assert isinstance(fired.directive, ReAsk)
+    # The dynamic reason quotes the rep's own amounts back at them.
+    assert "exceeds the total" in fired.directive.reason
+    assert "$" in fired.directive.reason
+
+
+async def test_unstated_remaining_is_derived_from_total_and_met(
+    derived_remaining_call: CallRun,
+) -> None:
+    """The rep can never see the remaining amount, so only the Observer's own Total - Met
+    derivation can fill it — recorded like any answer, which is also what silences the gap
+    pass for a field the rep cannot answer."""
+    extracted = derived_remaining_call.extracted()
+    total = extracted.get("sections.lifetime_maximum.total")
+    met = extracted.get("sections.lifetime_maximum.met_amount")
+    expected = derive_remaining(str(total or ""), str(met or ""))
+    if expected is None:
+        pytest.skip(f"no consistent total/met pair was extracted: total={total!r}, met={met!r}")
+    assert extracted.get("sections.lifetime_maximum.remaining") == expected
+
+
 async def test_inactive_policy_short_circuits_the_call(inactive_call: CallRun) -> None:
     """`insurance_not_active` skips straight to wrap_up: an inactive policy has no benefits worth
     collecting, so the call must not walk the remaining tasks."""
@@ -466,6 +554,35 @@ async def test_inactive_policy_short_circuits_the_call(inactive_call: CallRun) -
             f"the rule's trigger was not extracted this run (is_insurance_active={active!r})"
         )
     assert isinstance(inactive_call.landed, WrapUpAgent), "an inactive policy must reach wrap-up"
+
+
+async def test_no_raw_token_reaches_speech(family_coverage_call: CallRun) -> None:
+    """The original bug: an unresolved `{{confirm:<path>}}`/`{{value}}` slot spoken verbatim. With
+    no spouse prefill, the fuser must resolve the slot to the authored `ask` text instead."""
+    coverage = family_coverage_call.extracted().get("sections.benefit_coverage.coverage_type")
+    if coverage != "Family":
+        pytest.skip(
+            f"the spouse gate's trigger was not extracted this run (coverage_type={coverage!r})"
+        )
+    leaked = [line for line in family_coverage_call.vera_said() if "{{" in line]
+    assert not leaked, f"a raw template token reached speech: {leaked}"
+
+
+async def test_vera_never_fabricates_the_spouse_name(family_coverage_call: CallRun) -> None:
+    """With no spouse on file, VERA must ask rather than invent a name — the other half of the
+    original bug. Proven by ordering: the rep's turn is the first place the name can legitimately
+    appear, so no earlier VERA turn may contain it."""
+    turns = family_coverage_call.turns
+    first_rep_turn = next((i for i, t in enumerate(turns) if FAMILY_SPOUSE_NAME in t.rep), None)
+    if first_rep_turn is None:
+        pytest.skip(f"the rep never supplied the spouse name {FAMILY_SPOUSE_NAME!r} this run")
+
+    fabricated = [
+        line
+        for line in family_coverage_call.vera_said(turns[:first_rep_turn])
+        if FAMILY_SPOUSE_NAME in line
+    ]
+    assert not fabricated, f"VERA said the spouse name before the rep supplied it: {fabricated}"
 
 
 @pytest.mark.skipif(not full_walk_enabled(), reason="the gap pass needs the unfocused plan")

@@ -4,13 +4,15 @@ publish, and end.
 `publish` is owner-only: the caller must hold `calls:publish` *and* be the call's
 `initiated_by_id` (explicit 403 in-handler). A publish-capable join token
 (`?intervene=true`) additionally requires `calls:intervene`, checked after the
-visibility 404s, and claims the call's single-intervener lock.
+visibility 404s, and claims the call's single-intervener lock. `?callee=true` is the
+test-only browser-callee join: a publish-capable `caller-` participant standing in for
+the SIP callee, claiming no lock — refused unless the gateway enables that transport.
 """
 
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -90,6 +92,7 @@ from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
 from vera_core.observability.correlation import (
+    CALLER_IDENTITY_PREFIX,
     PARTICIPANT_MODE_ATTR,
     PARTICIPANT_MODE_INTERVENER,
     PARTICIPANT_MODE_LISTENER,
@@ -104,7 +107,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["calls"])
 
-_ACTIVE_STATUSES = (
+# Exported: the analytics live panel must count "live" exactly as Live Monitoring does.
+ACTIVE_CALL_STATUSES = (
     CallStatus.INITIATED,
     CallStatus.RINGING,
     CallStatus.IVR,
@@ -208,6 +212,7 @@ def _summary(
     insurance_provider: str | None = None,
     insurance_type: str | None = None,
     completion_pct: float | None = None,
+    verified_pct: float | None = None,
 ) -> CallSummary:
     return CallSummary(
         id=call.id,
@@ -228,6 +233,7 @@ def _summary(
         health_reason=call.health_reason,
         health_analyzed_at=call.health_analyzed_at,
         completion_pct=completion_pct,
+        verified_pct=verified_pct,
     )
 
 
@@ -279,9 +285,17 @@ async def join_token(
     audit: Audit,
     resolver: Annotated[PermissionResolver, Depends(get_resolver)],
     intervene: bool = False,
+    callee: bool = False,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[JoinTokenResponse]:
     response.headers["Cache-Control"] = "no-store"  # publish-capable JWT + email; never cache
+    if callee and intervene:
+        raise CustomAPIException(
+            DefaultExceptionCode.VALIDATION_ERROR,
+            message="callee and intervene are mutually exclusive join modes",
+        )
+    if callee and not livekit.browser_callee_transport:
+        raise ConflictError(message="browser-callee transport is not enabled")
     # Intervening claims the single-intervener lock — the row lock serializes
     # concurrent claims while the listen path stays lock-free.
     stmt = select(Call).where(Call.id == call_id)
@@ -293,7 +307,11 @@ async def join_token(
     if _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")  # 404 not 403: don't reveal a private call
     room_name = room_name_for_call(tenant_id, call.id)
-    identity = supervisor_identity(caller.user_id, caller.session_id)
+    identity = (
+        f"{CALLER_IDENTITY_PREFIX}{caller.user_id}"
+        if callee
+        else supervisor_identity(caller.user_id, caller.session_id)
+    )
     stolen_from: UUID | None = None
     if intervene:
         # Checked AFTER the visibility 404s so a private call never turns into a 403.
@@ -329,8 +347,20 @@ async def join_token(
                     payload_ref={},
                 )
             )
+    # The callee carries NO vera.mode: any value trips the worker's takeover controller
+    # and permanently silences the agent.
+    participant_attributes: dict[str, str] | None
+    if callee:
+        join_event = AuditEvent.CALL_CALLEE_JOIN
+        participant_attributes = None
+    elif intervene:
+        join_event = AuditEvent.CALL_INTERVENE_JOIN
+        participant_attributes = {PARTICIPANT_MODE_ATTR: PARTICIPANT_MODE_INTERVENER}
+    else:
+        join_event = AuditEvent.CALL_LISTEN_ONLY_JOIN
+        participant_attributes = {PARTICIPANT_MODE_ATTR: PARTICIPANT_MODE_LISTENER}
     # Every join is audited (owner included — their join is a PHI access too); the
-    # event name carries the mode: listen-only or intervene.
+    # event name carries the mode: listen-only, intervene, or callee.
     detail: dict[str, object] = {
         "owner_id": str(call.initiated_by_id) if call.initiated_by_id else None
     }
@@ -342,9 +372,7 @@ async def join_token(
             actor_type=ActorType.USER,
             actor_user_id=caller.user_id,
             actor_label=caller.email or caller.subject,
-            event_type=(
-                AuditEvent.CALL_INTERVENE_JOIN if intervene else AuditEvent.CALL_LISTEN_ONLY_JOIN
-            ).value,
+            event_type=join_event.value,
             resource_type="call",
             resource_id=str(call.id),
             permission_key="calls:intervene" if intervene else "calls:read",
@@ -353,17 +381,13 @@ async def join_token(
             detail=detail,
         )
     )
-    # Watch-only tokens are server-side mute; only ?intervene=true may publish.
+    # Watch-only tokens are server-side mute; only intervene and callee may publish.
     token = livekit.mint_join_token(
         room_name=room_name,
         identity=identity,
-        can_publish=intervene,
+        can_publish=intervene or callee,
         name=caller.email or caller.subject,
-        attributes={
-            PARTICIPANT_MODE_ATTR: (
-                PARTICIPANT_MODE_INTERVENER if intervene else PARTICIPANT_MODE_LISTENER
-            )
-        },
+        attributes=participant_attributes,
         # Cap the intervene token at the grace so a stale token can't outlive a stolen lock.
         ttl=_INTERVENE_CONNECT_GRACE if intervene else _LISTEN_TOKEN_TTL,
     )
@@ -830,9 +854,16 @@ async def end_call(
     return ok(None, message="Call is ending.")
 
 
+class PaginatedCallSummaries(BaseModel):
+    items: list[CallSummary]
+    page: int
+    page_size: int
+    total: int
+
+
 @router.get(
     "/calls",
-    response_model=ResponseModel[list[CallSummary]],
+    response_model=ResponseModel[list[CallSummary] | PaginatedCallSummaries],
     responses=CustomAPIResponse.custom(
         DefaultExceptionCode.UNAUTHORIZED,
         DefaultExceptionCode.FORBIDDEN,
@@ -846,18 +877,21 @@ async def list_calls(
     audit: Audit,
     scope: Literal["live", "history"] = "live",
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     caller: VerifiedIdentity = require("calls:read"),
-) -> ResponseModel[list[CallSummary]]:
+) -> ResponseModel[list[CallSummary] | PaginatedCallSummaries]:
     """`scope=live` (default) lists in-flight calls — unbounded unless `limit`
     is passed (capping it by default could silently hide live calls from
-    monitoring); `scope=history` returns the most recent terminal calls,
-    capped at `limit` (default 50)."""
+    monitoring); `scope=history` returns terminal calls as `page`/`page_size`
+    pages with a `total` (the `/call-history` envelope)."""
     response.headers["Cache-Control"] = "no-store"
     status_cond = (
-        Call.current_status.in_(list(_ACTIVE_STATUSES))
+        Call.current_status.in_(list(ACTIVE_CALL_STATUSES))
         if scope == "live"
         else Call.current_status.in_(TERMINAL_VALUES)
     )
+    visible = _visible_to(caller.user_id)
     query = (
         select(
             Call,
@@ -865,18 +899,57 @@ async def list_calls(
             PatientForm.insurance_provider,
             FormSchema.insurance_type,
             PatientForm.completion_pct,
+            PatientForm.verified_pct,
         )
         .join(PatientForm, PatientForm.id == Call.form_id)
         .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
         .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
         .where(status_cond)
-        .where(_visible_to(caller.user_id))
-        .order_by(Call.created_at.desc())
+        .where(visible)
+        # id (UUIDv7) tie-break keeps pages stable across equal timestamps.
+        .order_by(Call.created_at.desc(), Call.id.desc())
     )
-    effective_limit = (limit or 50) if scope == "history" else limit
-    if effective_limit is not None:
-        query = query.limit(effective_limit)
-    rows = (await session.execute(query)).all()
+
+    def _summaries(rows: Sequence[Any]) -> list[CallSummary]:
+        # `*_` absorbs the paged query's trailing window-count column.
+        return [
+            _summary(
+                c,
+                name,
+                caller.user_id,
+                provider,
+                insurance_type,
+                _pct(completion),
+                _pct(verified),
+            )
+            for c, name, provider, insurance_type, completion, verified, *_ in rows
+        ]
+
+    payload: list[CallSummary] | PaginatedCallSummaries
+    if scope == "live":
+        if limit is not None:
+            query = query.limit(limit)
+        payload = _summaries((await session.execute(query)).all())
+    else:
+        rows = (
+            await session.execute(
+                query.add_columns(func.count().over().label("total"))
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).all()
+        if rows:
+            total = int(rows[0].total)
+        else:
+            # Out-of-range page returns no rows; fall back to a bare count.
+            total = (
+                await session.execute(
+                    select(func.count()).select_from(Call).where(status_cond).where(visible)
+                )
+            ).scalar_one()
+        payload = PaginatedCallSummaries(
+            items=_summaries(rows), page=page, page_size=page_size, total=total
+        )
     # PHI disclosure — audit field names, mirroring list_patient_forms.
     await emit_phi_read_audit(
         audit,
@@ -887,12 +960,7 @@ async def list_calls(
         resource_id="list",
         fields=["patient_name", "insurance_provider", "health_reason"],
     )
-    return ok(
-        [
-            _summary(c, name, caller.user_id, provider, insurance_type, _pct(completion))
-            for c, name, provider, insurance_type, completion in rows
-        ]
-    )
+    return ok(payload)
 
 
 @router.get(
@@ -909,22 +977,33 @@ async def call_stats(
     session: TenantSession,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[CallStats]:
-    """Counts for the Live Monitoring stat cards, over the same calls the list
-    shows the caller. Pure counts (no PHI), so no disclosure audit; "today" is
-    the DB clock's UTC day."""
+    """Counts for the Live Monitoring stat cards. `total_today` is personal — only
+    calls the caller initiated or intervened in (VR2-63) — while `live`/`critical`
+    stay visibility-scoped, so an alert on a published call still surfaces. Pure
+    counts (no PHI), so no disclosure audit; "today" is the DB clock's UTC day."""
     response.headers["Cache-Control"] = "no-store"
     # Structural UTC "today": date_trunc truncates in the session TimeZone, so
     # shift to UTC, truncate, then re-anchor the naive result as UTC.
     utc_midnight = func.timezone("UTC", func.date_trunc("day", func.timezone("UTC", func.now())))
+    # Deliberately not visibility-scoped: an intervened call can drop out of the
+    # list later (ownerless and terminal) yet still counts as the caller's.
+    mine = or_(
+        Call.initiated_by_id == caller.user_id,
+        select(InterventionEvent.id)
+        .where(
+            InterventionEvent.call_id == Call.id,
+            InterventionEvent.supervisor_id == caller.user_id,
+        )
+        .exists(),
+    )
+    visible = _visible_to(caller.user_id)
     row = (
         await session.execute(
             select(
-                func.count().filter(Call.created_at >= utc_midnight),
-                func.count().filter(Call.current_status.in_(list(_ACTIVE_STATUSES))),
-                func.count().filter(Call.current_status == CallStatus.CRITICAL),
-            )
-            .select_from(Call)
-            .where(_visible_to(caller.user_id))
+                func.count().filter(Call.created_at >= utc_midnight, mine),
+                func.count().filter(visible, Call.current_status.in_(list(ACTIVE_CALL_STATUSES))),
+                func.count().filter(visible, Call.current_status == CallStatus.CRITICAL),
+            ).select_from(Call)
         )
     ).one()
     total_today, live, critical = row

@@ -13,6 +13,7 @@ dependencies = [
     "opentelemetry-sdk>=1.39",
     "opentelemetry-exporter-otlp-proto-http>=1.39",
     "redis>=5.2",
+    # floor 50 is a SECURITY bound, not housekeeping — tests/unit/test_dependency_floors.py
     "cryptography>=50",
     # IANA tz data for zoneinfo on platforms without a system database (Windows);
     # queue_dispatcher pins its business-hours window to America/New_York.
@@ -20,6 +21,8 @@ dependencies = [
     # Fault-tolerant out-of-pipeline LLM calls (vera_core.llm.ResilientLLM) wrap
     # livekit-agents' FallbackAdapter; google = Vertex Gemini, openai = GPT fallback.
     "livekit-agents[google,openai]>=1.5.17",
+    # stt.py imports this directly; floor is a SECURITY bound (test_dependency_floors.py)
+    "aiohttp>=3.14.3",
     "openpyxl>=3.1",
 ]
 

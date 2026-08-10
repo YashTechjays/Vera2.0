@@ -19,9 +19,11 @@ Two stages (the split keeps dispatch-pass memoization honest):
 * :func:`fuse_prefill` — the per-FORM stage: hydrates every resolvable
   ``{{token}}`` with the form's intake-prefilled value (spoken-title fallback
   when no value exists), builds the "Known information" block from prefilled
-  context-role leaves, and stamps ``prefilled`` — the answers seed for
-  applicability gates and the Phase-2 rule engine. ``{{current_year}}`` is
-  hydrated here too; ``{{value}}`` survives as the runtime sentinel.
+  context-role leaves, and stamps ``prefilled`` — the full per-form ``{path:
+  raw value}`` map, all roles. :func:`gating_seed` derives the worker's
+  role-scoped gate-evaluation seed from it; the Phase-2 rule engine reads
+  ``prefilled`` directly. ``{{current_year}}`` is hydrated here too;
+  ``{{value}}`` survives as the runtime sentinel.
 
 Note: PHI tokenization was dropped (2026-07-13), so the fused plan carries the
 form's raw intake values — the same Redis posture as ``vera:transcript:*`` keys.
@@ -36,7 +38,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from vera_core.forms.conditions import leaf_gates
+from vera_core.forms.conditions import (
+    alternative_pairs,
+    has_value,
+    is_applicable,
+    is_required,
+    leaf_gates,
+)
 from vera_core.forms.dsl import (
     PATH_PREFIX,
     PLACEHOLDER_RE,
@@ -45,11 +53,19 @@ from vera_core.forms.dsl import (
     Contradiction,
     FlowRule,
     FormSchemaDoc,
+    Group,
     LeafType,
+    NumericConsistency,
     RequiredWhen,
     Validation,
 )
 from vera_core.forms.prompting import PromptDocument, render_task_prompts
+from vera_core.forms.question_plan import (
+    PromptPanel,
+    PromptQuestion,
+    hydrate_panels,
+    iter_questions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +97,11 @@ class PlanFieldDescriptor(_Model):
     required: bool | RequiredWhen = False
     gates: tuple[Condition, ...] = ()
     inapplicable_value: str | None = None
+    # `completion_pct_v2` counts a leaf with a default as FILLED and the export writes it, so a
+    # worker that cannot see it chases fields the form already calls done.
+    default: str | None = None
+    # Prose for the Observer when this leaf sits under a routing branch (see `_exclusive_notes`).
+    exclusive_note: str | None = None
 
 
 class PlanTask(_Model):
@@ -90,9 +111,16 @@ class PlanTask(_Model):
     title: str
     intro: str | None = None  # AgentTask entry speech — verbatim
     outro: str | None = None  # AgentTask exit speech — verbatim
-    prompt: str  # compiled instruction text
+    prompt: str  # compiled instruction text: lead_in + the question list + trailing
     applicable_when: Condition | None = None
     fields: list[PlanFieldDescriptor] = Field(default_factory=list)
+    # `prompt` in its three pieces. The worker re-renders the question list at task entry with
+    # the entry-decided gates resolved — a question the gates rule out is DROPPED rather than
+    # listed and then retracted — and reassembles it around these, so the flow-rule and
+    # contradiction blocks that follow the list survive the narrowing.
+    lead_in: str = ""
+    panels: list[PromptPanel] = Field(default_factory=list)
+    trailing: str = ""
 
 
 class CallPlan(_Model):
@@ -106,12 +134,106 @@ class CallPlan(_Model):
     tasks: list[PlanTask]
     flow_rules: list[FlowRule] = Field(default_factory=list)
     contradictions: list[Contradiction] = Field(default_factory=list)
+    numeric_consistencies: list[NumericConsistency] = Field(default_factory=list)
     shared_conditions: dict[str, Condition] = Field(default_factory=dict)
+    # Either/or groups; answering one member satisfies the rest. See `conditions.alternative_pairs`.
+    alternative_pairs: list[tuple[str, ...]] = Field(default_factory=list)
     stt_key_terms: list[str] | None = None
     # Per-form stage (fuse_prefill) — empty/None on the compile_call_plan template:
     prefilled: dict[str, Any] = Field(default_factory=dict)  # {path: raw intake value}
     known_information: str | None = None  # "Title: value" lines, context-role leaves only
     on_file_values: str | None = None  # "Title: value" lines, confirm-role prefills (to confirm)
+
+
+def owed_now(
+    task: PlanTask, answers: Mapping[str, Any], shared: Mapping[str, Condition]
+) -> list[PromptQuestion]:
+    """The task's still-owed SPOKEN questions, in spoken order.
+
+    A join, not a second walk: question identity comes from the tree (so one spoken
+    question covering N fields counts once), while gates and requiredness come from the
+    descriptors those questions point at. Evaluated PER TARGET because a fan-out's targets
+    do not share a gate chain — the IUI copay question spans three CPT codes, each gated on
+    its own `covered` — so the question is owed while any covered code still lacks a copay.
+
+    `default` is deliberately not consulted: it declares the value a field takes when not
+    collected, never that the question need not be asked. `is_satisfied` keeps reading it,
+    so completion percentage, export and intake are unaffected.
+
+    Known limitation: this walks question NODES only, so an end-of-task confirm
+    (`confirm_in_task` with `confirm_immediate=False`) can never be owed here — it is spoken
+    by `render_task_prompts`'s separate `end_confirms` block, never a node in `task.panels`,
+    and `dsl.validate_question_coverage` deliberately exempts it for that reason. Zero such
+    leaves exist in either catalog (`test_no_catalog_uses_an_end_of_task_confirm` goes red
+    the moment one is authored) — do not union the end-confirm set in here to "fix" this;
+    lifting that loop into a named function and unioning it is the deferred follow-up.
+    """
+    by_path = {field.path: field for field in task.fields}
+    owed: list[PromptQuestion] = []
+    for question in iter_questions(task.panels):
+        if question.routes_between:
+            continue  # chooses between panels; collects nothing
+        live = [
+            field
+            for path in question.target_paths
+            if (field := by_path.get(path)) is not None
+            and is_applicable(field.gates, answers, shared)
+        ]
+        if any(
+            is_required(field, answers, shared) and not has_value(answers, field.path)
+            for field in live
+        ):
+            owed.append(question)
+    return owed
+
+
+def gating_seed(plan: CallPlan) -> dict[str, Any]:
+    """The answers a gate may be judged against before the call has collected anything.
+
+    An `ask`-role leaf is collected ON the call, so a value on file for one is a pre-call
+    baseline and never an answer: letting it settle a gate deletes every question behind it
+    from the compiled list, which is how the intake UI's `default` for `enrollment_required`
+    removed the enrollment provider question from `closing_admin`. `confirm` stays — it is on
+    file precisely to be read back — and a path no task collects is clinic-supplied context.
+
+    Provenance is deliberately not consulted, only role: `field_answer.source` does not reach
+    the worker, and an ask leaf's authority is the payer's representative either way."""
+    asked = {field.path for task in plan.tasks for field in task.fields if field.role == "ask"}
+    return {path: value for path, value in plan.prefilled.items() if path not in asked}
+
+
+def _exclusive_notes(doc: FormSchemaDoc) -> dict[str, str]:
+    """`{leaf path: note}` for every leaf under a ROUTING branch — an `alternatives` over groups.
+
+    A routing set picks one branch, but nothing gates the others, so the Observer has been
+    inferring `No` for the branch not taken: a live call recorded
+    `egg_cryopreservation_elective…covered = "No"` at confidence 90, which asserts the plan does
+    not cover elective egg cryopreservation when the representative never discussed it. `N/A` is
+    the true answer, and the Observer cannot know that from the transcript alone — the schema has
+    to say it.
+
+    Resolved to prose at compile time because the worker is DB-free, the same reason gate
+    conditions are pre-rendered rather than shipped as `Condition`s."""
+    leaf_paths = [path for path, _leaf, _gates in leaf_gates(doc)]
+    notes: dict[str, str] = {}
+    for section in doc.sections.values():
+        for alternatives in section.alternatives or []:
+            branches = [
+                (member, node.title)
+                for member in alternatives.members
+                if isinstance(node := section.fields.get(member.split(".")[-1]), Group)
+            ]
+            if len(branches) < 2:
+                continue  # a leaf-level either/or, not a routing set
+            for branch, title in branches:
+                others = " or ".join(other for path, other in branches if path != branch)
+                note = (
+                    f"Only one of {title} or {others} applies to this patient. If the "
+                    f"representative indicates {others} applies instead, record N/A here — never "
+                    "No, which would claim the plan does not cover it."
+                )
+                notes.update({p: note for p in leaf_paths if p.startswith(f"{branch}.")})
+    return notes
 
 
 def compile_call_plan(
@@ -131,6 +253,7 @@ def compile_call_plan(
     """
     rendered = render_task_prompts(doc, prompt_doc)
     section_to_task = doc.section_to_task()
+    exclusive_notes = _exclusive_notes(doc)
     fields_by_task: dict[str, list[PlanFieldDescriptor]] = {}
     for path, leaf, gates in leaf_gates(doc):
         if leaf.role not in COLLECTABLE_ROLES:
@@ -152,6 +275,8 @@ def compile_call_plan(
                 required=leaf.required,
                 gates=gates,
                 inapplicable_value=leaf.inapplicable_value,
+                default=leaf.default,
+                exclusive_note=exclusive_notes.get(path),
             )
         )
 
@@ -164,6 +289,9 @@ def compile_call_plan(
             prompt=rendered_task.prompt,
             applicable_when=task.applicable_when,
             fields=fields_by_task.get(rendered_task.task_key, []),
+            lead_in=rendered_task.lead_in,
+            panels=rendered_task.panels,
+            trailing=rendered_task.trailing,
         )
         for task, rendered_task in zip(doc.tasks, rendered.tasks, strict=True)
     ]
@@ -182,7 +310,9 @@ def compile_call_plan(
         tasks=tasks,
         flow_rules=list(doc.flow_rules or []),
         contradictions=list(doc.contradictions or []),
+        numeric_consistencies=list(doc.numeric_consistencies or []),
         shared_conditions=dict(doc.shared_conditions or {}),
+        alternative_pairs=alternative_pairs(doc),
         stt_key_terms=doc.stt_key_terms,
     )
 
@@ -223,6 +353,12 @@ def bookend_paths(plan: CallPlan, reference_field: str) -> list[str]:
     return [f.path for f in keep]
 
 
+# Two slot forms share one pattern: `{{confirm:<path>}}` keeps the confirm/ask verb label,
+# `{{confirm_bare:<path>}}` resolves to the same sentence without it (prompting._confirm_slot
+# decides which context emits which).
+CONFIRM_SLOT_RE = re.compile(r"\{\{confirm(?P<bare>_bare)?:(?P<path>[\w.]+)\}\}")
+_VALUE_TOKEN = "{{value}}"
+
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # "Dr. Dr. Jane" → "Dr. Jane": a title on both the template ("Dr. {{doctor_name}}")
@@ -234,7 +370,12 @@ def _render_value(raw: Any) -> str | None:
     """Prompt-text rendering of a prefilled raw value; None = not renderable
     (absent, or a shape with no sensible spoken form — dict/None)."""
     if isinstance(raw, str):
-        return _speak_iso_date(raw)
+        text = raw.strip()
+        # Mirrors ivr_selection._spoken_value: "N/A" is the intake default and the
+        # inapplicable marker, never a value worth speaking.
+        if not text or text.upper() == "N/A":
+            return None
+        return _speak_iso_date(text)
     if isinstance(raw, bool | int | float):
         return str(raw)
     if isinstance(raw, list):
@@ -276,9 +417,21 @@ class PrefillFuser:
         # Confirm-role leaves: prefilled values the agent must READ BACK to confirm
         # (their prompt is a {{value}} confirmation). Without this block the agent has
         # no value to confirm and degrades to an open ask (risking a conflicting answer).
-        self._confirm_leaves = [
-            (path, leaf.title) for path, leaf in doc.leaf_items() if leaf.role == "confirm"
-        ]
+        # Sentences for the {{confirm:path}} slots live alongside: the compiler emits
+        # one per confirm-role leaf and the per-form value decides which is spoken.
+        # A confirm-role leaf always carries both texts (dsl.py's Leaf._coherent
+        # enforces it), so one pass over leaf_items() builds both structures.
+        self._confirm_leaves: list[tuple[str, str]] = []
+        self._confirm_prompts: dict[str, tuple[str, str]] = {}
+        for path, leaf in doc.leaf_items():
+            if leaf.role != "confirm":
+                continue
+            self._confirm_leaves.append((path, leaf.title))
+            if leaf.prompt is not None:
+                self._confirm_prompts[path] = (
+                    leaf.prompt.confirm or leaf.title,
+                    leaf.prompt.ask or leaf.title,
+                )
 
     def fuse(self, values: Mapping[str, Any], *, current_year: int) -> CallPlan:
         """Fuse one form's intake-prefilled values into the template (pure — the
@@ -293,10 +446,38 @@ class PrefillFuser:
           value" lines) — the schema's "context = agent background" contract.
           Ask/confirm leaves are collected/confirmed on the call and
           input/ui_only leaves are never voice-touched, so they stay out.
-        * ``prefilled`` carries the full ``{path: raw}`` map (all roles) — the
-          answers seed for applicability gates and the Phase-2 rule engine.
+        * ``prefilled`` carries the full ``{path: raw}`` map (all roles).
+          :func:`gating_seed` derives the worker's role-scoped gate-evaluation
+          seed from it; the Phase-2 rule engine reads ``prefilled`` directly.
         """
         unresolved = 0
+        unbacked = 0
+
+        def expand_slots(text: str) -> str:
+            def repl(match: re.Match[str]) -> str:
+                nonlocal unbacked
+                bare = match.group("bare") is not None
+                path = match.group("path")
+                sentences = self._confirm_prompts.get(path)
+                if sentences is None:
+                    # Fail safe: an open ask is never wrong, a fabricated read-back is.
+                    unbacked += 1
+                    verb, sentence = "ask", self._titles.get(path, path)
+                else:
+                    confirm_text, ask_text = sentences
+                    rendered = _render_value(values.get(path))
+                    if rendered is None:
+                        verb, sentence = "ask", ask_text
+                    else:
+                        verb, sentence = "confirm", confirm_text.replace(_VALUE_TOKEN, rendered)
+                return sentence if bare else f"{verb} — {sentence}"
+
+            return CONFIRM_SLOT_RE.sub(repl, text)
+
+        def fuse_text(text: str) -> str:
+            """Slot expansion then token hydration — the whole per-form rewrite, named once
+            because every piece of a task's text gets exactly the same treatment."""
+            return hydrate(expand_slots(text)) or ""
 
         def hydrate(text: str | None) -> str | None:
             if text is None:
@@ -343,7 +524,14 @@ class PrefillFuser:
                         update={
                             "intro": hydrate(task.intro),
                             "outro": hydrate(task.outro),
-                            "prompt": hydrate(task.prompt) or "",
+                            # The pieces carry the same slots and tokens as `prompt`, and the
+                            # worker re-renders the list from `panels` at task entry — so they
+                            # get the identical treatment or that re-render speaks a raw
+                            # {{confirm:…}} / {{value}}.
+                            "prompt": fuse_text(task.prompt),
+                            "lead_in": fuse_text(task.lead_in),
+                            "panels": hydrate_panels(task.panels, fuse_text),
+                            "trailing": fuse_text(task.trailing),
                         }
                     )
                     for task in plan.tasks
@@ -359,6 +547,12 @@ class PrefillFuser:
                 "call plan %s: %d unresolvable placeholder(s) passed through verbatim",
                 plan.insurance_type,
                 unresolved,
+            )
+        if unbacked:
+            logger.warning(
+                "call plan %s: %d confirm slot(s) had no sentence; asked openly instead",
+                plan.insurance_type,
+                unbacked,
             )
         return fused
 

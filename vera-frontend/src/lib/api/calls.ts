@@ -2,6 +2,7 @@
 // envelope unwrap, throws `ApiError`). Calls are created by the queue dispatcher — no manual start-call endpoint.
 
 import { apiRequest } from "@/lib/api/client"
+import type { LiveCallMode } from "@/lib/monitoring/liveCallView"
 
 /** A verification call as returned by the control-plane (list rows + publish result). */
 export type CallSummary = {
@@ -38,6 +39,8 @@ export type CallSummary = {
   /** Form completion 0-100; null = never projected. Drives the live progress bar's
    *  fallback when no answer has streamed yet this call (e.g. a late retry). */
   completion_pct: number | null
+  /** Verified-field percentage 0-100; post-call only — 0/null during a live call. */
+  verified_pct: number | null
 }
 
 /** LiveKit join details for a call room. */
@@ -56,10 +59,25 @@ export type CallStats = {
   critical: number
 }
 
-/** GET /calls — calls the caller owns or that are published, newest first.
- *  scope "live" (default) is the in-flight list; "history" the most recent terminal calls. */
-export function listCalls(scope: "live" | "history" = "live"): Promise<CallSummary[]> {
-  return apiRequest<CallSummary[]>(scope === "history" ? "/calls?scope=history" : "/calls")
+/** A server-driven page envelope (matches the backend's paginated responses). */
+export type Paginated<T> = {
+  items: T[]
+  page: number
+  page_size: number
+  total: number
+}
+
+/** GET /calls — in-flight calls the caller owns or that are published, newest first. */
+export function listCalls(): Promise<CallSummary[]> {
+  return apiRequest<CallSummary[]>("/calls")
+}
+
+/** GET /calls?scope=history — terminal calls, newest first, one server page at a time. */
+export function listCompletedCalls(
+  params: { page?: number; page_size?: number } = {},
+): Promise<Paginated<CallSummary>> {
+  const { page = 1, page_size = 20 } = params
+  return apiRequest<Paginated<CallSummary>>(`/calls?scope=history&page=${page}&page_size=${page_size}`)
 }
 
 /** GET /calls/stats — counts for the Live Monitoring stat cards. */
@@ -88,12 +106,7 @@ export type CallHistoryRow = {
   transcript_available: boolean
 }
 
-export type PaginatedCalls = {
-  items: CallHistoryRow[]
-  page: number
-  page_size: number
-  total: number
-}
+export type PaginatedCalls = Paginated<CallHistoryRow>
 
 export type ListCallHistoryParams = {
   page?: number
@@ -127,11 +140,22 @@ export function publishCall(callId: string): Promise<CallSummary> {
   })
 }
 
+const JOIN_TOKEN_QUERY: Record<LiveCallMode, string> = {
+  listen: "",
+  intervene: "?intervene=true",
+  callee: "?callee=true",
+}
+
 /** GET /calls/{id}/join-token — listen-only by default; intervene mints a publish token
- *  (needs calls:intervene; claims the single-intervener lock, 409 while another holds it). */
-export function getJoinToken(callId: string, intervene = false): Promise<JoinTokenResponse> {
-  const query = intervene ? "?intervene=true" : ""
-  return apiRequest<JoinTokenResponse>(`/calls/${encodeURIComponent(callId)}/join-token${query}`)
+ *  (needs calls:intervene; claims the single-intervener lock, 409 while another holds it);
+ *  callee mints a rep-side publish token for the browser-callee test transport (no lock). */
+export function getJoinToken(
+  callId: string,
+  mode: LiveCallMode = "listen",
+): Promise<JoinTokenResponse> {
+  return apiRequest<JoinTokenResponse>(
+    `/calls/${encodeURIComponent(callId)}/join-token${JOIN_TOKEN_QUERY[mode]}`,
+  )
 }
 
 /** POST /calls/{id}/end — tears the room down; the worker's call.ended event drives closeout

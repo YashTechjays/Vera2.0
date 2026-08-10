@@ -23,6 +23,7 @@ function callSummary(overrides: Partial<CallSummary> = {}): CallSummary {
     health_reason: null,
     health_analyzed_at: null,
     completion_pct: null,
+    verified_pct: null,
     ...overrides,
   }
 }
@@ -36,5 +37,15 @@ describe("toLiveCall", () => {
   it("falls back to 0 when the form has no completion projection", () => {
     const live = toLiveCall(callSummary({ completion_pct: null }), Date.parse("2026-07-29T00:01:00Z"))
     expect(live.formProgress).toBe(0)
+  })
+
+  it("maps verified_pct into verifiedProgress", () => {
+    const live = toLiveCall(callSummary({ verified_pct: 40 }), Date.parse("2026-08-04T00:01:00Z"))
+    expect(live.verifiedProgress).toBe(40)
+  })
+
+  it("preserves null verified_pct (live/pre-eval renders no Verified label, not 0%)", () => {
+    const live = toLiveCall(callSummary({ verified_pct: null }), Date.parse("2026-08-04T00:01:00Z"))
+    expect(live.verifiedProgress).toBeNull()
   })
 })

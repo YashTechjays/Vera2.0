@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from google.genai.types import ThinkingConfig
@@ -57,11 +58,15 @@ from vera_core.events import (
     CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
+    IvrExitedEvent,
     WorkerEventBus,
 )
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
+    TRANSPORT_ATTR,
+    TRANSPORT_BROWSER,
+    TRANSPORT_SIP,
     call_trace_attributes,
     is_observer_identity,
     parse_room_name,
@@ -98,6 +103,22 @@ def _is_ready_speaker(participant: rtc.Participant) -> bool:
     if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
         return participant.attributes.get(_SIP_CALL_STATUS_ATTR) == _SIP_CALL_STATUS_ACTIVE
     return True
+
+
+def transport_of(speaker: rtc.Participant) -> str:
+    """How the callee reached the room, for the call's Langfuse span."""
+    if speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return TRANSPORT_SIP
+    return TRANSPORT_BROWSER
+
+
+def should_emit_answered(speaker: rtc.Participant, meta: dict[str, object]) -> bool:
+    """The SIP callee answering is the "call is live" signal; under browser-callee
+    transport the browser speaker stands in for it (a Voice Lab browser caller, which
+    sets no such metadata, does not)."""
+    if speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return True
+    return bool(meta.get("browser_callee"))
 
 
 @dataclass(frozen=True)
@@ -264,11 +285,23 @@ class CallLifecycleEmitter:
     async def ended(self, *, now_ms: int) -> None:
         await self._emit(CallEndedEvent(room_name=self._room_name, ts=now_ms))
 
-    async def _emit(self, event: CallAnsweredEvent | CallEndedEvent) -> None:
+    async def ivr_exited(self, *, now_ms: int) -> None:
+        await self._emit(IvrExitedEvent(room_name=self._room_name, ts=now_ms))
+
+    async def _emit(self, event: CallAnsweredEvent | CallEndedEvent | IvrExitedEvent) -> None:
         try:
             await self._bus.emit(event)
         except Exception:
             logger.exception("failed to emit %s for %s", event.type, self._room_name)
+
+
+def _ivr_exited_publisher(lifecycle: CallLifecycleEmitter) -> Callable[[], Awaitable[None]]:
+    """Bind `ivr_exited` into the no-arg callback the IVR navigator's handoff hook takes."""
+
+    async def publish() -> None:
+        await lifecycle.ivr_exited(now_ms=int(time.time() * 1000))
+
+    return publish
 
 
 def resolve_session(room_name: str, *, is_local: bool) -> str | None:
@@ -383,9 +416,9 @@ async def entrypoint(ctx: JobContext) -> None:
                         await events_redis.aclose()
                 return
             speaker = outcome.participant
-            # The SIP callee answering is the "call is live" signal; a browser caller
-            # (voice-lab browser mode) is not an answered phone call.
-            if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            # From the resolved speaker, not the metadata: what actually reached the room.
+            trace.get_current_span().set_attribute(TRANSPORT_ATTR, transport_of(speaker))
+            if lifecycle is not None and should_emit_answered(speaker, meta):
                 await lifecycle.answered(now_ms=int(time.time() * 1000))
 
         # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
@@ -518,7 +551,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     end_grace_seconds=settings.transcript_end_grace_seconds,
                 ),
                 room_name=room_name,
+                # One in-flight attempt's cap plus adapter overhead, not the whole
+                # Gemini->OpenAI fallback cascade — tied to the same setting so the two
+                # budgets can't drift, since the gap pass chains agent to agent with no
+                # speech between them and every extra second here is repeated dead air.
+                drain_timeout=settings.observer_extract_attempt_timeout_seconds + 2.0,
             )
+            controller.attach_observer(observer_manager)
             observer_manager.start()
 
         # Call-health observer (real /calls flow only: needs both the per-call
@@ -746,6 +785,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # A successful IVR keypad press rides the live transcript as a dtmf turn
         # (evidence of the action); rooms with no stream enabled report nowhere.
         on_keypress=turn_emitter.on_keypress if turn_emitter is not None else None,
+        on_ivr_exited=_ivr_exited_publisher(lifecycle) if lifecycle is not None else None,
     )
     await session.start(
         agent=agent,
