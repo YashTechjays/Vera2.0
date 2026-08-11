@@ -1,5 +1,3 @@
-import { Info } from "lucide-react"
-
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
@@ -7,40 +5,7 @@ import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls
 import { confidenceHighlightClass, fieldConfidenceLevel } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
 import { USAGE_META } from "./usageMeta"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import type { FieldProvenance } from "@/lib/patient-forms/types"
 import type { Condition, LeafField } from "@/lib/ibv/types"
-
-/** Tooltip body for AI-sourced field provenance — mirrors DisputeTooltipBody altitude.
- *  The judge's verdict is deliberately absent: it is the confidence chip's number now,
- *  and repeating it here is what made the two scores read as separate signals. */
-function ProvenanceTooltip({ prov }: { prov: FieldProvenance }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          aria-label="Field provenance"
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-        >
-          <Info className="h-3 w-3" />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-[280px]">
-        <p className="font-medium">
-          Attempt {prov.attempt} ({prov.mode})
-        </p>
-        {prov.judge?.evidence && (
-          <p className="mt-1 text-xs text-muted-foreground">"{prov.judge.evidence}"</p>
-        )}
-      </TooltipContent>
-    </Tooltip>
-  )
-}
 
 type Props = {
   field: LeafField
@@ -69,14 +34,12 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
     flagsFor,
     applyDispute,
     swapDispute,
-    provenanceFor,
     confidenceFor,
     isPathRequired,
   } = useIbv()
 
   const value = values[path] ?? ""
   const dispute = disputeFor(path)
-  const prov = provenanceFor(path)
   const confidence = confidenceFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
@@ -113,7 +76,6 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
             <span className="text-[#b91c1c]">*</span>
           </span>
         )}
-        {prov && <ProvenanceTooltip prov={prov} />}
       </div>
 
       <div className="relative flex flex-1 items-stretch">

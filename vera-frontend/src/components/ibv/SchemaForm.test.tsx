@@ -56,6 +56,12 @@ describe("SchemaForm", () => {
     expect(html).toContain("disabled")
   })
 
+  it("no longer renders the per-row provenance icon", () => {
+    // Evidence has one surface now — the dispute tooltip, fed by the field-level
+    // `evidence` the backend merges. The label-cell (i) tooltip must not creep back.
+    expect(html).not.toContain("Field provenance")
+  })
+
   it("renders the dynamic color legend and the usage tints", () => {
     expect(html).toContain("Color Legend")
     expect(html).toContain("System field")

@@ -90,11 +90,11 @@ def dispute_view(
     source: str,
     value: Any,
     confidence: int | None,
-    evidence: str | None,
     baseline_value: Any,
 ) -> dict[str, Any] | None:
-    """The `{previous_value, current_value, confidence, evidence, reasoning}` payload for one
-    field, or `None` when it is not disputed."""
+    """The `{previous_value, current_value, confidence, reasoning}` payload for one field, or
+    `None` when it is not disputed. Evidence is deliberately absent: it belongs to the answer,
+    not the divergence, so it rides on the field view instead."""
     if source != AnswerSource.AI_CALL.value:
         return None
     if normalize_value(unwrap_value(value)) == normalize_value(unwrap_value(baseline_value)):
@@ -103,7 +103,6 @@ def dispute_view(
         "previous_value": unwrap_value(baseline_value),
         "current_value": unwrap_value(value),
         "confidence": confidence,
-        "evidence": evidence,
         "reasoning": None,
     }
 
@@ -116,7 +115,6 @@ def is_disputed(current: AnswerRow, baseline_value: Any) -> bool:
             source=current.source,
             value=current.value,
             confidence=current.confidence,
-            evidence=current.evidence,
             baseline_value=baseline_value,
         )
         is not None
@@ -188,8 +186,12 @@ def build_field_views(
     baseline_value_by_path: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     """Assemble the flat, dotted-path field views the detail endpoint returns. Each
-    item is `{field_path, value, source, confidence, dispute}`; `dispute` is non-null
-    only when the current AI value diverges from the human/intake baseline.
+    item is `{field_path, value, source, confidence, evidence, dispute}`; `dispute` is
+    non-null only when the current AI value diverges from the human/intake baseline.
+
+    `evidence` is top-level rather than dispute-nested precisely because a `dispute` is
+    absent whenever the AI value AGREES with the baseline — those answers still have
+    evidence worth reviewing.
 
     `baseline_value_by_path` maps a field path to its most recent intake/human stored
     value (`{"value": ...}`); a missing entry means no baseline (treated as `None`)."""
@@ -200,7 +202,6 @@ def build_field_views(
             source=answer.source,
             value=answer.value,
             confidence=answer.confidence,
-            evidence=answer.evidence,
             baseline_value=baseline,
         )
         views.append(
@@ -209,6 +210,7 @@ def build_field_views(
                 "value": unwrap_value(answer.value),
                 "source": answer.source,
                 "confidence": answer.confidence,
+                "evidence": answer.evidence,
                 "dispute": dispute,
             }
         )

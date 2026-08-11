@@ -243,7 +243,9 @@ function adaptDetail(
         previousValue: toInput(f.dispute.previous_value, f.field_path),
         currentValue: toInput(f.dispute.current_value, f.field_path),
         confidence: f.dispute.confidence ?? undefined,
-        evidence: f.dispute.evidence ?? undefined,
+        // Field-level, not dispute-nested: the backend merges the judge's transcript
+        // quote over the extractor's capture into one `evidence` per field.
+        evidence: f.evidence ?? undefined,
         reasoning: f.dispute.reasoning ?? undefined,
       }
     }

@@ -2,8 +2,11 @@
 
 Loads which call wrote each current AI answer, the judge's latest verdict, the
 form's attempt timeline (lineage + snapshot diffs). PHI discipline: snapshot
-values are read to compute diffs but only field *paths* leave this module;
-judge `evidence` is de-identified (tokenized before the LLM saw it).
+values are read to compute diffs but only field *paths* leave this module.
+Judge `evidence` is a raw transcript quote, so it is PHI in plaintext — the
+tokenization wall was removed 2026-07-13 and never applied to it. It may be
+returned to an authorized session (the detail endpoint audits that read); it may
+never be logged, traced, or attached to a span.
 """
 
 from __future__ import annotations

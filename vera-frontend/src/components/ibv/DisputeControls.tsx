@@ -84,11 +84,17 @@ export function DisputeBadge({
       : value
   return (
     <Tooltip>
+      {/* A button, not a span: with the label-cell (i) tooltip gone this chip is the
+          only keyboard path to the evidence, and a span trigger is mouse-only. */}
       <TooltipTrigger asChild>
-        <span className="inline-flex max-w-[120px] items-center gap-1 truncate rounded border border-[#93C5FD] bg-[#EFF6FF] px-1.5 py-0.5 text-[10px] text-black">
+        <button
+          type="button"
+          aria-label="Dispute details"
+          className="inline-flex max-w-[120px] items-center gap-1 truncate rounded border border-[#93C5FD] bg-[#EFF6FF] px-1.5 py-0.5 text-[10px] text-black"
+        >
           {label && <span className="font-medium">{label}:</span>}
           <span className="truncate">{shown || "—"}</span>
-        </span>
+        </button>
       </TooltipTrigger>
       <TooltipContent>
         <DisputeTooltipBody dispute={dispute} confidence={confidence} />

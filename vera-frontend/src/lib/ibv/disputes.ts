@@ -13,7 +13,8 @@ export type Dispute = {
   currentValue: string
   /** 0–100 confidence the AI answer carried for the captured value */
   confidence?: number
-  /** short supporting evidence */
+  /** supporting transcript evidence — the field-level text from the REST detail, or the
+   *  frame's own evidence on the live SSE path */
   evidence?: string
   /** model reasoning */
   reasoning?: string

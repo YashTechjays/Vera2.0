@@ -434,9 +434,11 @@ async def test_detail_returns_fields_and_dispute(
         "previous_value": "BCBS TX",  # intake baseline
         "current_value": "Blue Cross",  # diverging AI value
         "confidence": 95,  # the AI answer's own confidence
-        "evidence": "rep said so",
-        "reasoning": None,  # field_evaluation plays no part in disputes
+        "reasoning": None,  # field_evaluation never gates the dispute *decision*
     }
+    # Evidence hangs off the field, not the dispute. This form has no call and so no
+    # judge verdict, so the merge falls back to the extractor's field_answer.evidence.
+    assert fields[HEALTH_PLAN]["evidence"] == "rep said so"
     # PHI-access audit written (field names only, no values).
     async with admin_sessionmaker() as s:
         rows = (

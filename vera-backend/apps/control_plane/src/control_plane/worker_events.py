@@ -596,7 +596,6 @@ class WorkerEventConsumer:
                 source=AnswerSource.AI_CALL.value,
                 value=event.value,
                 confidence=event.confidence,
-                evidence=None,
                 baseline_value=await baseline_value(session, form.id, event.field_path),
             )
             completion_pct = float(form.completion_pct)
