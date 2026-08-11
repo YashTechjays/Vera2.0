@@ -41,6 +41,7 @@ from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
+from vera_core.forms.intake import ANSWER_UNIT_FORMAT_RULE
 from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
@@ -128,7 +129,9 @@ def _extraction_instructions(task: PlanTask) -> str:
         "a payer representative. Return ONLY the fields below that the representative has "
         "clearly answered in the transcript. Output a JSON array of "
         '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
-        "Omit a field entirely if it is not yet answered. Use only these field_path values:",
+        "Omit a field entirely if it is not yet answered. "
+        f"{ANSWER_UNIT_FORMAT_RULE} "
+        "Use only these field_path values:",
     ]
     for f in task.fields:
         allowed = f" (one of: {', '.join(f.values)})" if f.values else ""

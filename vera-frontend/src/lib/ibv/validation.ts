@@ -121,6 +121,37 @@ export function isoToDateFormat(value: string, format: string): string {
   return format.replace(DATE_TOKEN_ONLY_RE, (token) => part[token])
 }
 
+const PERCENT_NUMBER_RE = /^(\d+)(?:\.(\d+))?$/
+const PERCENT_SUFFIX_RE = /\s*(?:%|percent|pct)$/i
+const LEADING_ZEROS_RE = /^0+/
+const TRAILING_ZEROS_RE = /0+$/
+
+/**
+ * Canonicalize a `percent` answer to "<n>%" so a cell the reviewer just typed matches the
+ * ones the backend wrote. Storage IS display here — `FieldRenderer` renders the stored
+ * string verbatim — so a session that types `20` into three of eight CPT rows would
+ * otherwise read `20%, 20, 15%, 30, 20%` until save.
+ *
+ * Frontend half of a parity pair with `vera_core.forms.intake.normalize_percent_value`
+ * (mirrors `consistency.py`/`numericConsistencyErrors` below) — keep these in sync:
+ * trim; blank passes through (`clearedRequired` depends on "" staying ""); anything not a
+ * bare number passes through verbatim, which is what preserves "N/A", "None", "$20" and
+ * prose, and keeps `isDeclaredLegal` matching `inapplicable_value` byte-for-byte; and it
+ * is IDEMPOTENT, since blur fires again on tab-through of an untouched cell.
+ *
+ * Deliberately does NOT clamp: "150" becomes "150%" so the range check still flags it.
+ */
+export function normalizePercentValue(value: string): string {
+  const text = value.trim()
+  if (!text) return value
+  const match = PERCENT_NUMBER_RE.exec(text.replace(PERCENT_SUFFIX_RE, ""))
+  if (!match) return value
+  // Mirrors the Python's `match.group(1).lstrip("0") or "0"` / `.rstrip("0")` exactly.
+  const whole = match[1].replace(LEADING_ZEROS_RE, "") || "0"
+  const frac = (match[2] ?? "").replace(TRAILING_ZEROS_RE, "")
+  return frac ? `${whole}.${frac}%` : `${whole}%`
+}
+
 /** Compile a DSL date_format ("M/D/YYYY") into an anchored value regex. */
 function dateFormatRegex(format: string): RegExp {
   const source = format.replace(

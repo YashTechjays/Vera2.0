@@ -5,21 +5,26 @@ from typing import Any
 
 import pytest
 
-from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.dsl import FormSchemaDoc, Range
 from vera_core.forms.intake import (
     InvalidIntakeValue,
+    PercentLeafRule,
     date_leaf_paths,
     iter_leaf_answers,
     missing_required,
     normalize_date_answers,
     normalize_date_value,
+    normalize_percent_answers,
+    normalize_percent_value,
     normalize_phone_answers,
     normalize_phone_prefix,
+    percent_leaf_paths,
     phone_promoted_paths,
     promote_columns,
     required_intake_fields,
     resolve_path,
     validate_enum_answers,
+    validate_percent_answers,
 )
 
 from .test_call_plan import IBV
@@ -682,3 +687,149 @@ class TestValidateEnumAnswers:
 
     def test_non_enum_path_is_ignored(self) -> None:
         validate_enum_answers([("sections.insurance_information.group_name", "Anything")], IBV)
+
+
+# A treatment-flavor coinsurance leaf (inapplicable_value "0%") and a male-flavor one
+# ("N/A") — the two literal shapes the schema authors, per authoring.py's _INAPPLICABLE.
+_OI_COINSURANCE = "sections.infertility_treatment.ovulation_induction.coinsurance"
+_MALE_COINSURANCE = "sections.male_partner_coverage.semen_analysis.cpt_89320.coinsurance"
+_OI_COPAY = "sections.infertility_treatment.ovulation_induction.copay"
+
+
+def _percent_rule(*, literals: tuple[str, ...] = ("0%",)) -> PercentLeafRule:
+    return PercentLeafRule(literals=literals, bounds=Range(min=0, max=100))
+
+
+class TestPercentLeafPaths:
+    def test_resolves_every_percent_typed_leaf_from_the_real_document(self) -> None:
+        paths = percent_leaf_paths(IBV)
+        assert _OI_COINSURANCE in paths
+        assert _MALE_COINSURANCE in paths
+        # keyed on leaf.type, so the currency sibling in the same group is excluded
+        assert _OI_COPAY not in paths
+
+    def test_carries_the_declared_range(self) -> None:
+        bounds = percent_leaf_paths(IBV)[_OI_COINSURANCE].bounds
+        assert bounds is not None
+        assert (bounds.min, bounds.max) == (0, 100)
+
+    def test_carries_the_leafs_own_inapplicable_value_as_a_literal(self) -> None:
+        paths = percent_leaf_paths(IBV)
+        assert "0%" in paths[_OI_COINSURANCE].literals
+        assert "N/A" in paths[_MALE_COINSURANCE].literals
+
+    def test_empty_when_nothing_is_percent_typed(self) -> None:
+        assert percent_leaf_paths(_FULL_DOC) == {}
+
+
+class TestNormalizePercentValue:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # the reported bug: a bare number gains the sign
+            ("20", "20%"),
+            (20, "20%"),
+            (" 20 ", "20%"),
+            # already canonical — idempotent
+            ("20%", "20%"),
+            ("20 %", "20%"),
+            # the LLM's other spellings (`20PCT` also pins the IGNORECASE flag)
+            ("20 percent", "20%"),
+            ("20PCT", "20%"),
+            # `0` now matches alternative_fills' authored "0%" byte-for-byte
+            ("0", "0%"),
+            ("0%", "0%"),
+            # one spelling per number
+            ("12.5", "12.5%"),
+            ("12.50", "12.5%"),
+            ("020", "20%"),
+            ("20.0", "20%"),
+            (12.5, "12.5%"),
+            # out of range still canonicalizes — range is validate_percent_answers' job
+            ("200", "200%"),
+        ],
+    )
+    def test_canonicalizes(self, raw: Any, expected: str) -> None:
+        assert normalize_percent_value(raw, _percent_rule()) == expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("N/A", "N/A"), ("n/a", "N/A"), ("N/a", "N/A"), (" n/a ", "N/A")],
+    )
+    def test_folds_a_schema_literal_to_its_authored_spelling(self, raw: str, expected: str) -> None:
+        rule = _percent_rule(literals=("N/A",))
+        assert normalize_percent_value(raw, rule) == expected
+
+    @pytest.mark.parametrize("raw", ["", "   ", None, True, False, [], {}])
+    def test_blank_and_non_numeric_types_pass_through_untouched(self, raw: Any) -> None:
+        assert normalize_percent_value(raw, _percent_rule()) is raw
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "20-30%",
+            "20% after deductible",
+            "twenty percent",
+            "up to 20%",
+            "-20",
+            "20%%",
+        ],
+    )
+    def test_an_unrecognized_shape_is_returned_verbatim(self, raw: str) -> None:
+        """Never raises and never drops information — a rep genuinely said this, and
+        discarding it would be worse than storing it unnormalized."""
+        assert normalize_percent_value(raw, _percent_rule()) == raw
+
+    @pytest.mark.parametrize(
+        "raw", ["20", "20%", "0", "12.50", "20 percent", "n/a", "", "20% after deductible"]
+    )
+    def test_is_idempotent(self, raw: str) -> None:
+        rule = _percent_rule(literals=("0%", "N/A"))
+        once = normalize_percent_value(raw, rule)
+        assert normalize_percent_value(once, rule) == once
+
+    def test_a_fraction_is_not_rescaled(self) -> None:
+        """The Apps Script sends `"0.2"` for a percent-formatted `20%` sheet cell
+        (ibv_infertility_appscript.js getFormattedValue). Rescaling here would print a
+        20% cost share where the truth may be 0.2% — that ambiguity is only resolvable
+        at the sheet, so it stays an upstream defect."""
+        assert normalize_percent_value("0.2", _percent_rule()) == "0.2%"
+
+
+class TestNormalizePercentAnswers:
+    def test_normalizes_only_percent_typed_paths(self) -> None:
+        answers = [(_OI_COINSURANCE, "20"), (_OI_COPAY, "20")]
+        assert normalize_percent_answers(answers, IBV) == [
+            (_OI_COINSURANCE, "20%"),
+            (_OI_COPAY, "20"),
+        ]
+
+    def test_no_op_when_nothing_is_percent_typed(self) -> None:
+        answers = [("sections.patient_information.patient_name", "Jane Doe")]
+        assert normalize_percent_answers(answers, _FULL_DOC) == answers
+
+
+class TestValidatePercentAnswers:
+    def test_raises_with_the_offending_path_and_no_value(self) -> None:
+        with pytest.raises(InvalidIntakeValue) as exc:
+            validate_percent_answers([(_OI_COINSURANCE, "200%")], IBV)
+        assert exc.value.field_path == _OI_COINSURANCE
+        assert "200" not in str(exc.value)
+
+    @pytest.mark.parametrize("raw", ["0%", "20%", "100%"])
+    def test_an_in_range_value_is_accepted(self, raw: str) -> None:
+        validate_percent_answers([(_OI_COINSURANCE, raw)], IBV)
+
+    def test_a_schema_literal_is_accepted(self) -> None:
+        validate_percent_answers([(_MALE_COINSURANCE, "N/A")], IBV)
+
+    def test_an_unrecognized_shape_is_not_range_checked(self) -> None:
+        """Only values the formatter recognized as numeric are bounded, so a qualified
+        answer reaches the human instead of 422-ing a live intake integration."""
+        validate_percent_answers([(_OI_COINSURANCE, "20% after deductible")], IBV)
+
+    def test_blank_value_passes_through(self) -> None:
+        validate_percent_answers([(_OI_COINSURANCE, "")], IBV)
+
+    def test_non_percent_path_is_ignored(self) -> None:
+        validate_percent_answers([(_OI_COPAY, "99999")], IBV)

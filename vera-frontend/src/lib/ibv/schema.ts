@@ -241,6 +241,29 @@ export function systemFieldPaths(schema: FormSchema): Set<string> {
   return paths
 }
 
+const _percentPathsBySchema = new WeakMap<FormSchema, Set<string>>()
+
+/**
+ * Paths of every `percent`-typed leaf — the set `commitValue` canonicalizes on blur.
+ *
+ * Lives here rather than beside `dateFormatsOf` in `IbvProvider.tsx`: that one is in the
+ * provider only because `adaptDetail` needs it BEFORE `schema` state is set. This has no
+ * such caller (its only consumer is a user-driven blur, by which point `schema` is set),
+ * so it belongs with the other exported, WeakMap-cached path indexes.
+ */
+export function percentPathsOf(schema: FormSchema): Set<string> {
+  let paths = _percentPathsBySchema.get(schema)
+  if (!paths) {
+    paths = new Set(
+      allLeaves(schema)
+        .filter((leaf) => leaf.field.type === "percent")
+        .map((leaf) => leaf.path)
+    )
+    _percentPathsBySchema.set(schema, paths)
+  }
+  return paths
+}
+
 export function fieldUsageOf(
   schema: FormSchema,
   path: string,

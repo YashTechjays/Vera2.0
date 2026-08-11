@@ -686,6 +686,70 @@ async def test_token_valued_field_routes_to_review(
     assert form.enqueued_at is None  # review path must not queue the form
 
 
+_COINSURANCE_PATH = "sections.coverage.coinsurance"
+
+
+async def _add_percent_leaf(ctx: _SeedCtx) -> None:
+    """Scope a percent-typed leaf to a single test — the shared `_SCHEMA_JSON` is all
+    `text`, and adding one there would shift the completion fractions the gate tests
+    assert. Mirrors `_require_notes_and_set_threshold`."""
+    schema: Any = copy.deepcopy(_SCHEMA_JSON)
+    schema["sections"]["coverage"]["fields"]["coinsurance"] = {
+        "type": "percent",
+        "title": "Coinsurance (%)",
+        "role": "ask",
+        "required": False,
+        "validation": {"range": {"min": 0, "max": 100}},
+        "prompt": {"ask": "What is the coinsurance?"},
+    }
+    await ctx.session.execute(
+        update(SchemaVersion)
+        .where(
+            SchemaVersion.id
+            == select(PatientForm.schema_version_id)
+            .where(PatientForm.id == ctx.form_id)
+            .scalar_subquery()
+        )
+        .values(schema_json=schema)
+    )
+    await ctx.session.flush()
+
+
+async def test_topped_up_percent_is_stored_canonically(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """This top-up writer bypasses `record_answer`, so it needs its own canonicalization —
+    otherwise a gap-pass coinsurance lands as a bare "20" beside the Observer path's "20%".
+    The judge must see the canonical value too, since that is what gets stored."""
+    ctx = seeded_ai_processing_form
+    await _add_percent_leaf(ctx)
+    turns = [TranscriptTurn(0, "user", "coinsurance is twenty percent")]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(_COINSURANCE_PATH, "20", 90, 0)],
+        verdicts=[JudgeVerdict(_COINSURANCE_PATH, True, 90, "twenty percent")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    stored = (
+        await ctx.session.execute(
+            select(FieldAnswer.value).where(FieldAnswer.field_path == _COINSURANCE_PATH)
+        )
+    ).scalar_one()
+    assert stored == {"value": "20%"}
+    assert llm.judge_calls[0][0].value == "20%"
+
+
 async def test_blank_valued_field_is_never_stored(  # VR2-93
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,

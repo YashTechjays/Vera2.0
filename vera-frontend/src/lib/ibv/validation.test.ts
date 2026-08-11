@@ -5,6 +5,7 @@ import { allLeaves, createRequiredPaths, parseSchema } from "./schema"
 import {
   isoToDateFormat,
   missingCreateLeaves,
+  normalizePercentValue,
   validateAll,
   validateCreate,
   validateSection,
@@ -120,6 +121,70 @@ describe("isoToDateFormat", () => {
     expect(isoToDateFormat("N/A", "M/D/YYYY")).toBe("N/A")
     expect(isoToDateFormat("", "M/D/YYYY")).toBe("")
     expect(isoToDateFormat("1982-02-23T00:00:00", "M/D/YYYY")).toBe("1982-02-23T00:00:00")
+  })
+})
+
+describe("normalizePercentValue", () => {
+  it("appends the sign to a bare number", () => {
+    expect(normalizePercentValue("20")).toBe("20%")
+    expect(normalizePercentValue(" 20 ")).toBe("20%")
+    expect(normalizePercentValue("12.5")).toBe("12.5%")
+  })
+
+  it("is idempotent — blur fires again on tab-through of an untouched cell", () => {
+    for (const raw of ["20", "20%", "0", "12.50", "20 percent", "", "20% after deductible"]) {
+      const once = normalizePercentValue(raw)
+      expect(normalizePercentValue(once)).toBe(once)
+    }
+  })
+
+  it("gives one spelling per number", () => {
+    expect(normalizePercentValue("020")).toBe("20%")
+    expect(normalizePercentValue("12.50")).toBe("12.5%")
+    expect(normalizePercentValue("20.0")).toBe("20%")
+    expect(normalizePercentValue("0")).toBe("0%")
+  })
+
+  it("folds the spoken unit suffixes the extractor may emit", () => {
+    expect(normalizePercentValue("20 %")).toBe("20%")
+    expect(normalizePercentValue("20 percent")).toBe("20%")
+    expect(normalizePercentValue("20PCT")).toBe("20%")
+  })
+
+  it("passes blank through so a required field can still be cleared", () => {
+    // `clearedRequired` in IbvProvider blocks Save on an emptied required field; that
+    // depends on "" staying "".
+    expect(normalizePercentValue("")).toBe("")
+    expect(normalizePercentValue("   ")).toBe("   ")
+  })
+
+  it("passes non-numeric values through verbatim", () => {
+    // This is what keeps "N/A" matching `inapplicable_value` byte-for-byte, so
+    // `isDeclaredLegal` still short-circuits validation for the male-partner leaves.
+    expect(normalizePercentValue("N/A")).toBe("N/A")
+    expect(normalizePercentValue("None")).toBe("None")
+    expect(normalizePercentValue("$20")).toBe("$20")
+    expect(normalizePercentValue("20-30%")).toBe("20-30%")
+    expect(normalizePercentValue("20% after deductible")).toBe("20% after deductible")
+    expect(normalizePercentValue("twenty percent")).toBe("twenty percent")
+  })
+
+  it("does not clamp, so the range check still flags an out-of-range value", () => {
+    expect(normalizePercentValue("150")).toBe("150%")
+    expect(
+      validateAll(schema, { [COVERED]: "Yes", [COINSURANCE]: normalizePercentValue("150") })[
+        COINSURANCE
+      ],
+    ).toBeTruthy()
+  })
+
+  it("does not rescale a fraction (the Apps Script 0.2 hazard stays upstream)", () => {
+    expect(normalizePercentValue("0.2")).toBe("0.2%")
+  })
+
+  it("produces a value the validator accepts", () => {
+    const values = { [COVERED]: "Yes", [COINSURANCE]: normalizePercentValue("20") }
+    expect(validateAll(schema, values)[COINSURANCE]).toBeUndefined()
   })
 })
 

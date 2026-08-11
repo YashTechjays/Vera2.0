@@ -55,6 +55,7 @@ from vera_core.forms.conditions import (
     routing_branch_fills,
 )
 from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.intake import normalize_percent_value, percent_leaf_paths
 from vera_core.forms.review import dispute_view
 from vera_core.models import Call, CallEvent, PatientForm, SchemaVersion
 from vera_core.models.audit_log import ActorType, AuditEvent
@@ -145,6 +146,26 @@ def _retry_young_or_drop(room_name: str, ts_ms: int) -> None:
     voice-lab room. Raises `_RetryEventLater` in the retry case; returns otherwise."""
     if _event_is_young(ts_ms):
         raise _RetryEventLater(room_name)
+
+
+def _safe_doc(schema_json: Mapping[str, Any]) -> FormSchemaDoc | None:
+    """The form's pinned document, or None for a v1 / unparseable schema.
+
+    Fail-soft on purpose: both things this feeds on the answer path (percent
+    canonicalization, the either/or fill) refine an answer that is already written, and
+    raising here would leave the Redis Streams event unacked and stall the whole answer
+    stream on reclaim. Logs the exception TYPE only — a pydantic ValidationError's message
+    embeds the document verbatim."""
+    if not is_v2(schema_json):
+        return None
+    try:
+        return FormSchemaDoc.model_validate(schema_json)
+    except Exception as exc:
+        logger.warning(
+            "answer normalization and alternatives fill skipped, schema invalid (%s)",
+            type(exc).__name__,
+        )
+        return None
 
 
 class WorkerEventConsumer:
@@ -479,24 +500,18 @@ class WorkerEventConsumer:
         form_id: UUID,
         call_id: UUID,
         answered: str,
-        schema_json: Mapping[str, Any],
+        doc: FormSchemaDoc | None,
     ) -> None:
         """Record the unused side of an either/or the answer just satisfied — see
         `alternative_fills`, which owns what may be written and refuses anything unsafe.
 
         Written as `ai_call` because it is derived from a call answer, so `record_answer`'s replay
-        and no-blank guards make a redelivery a no-op.
+        and no-blank guards make a redelivery a no-op. The values written are the leaves' own
+        authored `inapplicable_value`s, which are already canonical, so they need no normalizing.
 
-        Worker-safe like `recompute_form_projection`: the answer itself is already written, and a
-        cosmetic fill must never raise here — an exception leaves the event unacked and stalls the
-        whole answer stream on reclaim. A schema that will not validate just skips the fill."""
-        if not is_v2(schema_json):
-            return  # v1 has no `alternatives` concept
-        try:
-            doc = FormSchemaDoc.model_validate(schema_json)
-        except Exception as exc:
-            # Type name only — a pydantic ValidationError's message embeds the document verbatim.
-            logger.warning("alternatives fill skipped, schema invalid (%s)", type(exc).__name__)
+        `doc` is None for a v1 schema (no `alternatives` concept) or one that will not validate —
+        `_safe_doc` owns that fail-soft decision, since the caller needs the same document."""
+        if doc is None:
             return
         # Pair membership needs no values, but a routing fill can be triggered by ANY leaf under a
         # branch, so the snapshot is only skippable when neither applies.
@@ -545,24 +560,37 @@ class WorkerEventConsumer:
             ).scalar_one_or_none()
             if form is None:
                 return  # form deleted
+            # Read BEFORE the write (it used to follow it) because the answer's canonical
+            # form is schema-derived. The control plane owns `field_answer`, so it — not the
+            # separately deployed worker — is where a value is canonicalized: a rolled-back
+            # worker would otherwise persist uncanonical values forever, after the one-time
+            # backfill migration has already run.
+            version = (
+                await session.execute(
+                    select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+                )
+            ).scalar_one()
+            doc = _safe_doc(version.schema_json)
+            # Canonicalized ONCE and reused by all three consumers below (the row, the live
+            # dispute, the SSE frame). Normalizing only the row would leave Live Monitoring
+            # showing a bare "20" against a "20%" row, and would have `dispute_view` compare
+            # an uncanonical value against a canonical baseline — a false dispute.
+            value = event.value
+            if doc is not None and (rule := percent_leaf_paths(doc).get(event.field_path)):
+                value = normalize_percent_value(value, rule)
             wrote = await record_answer(
                 session,
                 tenant_id=ref.tenant_id,
                 form_id=form.id,
                 call_id=call.id,
                 field_path=event.field_path,
-                raw_value=event.value,
+                raw_value=value,
                 source=AnswerSource.AI_CALL.value,
                 confidence=event.confidence,
                 evidence_seq=event.evidence_seq,
             )
             if not wrote:
                 return  # idempotent redelivery — value already current
-            version = (
-                await session.execute(
-                    select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
-                )
-            ).scalar_one()
             # Before the projection, so completion_pct counts the fills this answer closes out.
             await self._fill_alternatives(
                 session,
@@ -570,7 +598,7 @@ class WorkerEventConsumer:
                 form_id=form.id,
                 call_id=call.id,
                 answered=event.field_path,
-                schema_json=version.schema_json,
+                doc=doc,
             )
             await recompute_form_projection(session, form, version.schema_json)
             await self._audit.emit(
@@ -594,7 +622,7 @@ class WorkerEventConsumer:
             # Everything the relay needs, read while the row is still live in this session.
             dispute = dispute_view(
                 source=AnswerSource.AI_CALL.value,
-                value=event.value,
+                value=value,
                 confidence=event.confidence,
                 evidence=None,
                 baseline_value=await baseline_value(session, form.id, event.field_path),
@@ -605,7 +633,7 @@ class WorkerEventConsumer:
         await self._call_stream.publish_field_answer(
             event.room_name,
             field_path=event.field_path,
-            value=event.value,
+            value=value,
             confidence=event.confidence,
             evidence_seq=event.evidence_seq,
             completion_pct=completion_pct,

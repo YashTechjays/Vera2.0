@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 from uuid import UUID
 
@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.intake import normalize_percent_value, percent_leaf_paths
 from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
     form_completion_pct,
@@ -337,6 +338,17 @@ async def evaluate_call(
     # inserts for one path would violate the fa_current_uq partial unique index
     # (the batch demote runs before the inserts) and poison-loop the job.
     clean = list({ef.field_path: ef for ef in clean}.values())
+    # Canonicalize percents before BOTH the write and the judge pass, so this top-up
+    # writer agrees with the Observer path (`worker_events`) on stored shape and the judge
+    # sees the value that will actually be stored. `normalize_percent_value` never raises —
+    # an exception here would poison-loop the job (see this module's docstring).
+    percent_rules = percent_leaf_paths(doc)
+
+    def canonicalized(ef: ExtractedField) -> ExtractedField:
+        rule = percent_rules.get(ef.field_path)
+        return ef if rule is None else replace(ef, value=normalize_percent_value(ef.value, rule))
+
+    clean = [canonicalized(ef) for ef in clean]
     # Demote the outgoing current rows in one statement BEFORE adding their
     # replacements, so the merge invariant (one current row per path) holds at flush.
     await _demote_current(session, form_id, [ef.field_path for ef in clean])

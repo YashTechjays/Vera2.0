@@ -8,6 +8,7 @@ monkeypatched per-test via `_consumer()`, which routes queries through a
 """
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ import control_plane.worker_events as worker_events
 from control_plane.call_closeout import TERMINAL_VALUES
 from control_plane.livekit_gateway import LiveKitGateway
 from control_plane.worker_events import WorkerEventConsumer
+from tests.unit.forms.test_call_plan import IBV
 from vera_core.audit import AuditRecord
 from vera_core.call_stream import CallStreamEvent
 from vera_core.events import (
@@ -1133,6 +1135,112 @@ async def test_answer_recorded_publishes_null_dispute_when_matching_baseline(
     assert wired.call_stream.field_answers[0]["dispute"] is None
 
 
+_PCT_PATH = "sections.infertility_treatment.ovulation_induction.coinsurance"
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_canonicalizes_a_percent_for_all_three_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare "20" from the extractor is stored, disputed and relayed as "20%".
+
+    All three must agree: normalizing only the DB row would leave Live Monitoring showing
+    "20" against a "20%" row, and would have `dispute_view` compare an uncanonical value
+    against a canonical baseline — a false dispute on the live path only.
+    """
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    form = _form_row(tenant_id, form_id)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        schema_version=SchemaVersion(
+            id=form.schema_version_id,
+            schema_json=json.loads(IBV.model_dump_json(exclude_none=True)),
+        ),
+    )
+    redis = _FakeRedis()
+    wired = _consumer(monkeypatch, redis, _FakeLiveKit(), session=session)
+
+    # A list, not a dict: the real document also activates the either/or fill, whose own
+    # record_answer calls would otherwise clobber the one under test.
+    writes: list[dict[str, Any]] = []
+
+    async def _capture(sess: Any, **kwargs: Any) -> bool:
+        writes.append(kwargs)
+        return True
+
+    async def _recompute(sess: Any, f: Any, schema_json: Any) -> None:
+        return None
+
+    async def _baseline(sess: Any, fid: Any, path: str) -> Any:
+        return {"value": "30%"}  # differs, so a dispute is built and we can inspect it
+
+    async def _no_values(sess: Any, fid: Any) -> dict[str, Any]:
+        return {}  # the fill reads these; the fake session has no FieldAnswer route
+
+    monkeypatch.setattr(worker_events, "record_answer", _capture)
+    monkeypatch.setattr(worker_events, "recompute_form_projection", _recompute)
+    monkeypatch.setattr(worker_events, "baseline_value", _baseline)
+    monkeypatch.setattr(worker_events, "current_values_by_path", _no_values)
+
+    event = CallAnswerRecordedEvent(
+        room_name=room_name_for_call(tenant_id, call_id), field_path=_PCT_PATH, value="20", ts=1
+    )
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    frame = wired.call_stream.field_answers[0]
+    answer = next(w for w in writes if w["field_path"] == _PCT_PATH)
+    assert answer["raw_value"] == "20%"  # the persisted row
+    assert frame["value"] == "20%"  # the SSE frame
+    assert frame["dispute"]["current_value"] == "20%"  # the live dispute
+
+
+@pytest.mark.asyncio
+async def test_answer_recorded_leaves_a_non_percent_answer_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The normalizer is keyed on `leaf.type`, so an enum answer is stored verbatim."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    form = _form_row(tenant_id, form_id)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        schema_version=SchemaVersion(
+            id=form.schema_version_id,
+            schema_json=json.loads(IBV.model_dump_json(exclude_none=True)),
+        ),
+    )
+    wired = _consumer(monkeypatch, _FakeRedis(), _FakeLiveKit(), session=session)
+
+    covered = "sections.infertility_treatment.ovulation_induction.covered"
+    writes: list[dict[str, Any]] = []
+
+    async def _capture(sess: Any, **kwargs: Any) -> bool:
+        writes.append(kwargs)
+        return True
+
+    async def _recompute(sess: Any, f: Any, schema_json: Any) -> None:
+        return None
+
+    async def _baseline(sess: Any, fid: Any, path: str) -> Any:
+        return None
+
+    async def _no_values(sess: Any, fid: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(worker_events, "record_answer", _capture)
+    monkeypatch.setattr(worker_events, "recompute_form_projection", _recompute)
+    monkeypatch.setattr(worker_events, "baseline_value", _baseline)
+    monkeypatch.setattr(worker_events, "current_values_by_path", _no_values)
+
+    event = CallAnswerRecordedEvent(
+        room_name=room_name_for_call(tenant_id, call_id), field_path=covered, value="Yes", ts=1
+    )
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert next(w for w in writes if w["field_path"] == covered)["raw_value"] == "Yes"
+
+
 @pytest.mark.asyncio
 async def test_answer_recorded_skips_publish_for_terminal_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -1175,8 +1283,13 @@ async def test_answer_recorded_noop_skips_recompute_and_audit(
 ) -> None:
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
+    form = _form_row(tenant_id, form_id)
+    # The schema version is read BEFORE the write now (the answer's canonical form is
+    # schema-derived), so even a redelivery no-op resolves it.
     session = _FakeSession(
-        call=_call_row(tenant_id, call_id, form_id), form=_form_row(tenant_id, form_id)
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        schema_version=SchemaVersion(id=form.schema_version_id, schema_json={"dsl_version": "2.1"}),
     )
     redis, livekit = _FakeRedis(), _FakeLiveKit()
     wired = _consumer(monkeypatch, redis, livekit, session=session)

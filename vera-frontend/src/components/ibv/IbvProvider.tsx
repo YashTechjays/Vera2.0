@@ -13,6 +13,7 @@ import { toast } from "sonner"
 import {
   isoToDateFormat,
   missingCreateLeaves,
+  normalizePercentValue,
   validateAll,
   validateCreate,
   type ValidationErrors,
@@ -25,6 +26,7 @@ import {
   isSatisfied,
   leafByPath,
   parseSchema,
+  percentPathsOf,
 } from "@/lib/ibv/schema"
 import {
   activeDisputeValue,
@@ -70,6 +72,11 @@ type IbvContextValue = {
   schema: FormSchema | null
   values: FormValues
   setValue: (path: string, value: string) => void
+  /** The user left a cell: canonicalize a typed unit (a `percent` leaf gains its "%") so
+   *  the column reads one way mid-session, before any save round-trip. A no-op for every
+   *  other leaf type, and a no-op when the value is already canonical — so tabbing through
+   *  an untouched form never marks it dirty. */
+  commitValue: (path: string, value: string) => void
   /** Apply an AI-extracted answer pushed live over SSE (Live Monitoring). Updates
    *  the value WITHOUT marking the form dirty, and skips any field the supervisor
    *  has edited this session so an agent fill never clobbers a manual correction.
@@ -325,6 +332,7 @@ export function IbvProvider({
     [schema],
   )
 
+
   // Required/applicable fields the reviewer emptied in THIS session (had a value on
   // load, now blank). Saving is blocked on these — the reported defect is "mandatory
   // fields cleared after upload". Computed directly (not from `errors`) so it counts
@@ -555,6 +563,19 @@ export function IbvProvider({
     createIdempotencyKeyRef.current = null
   }, [])
 
+  const commitValue = useCallback(
+    (path: string, value: string) => {
+      // `percentPathsOf` is WeakMap-cached per schema, so no useMemo is needed here.
+      const isPercent = schema !== null && percentPathsOf(schema).has(path)
+      const next = isPercent ? normalizePercentValue(value) : value
+      // The equality guard is load-bearing: without it, blur on an untouched cell would
+      // call setValue and so set dirty/reset saveState, enabling Save on a form nobody
+      // edited — every tab-through of a loaded form.
+      if (next !== value) setValue(path, next)
+    },
+    [schema, setValue],
+  )
+
   const applyLiveAnswer = useCallback(
     (
       expectedFormId: string,
@@ -744,6 +765,7 @@ export function IbvProvider({
     schema,
     values,
     setValue,
+    commitValue,
     applyLiveAnswer,
     errors,
     clearedRequired,

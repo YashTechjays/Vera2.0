@@ -17,6 +17,7 @@ import {
   optionsOf,
   parseSchema,
   sectionEntriesOf,
+  percentPathsOf,
   suggestionsOf,
   systemFieldPaths,
 } from "./schema"
@@ -409,4 +410,18 @@ describe("alternativeSiblings / isSatisfied", () => {
   it("owes both when neither side is answered", () => {
     expect(isSatisfied(schema, leaf("sections.svc.cpt_1.copay"), {})).toBe(false)
   })
+})
+
+describe("percentPathsOf", () => {
+  it("finds every percent leaf in the real compiled document", () => {
+    const paths = percentPathsOf(schema)
+    // Keyed on `leaf.type`, so the currency/enum siblings in the same CPT group are out.
+    expect(paths.has("sections.general_coverage.office_visits.cpt_99211.coinsurance")).toBe(true)
+    expect(paths.has("sections.general_coverage.office_visits.cpt_99211.copay")).toBe(false)
+    expect(paths.has("sections.general_coverage.office_visits.cpt_99211.covered")).toBe(false)
+    expect(paths.size).toBe(
+      allLeaves(schema).filter((leaf) => leaf.field.type === "percent").length,
+    )
+  })
+
 })

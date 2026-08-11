@@ -56,6 +56,15 @@ def test_extract_prompt_numbers_turns_and_lists_paths() -> None:
     assert "[0]" in prompt and "[1]" in prompt  # evidence_seq anchors
 
 
+def test_extract_prompt_states_the_percent_and_money_shape() -> None:
+    """This prompt carries no field metadata — only bare paths — so the unit convention
+    has to be spelled out, matching the Observer's rule in agent_worker/observer.py.
+    Storage is canonicalized on write regardless; this keeps the model from varying."""
+    prompt = build_extract_prompt(["sections.cov.coinsurance"], [])
+    assert '"20%", never "20"' in prompt
+    assert '"$20", never "20"' in prompt
+
+
 def test_parse_extract_response_maps_fields() -> None:
     data = [{"field_path": "p", "value": "in-network", "confidence": 90, "evidence_seq": 1}]
     out = parse_extract_response(data)
