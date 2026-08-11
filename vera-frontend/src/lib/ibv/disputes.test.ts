@@ -5,6 +5,9 @@ import {
   humanizeLabel,
   confidenceLevel,
   confidenceHighlightClass,
+  confidenceLabel,
+  fieldConfidenceLevel,
+  resolveConfidence,
   defaultFlags,
   activeDisputeValue,
   badgeValue,
@@ -40,8 +43,49 @@ describe("confidenceLevel", () => {
 
 describe("confidenceHighlightClass", () => {
   it("returns distinct classes per level", () => {
-    expect(confidenceHighlightClass(100)).not.toBe(confidenceHighlightClass(50))
-    expect(confidenceHighlightClass(95)).toBeTruthy()
+    expect(confidenceHighlightClass("high")).not.toBe(confidenceHighlightClass("very-low"))
+    expect(confidenceHighlightClass("medium")).toBeTruthy()
+  })
+})
+
+describe("resolveConfidence", () => {
+  it("prefers the judge's verdict over the capture score", () => {
+    expect(resolveConfidence(90, { confidence: 100, supported: true })).toEqual({
+      score: 100,
+      source: "judge",
+      supported: true,
+    })
+  })
+
+  it("falls back to the capture score when the judge has not run", () => {
+    expect(resolveConfidence(90, null)).toEqual({
+      score: 90,
+      source: "captured",
+      supported: true,
+    })
+  })
+})
+
+describe("fieldConfidenceLevel", () => {
+  it("never lets a rejected value take a passing level", () => {
+    expect(fieldConfidenceLevel(resolveConfidence(90, { confidence: 95, supported: false }))).toBe(
+      "very-low"
+    )
+  })
+})
+
+describe("confidenceLabel", () => {
+  it("names the pass that produced the number", () => {
+    expect(confidenceLabel(resolveConfidence(90, { confidence: 100, supported: true }))).toBe(
+      "judge 100% · high"
+    )
+    expect(confidenceLabel(resolveConfidence(90, null))).toBe("captured 90% · medium")
+  })
+
+  it("drops the number on an unsupported verdict", () => {
+    expect(confidenceLabel(resolveConfidence(90, { confidence: 95, supported: false }))).toBe(
+      "judge · unsupported"
+    )
   })
 })
 

@@ -9,9 +9,11 @@ import {
 import {
   badgeValue,
   confidenceChipClass,
-  confidenceLevel,
+  confidenceLabel,
+  fieldConfidenceLevel,
   type Dispute,
   type DisputeFlags,
+  type FieldConfidence,
 } from "@/lib/ibv/disputes"
 
 /** ✓ apply (teal) → ↶ unapply (green) for a disputed field. */
@@ -67,10 +69,12 @@ const BADGE_VALUE_MAX_CHARS = 10
 export function DisputeBadge({
   value,
   dispute,
+  confidence,
   label = "Prior",
 }: {
   value: string
   dispute: Dispute
+  confidence: FieldConfidence
   /** "" renders a bare-value chip — the blue styling alone still reads as "prior" */
   label?: string
 }) {
@@ -87,7 +91,7 @@ export function DisputeBadge({
         </span>
       </TooltipTrigger>
       <TooltipContent>
-        <DisputeTooltipBody dispute={dispute} />
+        <DisputeTooltipBody dispute={dispute} confidence={confidence} />
       </TooltipContent>
     </Tooltip>
   )
@@ -95,6 +99,8 @@ export function DisputeBadge({
 
 type DisputeControlsProps = {
   dispute: Dispute
+  /** the one score shown for this field — judge verdict, else capture score */
+  confidence: FieldConfidence
   flags: DisputeFlags
   /** absolute placement of the cluster inside the input box */
   className: string
@@ -110,6 +116,7 @@ type DisputeControlsProps = {
  */
 export function CompactDisputeControls({
   dispute,
+  confidence,
   flags,
   className,
   onSwap,
@@ -125,7 +132,7 @@ export function CompactDisputeControls({
         </div>
       </TooltipTrigger>
       <TooltipContent>
-        <DisputeTooltipBody dispute={dispute} />
+        <DisputeTooltipBody dispute={dispute} confidence={confidence} />
       </TooltipContent>
     </Tooltip>
   )
@@ -134,6 +141,7 @@ export function CompactDisputeControls({
 /** Wide cells: swap/apply plus an inline chip of the alternative value. */
 export function InlineDisputeControls({
   dispute,
+  confidence,
   flags,
   className,
   onSwap,
@@ -152,6 +160,7 @@ export function InlineDisputeControls({
       <DisputeBadge
         value={badgeValue(dispute, flags)}
         dispute={dispute}
+        confidence={confidence}
         label={bareBadge ? "" : label}
       />
     </div>
@@ -159,17 +168,23 @@ export function InlineDisputeControls({
 }
 
 /** Tooltip body: confidence chip + evidence + reasoning. */
-export function DisputeTooltipBody({ dispute }: { dispute: Dispute }) {
+export function DisputeTooltipBody({
+  dispute,
+  confidence,
+}: {
+  dispute: Dispute
+  confidence: FieldConfidence
+}) {
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2">
         <span
           className={cn(
             "rounded px-1.5 py-0.5 text-[10px] font-semibold",
-            confidenceChipClass(dispute.confidence)
+            confidenceChipClass(fieldConfidenceLevel(confidence))
           )}
         >
-          {dispute.confidence ?? "—"}% · {confidenceLevel(dispute.confidence)}
+          {confidenceLabel(confidence)}
         </span>
       </div>
       <div>

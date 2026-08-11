@@ -30,12 +30,14 @@ import {
   activeDisputeValue,
   applyAllFlags,
   defaultFlags,
+  resolveConfidence,
   toggleApplied,
   toggleSwapped,
   type Dispute,
   type DisputeFlagMap,
   type DisputeFlags,
   type DisputeMap,
+  type FieldConfidence,
 } from "@/lib/ibv/disputes"
 import { canApplyLiveAnswer } from "@/lib/ibv/liveAnswers"
 import type { FormSchema, FormValues, LeafField } from "@/lib/ibv/types"
@@ -129,6 +131,9 @@ type IbvContextValue = {
   formId: string | null
   /** Returns the provenance record for a field path, or null if absent. */
   provenanceFor: (path: string) => FieldProvenance | null
+  /** The one confidence a field displays — judge verdict when it has run, else the
+   *  capture score. See `resolveConfidence`. */
+  confidenceFor: (path: string) => FieldConfidence
   /** Open a real patient form by id, loaded (always refetched) from the API. */
   openFormById: (formId: string) => void
   /** Open the modal over the form already loaded — no refetch, no state reset. For a
@@ -740,6 +745,12 @@ export function IbvProvider({
     [provenance],
   )
 
+  const confidenceFor = useCallback(
+    (path: string) =>
+      resolveConfidence(disputes[path]?.confidence, provenance[path]?.judge),
+    [disputes, provenance],
+  )
+
   const value: IbvContextValue = {
     schema,
     values,
@@ -774,6 +785,7 @@ export function IbvProvider({
     modalOpen,
     formId,
     provenanceFor,
+    confidenceFor,
     openFormById,
     openLoadedForm,
     loadFormById,

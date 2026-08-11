@@ -33,8 +33,23 @@ from vera_core.forms.intake import (
     promote_columns,
     resolve_path,
 )
-from vera_core.models import FieldAnswer, FormSchema, PatientForm, SchemaVersion, Tenant
-from vera_core.models.enums import AnswerSource, FormStatus, InsuranceType, VersionStatus
+from vera_core.models import (
+    Call,
+    FieldAnswer,
+    FieldEvaluation,
+    FormSchema,
+    PatientForm,
+    SchemaVersion,
+    Tenant,
+)
+from vera_core.models.enums import (
+    AnswerSource,
+    CallMode,
+    CallStatus,
+    FormStatus,
+    InsuranceType,
+    VersionStatus,
+)
 
 _DIGIT_PATTERN = re.compile(r"^\^\[0-9\]\{(\d+)\}\$$")
 
@@ -107,25 +122,40 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     },
 }
 
-# (section_key, field_key) -> (ai_call_value, confidence, evidence): EXCEPTION_REVIEW
+# (section_key, field_key) -> (ai_call_value, confidence, evidence, judge): EXCEPTION_REVIEW
 # only. Each becomes an INTAKE baseline (the `_OVERRIDES`/generic-fill value, superseded)
 # plus a diverging current AI_CALL answer — the dispute signal `is_disputed` reads
 # (`vera_core.forms.review`).
-_DISPUTES: dict[tuple[str, str], tuple[str, int, str]] = {
+#
+# `judge` is the post-call verdict (confidence, supported) persisted as a
+# `field_evaluation`, or None for an answer the judge never reached. The four entries
+# below deliberately cover every state the reviewer's confidence chip can render:
+# judge-supported high, judge-supported medium, judge-REJECTED (whose score must not
+# colour the field), and no verdict at all (falls back to the capture score).
+_DISPUTES: dict[tuple[str, str], tuple[str, int, str, tuple[int, bool] | None]] = {
     ("insurance_information", "doctor_inside_network"): (
         "No",
         92,
         "representative said the doctor is out-of-network this year",
+        (100, True),
     ),
     ("benefit_coverage", "coverage_type"): (
         "Individual",
         88,
         "representative corrected the policy to individual-only",
+        (92, True),
     ),
     ("hospital_information", "tax_id"): (
         "123456789",
         95,
         "representative read back a different tax ID",
+        (95, False),
+    ),
+    ("insurance_information", "policy_number"): (
+        "POL-661599",
+        85,
+        "representative gave a different policy number",
+        None,
     ),
 }
 
@@ -264,7 +294,22 @@ async def seed_patient(status: FormStatus) -> None:
             else {}
         )
 
+        # The AI answers need a call to hang off: `load_field_provenance` joins only
+        # ai_call answers whose call_id is in the attempt timeline, so a call-less
+        # seed renders no provenance and no judge verdict at all.
+        call = None
+        if disputes:
+            call = Call(
+                tenant_id=tenant_id,
+                form_id=form.id,
+                mode=CallMode.FULL.value,
+                current_status=CallStatus.COMPLETED.value,
+            )
+            session.add(call)
+            await session.flush()
+
         rows: list[FieldAnswer] = []
+        judged: list[tuple[FieldAnswer, tuple[int, bool]]] = []
         for path, raw in iter_leaf_answers(payload_root):
             dispute = disputes.get(path)
             rows.append(
@@ -278,25 +323,39 @@ async def seed_patient(status: FormStatus) -> None:
                 )
             )
             if dispute is not None:
-                ai_value, confidence, evidence = dispute
-                rows.append(
-                    FieldAnswer(
-                        tenant_id=tenant_id,
-                        form_id=form.id,
-                        field_path=path,
-                        value={"value": ai_value},
-                        source=AnswerSource.AI_CALL.value,
-                        confidence=confidence,
-                        evidence=evidence,
-                        is_current=True,
-                    )
+                ai_value, confidence, evidence, judge = dispute
+                answer = FieldAnswer(
+                    tenant_id=tenant_id,
+                    form_id=form.id,
+                    call_id=call.id if call else None,
+                    field_path=path,
+                    value={"value": ai_value},
+                    source=AnswerSource.AI_CALL.value,
+                    confidence=confidence,
+                    evidence=evidence,
+                    is_current=True,
                 )
+                rows.append(answer)
+                if judge is not None:
+                    judged.append((answer, judge))
         session.add_all(rows)
         await session.flush()
 
+        session.add_all(
+            FieldEvaluation(
+                tenant_id=tenant_id,
+                answer_id=answer.id,
+                confidence=judge_confidence,
+                supported=supported,
+                evidence=answer.evidence,
+            )
+            for answer, (judge_confidence, supported) in judged
+        )
+
         print(
             f"seeded patient_form {form.id} status={status.value} "
-            f"schema_version={version.version} field_answers={len(rows)} disputes={len(disputes)}"
+            f"schema_version={version.version} field_answers={len(rows)} "
+            f"disputes={len(disputes)} judged={len(judged)}"
         )
 
 

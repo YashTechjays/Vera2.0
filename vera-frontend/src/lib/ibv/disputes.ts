@@ -113,13 +113,56 @@ export function confidenceLevel(score?: number): ConfidenceLevel {
   return "very-low"
 }
 
+/** Which pass produced the confidence a field displays. */
+export type ConfidenceSource = "judge" | "captured"
+
+/**
+ * The single confidence a field shows. Two different numbers reach the browser:
+ * the extractor's own score, stamped when the answer was captured (live during the
+ * call, or by the post-call top-up), and the post-call judge's verdict on whether
+ * the transcript supports that value. Showing both bare — in two tooltips on one
+ * row — is what made them unreadable, so one wins and says which it is.
+ *
+ * The judge wins when it has run. That mirrors the backend: `load_field_status`
+ * gates retries on the judge's score and falls back to the extractor's, so the
+ * number on screen is now the number the system acted on.
+ */
+export type FieldConfidence = {
+  score?: number
+  source: ConfidenceSource
+  /** false only when the judge explicitly rejected the value */
+  supported: boolean
+}
+
+export function resolveConfidence(
+  captured: number | undefined,
+  judge: { confidence: number | null; supported: boolean } | null | undefined
+): FieldConfidence {
+  if (!judge) return { score: captured, source: "captured", supported: true }
+  return { score: judge.confidence ?? undefined, source: "judge", supported: judge.supported }
+}
+
+/** A judge-rejected value is always "very-low" whatever its score: the judge prompt
+ *  never says whether that number grades the value or the rejection, so trusting it
+ *  here would paint a rejected field green. */
+export function fieldConfidenceLevel(c: FieldConfidence): ConfidenceLevel {
+  return c.supported ? confidenceLevel(c.score) : "very-low"
+}
+
+/** Chip text — one number, named by the pass that produced it. An unsupported
+ *  verdict shows no number, for the reason in `fieldConfidenceLevel`. */
+export function confidenceLabel(c: FieldConfidence): string {
+  if (!c.supported) return "judge · unsupported"
+  return `${c.source} ${c.score ?? "—"}% · ${fieldConfidenceLevel(c)}`
+}
+
 /**
  * Tailwind border+bg+ring classes for an unresolved disputed field, by
  * confidence. Exact smart-caller-fe palette: 100% green, 90–99% yellow,
  * 80–89% amber, <80% red; unknown → base navy. Full 1px border + 2px ring.
  */
-export function confidenceHighlightClass(score?: number): string {
-  switch (confidenceLevel(score)) {
+export function confidenceHighlightClass(level: ConfidenceLevel): string {
+  switch (level) {
     case "high":
       return "border border-[#10b981] bg-[#F0FDF4] shadow-[0_0_0_2px_rgba(16,185,129,0.2)]"
     case "medium":
@@ -134,8 +177,8 @@ export function confidenceHighlightClass(score?: number): string {
 }
 
 /** Tailwind classes for the small confidence chip in the tooltip. */
-export function confidenceChipClass(score?: number): string {
-  switch (confidenceLevel(score)) {
+export function confidenceChipClass(level: ConfidenceLevel): string {
+  switch (level) {
     case "high":
       return "bg-[#10b981] text-white"
     case "medium":

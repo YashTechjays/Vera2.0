@@ -4,6 +4,7 @@ import { FieldRenderer } from "./FieldRenderer"
 import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
 import {
   confidenceHighlightClass,
+  fieldConfidenceLevel,
   type Dispute,
   type DisputeFlags,
   type DisputeMap,
@@ -85,6 +86,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
     setValue,
     errors,
     disputeFor,
+    confidenceFor,
     flagsFor,
     applyDispute,
     swapDispute,
@@ -98,6 +100,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const { path, field, gates } = cell
   const value = values[path] ?? ""
   const dispute = disputeFor(path)
+  const confidence = confidenceFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const disabledReason =
@@ -105,7 +108,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const invalidReason = errors[path]
   const showDispute = showsDispute(dispute, flags)
   const highlightClass = showDispute
-    ? confidenceHighlightClass(dispute!.confidence)
+    ? confidenceHighlightClass(fieldConfidenceLevel(confidence))
     : undefined
   const isTextarea = field.ui?.widget === "textarea"
 
@@ -137,6 +140,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
             // Buttons pinned to the first line; a 10-char chip of a paragraph is noise.
             <CompactDisputeControls
               dispute={dispute!}
+              confidence={confidence}
               flags={flags}
               className="top-1 right-1"
               canSwap={applicable}
@@ -146,6 +150,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           ) : (
             <InlineDisputeControls
               dispute={dispute!}
+              confidence={confidence}
               flags={flags}
               className="right-1"
               bareBadge={field.type === "enum"}
