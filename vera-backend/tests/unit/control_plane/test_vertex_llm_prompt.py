@@ -7,6 +7,7 @@ from control_plane import llm as llm_mod
 from control_plane.llm import (
     _JUDGE_MAX_ATTEMPTS,
     VertexLLMClient,
+    _turns_block,
     build_extract_prompt,
     build_judge_prompt,
     parse_extract_response,
@@ -76,7 +77,7 @@ def test_parse_extract_response_drops_blank_values() -> None:  # VR2-93
 def test_build_judge_prompt_includes_extracted_and_transcript() -> None:
     extracted = [ExtractedField(field_path="a.b", value="yes", confidence=80, evidence_seq=0)]
     turns = [TranscriptTurn(0, "agent", "yes, covered")]
-    prompt = build_judge_prompt(extracted, turns)
+    prompt = build_judge_prompt(extracted, _turns_block(turns))
     assert "a.b" in prompt
     assert "[0]" in prompt
 
@@ -101,7 +102,7 @@ def test_build_judge_prompt_excludes_extractor_confidence() -> None:
         )
     ]
     turns = [TranscriptTurn(0, "agent", "you are in network")]
-    prompt = build_judge_prompt(extracted, turns)
+    prompt = build_judge_prompt(extracted, _turns_block(turns))
 
     # The prompt MUST include the value and field_path and evidence_seq
     assert "in-network" in prompt
@@ -274,12 +275,10 @@ class _ConcurrencyProbeClient(VertexLLMClient):
 async def test_judge_runs_chunks_of_one_attempt_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """All chunks of one attempt must be in flight together — sequential chunk
-    execution is the latency bug this guards against (each chunk is a full
-    Gemini round-trip; a 4-chunk form paid them back-to-back). Pinning a single
-    attempt is what makes sequential execution FAIL here — with retries, a later
-    attempt would rescue the timed-out chunks against the already-set event."""
+    """Sequential chunk execution — the latency bug this guards against — deadlocks
+    against the probe's barrier and fails; concurrent chunks all start and pass."""
     monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 1)
+    # Single attempt — a retry pass would rescue timed-out chunks and mask a sequential regression.
     monkeypatch.setattr(llm_mod, "_JUDGE_MAX_ATTEMPTS", 1)
     stub = _ConcurrencyProbeClient(expected_calls=3)
     out = await stub.judge(extracted=[_ef("a"), _ef("b"), _ef("c")], turns=[])

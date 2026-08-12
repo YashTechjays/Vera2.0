@@ -52,7 +52,7 @@ def parse_extract_response(data: list[dict[str, Any]]) -> list[ExtractedField]:
     ]
 
 
-def build_judge_prompt(extracted: list[ExtractedField], turns: list[TranscriptTurn]) -> str:
+def build_judge_prompt(extracted: list[ExtractedField], turns_block: str) -> str:
     items = [
         {"field_path": e.field_path, "value": e.value, "evidence_seq": e.evidence_seq}
         for e in extracted
@@ -61,7 +61,7 @@ def build_judge_prompt(extracted: list[ExtractedField], turns: list[TranscriptTu
         "For each extracted field, decide whether the transcript SUPPORTS the value. "
         "Return exactly one entry for EVERY extracted field_path — never omit any — "
         "with supported (bool), 0-100 confidence, and a short evidence quote.\n\n"
-        f"extracted:\n{json.dumps(items)}\n\ntranscript:\n{_turns_block(turns)}"
+        f"extracted:\n{json.dumps(items)}\n\ntranscript:\n{turns_block}"
     )
 
 
@@ -161,11 +161,11 @@ class VertexLLMClient(LLMClient):
         return parse_extract_response(data)
 
     async def _judge_chunk(
-        self, chunk: tuple[ExtractedField, ...], turns: list[TranscriptTurn]
+        self, chunk: tuple[ExtractedField, ...], turns_block: str
     ) -> list[JudgeVerdict]:
         chunk_paths = [ef.field_path for ef in chunk]
         data = await self._generate(
-            build_judge_prompt(list(chunk), turns), _judge_schema(chunk_paths)
+            build_judge_prompt(list(chunk), turns_block), _judge_schema(chunk_paths)
         )
         # ignore reworded/stray paths
         return [v for v in parse_judge_response(data) if v.field_path in chunk_paths]
@@ -177,15 +177,15 @@ class VertexLLMClient(LLMClient):
             return []
         by_path: dict[str, JudgeVerdict] = {}
         last_error: Exception | None = None
+        turns_block = _turns_block(turns)
         for _ in range(_JUDGE_MAX_ATTEMPTS):
             pending = [ef for ef in extracted if ef.field_path not in by_path]
             if not pending:
                 break
             chunks = list(batched(pending, _JUDGE_CHUNK_SIZE))
-            # gather, not TaskGroup: one failed chunk must not cancel its siblings —
-            # the salvage contract keeps every other chunk's verdicts.
+            # gather, not TaskGroup: a failed chunk must not cancel its siblings (salvage contract).
             results = await asyncio.gather(
-                *(self._judge_chunk(chunk, turns) for chunk in chunks),
+                *(self._judge_chunk(chunk, turns_block) for chunk in chunks),
                 return_exceptions=True,
             )
             progressed = False
