@@ -13,6 +13,7 @@ import { toast } from "sonner"
 import {
   isoToDateFormat,
   missingCreateLeaves,
+  declaredLegalValues,
   normalizePercentValue,
   validateAll,
   validateCreate,
@@ -26,7 +27,6 @@ import {
   isSatisfied,
   leafByPath,
   parseSchema,
-  percentPathsOf,
 } from "@/lib/ibv/schema"
 import {
   activeDisputeValue,
@@ -565,15 +565,27 @@ export function IbvProvider({
 
   const commitValue = useCallback(
     (path: string, value: string) => {
-      // `percentPathsOf` is WeakMap-cached per schema, so no useMemo is needed here.
-      const isPercent = schema !== null && percentPathsOf(schema).has(path)
-      const next = isPercent ? normalizePercentValue(value) : value
-      // The equality guard is load-bearing: without it, blur on an untouched cell would
-      // call setValue and so set dirty/reset saveState, enabling Save on a form nobody
-      // edited — every tab-through of a loaded form.
-      if (next !== value) setValue(path, next)
+      // One WeakMap-cached lookup gives both the type and the declared literals, so no
+      // separate percent-path index (and no useMemo) is needed.
+      const leaf = schema === null ? undefined : leafByPath(schema).get(path)
+      if (leaf?.field.type !== "percent") return
+      const next = normalizePercentValue(value, declaredLegalValues(leaf.field))
+      if (next === value) return
+
+      // Whether this counts as a human edit depends on whether the reviewer actually
+      // changed anything. Canonicalizing a value they merely tabbed past must NOT set
+      // `dirty` (it would enable Save on a form nobody edited), must NOT enter
+      // `editedPathsRef` (that permanently blocks live AI answers for the cell), and must
+      // NOT reach `form_data` on the next save — where `resolve_disputes` would write a
+      // HUMAN checkpoint and a `dispute_action` attributing an adjudication that never
+      // happened (PR #82 review). A value they DID type is a real edit.
+      if (value === (originalValues[path] ?? "")) {
+        setValues((prev) => ({ ...prev, [path]: next }))
+        return
+      }
+      setValue(path, next)
     },
-    [schema, setValue],
+    [schema, originalValues, setValue],
   )
 
   const applyLiveAnswer = useCallback(

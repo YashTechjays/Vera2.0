@@ -9,6 +9,8 @@ revision's hex prefix is minted at `just makemigration` time) so the test and th
 migration cannot drift, plus:
   - a mixed-shape round trip on a real database, including a non-current history row;
   - re-running is a clean no-op (idempotency);
+  - the keyset pagination itself, forced across a chunk boundary — at fixture scale the
+    real `_CHUNK` of 5,000 would let the loop run exactly once and never advance its cursor;
   - a v1-pinned form is untouched;
   - the BYPASSRLS privilege guard, both as a pure decision and against the real
     non-superuser role, because without it FORCE RLS on `field_answer` makes the whole
@@ -17,7 +19,6 @@ migration cannot drift, plus:
 Skips without a reachable DB (see conftest)."""
 
 import importlib.util
-import json
 from collections.abc import AsyncGenerator
 from functools import cache
 from pathlib import Path
@@ -90,42 +91,46 @@ def _migration_module() -> ModuleType:
     return module
 
 
-async def _run_backfill(sessionmaker: async_sessionmaker[AsyncSession]) -> int:
-    """Mirrors upgrade()'s loop exactly, reusing the migration's own SQL and helpers.
-    Returns how many rows it rewrote, so idempotency is observable."""
+async def _run_backfill(
+    sessionmaker: async_sessionmaker[AsyncSession], *, chunk: int | None = None
+) -> tuple[int, int]:
+    """Mirrors upgrade()'s single paginated pass, reusing the migration's own SQL and
+    helpers. Returns `(rows_rewritten, chunks_fetched)` so both idempotency and the
+    pagination itself are observable — `chunk` overrides `_CHUNK` to force a boundary."""
     module = _migration_module()
-    written = 0
+    limit = module._CHUNK if chunk is None else chunk
+    written = chunks = 0
     async with sessionmaker() as session, session.begin():
         privileged = bool((await session.execute(text(module.PRIVILEGE_SQL))).scalar())
         module.abort_if_rls_would_hide_rows(privileged)
         versions = (await session.execute(text(module.SELECT_SCHEMA_VERSIONS_SQL))).all()
-        for version_id, schema_json_text in versions:
-            paths = module.percent_leaf_paths(json.loads(schema_json_text))
-            if not paths:
-                continue
-            after = UUID(int=0)
-            while rows := (
-                await session.execute(
-                    text(module.SELECT_ANSWERS_SQL),
-                    {
-                        "schema_version_id": version_id,
-                        "paths": paths,
-                        "after": after,
-                        "limit": module._CHUNK,
-                    },
-                )
-            ).all():
-                after = rows[-1][0]
-                updates = [
-                    {"id": row_id, "new": canonical}
-                    for row_id, stored in rows
-                    if (canonical := module.canonical_percent(stored)) is not None
-                    and canonical != stored
-                ]
-                if updates:
-                    await session.execute(text(module.UPDATE_ANSWER_SQL), updates)
-                    written += len(updates)
-    return written
+        version_ids, paths = module.percent_targets(versions)
+        if not version_ids:
+            return 0, 0
+        after = UUID(int=0)
+        while rows := (
+            await session.execute(
+                text(module.SELECT_ANSWERS_SQL),
+                {
+                    "schema_version_ids": version_ids,
+                    "paths": paths,
+                    "after": after,
+                    "limit": limit,
+                },
+            )
+        ).all():
+            chunks += 1
+            after = rows[-1][0]
+            updates = [
+                {"id": row_id, "new": canonical}
+                for row_id, stored in rows
+                if (canonical := module.canonical_percent(stored)) is not None
+                and canonical != stored
+            ]
+            if updates:
+                await session.execute(text(module.UPDATE_ANSWER_SQL), updates)
+                written += len(updates)
+    return written, chunks
 
 
 async def _wipe(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -321,8 +326,30 @@ class TestBackfill:
         admin_sessionmaker: async_sessionmaker[AsyncSession],
     ) -> None:
         """CI runs `alembic upgrade head` from 0001, and the dev DB may be migrated twice."""
-        first = await _run_backfill(admin_sessionmaker)
-        second = await _run_backfill(admin_sessionmaker)
+        first, _ = await _run_backfill(admin_sessionmaker)
+        second, _ = await _run_backfill(admin_sessionmaker)
 
         assert first > 0  # the fixture really did have work to do
         assert second == 0
+
+    async def test_paginates_across_the_chunk_boundary(
+        self,
+        percent_world: dict[str, UUID],
+        admin_sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """The real `_CHUNK` is 5,000, so at fixture scale the keyset loop would only ever
+        run once and its cursor advance would never be exercised. Force a boundary: with
+        chunk=1 every row is its own page, so a cursor that failed to advance would either
+        loop forever or re-fetch the same row.
+
+        Rewriting must total the same as the single-chunk run — pagination is the only
+        difference, not what gets written."""
+        paginated, chunks = await _run_backfill(admin_sessionmaker, chunk=1)
+
+        assert chunks > 1  # the loop genuinely iterated
+        assert paginated > 0
+        # Every percent row converged, exactly as the unpaginated run leaves them.
+        assert await _value(admin_sessionmaker, percent_world["bare"]) == {"value": "20%"}
+        assert await _value(admin_sessionmaker, percent_world["history"]) == {"value": "30%"}
+        # And a second pass at the same chunk size finds nothing left to do.
+        assert (await _run_backfill(admin_sessionmaker, chunk=1))[0] == 0

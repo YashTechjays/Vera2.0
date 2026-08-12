@@ -16,7 +16,7 @@ Every PHI response audits field **names** only (never values).
 
 import asyncio
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Annotated, Any, Literal, NoReturn
@@ -60,7 +60,6 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.export import build_workbook
 from vera_core.forms.intake import (
     InvalidIntakeValue,
-    PercentLeafRule,
     PromotedIdentifiers,
     date_leaf_paths,
     iter_leaf_answers,
@@ -76,7 +75,6 @@ from vera_core.forms.intake import (
     promote_columns,
     unknown_payload_paths,
     validate_enum_answers,
-    validate_percent_answers,
 )
 from vera_core.forms.review import (
     AnswerRow,
@@ -196,21 +194,6 @@ def _validate_enum_answers_or_422(answers: list[tuple[str, Any]], doc: FormSchem
         _raise_422(exc)
 
 
-def _validate_percent_answers_or_422(
-    answers: list[tuple[str, Any]],
-    doc: FormSchemaDoc,
-    rules: Mapping[str, PercentLeafRule] | None = None,
-) -> None:
-    """`validate_percent_answers`, translated to the API's validation-error contract.
-    Range enforcement lives here rather than in `normalize_percent_answers` because the
-    normalizer is deliberately total (see its docstring) — only the human-facing endpoints
-    reject an out-of-range percent; a value from the CALL becomes a dispute instead."""
-    try:
-        validate_percent_answers(answers, doc, rules)
-    except InvalidIntakeValue as exc:
-        _raise_422(exc)
-
-
 @dataclass(frozen=True)
 class CreatedPatientForm:
     """What both create paths (API-key intake, in-app create) hand back to their
@@ -261,10 +244,8 @@ async def _create_patient_form(
             )
         answers = normalize_phone_answers(answers, doc)
         answers = _normalize_date_answers_or_422(answers, doc)
-        percent_rules = percent_leaf_paths(doc)
-        answers = normalize_percent_answers(answers, doc, percent_rules)
+        answers = normalize_percent_answers(answers, doc)
         _validate_enum_answers_or_422(answers, doc)
-        _validate_percent_answers_or_422(answers, doc, percent_rules)
         promoted = _promote_or_422(dict(answers).get, doc)
     else:
         answers = list(iter_leaf_answers(intake_payload))
@@ -1047,7 +1028,7 @@ async def resolve_disputes(
     doc = _v2_doc(version.schema_json)
     phone_paths = phone_promoted_paths(doc) if doc is not None else set()
     date_paths = date_leaf_paths(doc) if doc is not None else {}
-    percent_rules = percent_leaf_paths(doc) if doc is not None else {}
+    percent_literals_by_path = percent_leaf_paths(doc) if doc is not None else {}
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
@@ -1109,10 +1090,6 @@ async def resolve_disputes(
         await session.flush()  # clear the old current before inserting the new one
         session.add(_human_answer(cur.field_path, raw))
 
-    # Rejected before the loop writes anything, so a 422 never leaves a partial edit.
-    if doc is not None:
-        _validate_percent_answers_or_422(list(body.form_data.items()), doc, percent_rules)
-
     for path, new_value in body.form_data.items():
         if path in phone_paths:
             new_value = normalize_phone_prefix(new_value)
@@ -1120,8 +1097,11 @@ async def resolve_disputes(
             new_value = _normalize_date_value_or_422(new_value, path, date_paths[path])
         # Before the `normalize_value` comparison below, so resubmitting "20" against a
         # stored "20%" is correctly a no-op rather than a spurious human checkpoint.
-        if (percent_rule := percent_rules.get(path)) is not None:
-            new_value = normalize_percent_value(new_value, percent_rule)
+        # Never rejects an out-of-range percent: the value a reviewer ACCEPTS comes back
+        # through here, so a 422 would make an implausible AI answer unadjudicatable and
+        # take the rest of their save batch down with it.
+        if (percent_literals := percent_literals_by_path.get(path)) is not None:
+            new_value = normalize_percent_value(new_value, percent_literals)
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).

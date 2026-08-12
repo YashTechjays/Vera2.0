@@ -56,13 +56,16 @@ def test_extract_prompt_numbers_turns_and_lists_paths() -> None:
     assert "[0]" in prompt and "[1]" in prompt  # evidence_seq anchors
 
 
-def test_extract_prompt_states_the_percent_and_money_shape() -> None:
+def test_extract_prompt_states_the_percent_shape_and_says_nothing_about_money() -> None:
     """This prompt carries no field metadata — only bare paths — so the unit convention
     has to be spelled out, matching the Observer's rule in agent_worker/observer.py.
-    Storage is canonicalized on write regardless; this keeps the model from varying."""
+
+    Money is deliberately absent: `currency` leaves have no normalizer and no backfill, so
+    instructing the model to switch to "$20" would change money's stored shape with nothing
+    to converge it — worse than leaving currency alone (PR #82 review)."""
     prompt = build_extract_prompt(["sections.cov.coinsurance"], [])
     assert '"20%", never "20"' in prompt
-    assert '"$20", never "20"' in prompt
+    assert "$20" not in prompt
 
 
 def test_parse_extract_response_maps_fields() -> None:

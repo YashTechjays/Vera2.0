@@ -5,6 +5,7 @@ import { allLeaves, createRequiredPaths, parseSchema } from "./schema"
 import {
   isoToDateFormat,
   missingCreateLeaves,
+  declaredLegalValues,
   normalizePercentValue,
   validateAll,
   validateCreate,
@@ -159,14 +160,38 @@ describe("normalizePercentValue", () => {
   })
 
   it("passes non-numeric values through verbatim", () => {
-    // This is what keeps "N/A" matching `inapplicable_value` byte-for-byte, so
-    // `isDeclaredLegal` still short-circuits validation for the male-partner leaves.
     expect(normalizePercentValue("N/A")).toBe("N/A")
     expect(normalizePercentValue("None")).toBe("None")
     expect(normalizePercentValue("$20")).toBe("$20")
     expect(normalizePercentValue("20-30%")).toBe("20-30%")
     expect(normalizePercentValue("20% after deductible")).toBe("20% after deductible")
     expect(normalizePercentValue("twenty percent")).toBe("twenty percent")
+  })
+
+  it("folds a declared literal to its authored spelling, case-insensitively", () => {
+    // Parity with the Python half's `_matched_literal`. Without this, a typed "n/a" stays
+    // lowercase, `isDeclaredLegal` compares byte-for-byte against the authored "N/A" and
+    // does not short-circuit, and the cell shows a false error (PR #82 review).
+    expect(normalizePercentValue("n/a", ["N/A"])).toBe("N/A")
+    expect(normalizePercentValue("N/a", ["N/A"])).toBe("N/A")
+    expect(normalizePercentValue(" n/a ", ["N/A"])).toBe("N/A")
+    expect(normalizePercentValue("none", ["N/A", "None"])).toBe("None")
+  })
+
+  it("leaves a typed literal alone when the leaf declares none", () => {
+    expect(normalizePercentValue("n/a", [])).toBe("n/a")
+  })
+
+  it("folds to a value byte-equal to the real leaf's declared literal", () => {
+    // The mechanism behind the regression: `isDeclaredLegal` compares byte-for-byte, so
+    // only the folded spelling short-circuits pattern/range for a non-numeric answer.
+    const MALE_COINS = "sections.male_partner_coverage.semen_analysis.cpt_89320.coinsurance"
+    const leaf = allLeaves(schema).find((l) => l.path === MALE_COINS)!
+    const literals = declaredLegalValues(leaf.field)
+
+    expect(literals).toContain("N/A")
+    expect(normalizePercentValue("n/a", literals)).toBe(leaf.field.inapplicable_value)
+    expect(literals).not.toContain(normalizePercentValue("n/a", []))
   })
 
   it("does not clamp, so the range check still flags an out-of-range value", () => {

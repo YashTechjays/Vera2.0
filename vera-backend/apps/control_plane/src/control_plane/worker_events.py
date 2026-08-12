@@ -151,11 +151,17 @@ def _retry_young_or_drop(room_name: str, ts_ms: int) -> None:
 def _safe_doc(schema_json: Mapping[str, Any]) -> FormSchemaDoc | None:
     """The form's pinned document, or None for a v1 / unparseable schema.
 
-    Fail-soft on purpose: both things this feeds on the answer path (percent
-    canonicalization, the either/or fill) refine an answer that is already written, and
-    raising here would leave the Redis Streams event unacked and stall the whole answer
-    stream on reclaim. Logs the exception TYPE only — a pydantic ValidationError's message
-    embeds the document verbatim."""
+    Fail-soft because both things this feeds on the answer path (percent canonicalization,
+    the either/or fill) merely refine an answer that is already written — neither is worth
+    failing the event over. Logs the exception TYPE only: a pydantic ValidationError's
+    message embeds the document verbatim.
+
+    This does NOT make the answer path stall-proof, and must not be read as doing so. For a
+    v2-but-unparseable document `recompute_form_projection` re-validates the same
+    `schema_json` unguarded (`services/field_answers.py`), so it raises a few lines later
+    anyway, the transaction rolls back, and the event is redelivered forever. That hole
+    predates this helper and is tracked separately — it is a shared worker-path concern, not
+    something to patch from here."""
     if not is_v2(schema_json):
         return None
     try:
@@ -576,8 +582,8 @@ class WorkerEventConsumer:
             # showing a bare "20" against a "20%" row, and would have `dispute_view` compare
             # an uncanonical value against a canonical baseline — a false dispute.
             value = event.value
-            if doc is not None and (rule := percent_leaf_paths(doc).get(event.field_path)):
-                value = normalize_percent_value(value, rule)
+            if doc is not None and (lits := percent_leaf_paths(doc).get(event.field_path)):
+                value = normalize_percent_value(value, lits)
             wrote = await record_answer(
                 session,
                 tenant_id=ref.tenant_id,

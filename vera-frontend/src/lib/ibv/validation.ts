@@ -6,7 +6,7 @@ import {
   isSatisfied,
   titleOf,
 } from "./schema"
-import type { FlatLeaf, FormSchema, FormValues } from "./types"
+import type { FlatLeaf, FormSchema, FormValues, LeafField } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
 export type ValidationErrors = Record<string, string>
@@ -134,16 +134,25 @@ const TRAILING_ZEROS_RE = /0+$/
  *
  * Frontend half of a parity pair with `vera_core.forms.intake.normalize_percent_value`
  * (mirrors `consistency.py`/`numericConsistencyErrors` below) — keep these in sync:
- * trim; blank passes through (`clearedRequired` depends on "" staying ""); anything not a
- * bare number passes through verbatim, which is what preserves "N/A", "None", "$20" and
- * prose, and keeps `isDeclaredLegal` matching `inapplicable_value` byte-for-byte; and it
- * is IDEMPOTENT, since blur fires again on tab-through of an untouched cell.
+ * trim; blank passes through (`clearedRequired` depends on "" staying ""); a `literals`
+ * match folds to its AUTHORED spelling; anything else passes through verbatim; and it is
+ * IDEMPOTENT, since blur fires again on tab-through of an untouched cell.
+ *
+ * `literals` is the leaf's declared-legal set (`special_values` + `default` +
+ * `inapplicable_value`), the same trio the backend's `declared_extras` uses. Folding case
+ * is load-bearing, not cosmetic: without it a reviewer typing "n/a" into a male-partner
+ * coinsurance cell keeps "n/a", `isDeclaredLegal` compares byte-for-byte against the
+ * authored "N/A" and does not short-circuit, and the cell shows a false "must be a number"
+ * on a value the backend accepts — then silently changes to "N/A" after save (PR #82).
  *
  * Deliberately does NOT clamp: "150" becomes "150%" so the range check still flags it.
  */
-export function normalizePercentValue(value: string): string {
+export function normalizePercentValue(value: string, literals: readonly string[] = []): string {
   const text = value.trim()
   if (!text) return value
+  const folded = text.toLowerCase()
+  const literal = literals.find((l) => l.toLowerCase() === folded)
+  if (literal !== undefined) return literal
   const match = PERCENT_NUMBER_RE.exec(text.replace(PERCENT_SUFFIX_RE, ""))
   if (!match) return value
   // Mirrors the Python's `match.group(1).lstrip("0") or "0"` / `.rstrip("0")` exactly.
@@ -163,15 +172,19 @@ function dateFormatRegex(format: string): RegExp {
 
 /**
  * Values legal by declaration (spec §4.4): special_values plus the declared
- * default / inapplicable_value — they bypass pattern and range checks.
+ * default / inapplicable_value. Mirrors the backend's `intake.declared_extras`; shared by
+ * `isDeclaredLegal` (which bypasses pattern/range for them) and `normalizePercentValue`
+ * (which folds a typed value to the authored spelling), so the two cannot disagree about
+ * what counts as an authored answer.
  */
-function isDeclaredLegal(leaf: FlatLeaf, value: string): boolean {
-  const f = leaf.field
-  return (
-    (f.special_values ?? []).includes(value) ||
-    value === f.default ||
-    value === f.inapplicable_value
+export function declaredLegalValues(field: LeafField): string[] {
+  return [...(field.special_values ?? []), field.default, field.inapplicable_value].filter(
+    (v): v is string => v !== undefined && v !== null
   )
+}
+
+function isDeclaredLegal(leaf: FlatLeaf, value: string): boolean {
+  return declaredLegalValues(leaf.field).includes(value)
 }
 
 function validateLeaf(

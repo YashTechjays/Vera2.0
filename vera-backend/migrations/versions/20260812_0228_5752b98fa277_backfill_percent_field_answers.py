@@ -67,14 +67,19 @@ SELECT_SCHEMA_VERSIONS_SQL = """
     WHERE (schema_json ->> 'dsl_version') LIKE '2.%'
 """
 
-# Every answer for a percent leaf of one schema_version — is_current NOT filtered, see
-# the module docstring. `->> 'value'` renders a JSON number and a JSON string alike, so a
-# legacy numeric 20 normalizes to the string "20%" like everything else.
+# Every percent-leaf answer across ALL v2 schema versions in ONE pass — `is_current` is
+# deliberately not filtered (see the module docstring). `->> 'value'` renders a JSON number
+# and a JSON string alike, so a legacy numeric 20 normalizes to "20%" like everything else.
+#
+# One pass, not one per schema_version: the `pf.schema_version_id` filter only applies after
+# the join probe, so a per-version loop cannot stop its scan early and would walk the
+# `field_answer` index once per version — tens of full passes on a real install, inside a
+# single transaction, while the control plane is stopped for the deploy.
 SELECT_ANSWERS_SQL = """
     SELECT fa.id, fa.value ->> 'value'
     FROM field_answer fa
     JOIN patient_form pf ON pf.id = fa.form_id
-    WHERE pf.schema_version_id = :schema_version_id
+    WHERE pf.schema_version_id = ANY(:schema_version_ids)
       AND fa.field_path = ANY(:paths)
       AND fa.value ->> 'value' IS NOT NULL
       AND fa.id > :after
@@ -152,34 +157,48 @@ def canonical_percent(raw: str) -> str | None:
     return f"{whole}.{frac}%" if frac else f"{whole}%"
 
 
+def percent_targets(rows: Sequence[tuple[Any, str]]) -> tuple[list[Any], list[str]]:
+    """`(schema_version_ids, percent_leaf_paths)` for every dsl 2.x document that has at
+    least one percent leaf — the union driving the single scan. Isolated from SQL execution
+    so it is unit-testable against literal rows, like `abort_if_rls_would_hide_rows`."""
+    version_ids: list[Any] = []
+    paths: set[str] = set()
+    for version_id, schema_json_text in rows:
+        found = percent_leaf_paths(json.loads(schema_json_text))
+        if found:
+            version_ids.append(version_id)
+            paths.update(found)
+    return version_ids, sorted(paths)
+
+
 def upgrade() -> None:
     conn = op.get_bind()
     abort_if_rls_would_hide_rows(bool(conn.exec_driver_sql(PRIVILEGE_SQL).scalar()))
 
-    for version_id, schema_json_text in conn.exec_driver_sql(SELECT_SCHEMA_VERSIONS_SQL).all():
-        paths = percent_leaf_paths(json.loads(schema_json_text))
-        if not paths:
-            continue
-        # The non-partial `ix_field_answer_baseline` serves this; `fa_current_uq` cannot,
-        # since it is partial on `is_current` and this deliberately spans every row.
-        after = UUID(int=0)
-        while rows := conn.execute(
-            sa.text(SELECT_ANSWERS_SQL),
-            {
-                "schema_version_id": version_id,
-                "paths": paths,
-                "after": after,
-                "limit": _CHUNK,
-            },
-        ).all():
-            after = rows[-1][0]
-            updates = [
-                {"id": row_id, "new": canonical}
-                for row_id, stored in rows
-                if (canonical := canonical_percent(stored)) is not None and canonical != stored
-            ]
-            if updates:
-                conn.execute(sa.text(UPDATE_ANSWER_SQL), updates)
+    version_ids, paths = percent_targets(conn.exec_driver_sql(SELECT_SCHEMA_VERSIONS_SQL).all())
+    if not version_ids:
+        return
+
+    # The non-partial `ix_field_answer_baseline` serves this; `fa_current_uq` cannot, since
+    # it is partial on `is_current` and this deliberately spans every row.
+    after = UUID(int=0)
+    while rows := conn.execute(
+        sa.text(SELECT_ANSWERS_SQL),
+        {
+            "schema_version_ids": version_ids,
+            "paths": paths,
+            "after": after,
+            "limit": _CHUNK,
+        },
+    ).all():
+        after = rows[-1][0]
+        updates = [
+            {"id": row_id, "new": canonical}
+            for row_id, stored in rows
+            if (canonical := canonical_percent(stored)) is not None and canonical != stored
+        ]
+        if updates:
+            conn.execute(sa.text(UPDATE_ANSWER_SQL), updates)
 
 
 def downgrade() -> None:

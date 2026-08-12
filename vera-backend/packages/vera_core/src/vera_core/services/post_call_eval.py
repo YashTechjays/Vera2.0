@@ -342,11 +342,11 @@ async def evaluate_call(
     # writer agrees with the Observer path (`worker_events`) on stored shape and the judge
     # sees the value that will actually be stored. `normalize_percent_value` never raises —
     # an exception here would poison-loop the job (see this module's docstring).
-    percent_rules = percent_leaf_paths(doc)
+    percent_literals_by_path = percent_leaf_paths(doc)
 
     def canonicalized(ef: ExtractedField) -> ExtractedField:
-        rule = percent_rules.get(ef.field_path)
-        return ef if rule is None else replace(ef, value=normalize_percent_value(ef.value, rule))
+        lits = percent_literals_by_path.get(ef.field_path)
+        return ef if lits is None else replace(ef, value=normalize_percent_value(ef.value, lits))
 
     clean = [canonicalized(ef) for ef in clean]
     # Demote the outgoing current rows in one statement BEFORE adding their
