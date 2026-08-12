@@ -33,10 +33,15 @@ describe("humanizeLabel", () => {
 
 describe("confidenceLevel", () => {
   it("maps scores at documented thresholds", () => {
+    // Each band's floor and the point just below it, so an off-by-one shift fails.
     expect(confidenceLevel(100)).toBe("high")
-    expect(confidenceLevel(95)).toBe("medium")
-    expect(confidenceLevel(85)).toBe("low")
-    expect(confidenceLevel(50)).toBe("very-low")
+    expect(confidenceLevel(95)).toBe("high")
+    expect(confidenceLevel(94)).toBe("medium")
+    expect(confidenceLevel(85)).toBe("medium")
+    expect(confidenceLevel(84)).toBe("low")
+    expect(confidenceLevel(75)).toBe("low")
+    expect(confidenceLevel(74)).toBe("very-low")
+    expect(confidenceLevel(0)).toBe("very-low")
     expect(confidenceLevel(undefined)).toBe("unknown")
   })
 })

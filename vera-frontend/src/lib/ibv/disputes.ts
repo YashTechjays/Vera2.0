@@ -105,12 +105,14 @@ export function humanizeLabel(path: string): string {
 
 export type ConfidenceLevel = "high" | "medium" | "low" | "very-low" | "unknown"
 
-/** Map a confidence score to a level (matches smart-caller-fe thresholds). */
+/** Map a confidence score to a level. The bands are 10 points wide from 95 down, so
+ *  "high" is a range rather than the single value 100 the smart-caller-fe port used —
+ *  a 99% judge verdict no longer reads the same as a 90% one. */
 export function confidenceLevel(score?: number): ConfidenceLevel {
   if (score === undefined || score === null) return "unknown"
-  if (score >= 100) return "high"
-  if (score >= 90) return "medium"
-  if (score >= 80) return "low"
+  if (score >= 95) return "high"
+  if (score >= 85) return "medium"
+  if (score >= 75) return "low"
   return "very-low"
 }
 
@@ -159,8 +161,8 @@ export function confidenceLabel(c: FieldConfidence): string {
 
 /**
  * Tailwind border+bg+ring classes for an unresolved disputed field, by
- * confidence. Exact smart-caller-fe palette: 100% green, 90–99% yellow,
- * 80–89% amber, <80% red; unknown → base navy. Full 1px border + 2px ring.
+ * confidence. smart-caller-fe palette on the confidenceLevel bands: ≥95 green,
+ * 85–94 yellow, 75–84 amber, <75 red; unknown → base navy. 1px border + 2px ring.
  */
 export function confidenceHighlightClass(level: ConfidenceLevel): string {
   switch (level) {
@@ -196,8 +198,8 @@ export function confidenceChipClass(level: ConfidenceLevel): string {
 /**
  * Demo disputes spanning every confidence color. currentValue matches the mock
  * values so the seeded display stays consistent.
- *  - 100 → green (high), 90–99 → yellow (medium), 80–89 → amber (low),
- *    <80 → red (very-low), no confidence → navy (base).
+ *  - ≥95 → green (high), 85–94 → yellow (medium), 75–84 → amber (low),
+ *    <75 → red (very-low), no confidence → navy (base).
  */
 export const mockDisputes: DisputeMap = {
   "sections.patient_information.patient_name": {
@@ -210,14 +212,14 @@ export const mockDisputes: DisputeMap = {
   "sections.insurance_information.plan_type": {
     previousValue: "POS",
     currentValue: "PPO",
-    confidence: 95,
+    confidence: 88,
     evidence: "Rep confirmed the plan type during the call.",
     reasoning: "Plan type corrected from the carrier portal during the call.",
   },
   "sections.general_coverage.office_visits.cpt_99211.covered": {
     previousValue: "No",
     currentValue: "Yes",
-    confidence: 92,
+    confidence: 78,
     evidence: "Confirmed covered for CPT 99211.",
     reasoning: "Office visit is a covered benefit.",
   },
