@@ -4,6 +4,8 @@
 **Branch context:** `fix/task-complete-and-gap-pass-question-preparatino`
 **Builds on:** `2026-08-09-lossless-call-plan-completion-design.md` (the owed set and the
 question tree it derives from)
+**Scope:** the two FRESH-CALL sites only — the `task_complete` refusal and the gap-pass system
+instruction. The focused-retry fix is a separate branch; see *Serving the retry fix*.
 
 ## Summary
 
@@ -33,7 +35,9 @@ instruction list. The refusal path simply never looked at the tree.
 
 This spec replaces field-title rendering with a **narrowed copy of that same tree**, adds an
 `explode` mode that pre-loads the follow-up questions a missing answer will open, and deletes
-the field-line renderers.
+the field-line renderers. The narrowing is deliberately built as a general
+`(task, paths) -> narrowed tree` operation rather than an owed-set-specific helper, because the
+focused-retry path needs exactly the same operation on a different path set.
 
 ---
 
@@ -91,15 +95,18 @@ turn late, which is one turn too late.
 
 | Layer | Function | File |
 |---|---|---|
-| Tree narrowing | `keep_questions(panels, wanted)` — complement of `drop_questions` | `forms/question_plan.py` |
-| Tree × descriptors | `owed_question_tree(task, paths, answers, shared, *, explode=False)` | `forms/call_plan.py` |
+| Structural narrowing | `keep_questions(panels, wanted)` — complement of `drop_questions` | `forms/question_plan.py` |
+| Tree × descriptors | `focus_questions(task, paths, answers, shared, *, explode=False)` | `forms/call_plan.py` |
 | Compact render | `render_digest(panels)` | `forms/prompting.py` |
 | Full render | `render_panels(panels)` — **unchanged** | `forms/prompting.py` |
 
-`owed_question_tree` lives in `call_plan.py` because the explode closure needs
-`PlanFieldDescriptor.gates` — the same tree × descriptor join `owed_now` already performs
-there. All four functions stay pure, DB-free and deterministic, so the worker keeps rendering
-without a `FormSchemaDoc`.
+`focus_questions` returns `list[PromptPanel]` — the narrowed tree. It lives in `call_plan.py`
+because the explode closure needs `PlanFieldDescriptor.gates`, the same tree × descriptor join
+`owed_now` already performs there. It is named for the general operation, not for the owed set,
+because the retry path will call it with a focus set instead.
+
+All four functions stay pure, DB-free and deterministic, so the worker keeps rendering without
+a `FormSchemaDoc`.
 
 `owed_questions` (`question_plan.py:681`) has no production caller — its own docstring records
 that the guards stopped counting in it — and `keep_questions` subsumes it. It is deleted in
@@ -120,6 +127,10 @@ Mirrors `drop_questions` structurally, including its two non-obvious rules:
   matching panel below"* — would name a panel that is not below. The surviving branch keeps its
   own gate, and the Observer still has `exclusive_note` for the record-N/A-not-No hazard.
 
+The rule matches `routes_between` titles against surviving sibling panel titles. That is the
+same coupling `_register_route` creates when it builds `routes_between` from those titles; it
+is not a new assumption.
+
 ### Question granularity, and the partial fan-out
 
 The narrowed tree is question-granular: an `AskGroup` is one `PromptQuestion` whose
@@ -128,11 +139,17 @@ line. That is correct for the ask — there is no per-code sentence in the tree 
 the per-code targeting today's field-granular list has. On `diagnostic_testing`, two owed codes
 out of eight would re-ask a sentence naming all eight.
 
-`PromptQuestion` gains `still_needed: list[str] = []`, stamped by `owed_question_tree` on the
-surviving copy when the owed targets are a strict subset of the question's targets and each
-maps to a distinct `cpt_` segment. `_numbered_question` renders it only when non-empty, so the
-compiler — which never sets it — produces byte-identical output and `TestPanelsMatchThePrompt`
-still holds.
+Two additions fix that without a code convention:
+
+- `PlanFieldDescriptor` gains **`owner_title`** — the title of the nearest titled ancestor
+  group, compiled from the doc. `authoring.cpt_group` already titles itself `CPT 58340`, so a
+  code axis names itself correctly, and a future fan-out over some other axis names itself
+  correctly too. No `cpt_` string parsing anywhere in the narrowing.
+- `PromptQuestion` gains **`still_needed: list[str] = []`**, stamped by `focus_questions` on the
+  surviving copy when the owed targets are a strict subset of the question's targets — the
+  `owner_title` of each owed target, deduped in target order. `_numbered_question` and
+  `render_digest` render it only when non-empty, so the compiler — which never sets it —
+  produces byte-identical output and `TestPanelsMatchThePrompt` still holds.
 
 ```
 1. Are diagnostic labs, X-ray and ultrasound services CPT codes: 58340, 82670, ... covered
@@ -140,7 +157,7 @@ still holds.
    - Answers: Yes | No | N/A
    - One question for all of these codes; apply the answer to every code the representative
      confirms: 58340, 82670, ...
-   - Still needed for: 58340, 82670.
+   - Still needed for: CPT 58340, CPT 82670.
 ```
 
 Only the `AskGroup` (fan-out) axis needs this. On the `Alternatives` (either/or) axis
@@ -242,6 +259,75 @@ The rendered block carries `{{token}}` values hydrated by `fuse_prefill`, so it 
 unloggable. Logging at all three sites stays as it is today — counts and task keys only, never
 the rendered text and never a field value.
 
+### Schema-genericity
+
+Nothing in the design reads a schema-specific name or a code convention. `disease_only` was
+checked as the negative case: 44 questions, **0 fan-outs and 0 routing questions**, so
+`still_needed` never stamps and the routing rule never fires — the narrowing degrades to a
+plain subtree filter. `ibv_standard` exercises the other end: 111 questions, 31 fan-outs, 2
+routing questions, 21 multi-option questions. Both must be covered by tests.
+
+---
+
+## Serving the retry fix (OUT OF SCOPE — later branch)
+
+`focus_call_plan` is broken and this branch deliberately leaves it alone, but the primitive
+above is shaped so the fix is a wrapper rather than a rewrite. Recording the evidence and the
+seam here so that branch does not have to rediscover either.
+
+### What is broken
+
+`focus_call_plan` narrows `task.fields` and nothing else. Measured on both schemas:
+
+```
+=== ibv_standard / task insurance_basics
+  descriptors        :  20  ->    2   (narrowed)
+  panels questions   :  16  ->   16   *** NOT NARROWED ***
+  prompt chars       :  3461 -> 3461  *** NOT NARROWED ***
+
+=== disease_only / task policy_basics
+  descriptors        :  11  ->    2   (narrowed)
+  panels questions   :  11  ->   11   *** NOT NARROWED ***
+  prompt chars       :  1878 -> 1878  *** NOT NARROWED ***
+```
+
+Two consequences:
+
+1. **A focused retry re-asks the whole task.** `_assembled_block` renders from `panels`, and
+   `_completeness_block` tells the agent *"the list above runs 1 to 16 and is the complete
+   set … call task_complete only once all 16 have been asked"*. The Observer holds 2
+   descriptors, so the other 14 answers are collected and discarded.
+2. **Descriptors are narrowed by path, but the schema asks by question.** Focused to one path
+   of an 8-member `AskGroup`, the agent speaks a question covering 8 codes with 1 descriptor
+   behind it — 7 answers with nowhere to land. `expand_to_groups` masks this today by
+   over-including whole groups.
+
+### The seam
+
+The retry fix is `focus_task(task, paths, …) -> PlanTask | None`: call `focus_questions`, then
+re-render `prompt` from `lead_in + render_panels(kept) + trailing` and derive `fields` from the
+kept questions' target paths. `focus_call_plan` becomes that mapped over tasks, dropping tasks
+with nothing kept. `_questions_at_entry` and `_completeness_block` then self-heal, because both
+count the tree they are rendered from.
+
+Three decisions this branch banks for it:
+
+- **Question-granular narrowing**, so a descriptor set can be derived from the kept questions
+  rather than guessed at.
+- **`owner_title` on `PlanFieldDescriptor`**, so a partially-focused fan-out can name its
+  members on any schema.
+- **`focus_questions` takes an arbitrary path set**, not the owed set, and `explode` is opt-in.
+  Retry will pass `explode=False`: `expand_to_groups` already pulls every collectable leaf of
+  any touched group, which is strictly coarser than the gate closure, and it stays the retry's
+  scoping policy.
+
+One question left open for that branch, because it is a product call with no bearing here:
+when a kept fan-out question can answer more paths than were requested, does the descriptor set
+widen to all of them (the rep's volunteered answer for a sibling code lands, but overwrites an
+already-collected value) or stay at the requested paths (nothing is overwritten, but those
+answers are discarded)? A task the compiler shipped no tree for must also keep today's
+path-based behavior.
+
 ---
 
 ## Testing
@@ -249,9 +335,10 @@ the rendered text and never a field value.
 | What | Where |
 |---|---|
 | `keep_questions`: routing kept at ≥2 / dropped at 1, confirm run travels with anchor, empty panels pruned, fan-out counted once | `tests/unit/forms/test_question_plan.py` |
-| `owed_question_tree`: closure reaches fixpoint, answered dependents excluded, `still_needed` only on a strict code subset | `tests/unit/forms/test_call_plan.py` |
+| `focus_questions`: closure reaches fixpoint, answered dependents excluded, `still_needed` only on a strict subset, `owner_title` labels | `tests/unit/forms/test_call_plan.py` |
 | `render_digest`: crumb printed once per panel, continuous numbering, routing line unnumbered, either/or labels present | `tests/unit/forms/test_prompting.py` |
 | `render_panels` byte-identity with `still_needed` unset | existing `TestPanelsMatchThePrompt` |
+| Both catalogs: `ibv_standard` (fan-outs + routing) and `disease_only` (neither) narrow and render | `tests/unit/forms/` |
 | Real-schema regression: the two `Cycle Limit` lines and the two `cpt_89337` lines are distinguishable | `apps/agent_worker/tests/unit/test_plan_runtime.py` |
 
 `TestFieldLines` is replaced by tests on the two refusal messages and `_gap_block`;
@@ -266,6 +353,7 @@ and a live browser-callee call is required before shipping.
 
 ## Out of scope
 
+- **`focus_call_plan` / the focused-retry path.** Separate branch; see above.
 - `gap_fields` staying field-granular. The narrowing consumes its output; changing its
   granularity is a separate decision with guard-arithmetic consequences.
 - The end-of-task confirm limitation `owed_now` documents (`confirm_in_task` with
