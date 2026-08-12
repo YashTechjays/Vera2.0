@@ -143,10 +143,21 @@ def _v2_doc(schema_json: dict[str, Any]) -> FormSchemaDoc | None:
     return FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
 
 
-def _raise_422(exc: InvalidIntakeValue) -> NoReturn:
+def _field_label(doc: FormSchemaDoc | None, field_path: str) -> str:
+    """How a validation error names a field: the leaf's schema-authored (non-PHI) title,
+    falling back to the raw path when `doc` doesn't define that leaf."""
+    if doc is None:
+        return field_path
+    return next((leaf.title for path, leaf in doc.leaf_items() if path == field_path), field_path)
+
+
+def _raise_422(exc: InvalidIntakeValue, doc: FormSchemaDoc | None) -> NoReturn:
+    """`InvalidIntakeValue`, translated to the API's validation-error contract — names the
+    field and why its value was rejected (e.g. "Plan Effective Date: must be in the format
+    M/D/YYYY"), never the submitted value (PHI)."""
     raise CustomAPIException(
         DefaultExceptionCode.VALIDATION_ERROR,
-        message="invalid field value",
+        message=f"{_field_label(doc, exc.field_path)}: {exc.reason}",
         data={"fields": [exc.field_path]},
     ) from exc
 
@@ -157,7 +168,7 @@ def _promote_or_422(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> Prom
     try:
         return promote_columns(get_value, doc)
     except InvalidIntakeValue as exc:
-        _raise_422(exc)
+        _raise_422(exc, doc)
 
 
 def _normalize_date_answers_or_422(
@@ -170,17 +181,19 @@ def _normalize_date_answers_or_422(
     try:
         return normalize_date_answers(answers, doc)
     except InvalidIntakeValue as exc:
-        _raise_422(exc)
+        _raise_422(exc, doc)
 
 
-def _normalize_date_value_or_422(value: Any, field_path: str, date_format: str | None) -> Any:
+def _normalize_date_value_or_422(
+    value: Any, field_path: str, date_format: str | None, doc: FormSchemaDoc | None
+) -> Any:
     """`normalize_date_value`, translated to the API's validation-error contract —
     the single-leaf counterpart to `_normalize_date_answers_or_422`, used when a
     dispute-resolve edit reformats one date leaf's answer to its declared format."""
     try:
         return normalize_date_value(value, field_path, date_format)
     except InvalidIntakeValue as exc:
-        _raise_422(exc)
+        _raise_422(exc, doc)
 
 
 def _validate_enum_answers_or_422(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> None:
@@ -188,7 +201,7 @@ def _validate_enum_answers_or_422(answers: list[tuple[str, Any]], doc: FormSchem
     try:
         validate_enum_answers(answers, doc)
     except InvalidIntakeValue as exc:
-        _raise_422(exc)
+        _raise_422(exc, doc)
 
 
 @dataclass(frozen=True)
@@ -1117,7 +1130,7 @@ async def resolve_disputes(
         if path in phone_paths:
             new_value = normalize_phone_prefix(new_value)
         if path in date_paths:
-            new_value = _normalize_date_value_or_422(new_value, path, date_paths[path])
+            new_value = _normalize_date_value_or_422(new_value, path, date_paths[path], doc)
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).

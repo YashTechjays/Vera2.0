@@ -49,6 +49,12 @@ def test_virtual_assistant_has_live_monitoring_and_data_management_access() -> N
         assert code in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
 
 
+def test_virtual_assistant_has_forms_export_and_recordings_read() -> None:
+    for code in ("forms:export", "recordings:read"):
+        assert code in DEFAULT_PERMISSIONS
+        assert code in SYSTEM_ROLES["VIRTUAL_ASSISTANT"]
+
+
 def test_call_audit_events_exist() -> None:
     assert AuditEvent.CALL_PUBLISH.value == "call.publish"
     assert AuditEvent.CALL_LISTEN_ONLY_JOIN.value == "call.listen-only.join"

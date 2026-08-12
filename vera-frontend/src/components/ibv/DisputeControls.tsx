@@ -108,7 +108,7 @@ type DisputeControlsProps = {
   /** the one score shown for this field — judge verdict, else capture score */
   confidence: FieldConfidence
   flags: DisputeFlags
-  /** absolute placement of the cluster inside the input box */
+  /** absolute placement of the cluster inside the input box, vertical alignment included */
   className: string
   onSwap: () => void
   onApply: () => void
@@ -117,8 +117,8 @@ type DisputeControlsProps = {
 }
 
 /**
- * Narrow cells (the 340px rail, matrix textareas): swap/apply only — there is no
- * room beside the value for a chip, so the tooltip carries prior/captured/evidence.
+ * Narrow cells (the 340px rail): swap/apply only — there is no room beside the
+ * value for a chip, so the tooltip carries prior/captured/evidence.
  */
 export function CompactDisputeControls({
   dispute,
@@ -155,12 +155,12 @@ export function InlineDisputeControls({
   bareBadge,
   canSwap,
 }: DisputeControlsProps & {
-  /** drop the chip's label — for the tightest columns (enums) */
+  /** drop the chip's label — for the tightest columns (short values) */
   bareBadge?: boolean
 }) {
   const label = flags.swapped ? "Captured" : "Prior"
   return (
-    <div className={cn("absolute top-1/2 flex -translate-y-1/2 items-center gap-1", className)}>
+    <div className={cn("absolute flex items-center gap-1", className)}>
       {canSwap && <SwapButton swapped={flags.swapped} onClick={onSwap} />}
       <ApplyButton applied={flags.applied} onClick={onApply} />
       <DisputeBadge

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react"
 import { TriangleAlert } from "lucide-react"
 
 import { Section } from "./Section"
@@ -80,6 +81,21 @@ export function SchemaForm() {
   // The document the open form is pinned to — fetched from the backend by
   // schema_version_id (IbvProvider); null until it arrives.
   const { schema } = useIbv()
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Firefox leaves an open native <select> popup at its stale screen position
+  // when an ancestor container scrolls (VR2-115); blurring dismisses it.
+  useEffect(() => {
+    const onScroll = (e: Event) => {
+      const active = document.activeElement
+      if (!(active instanceof HTMLSelectElement)) return
+      if (!rootRef.current?.contains(active)) return
+      if (e.target instanceof Node && e.target.contains(active)) active.blur()
+    }
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true })
+    return () => document.removeEventListener("scroll", onScroll, { capture: true })
+  }, [])
+
   if (!schema) return null
 
   const pick = (keys: string[]): Entry[] =>
@@ -102,7 +118,7 @@ export function SchemaForm() {
   )
 
   return (
-    <div className="flex flex-col gap-[15px]">
+    <div ref={rootRef} className="flex flex-col gap-[15px]">
       <ContradictionBanner schema={schema} />
       <div className="flex gap-5">
         {/* Two main columns fill the entire first view; the reference box sits
