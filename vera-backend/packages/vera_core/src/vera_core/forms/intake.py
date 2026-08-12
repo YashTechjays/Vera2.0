@@ -326,7 +326,7 @@ def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> Prom
             if cleaned is not None:
                 cleaned = normalize_phone_prefix(cleaned)
                 if not E164_RE.match(cleaned):
-                    raise InvalidIntakeValue(path, "must be a valid phone number")
+                    raise InvalidIntakeValue(path, "must be a valid ISO formatted phone number")
             values[column] = cleaned
         else:
             values[column] = _clean_str(raw)
