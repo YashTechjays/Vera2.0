@@ -1,6 +1,7 @@
 """Vertex AI Gemini implementation of the post-call LLMClient. Structured output;
 Flash by default. Consumes only the de-identified transcript — no raw PHI."""
 
+import asyncio
 import json
 import logging
 from itertools import batched
@@ -152,6 +153,16 @@ class VertexLLMClient(LLMClient):
         data = await self._generate(build_extract_prompt(field_paths, turns), _EXTRACT_SCHEMA)
         return parse_extract_response(data)
 
+    async def _judge_chunk(
+        self, chunk: tuple[ExtractedField, ...], turns: list[TranscriptTurn]
+    ) -> list[JudgeVerdict]:
+        chunk_paths = [ef.field_path for ef in chunk]
+        data = await self._generate(
+            build_judge_prompt(list(chunk), turns), _judge_schema(chunk_paths)
+        )
+        # ignore reworded/stray paths
+        return [v for v in parse_judge_response(data) if v.field_path in chunk_paths]
+
     async def judge(
         self, *, extracted: list[ExtractedField], turns: list[TranscriptTurn]
     ) -> list[JudgeVerdict]:
@@ -163,25 +174,28 @@ class VertexLLMClient(LLMClient):
             pending = [ef for ef in extracted if ef.field_path not in by_path]
             if not pending:
                 break
+            chunks = list(batched(pending, _JUDGE_CHUNK_SIZE))
+            # gather, not TaskGroup: one failed chunk must not cancel its siblings —
+            # the salvage contract keeps every other chunk's verdicts.
+            results = await asyncio.gather(
+                *(self._judge_chunk(chunk, turns) for chunk in chunks),
+                return_exceptions=True,
+            )
             progressed = False
-            for chunk in batched(pending, _JUDGE_CHUNK_SIZE):
-                chunk_paths = [ef.field_path for ef in chunk]
-                try:
-                    data = await self._generate(
-                        build_judge_prompt(list(chunk), turns), _judge_schema(chunk_paths)
-                    )
-                except Exception as exc:  # salvage the other chunks / prior attempts
-                    last_error = exc
+            for chunk, result in zip(chunks, results, strict=True):
+                if isinstance(result, BaseException):
+                    if not isinstance(result, Exception):
+                        raise result  # CancelledError and friends must propagate
+                    last_error = result
                     logger.warning(
                         "judge: chunk of %d field(s) failed (%s) — salvaging remaining verdicts",
                         len(chunk),
-                        type(exc).__name__,
+                        type(result).__name__,
                     )
                     continue
-                for v in parse_judge_response(data):
-                    if v.field_path in chunk_paths:  # ignore reworded/stray paths
-                        by_path[v.field_path] = v
-                        progressed = True
+                for v in result:
+                    by_path[v.field_path] = v
+                    progressed = True
             if not progressed:  # a whole failed/empty attempt — don't spin the rest
                 break
         # An error that left ANY field unjudged must surface so the caller routes to

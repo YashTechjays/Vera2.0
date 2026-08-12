@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -249,3 +250,37 @@ def test_loads_response_raises_on_empty_string() -> None:
     """_loads_response raises RuntimeError on empty string."""
     with pytest.raises(RuntimeError, match="empty LLM response"):
         _loads_response("")
+
+
+class _ConcurrencyProbeClient(VertexLLMClient):
+    """Stub whose _generate blocks until EVERY expected chunk call has started —
+    a sequential judge deadlocks here and trips the wait_for timeout."""
+
+    def __init__(self, expected_calls: int) -> None:
+        self._model = "fake-model"
+        self._expected = expected_calls
+        self._started = 0
+        self._all_started = asyncio.Event()
+
+    async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
+        self._started += 1
+        if self._started == self._expected:
+            self._all_started.set()
+        await asyncio.wait_for(self._all_started.wait(), timeout=0.5)
+        paths = cast(list[str], schema["items"]["properties"]["field_path"]["enum"])
+        return [_vd(p) for p in paths]
+
+
+async def test_judge_runs_chunks_of_one_attempt_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All chunks of one attempt must be in flight together — sequential chunk
+    execution is the latency bug this guards against (each chunk is a full
+    Gemini round-trip; a 4-chunk form paid them back-to-back). Pinning a single
+    attempt is what makes sequential execution FAIL here — with retries, a later
+    attempt would rescue the timed-out chunks against the already-set event."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 1)
+    monkeypatch.setattr(llm_mod, "_JUDGE_MAX_ATTEMPTS", 1)
+    stub = _ConcurrencyProbeClient(expected_calls=3)
+    out = await stub.judge(extracted=[_ef("a"), _ef("b"), _ef("c")], turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b", "c"]
