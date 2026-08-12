@@ -14,10 +14,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import ceil
 from typing import Any
 
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.worksheet.worksheet import Worksheet
 
 from vera_core.forms.conditions import is_applicable, is_required, leaf_gates
@@ -153,8 +155,11 @@ _BORDER_VALUE = Border(*(Side(style="thin", color=_TEAL),) * 4)
 _BORDER_GREEN = Border(*(Side(style="thin", color="1F9D57"),) * 4)
 _BOLD = Font(bold=True)
 _LABEL_FONT = Font(bold=True, color=_NAVY)
-_CENTER = Alignment(horizontal="center", vertical="center")
-_TOP_LEFT = Alignment(vertical="top", wrap_text=True)
+# Wrapping is on everywhere: a header or value too long for its column must fold,
+# never truncate. Vertical centering is what makes a rowspan band label sit beside
+# its rows instead of floating at the top of the merge.
+_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 _FILL_CONTEXT = PatternFill("solid", start_color="22C55E")  # Section.tsx bg-[#22c55e]
 _FILL_PLAIN = PatternFill("solid", start_color="EFEFEF")  # --color-ibv-label-bg
 _FILL_GRID_HEADER = PatternFill("solid", start_color="EFEFEF")  # SectionMatrix TH bg-ibv-label-bg
@@ -167,8 +172,16 @@ _FILL_LABEL_NOOP = PatternFill(patternType="lightUp", fgColor="E4E4E7", bgColor=
 
 
 def cell_str(v: Any) -> str:
-    """Coerce a field value to a spreadsheet-safe string; None → empty string."""
-    return "" if v is None else str(v)
+    """Coerce a field value to a spreadsheet-safe string; None → empty string.
+
+    An integral float loses its ``.0`` so a money column doesn't read "500.0" on one
+    row and "500" on the next. Only floats are touched — re-typing numeric-looking
+    strings would corrupt leading zeros in a policy or member ID."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
 
 
 class _Ctx:
@@ -223,7 +236,7 @@ def _style(
         c.font = font
     elif bold:
         c.font = _BOLD
-    c.alignment = _CENTER if center else _TOP_LEFT
+    c.alignment = _CENTER if center else _LEFT
 
 
 def _vmerge(ws: Worksheet, top: int, col: int, n: int) -> None:
@@ -361,6 +374,80 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
     return r - row
 
 
+# Sizing bounds, in Excel column-width units (≈ one character of the default font).
+# The cap is deliberately below the longest labels: wrapping a long label or header
+# over two lines keeps the sheet narrow enough to scan, and every cell wraps rather
+# than truncating. Past _MAX_LINES a cell scrolls instead of stretching its row.
+_MIN_WIDTH, _MAX_WIDTH, _WIDTH_PAD = 12.0, 26.0, 2.4
+_LINE_HEIGHT, _MAX_LINES = 15.0, 6
+
+
+def _spanning_cells(ws: Worksheet) -> set[tuple[int, int]]:
+    """Coordinates inside a merge that crosses columns. Their text belongs to the
+    span, not to any one column, so it must not drive that column's width. A
+    single-column vertical merge is excluded — its text really is that wide."""
+    return {
+        coord for rng in ws.merged_cells.ranges if rng.min_col != rng.max_col for coord in rng.cells
+    }
+
+
+def autofit_columns(ws: Worksheet, *, max_width: float = _MAX_WIDTH) -> None:
+    """Size every column to its own widest cell.
+
+    A fixed per-column vector cannot work here: the top band treats columns C and F
+    as spacers between its three side-by-side stacks, while every full-width grid
+    below uses those same columns for data — which is how "Coinsurance (%)" came to
+    render in a 3-wide spacer."""
+    spanning = _spanning_cells(ws)
+    widest: dict[int, int] = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is None or (cell.row, cell.column) in spanning:
+                continue
+            longest = max((len(line) for line in str(cell.value).splitlines()), default=0)
+            widest[cell.column] = max(widest.get(cell.column, 0), longest)
+    for col, chars in widest.items():
+        ws.column_dimensions[get_column_letter(col)].width = min(
+            max_width, max(_MIN_WIDTH, chars + _WIDTH_PAD)
+        )
+
+
+def _fit_row_heights(ws: Worksheet) -> None:
+    """Give rows that still wrap after autofit an explicit height.
+
+    Excel only auto-fits a wrapped row it has laid out itself, so a value longer than
+    the _MAX_WIDTH cap clips to one line in the delivered file. The line count is an
+    estimate from character count over column width."""
+    spanning = _spanning_cells(ws)
+    widths = {
+        col: ws.column_dimensions[get_column_letter(col)].width
+        for col in range(1, ws.max_column + 1)
+    }
+    for r, row in enumerate(ws.iter_rows(), start=1):
+        lines = 1
+        for cell in row:
+            if cell.value is None or (cell.row, cell.column) in spanning:
+                continue
+            width = widths.get(cell.column)
+            if width:
+                lines = max(lines, ceil(len(str(cell.value)) / width))
+        if lines > 1:
+            ws.row_dimensions[r].height = _LINE_HEIGHT * min(lines, _MAX_LINES)
+
+
+def _presentation(ws: Worksheet) -> None:
+    """Sheet-level review affordances: the form draws its own cell borders, so
+    Excel's background grid is noise; column A (labels, and the grids' Service
+    column) stays put when scrolling right."""
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "B1"
+    ws.print_options.horizontalCentered = True
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+
+
 def render_form_sheet(
     ws: Worksheet, doc: FormSchemaDoc, values: Mapping[str, Any]
 ) -> dict[str, str]:
@@ -413,7 +500,7 @@ def render_form_sheet(
             run.append(key)
     flush_run()
 
-    widths = {1: 30, 2: 22, 3: 14, 4: 30, 5: 22, 6: 3, 7: 30, 8: 22}
-    for idx, w in widths.items():
-        ws.column_dimensions[get_column_letter(idx)].width = w
+    autofit_columns(ws)
+    _fit_row_heights(ws)
+    _presentation(ws)
     return ctx.titles

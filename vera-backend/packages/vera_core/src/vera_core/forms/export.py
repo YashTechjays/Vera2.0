@@ -15,7 +15,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
-from vera_core.forms.export_form_sheet import cell_str, render_form_sheet
+from vera_core.forms.export_form_sheet import autofit_columns, cell_str, render_form_sheet
 from vera_core.services.call_provenance import CallAttempt, FieldProvenance
 
 _BOLD = Font(bold=True)
@@ -26,6 +26,13 @@ def _bold_header(ws: Worksheet, title: str) -> None:
     ws.append([])
     ws.append([title])
     ws.cell(row=ws.max_row, column=1).font = _BOLD
+
+
+def _column_headings(ws: Worksheet, headings: list[str]) -> None:
+    """Append a heading row with every cell bold — not just the first."""
+    ws.append(headings)
+    for col in range(1, len(headings) + 1):
+        ws.cell(row=ws.max_row, column=col).font = _BOLD
 
 
 def build_workbook(
@@ -50,12 +57,14 @@ def build_workbook(
         titles = {p: p for p in sorted_paths}
         for path in sorted_paths:
             form_ws.append([path, cell_str(values[path])])
+        autofit_columns(form_ws, max_width=64.0)
 
     prov_ws = cast(Worksheet, wb.create_sheet("Provenance"))
-    prov_ws.append(
-        ["Field path", "Label", "Source", "Attempt", "Mode", "Judge confidence", "Supported"]
+    _column_headings(
+        prov_ws,
+        ["Field path", "Label", "Source", "Attempt", "Mode", "Judge confidence", "Supported"],
     )
-    prov_ws.cell(row=1, column=1).font = _BOLD
+    prov_ws.freeze_panes = "A2"
     for path in sorted_paths:
         p = provenance.get(path)
         prov_ws.append(
@@ -72,7 +81,7 @@ def build_workbook(
 
     attempt_by_id = {a.id: a.attempt for a in attempts}
     _bold_header(prov_ws, "Call history")
-    prov_ws.append(["Attempt", "Mode", "Status", "Created at", "Retry of attempt"])
+    _column_headings(prov_ws, ["Attempt", "Mode", "Status", "Created at", "Retry of attempt"])
     for a in attempts:
         prov_ws.append(
             [
@@ -83,6 +92,9 @@ def build_workbook(
                 attempt_by_id.get(a.retry_of) if a.retry_of else None,
             ]
         )
+
+    # Field paths run long; the Form sheet sets its own bounds in render_form_sheet.
+    autofit_columns(prov_ws, max_width=64.0)
 
     _neutralize_formulas(wb)
     buf = BytesIO()
