@@ -121,8 +121,15 @@ def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
 
 
 class VertexLLMClient(LLMClient):
-    def __init__(self, *, project: str, location: str, model: str) -> None:
-        self._client = genai.Client(vertexai=True, project=project, location=location)
+    def __init__(
+        self, *, project: str, location: str, model: str, timeout_ms: int = 120_000
+    ) -> None:
+        self._client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+            http_options=types.HttpOptions(timeout=timeout_ms),
+        )
         self._model = model
 
     @staticmethod

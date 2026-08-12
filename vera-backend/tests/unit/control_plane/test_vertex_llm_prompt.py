@@ -284,3 +284,21 @@ async def test_judge_runs_chunks_of_one_attempt_concurrently(
     stub = _ConcurrencyProbeClient(expected_calls=3)
     out = await stub.judge(extracted=[_ef("a"), _ef("b"), _ef("c")], turns=[])
     assert sorted(v.field_path for v in out) == ["a", "b", "c"]
+
+
+def test_vertex_client_sets_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The genai client must carry a request timeout — without one, a stalled
+    Vertex call holds the form in AI_PROCESSING until the sweeper's 5-min grace."""
+    captured: dict[str, Any] = {}
+
+    class _FakeGenaiClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("control_plane.llm.genai.Client", _FakeGenaiClient)
+    VertexLLMClient(project="p", location="l", model="m", timeout_ms=45_000)
+    assert captured["http_options"].timeout == 45_000
+
+    captured.clear()
+    VertexLLMClient(project="p", location="l", model="m")
+    assert captured["http_options"].timeout == 120_000
