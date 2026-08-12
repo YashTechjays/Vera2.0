@@ -28,12 +28,13 @@ E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 
 
 class InvalidIntakeValue(ValueError):
-    """A provided value failed normalization (e.g. an unparseable date). Carries
-    the offending field **path** so the endpoint can surface it without echoing the
-    value (PHI)."""
+    """A provided value failed normalization (e.g. an unparseable date). Carries the
+    offending field **path** and a user-presentable `reason` — never the value (PHI) — so
+    the endpoint can build a 422 message naming the field and what was wrong with it."""
 
-    def __init__(self, field_path: str, reason: str = "invalid value") -> None:
+    def __init__(self, field_path: str, reason: str) -> None:
         self.field_path = field_path
+        self.reason = reason
         super().__init__(f"{field_path}: {reason}")
 
 
@@ -207,7 +208,8 @@ def _parse_date(value: Any, field_path: str, date_format: str | None = None) -> 
         parsed = parse_date_format(text, date_format)
         if parsed is not None:
             return parsed
-    raise InvalidIntakeValue(field_path, "expected an ISO date or the field's configured format")
+        raise InvalidIntakeValue(field_path, f"must be in the format {date_format}")
+    raise InvalidIntakeValue(field_path, "must be in the format YYYY-MM-DD")
 
 
 def date_leaf_paths(doc: FormSchemaDoc) -> dict[str, str | None]:
@@ -412,7 +414,7 @@ def validate_enum_answers(answers: list[tuple[str, Any]], doc: FormSchemaDoc) ->
             continue
         text = _clean_str(raw)
         if text is not None and text not in allowed:
-            raise InvalidIntakeValue(path, "value is not one of the field's declared options")
+            raise InvalidIntakeValue(path, "must be one of the field's allowed options")
 
 
 def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> PromotedIdentifiers:
@@ -441,7 +443,7 @@ def promote_columns(get_value: Callable[[str], Any], doc: FormSchemaDoc) -> Prom
             if cleaned is not None:
                 cleaned = normalize_phone_prefix(cleaned)
                 if not E164_RE.match(cleaned):
-                    raise InvalidIntakeValue(path, "expected an E.164 phone number")
+                    raise InvalidIntakeValue(path, "must be a valid ISO formatted phone number")
             values[column] = cleaned
         else:
             values[column] = _clean_str(raw)

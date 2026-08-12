@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
+import { InlineDisputeControls } from "./DisputeControls"
 import {
   confidenceHighlightClass,
   type Dispute,
@@ -14,38 +14,47 @@ import type { LeafField } from "@/lib/ibv/types"
 
 const TH = "border border-ibv-input-border bg-ibv-label-bg px-2 py-0.5 font-bold"
 
-/** Room reserved inside the input so the dispute cluster never covers the value. */
-function disputeGutter(field: LeafField): string {
-  // textarea padding applies to EVERY line, so long-text cells reserve buttons only
-  if (field.ui?.widget === "textarea") return "50px"
-  if (field.type === "enum") return "90px"
-  return "150px"
+// ICD-10 / CPT cells are static text (never disputed), so they keep one width in
+// both flavours instead of widening with the dispute chips. min-w (not w): a plain
+// width gets squeezed once the disputed columns' min-widths overflow the container.
+const ICD_WIDTH = "min-w-[90px]"
+const CPT_WIDTH = "min-w-[110px]"
+
+/** Short values (Yes/No, money, percent, count) read fine as a bare blue chip, so
+ *  their cells reserve less room than a labeled "Prior:" chip needs. */
+function usesBareBadge(field: LeafField): boolean {
+  return ["enum", "currency", "percent", "integer"].includes(field.type)
 }
 
-/** Yes/No columns need less room than text/money for value + controls + chip. */
-function isEnumColumn(table: SectionTable, key: string): boolean {
-  return table.groups.some((g) => g.rows.some((r) => r.cells[key]?.field.type === "enum"))
+/** Height of the strip a disputed textarea keeps clear above its text. */
+const TEXTAREA_STRIP = "28px"
+
+/** Room reserved inside the input so the dispute cluster never covers the value. */
+function disputeGutter(field: LeafField): string {
+  return usesBareBadge(field) ? "95px" : "150px"
+}
+
+/** Bare-chip columns stay narrow; a labeled chip needs the wider value column. */
+function isBareBadgeColumn(table: SectionTable, key: string): boolean {
+  return table.groups.some((g) =>
+    g.rows.some((r) => {
+      const field = r.cells[key]?.field
+      return field !== undefined && usesBareBadge(field)
+    })
+  )
 }
 
 // Two width flavours. The wide one only exists to fit the inline Prior chip, which
 // renders solely on disputed cells — applying it always would make every form scroll
 // sideways to reserve room for chips it never draws, so it is gated on dispute presence.
 const COMPACT_WIDTHS = {
-  icd: "w-[80px]",
-  icdCell: "w-[80px]",
-  cpt: "w-[120px]",
-  cptCell: "w-[120px] break-words",
   value: "min-w-[100px]",
-  enumValue: "min-w-[100px]",
+  bareValue: "min-w-[100px]",
   extra: "",
 } as const
 const WIDE_WIDTHS = {
-  icd: "min-w-[110px]",
-  icdCell: "min-w-[110px] whitespace-nowrap",
-  cpt: "min-w-[150px]",
-  cptCell: "min-w-[150px] whitespace-nowrap",
   value: "min-w-[210px]",
-  enumValue: "min-w-[120px]",
+  bareValue: "min-w-[150px]",
   extra: "min-w-[210px]",
 } as const
 
@@ -111,15 +120,15 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const isTextarea = field.ui?.widget === "textarea"
 
   return (
-    // h-px is the table-cell "fill height" trick: the cell collapses to its real
-    // (possibly row-spanned) height, and the h-full child then stretches to it,
-    // so the input covers the whole cell with no top/bottom background strip.
+    // The control fills the cell from out of flow, so the spacer carries the row height:
+    // the h-px td + h-full child fill trick renders 0-height in Firefox (VR2-115).
     <td
-      className="h-px border border-ibv-input-border p-0"
+      className="relative border border-ibv-input-border p-0"
       rowSpan={rowSpan}
       data-field-path={path}
     >
-      <div className="relative h-full">
+      <div className={isTextarea ? "min-h-[44px]" : "min-h-[24px]"} />
+      <div className="absolute inset-0">
         <FieldRenderer
           field={field}
           path={path}
@@ -131,31 +140,23 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           title={disabledReason ?? invalidReason}
           invalid={!!invalidReason}
           highlightClass={highlightClass}
-          inputPaddingRight={showDispute ? disputeGutter(field) : undefined}
+          // a right gutter would indent EVERY line of a textarea, so long-text cells
+          // reserve a strip above the text and put the controls there instead
+          inputPaddingRight={showDispute && !isTextarea ? disputeGutter(field) : undefined}
+          inputPaddingTop={showDispute && isTextarea ? TEXTAREA_STRIP : undefined}
           borderless
         />
-        {showDispute &&
-          (isTextarea ? (
-            // Buttons pinned to the first line; a 10-char chip of a paragraph is noise.
-            <CompactDisputeControls
-              dispute={dispute!}
-              flags={flags}
-              className="top-1 right-1"
-              canSwap={applicable}
-              onSwap={() => swapDispute(path)}
-              onApply={() => applyDispute(path)}
-            />
-          ) : (
-            <InlineDisputeControls
-              dispute={dispute!}
-              flags={flags}
-              className="right-1"
-              bareBadge={field.type === "enum"}
-              canSwap={applicable}
-              onSwap={() => swapDispute(path)}
-              onApply={() => applyDispute(path)}
-            />
-          ))}
+        {showDispute && (
+          <InlineDisputeControls
+            dispute={dispute!}
+            flags={flags}
+            className={isTextarea ? "top-1 right-1" : "top-1/2 right-1 -translate-y-1/2"}
+            bareBadge={usesBareBadge(field)}
+            canSwap={applicable}
+            onSwap={() => swapDispute(path)}
+            onApply={() => applyDispute(path)}
+          />
+        )}
       </div>
     </td>
   )
@@ -178,12 +179,12 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
         <thead>
           <tr className="text-center">
             <th className={cn("w-[170px]", TH)}>Service</th>
-            {table.hasIcd && <th className={cn(w.icd, TH)}>ICD-10</th>}
-            <th className={cn(w.cpt, TH)}>CPT Code</th>
+            {table.hasIcd && <th className={cn(ICD_WIDTH, TH)}>ICD-10</th>}
+            <th className={cn(CPT_WIDTH, TH)}>CPT Code</th>
             {table.columns.map((c) => (
               <th
                 key={c.key}
-                className={cn(isEnumColumn(table, c.key) ? w.enumValue : w.value, TH)}
+                className={cn(isBareBadgeColumn(table, c.key) ? w.bareValue : w.value, TH)}
               >
                 {c.title}
               </th>
@@ -221,7 +222,8 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
                   <td
                     className={cn(
                       "border border-ibv-input-border bg-white px-2 py-0.5 align-top text-ibv-label-border",
-                      w.icdCell
+                      ICD_WIDTH,
+                      "break-words"
                     )}
                     rowSpan={group.rows.length}
                   >
@@ -231,7 +233,8 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
                 <td
                   className={cn(
                     "border border-ibv-input-border bg-white px-2 py-0.5 text-center text-black",
-                    w.cptCell
+                    CPT_WIDTH,
+                    "break-words"
                   )}
                 >
                   {row.label}

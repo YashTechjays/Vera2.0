@@ -146,7 +146,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
             <InlineDisputeControls
               dispute={dispute!}
               flags={flags}
-              className="right-1.5"
+              className="top-1/2 right-1.5 -translate-y-1/2"
               canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
