@@ -32,8 +32,9 @@
 **/.ruff_cache/
 **/.coverage
 
-# Local Claude settings (may hold tokens)
+# Local Claude settings (may hold tokens) and per-machine dev-server config
 **/.claude/settings.local.json
+**/.claude/launch.json
 
 # Terraform state
 **/.terraform/
@@ -44,3 +45,6 @@
 
 # superpowers subagent-driven-development scratch (progress ledger, task briefs, review packages)
 .superpowers/
+
+# graphify knowledge-graph output
+graphify-out/
