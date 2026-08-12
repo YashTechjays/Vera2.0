@@ -763,7 +763,7 @@ async def test_resolve_with_invalid_non_promoted_date_returns_422(
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["data"]["fields"] == ["sections.patient_information.spouse_partner_dob"]
-    assert body["message"] == "Spouse / Partner Date of Birth: must be in the format M/D/YYYY"
+    assert body["message"] == "Spouse DOB: must be in the format M/D/YYYY"
 
 
 async def test_resolve_with_invalid_plan_effective_date_names_the_field_and_format(

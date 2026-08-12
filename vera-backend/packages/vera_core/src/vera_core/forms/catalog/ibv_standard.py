@@ -206,7 +206,7 @@ def _context_sections() -> dict[str, Section]:
                 ),
                 "spouse_partner_name": Leaf(
                     type="text",
-                    title="Spouse / Partner Name",
+                    title="Spouse Name",
                     role="confirm",
                     default="N/A",
                     confirm_in_task=_CONFIRM_IN_INSURANCE_BASICS,
@@ -226,7 +226,7 @@ def _context_sections() -> dict[str, Section]:
                 "spouse_partner_dob": Leaf(
                     type="date",
                     validation=DATE_VALIDATION,
-                    title="Spouse / Partner Date of Birth",
+                    title="Spouse DOB",
                     role="confirm",
                     default="N/A",
                     confirm_in_task=_CONFIRM_IN_INSURANCE_BASICS,
