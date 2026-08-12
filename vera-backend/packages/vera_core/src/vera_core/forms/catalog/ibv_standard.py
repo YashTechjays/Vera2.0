@@ -185,6 +185,7 @@ def _context_sections() -> dict[str, Section]:
                     type="text",
                     title="Chart Number",
                     role="input",
+                    required=True,
                     description="Clinic-internal chart number. Display only; never part of the call.",
                 ),
                 "patient_name": Leaf(
@@ -284,6 +285,7 @@ def _context_sections() -> dict[str, Section]:
                     type="text",
                     title="Verified By",
                     role="context",
+                    required=True,
                     description="Human supervisor named in the call introduction.",
                 ),
                 "verified_at": Leaf(
@@ -293,6 +295,7 @@ def _context_sections() -> dict[str, Section]:
                     type="phone",
                     title="Callback Number",
                     role="context",
+                    required=True,
                     description="The callback phone number of your supervisor",
                 ),
             },
@@ -305,7 +308,9 @@ def _context_sections() -> dict[str, Section]:
                 "hospital_name": Leaf(
                     type="text", title="Hospital Name", role="context", required=True
                 ),
-                "hospital_address": Leaf(type="text", title="Hospital Address", role="context"),
+                "hospital_address": Leaf(
+                    type="text", title="Hospital Address", role="context", required=True
+                ),
                 "tax_id": Leaf(
                     type="text",
                     title="Tax ID",
@@ -334,6 +339,7 @@ def _context_sections() -> dict[str, Section]:
                     type="text",
                     title="Provider NPI",
                     role="context",
+                    required=True,
                     validation=Validation(pattern="^[0-9]{10}$"),
                 ),
                 "office_location": Leaf(type="text", title="Office Location", role="context"),
@@ -941,10 +947,10 @@ def _admin_sections() -> dict[str, Section]:
             ),
             fields={
                 "insurance_provider_name": Leaf(
-                    type="text", title="Insurance Provider Name", role="context"
+                    type="text", title="Insurance Provider Name", role="context", required=True
                 ),
                 "insurance_phone_number": Leaf(
-                    type="phone", title="Insurance Provider Phone", role="context"
+                    type="phone", title="Insurance Provider Phone", role="context", required=True
                 ),
                 "web_portal": Leaf(
                     type="text",
