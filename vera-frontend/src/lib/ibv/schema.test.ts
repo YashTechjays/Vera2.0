@@ -410,4 +410,3 @@ describe("alternativeSiblings / isSatisfied", () => {
     expect(isSatisfied(schema, leaf("sections.svc.cpt_1.copay"), {})).toBe(false)
   })
 })
-

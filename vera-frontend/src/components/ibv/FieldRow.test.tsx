@@ -18,7 +18,6 @@ vi.mock("./IbvProvider", async () => {
       schema: demoSchema,
       values: state.values,
       setValue: vi.fn(),
-      commitValue: vi.fn(),
       errors: {},
       disputeFor: (p: string) => (p === PATH ? dispute : undefined),
       flagsFor: () => defaultFlags(),

@@ -66,7 +66,6 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
     schema,
     values,
     setValue,
-    commitValue,
     errors,
     disputeFor,
     flagsFor,
@@ -123,7 +122,6 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
           path={path}
           value={value}
           onChange={(v) => setValue(path, v)}
-          onCommit={(v) => commitValue(path, v)}
           disabled={!applicable}
           placeholder={!applicable ? field.inapplicable_value : undefined}
           title={disabledReason ?? invalidReason}

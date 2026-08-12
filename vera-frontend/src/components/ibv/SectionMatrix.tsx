@@ -92,7 +92,6 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
     schema,
     values,
     setValue,
-    commitValue,
     errors,
     disputeFor,
     flagsFor,
@@ -134,7 +133,6 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           path={path}
           value={value}
           onChange={(v) => setValue(path, v)}
-          onCommit={(v) => commitValue(path, v)}
           disabled={!applicable}
           placeholder={!applicable ? field.inapplicable_value : undefined}
           title={disabledReason ?? invalidReason}

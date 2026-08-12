@@ -9,7 +9,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from vera_core.forms.intake import ANSWER_UNIT_FORMAT_RULE
+from vera_core.forms.extraction_prompt import ANSWER_UNIT_FORMAT_RULE
 from vera_core.forms.review import is_blank_answer
 from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
 

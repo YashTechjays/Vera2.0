@@ -10,13 +10,13 @@ persists — never log the values. Validation errors carry paths only.
 """
 
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, Leaf, format_date, parse_date_format
+from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, format_date, parse_date_format
 
 # Legacy v1 section the required-fields fallback reads structurally.
 _PATIENT_INFO = "patient_information"
@@ -258,116 +258,6 @@ def normalize_date_answers(
     ]
 
 
-# The authored non-numeric answers one `percent` leaf accepts, in their authored spelling.
-type PercentLiterals = tuple[str, ...]
-
-# What the extraction prompts are told to emit, so the prompt and the normalizer below are
-# provably the same rule. Shared by both extractors (`agent_worker.observer` and
-# `control_plane.llm`) — two copies of this sentence is how the two of them would come to
-# write two different shapes into one column, the defect the normalizer exists to fix.
-#
-# Percent ONLY, deliberately: `currency` leaves have the same mixed-spelling defect but no
-# normalizer and no backfill yet, so telling the extractor to switch to "$20" would change
-# money's stored shape with nothing to converge it — making currency worse than leaving it
-# alone. Extend this sentence in the SAME change that adds the currency normalizer.
-ANSWER_UNIT_FORMAT_RULE = (
-    'Write a percentage answer as digits with the sign and nothing else — "20%", never '
-    '"20" or "twenty percent"; "0%" for none.'
-)
-
-# A plain non-negative decimal — the only shape `normalize_percent_value` reformats.
-_PERCENT_NUMBER_RE = re.compile(r"^(\d+)(?:\.(\d+))?$")
-# One trailing unit marker, plus any space before it.
-_PERCENT_SUFFIX_RE = re.compile(r"\s*(?:%|percent|pct)$", re.IGNORECASE)
-
-
-def percent_leaf_paths(doc: FormSchemaDoc) -> dict[str, PercentLiterals]:
-    """Root-anchored paths of every `type: "percent"` leaf in `doc`, mapped to that leaf's
-    authored literals — the dynamic, schema-driven set `normalize_percent_answers`
-    canonicalizes. Resolved from the leaf's declared type rather than a field name (same
-    rationale as `date_leaf_paths`), so a future percent leaf is covered with no code
-    change. Literals come from the same `special_values`/`default`/`inapplicable_value`
-    trio `enum_accepted_values` treats as legal extras, which is how the `male` flavor's
-    "N/A" survives canonicalization without being hardcoded here.
-
-    The leaf's `validation.range` is deliberately NOT carried: range enforcement lives in
-    the review UI (`validation.ts`), never on a write path. Rejecting an out-of-range
-    percent server-side made an implausible CALL answer impossible to adjudicate — a
-    reviewer accepting the dispute sent the value back and 422'd their whole save batch."""
-    return {
-        path: declared_extras(leaf) for path, leaf in doc.leaf_items() if leaf.type == "percent"
-    }
-
-
-def _percent_text(value: Any) -> str | None:
-    """`value` as trimmed text when it could carry a percent, else None. Excludes `bool`
-    explicitly — it subclasses `int`, so `True` would otherwise read as the number 1."""
-    if isinstance(value, bool) or not isinstance(value, str | int | float):
-        return None
-    return _clean_str(value)
-
-
-def _matched_literal(text: str, literals: PercentLiterals) -> str | None:
-    """The authored spelling of the schema literal `text` names, case-insensitively."""
-    folded = text.casefold()
-    return next((lit for lit in literals if lit.casefold() == folded), None)
-
-
-def _canonical_number(text: str) -> str | None:
-    """`text` reformatted to ``"<n>%"``, or None if it is not a plain non-negative decimal
-    (optionally unit-suffixed). Sole definition of the percent number shape — the runtime
-    normalizer and the backfill migration's frozen copy both follow it."""
-    match = _PERCENT_NUMBER_RE.match(_PERCENT_SUFFIX_RE.sub("", text))
-    if match is None:
-        return None
-    whole, frac = match.group(1).lstrip("0") or "0", (match.group(2) or "").rstrip("0")
-    return f"{whole}.{frac}%" if frac else f"{whole}%"
-
-
-def normalize_percent_value(value: Any, literals: PercentLiterals) -> Any:
-    """Canonicalize one percent answer to ``"<n>%"`` so every writer stores one spelling —
-    the review UI and the xlsx export render the stored string verbatim, so storage IS
-    display. Folds a schema literal to its authored casing; returns anything else — blank,
-    prose, a qualified answer like "20% after deductible" — **verbatim**.
-
-    Deliberately TOTAL: it never raises, and it never rejects. Two of its callers cannot
-    tolerate an exception — one in `worker_events` would leave the Redis Streams answer
-    event unacked and stall the stream, one in `post_call_eval` would poison-loop the job.
-    It also does NOT enforce `validation.range`: an out-of-range value from a CALL has to
-    reach a reviewer as a dispute, and rejecting it on the way IN made accepting that
-    dispute impossible (the accepted value comes back through dispute-resolve, so the whole
-    save batch 422'd). Range is a review-UI concern — `validation.ts::validateLeaf`.
-
-    Mirrored in the frontend by `normalizePercentValue`
-    (`vera-frontend/src/lib/ibv/validation.ts`), which takes the same literals so a
-    reviewer's own keystrokes fold identically — keep the two in sync."""
-    text = _percent_text(value)
-    if text is None:
-        return value
-    if (literal := _matched_literal(text, literals)) is not None:
-        return literal
-    return _canonical_number(text) or value
-
-
-def normalize_percent_answers(
-    answers: list[tuple[str, Any]],
-    doc: FormSchemaDoc,
-    literals_by_path: Mapping[str, PercentLiterals] | None = None,
-) -> list[tuple[str, Any]]:
-    """Canonicalize every flattened `(path, value)` answer whose path is a percent-typed
-    leaf (`percent_leaf_paths`) — applied before `field_answer` rows are built, mirroring
-    `normalize_date_answers`. Non-percent paths pass through untouched. Never raises.
-
-    `literals_by_path` lets a caller that already resolved them reuse the walk."""
-    resolved = percent_leaf_paths(doc) if literals_by_path is None else literals_by_path
-    if not resolved:
-        return answers
-    return [
-        (path, raw if (lits := resolved.get(path)) is None else normalize_percent_value(raw, lits))
-        for path, raw in answers
-    ]
-
-
 def unknown_payload_paths(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> list[str]:
     """Paths in `answers` that are not in `doc`'s leaf set — used to reject intake
     payloads containing keys the schema does not define. Returns a sorted, deduplicated
@@ -381,23 +271,16 @@ def unknown_payload_paths(answers: list[tuple[str, Any]], doc: FormSchemaDoc) ->
     return sorted(answer_paths - known)
 
 
-def declared_extras(leaf: Leaf) -> tuple[str, ...]:
-    """A leaf's values that are legal by declaration rather than by shape (spec §4.4):
-    `special_values` plus its own `default` and `inapplicable_value`. One definition so the
-    enum validator and the percent canonicalizer cannot disagree about what counts as an
-    authored answer — a percent leaf's `"N/A"` must survive canonicalization for the same
-    reason an enum's must pass validation."""
-    extras = (*(leaf.special_values or []), leaf.default, leaf.inapplicable_value)
-    return tuple(value for value in extras if value is not None)
-
-
 def enum_accepted_values(doc: FormSchemaDoc) -> dict[str, set[str]]:
-    """Accepted intake answers per enum leaf — declared `values` plus `declared_extras`."""
-    return {
-        path: set(leaf.values) | set(declared_extras(leaf))
-        for path, leaf in doc.leaf_items()
-        if leaf.type == "enum" and leaf.values
-    }
+    """Accepted intake answers per enum leaf — declared `values` plus `special_values`,
+    the leaf's own `default` and its `inapplicable_value`."""
+    accepted: dict[str, set[str]] = {}
+    for path, leaf in doc.leaf_items():
+        if leaf.type != "enum" or not leaf.values:
+            continue
+        extras = (*(leaf.special_values or []), leaf.default, leaf.inapplicable_value)
+        accepted[path] = set(leaf.values) | {value for value in extras if value is not None}
+    return accepted
 
 
 def validate_enum_answers(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> None:

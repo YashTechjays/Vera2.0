@@ -41,7 +41,7 @@ from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
-from vera_core.forms.intake import ANSWER_UNIT_FORMAT_RULE
+from vera_core.forms.extraction_prompt import ANSWER_UNIT_FORMAT_RULE
 from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (

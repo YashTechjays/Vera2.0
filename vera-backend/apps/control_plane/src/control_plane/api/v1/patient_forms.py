@@ -66,11 +66,8 @@ from vera_core.forms.intake import (
     missing_required,
     normalize_date_answers,
     normalize_date_value,
-    normalize_percent_answers,
-    normalize_percent_value,
     normalize_phone_answers,
     normalize_phone_prefix,
-    percent_leaf_paths,
     phone_promoted_paths,
     promote_columns,
     unknown_payload_paths,
@@ -257,7 +254,6 @@ async def _create_patient_form(
             )
         answers = normalize_phone_answers(answers, doc)
         answers = _normalize_date_answers_or_422(answers, doc)
-        answers = normalize_percent_answers(answers, doc)
         _validate_enum_answers_or_422(answers, doc)
         promoted = _promote_or_422(dict(answers).get, doc)
     else:
@@ -1041,7 +1037,6 @@ async def resolve_disputes(
     doc = _v2_doc(version.schema_json)
     phone_paths = phone_promoted_paths(doc) if doc is not None else set()
     date_paths = date_leaf_paths(doc) if doc is not None else {}
-    percent_literals_by_path = percent_leaf_paths(doc) if doc is not None else {}
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
@@ -1108,13 +1103,6 @@ async def resolve_disputes(
             new_value = normalize_phone_prefix(new_value)
         if path in date_paths:
             new_value = _normalize_date_value_or_422(new_value, path, date_paths[path], doc)
-        # Before the `normalize_value` comparison below, so resubmitting "20" against a
-        # stored "20%" is correctly a no-op rather than a spurious human checkpoint.
-        # Never rejects an out-of-range percent: the value a reviewer ACCEPTS comes back
-        # through here, so a 422 would make an implausible AI answer unadjudicatable and
-        # take the rest of their save batch down with it.
-        if (percent_literals := percent_literals_by_path.get(path)) is not None:
-            new_value = normalize_percent_value(new_value, percent_literals)
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).

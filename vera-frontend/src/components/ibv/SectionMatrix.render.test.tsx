@@ -20,7 +20,6 @@ vi.mock("./IbvProvider", async () => {
       schema: demoSchema,
       values: state.values,
       setValue: vi.fn(),
-      commitValue: vi.fn(),
       errors: {},
       disputes: { [CELL]: dispute },
       disputeFor: (p: string) => (p === CELL ? dispute : undefined),

@@ -13,8 +13,6 @@ import { toast } from "sonner"
 import {
   isoToDateFormat,
   missingCreateLeaves,
-  declaredLegalValues,
-  normalizePercentValue,
   validateAll,
   validateCreate,
   type ValidationErrors,
@@ -72,11 +70,6 @@ type IbvContextValue = {
   schema: FormSchema | null
   values: FormValues
   setValue: (path: string, value: string) => void
-  /** The user left a cell: canonicalize a typed unit (a `percent` leaf gains its "%") so
-   *  the column reads one way mid-session, before any save round-trip. A no-op for every
-   *  other leaf type, and a no-op when the value is already canonical — so tabbing through
-   *  an untouched form never marks it dirty. */
-  commitValue: (path: string, value: string) => void
   /** Apply an AI-extracted answer pushed live over SSE (Live Monitoring). Updates
    *  the value WITHOUT marking the form dirty, and skips any field the supervisor
    *  has edited this session so an agent fill never clobbers a manual correction.
@@ -336,7 +329,6 @@ export function IbvProvider({
     [schema],
   )
 
-
   // Required/applicable fields the reviewer emptied in THIS session (had a value on
   // load, now blank). Saving is blocked on these — the reported defect is "mandatory
   // fields cleared after upload". Computed directly (not from `errors`) so it counts
@@ -567,31 +559,6 @@ export function IbvProvider({
     createIdempotencyKeyRef.current = null
   }, [])
 
-  const commitValue = useCallback(
-    (path: string, value: string) => {
-      // One WeakMap-cached lookup gives both the type and the declared literals, so no
-      // separate percent-path index (and no useMemo) is needed.
-      const leaf = schema === null ? undefined : leafByPath(schema).get(path)
-      if (leaf?.field.type !== "percent") return
-      const next = normalizePercentValue(value, declaredLegalValues(leaf.field))
-      if (next === value) return
-
-      // Whether this counts as a human edit depends on whether the reviewer actually
-      // changed anything. Canonicalizing a value they merely tabbed past must NOT set
-      // `dirty` (it would enable Save on a form nobody edited), must NOT enter
-      // `editedPathsRef` (that permanently blocks live AI answers for the cell), and must
-      // NOT reach `form_data` on the next save — where `resolve_disputes` would write a
-      // HUMAN checkpoint and a `dispute_action` attributing an adjudication that never
-      // happened (PR #82 review). A value they DID type is a real edit.
-      if (value === (originalValues[path] ?? "")) {
-        setValues((prev) => ({ ...prev, [path]: next }))
-        return
-      }
-      setValue(path, next)
-    },
-    [schema, originalValues, setValue],
-  )
-
   const applyLiveAnswer = useCallback(
     (
       expectedFormId: string,
@@ -795,7 +762,6 @@ export function IbvProvider({
     schema,
     values,
     setValue,
-    commitValue,
     applyLiveAnswer,
     errors,
     clearedRequired,

@@ -9,9 +9,6 @@ type Props = {
   path: string
   value: string
   onChange: (value: string) => void
-  /** the user left the cell — the provider canonicalizes typed units here (percent).
-   *  Kept type-agnostic on purpose: this reports the event, the provider owns the rule. */
-  onCommit?: (value: string) => void
   /** field (or an ancestor) is inapplicable — gray out and lock the control */
   disabled?: boolean
   /** shown when empty; callers pass inapplicable_value for skipped fields */
@@ -94,7 +91,6 @@ export function FieldRenderer({
   path,
   value,
   onChange,
-  onCommit,
   disabled,
   placeholder,
   title,
@@ -192,10 +188,6 @@ export function FieldRenderer({
         inputMode={inputMode}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        // On blur, never per keystroke: this input is controlled, so rewriting "2" to "2%"
-        // mid-typing jumps the caret past the sign (next keystroke gives "2%0") and makes
-        // the field un-clearable, since backspace can never remove the appended sign.
-        onBlur={(e) => onCommit?.(e.target.value)}
         disabled={disabled}
         placeholder={hint}
         list={listId}
