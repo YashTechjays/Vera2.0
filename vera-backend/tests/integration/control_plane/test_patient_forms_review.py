@@ -864,7 +864,7 @@ async def test_resolve_with_invalid_promoted_phone_returns_422(
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["data"]["fields"] == [INSURANCE_PHONE]
-    assert body["message"] == "Insurance Provider Phone: must be a valid phone number"
+    assert body["message"] == "Insurance Provider Phone: must be a valid ISO formatted phone number"
 
 
 # ---- baseline-derived dispute behavior --------------------------------------
