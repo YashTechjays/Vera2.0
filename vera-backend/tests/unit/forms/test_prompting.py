@@ -14,7 +14,7 @@ from vera_core.forms.call_plan import (
     compile_call_plan,
     fuse_prefill,
 )
-from vera_core.forms.dsl import FormSchemaDoc, load_document
+from vera_core.forms.dsl import Codes, FormSchemaDoc, load_document
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
     PromptDocument,
@@ -23,6 +23,7 @@ from vera_core.forms.prompting import (
     SessionBlock,
     TaskTextOverride,
     numbered_questions,
+    render_digest,
     render_panels,
     render_task_prompts,
 )
@@ -339,3 +340,129 @@ class TestStillNeeded:
             )
         ]
         assert numbered_questions(panels) == 1
+
+
+def _digest_tree() -> list[PromptPanel]:
+    """One section panel over two service panels — the real compiled shape."""
+    return [
+        PromptPanel(
+            title="Infertility Treatment",
+            items=[
+                PromptPanel(
+                    title="Ovulation Induction (OI/TI)",
+                    codes=Codes(icd10=["Z31.89"]),
+                    items=[
+                        PromptQuestion(
+                            text="What is the cycle limit for ovulation induction?",
+                            options=[PromptOption(target_paths=["a.oi.cycle"])],
+                            gate_text="this service is covered",
+                        )
+                    ],
+                ),
+                PromptPanel(
+                    title="IUI",
+                    codes=Codes(cpt=["58323", "58322"]),
+                    items=[
+                        PromptQuestion(
+                            text="What is the copay or coinsurance for IUI?",
+                            options=[
+                                PromptOption(label="Copay ($)", target_paths=["a.iui.copay"]),
+                                PromptOption(label="Coinsurance (%)", target_paths=["a.iui.coins"]),
+                            ],
+                            gate_text="this service is covered",
+                        ),
+                        PromptQuestion(
+                            text="What is the cycle limit for IUI?",
+                            options=[PromptOption(target_paths=["a.iui.cycle"])],
+                        ),
+                    ],
+                ),
+            ],
+        )
+    ]
+
+
+class TestRenderDigest:
+    def test_a_crumb_is_printed_once_per_panel_with_its_codes(self) -> None:
+        digest = render_digest(_digest_tree())
+        assert "Ovulation Induction (OI/TI) [ICD ten Z31.89]:" in digest
+        assert "IUI [CPT 58323, 58322]:" in digest
+        # The sole root section panel names the task, so it never enters a crumb.
+        assert "Infertility Treatment" not in digest
+        assert digest.count("IUI [CPT 58323, 58322]:") == 1
+
+    def test_numbering_is_continuous_across_panels(self) -> None:
+        digest = render_digest(_digest_tree())
+        assert "1. What is the cycle limit for ovulation induction?" in digest
+        assert "2. What is the copay or coinsurance for IUI?" in digest
+        assert "3. What is the cycle limit for IUI?" in digest
+
+    def test_the_last_ordinal_is_numbered_questions(self) -> None:
+        # The refusal's ordinals have to mean the same thing as the list the agent is reading.
+        tree = _digest_tree()
+        assert f"{numbered_questions(tree)}. What is the cycle limit for IUI?" in render_digest(
+            tree
+        )
+
+    def test_either_or_labels_and_gate_are_carried_inline(self) -> None:
+        assert (
+            "What is the copay or coinsurance for IUI? "
+            "[either: Copay ($) / Coinsurance (%)] (only if this service is covered)"
+        ) in render_digest(_digest_tree())
+
+    def test_still_needed_is_carried_inline(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Labs",
+                items=[
+                    PromptQuestion(
+                        text="Are codes 58340, 82670 covered?",
+                        options=[PromptOption(target_paths=["a.cpt_58340.cov", "a.cpt_82670.cov"])],
+                        still_needed=["CPT 58340"],
+                    )
+                ],
+            )
+        ]
+        assert "(still needed for: CPT 58340)" in render_digest(panels)
+
+    def test_a_routing_question_takes_no_ordinal(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Egg cryo",
+                items=[
+                    PromptQuestion(text="Elective or cancer?", routes_between=["Elec", "Canc"]),
+                    _q("Elective covered?", "a.elec"),
+                ],
+            )
+        ]
+        digest = render_digest(panels)
+        assert "First settle which applies: Elective or cancer?" in digest
+        assert "Elec or Canc — only one applies" in digest
+        assert "1. Elective covered?" in digest
+        assert "1. Elective or cancer?" not in digest
+
+    def test_a_confirm_node_takes_no_ordinal(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Basics",
+                items=[
+                    _q("Spouse name?", "a.spouse"),
+                    PromptQuestion(
+                        text="Read back the DOB",
+                        options=[PromptOption(target_paths=["a.dob"])],
+                        is_confirm=True,
+                    ),
+                ],
+            )
+        ]
+        digest = render_digest(panels)
+        assert "1. Spouse name?" in digest
+        assert "Read back the DOB" in digest
+        assert "2." not in digest
+
+    def test_an_untitled_panel_yields_lines_with_no_crumb(self) -> None:
+        # Hand-built fixtures (and any panel the compiler leaves untitled) still render.
+        assert render_digest([PromptPanel(items=[_q("Rep name?", "a.rep")])]) == "1. Rep name?"
+
+    def test_an_empty_tree_renders_empty(self) -> None:
+        assert render_digest([]) == ""

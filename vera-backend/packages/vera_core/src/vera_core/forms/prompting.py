@@ -17,7 +17,7 @@ Pure and DB-free; consumed by the seeder and the call-time prompt pipeline.
 
 import logging
 from collections.abc import Callable, Iterator
-from itertools import count
+from itertools import count, groupby
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -375,6 +375,67 @@ def numbered_questions(panels: list[PromptPanel]) -> int:
         for panel in panels
         for item in panel.items
     )
+
+
+def render_digest(panels: list[PromptPanel]) -> str:
+    """The same tree as `render_panels`, compressed for a reader that ALREADY has the full list.
+
+    Each panel's crumb — its title chain plus the nearest codes line — is printed once, with its
+    questions numbered beneath. Numbering is `render_panels`' own: one continuous counter across
+    every panel, and no ordinal for a routing question or a confirm node, so a refusal's
+    ordinals mean the same thing as the list the agent is reading. The sole root section panel
+    is left out of the crumb: it names the task, so repeating it on every line says nothing.
+    """
+    numbering = count(1)
+    entries: list[tuple[str, str]] = []
+    bare_root = len(panels) == 1
+
+    def walk(panel: PromptPanel, titles: list[str], codes: str, root: bool) -> None:
+        here = titles if (root and bare_root) else [*titles, panel.title or ""]
+        here = [title for title in here if title]
+        codes = (_codes_text(panel.codes) if panel.codes is not None else "") or codes
+        crumb = " > ".join(here)
+        if codes:
+            crumb = f"{crumb} [{codes}]" if crumb else f"[{codes}]"
+        for item in panel.items:
+            if isinstance(item, PromptPanel):
+                walk(item, here, codes, False)
+            elif item.routes_between:
+                entries.append(
+                    (
+                        crumb,
+                        f"* First settle which applies: {item.text} "
+                        f"({' or '.join(item.routes_between)} — only one applies)",
+                    )
+                )
+            elif item.is_confirm:
+                entries.append((crumb, f"* {item.text}"))
+            else:
+                entries.append((crumb, f"{next(numbering)}. {_digest_line(item)}"))
+
+    for panel in panels:
+        walk(panel, [], "", True)
+
+    blocks: list[str] = []
+    for crumb, group in groupby(entries, key=lambda entry: entry[0]):
+        lines = [line for _crumb, line in group]
+        if crumb:
+            blocks.append("\n".join([f"{crumb}:", *(f"  {line}" for line in lines)]))
+        else:
+            blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _digest_line(question: PromptQuestion) -> str:
+    parts = [question.text]
+    labels = [option.label for option in question.options if option.label]
+    if labels:
+        parts.append(f"[either: {' / '.join(labels)}]")
+    if question.still_needed:
+        parts.append(f"(still needed for: {', '.join(question.still_needed)})")
+    if question.gate_text is not None:
+        parts.append(f"(only if {question.gate_text})")
+    return " ".join(parts)
 
 
 def _panel_lines(panel: PromptPanel, depth: int, numbering: Iterator[int]) -> list[str]:
