@@ -44,7 +44,13 @@ from agent_worker.prompt import (
     SCOPE_DISCIPLINE,
     TOOL_REASON_ARG,
 )
-from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, gating_seed, owed_now
+from vera_core.forms.call_plan import (
+    CallPlan,
+    PlanFieldDescriptor,
+    focus_questions,
+    gating_seed,
+    owed_now,
+)
 from vera_core.forms.conditions import (
     alternative_index,
     evaluate,
@@ -53,7 +59,7 @@ from vera_core.forms.conditions import (
     is_required,
 )
 from vera_core.forms.dsl import AllCondition, AnyCondition, Condition, NotCondition, RefCondition
-from vera_core.forms.prompting import numbered_questions, render_panels
+from vera_core.forms.prompting import numbered_questions, render_digest, render_panels
 from vera_core.forms.question_plan import PromptPanel, drop_questions
 from vera_core.plan_store import PlanRunStateService
 
@@ -240,6 +246,9 @@ class PlanTaskAgent(Agent):
         # comparing it against the CURRENTLY outstanding count let an 11-turn task clear a
         # 5-question bar and hand off with six questions unasked.
         self._questions_at_entry = 0
+        # The tree currently in this agent's instructions. A refusal must narrow from THIS and
+        # not from the compiled tree, or it can name a question the agent cannot see.
+        self._panels = self._task.panels
         self._refusals = 0
         self._outstanding_at_last_refusal: int | None = None
         self._rep_turns = 0
@@ -346,6 +355,7 @@ class PlanTaskAgent(Agent):
             return self._task.panels
         kept = drop_questions(self._task.panels, {f.path for f in excluded})
         await self.update_instructions(self._build_instructions(kept))
+        self._panels = kept
         return kept
 
     async def on_user_turn_completed(
@@ -434,7 +444,16 @@ class PlanTaskAgent(Agent):
             "Not yet — these required questions of the current task have no answer on file. "
             "Ask the representative for them now (one at a time), and call task_complete once "
             "they are answered or the representative says they cannot answer:\n"
-            f"{_field_lines(outstanding)}"
+            f"{render_digest(self._owed_digest(outstanding))}"
+        )
+
+    def _owed_digest(self, outstanding: list[PlanFieldDescriptor]) -> list[PromptPanel]:
+        """`outstanding` as a narrowing of the tree this agent's instructions already show."""
+        return focus_questions(
+            self._task.model_copy(update={"panels": self._panels}),
+            [field.path for field in outstanding],
+            self._controller.answers,
+            self._controller.plan.shared_conditions,
         )
 
     def _tag_completion_decision(self, refusal: str | None) -> None:
@@ -944,6 +963,11 @@ class PlanRunController:
         cannot tell a pre-call value from one the rep just gave."""
         self._answers = {**self._baseline, **answers}
 
+    @property
+    def answers(self) -> Mapping[str, Any]:
+        """Baseline plus what the call has collected. Read-only: `update_answers` is the writer."""
+        return self._answers
+
     async def drain_observer(self) -> None:
         """Let extraction settle before a caller reads `gap_fields`. No-op without a manager."""
         if self._observer_manager is not None:
@@ -1142,6 +1166,30 @@ class PlanRunController:
             and is_required(field, self._answers, shared)
             and not answered(path)
         ]
+
+    def gap_panels(
+        self,
+        task_index: int,
+        fields: list[PlanFieldDescriptor],
+        *,
+        explode: bool = False,
+    ) -> list[PromptPanel]:
+        """This task's tree narrowed to `fields`, gated-out questions pruned first.
+
+        The pre-prune matters only for `explode`: `gap_fields` is already applicable-only, but
+        the closure could otherwise surface a question some OTHER gate has decidably ruled out.
+        It lives here rather than in `call_plan` because `excluded_fields` needs this
+        controller's answers."""
+        task = self.plan.tasks[task_index]
+        excluded = {field.path for field in self.excluded_fields(task_index)}
+        panels = drop_questions(task.panels, excluded) if excluded else task.panels
+        return focus_questions(
+            task.model_copy(update={"panels": panels}),
+            [field.path for field in fields],
+            self._answers,
+            self.plan.shared_conditions,
+            explode=explode,
+        )
 
     def owed_question_count(self, task_index: int) -> int:
         """`gap_fields` measured in SPOKEN questions — the ceiling both guards judge by.
