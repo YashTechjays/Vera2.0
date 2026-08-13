@@ -293,3 +293,49 @@ class TestContinuousNumbering:
 
     def test_an_empty_tree_counts_nothing(self) -> None:
         assert numbered_questions([]) == 0
+
+
+class TestStillNeeded:
+    """A partially-answered fan-out is one question with some members already on file."""
+
+    def test_still_needed_is_rendered_under_the_question(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Labs",
+                items=[
+                    PromptQuestion(
+                        text="Are codes 58340, 82670 covered?",
+                        options=[
+                            PromptOption(
+                                answers="Yes | No",
+                                target_paths=["a.cpt_58340.covered", "a.cpt_82670.covered"],
+                            )
+                        ],
+                        still_needed=["CPT 58340"],
+                    )
+                ],
+            )
+        ]
+        rendered = render_panels(panels)
+        assert "1. Are codes 58340, 82670 covered?" in rendered
+        assert "   - Still needed for: CPT 58340." in rendered
+
+    def test_an_unstamped_question_renders_no_such_line(self) -> None:
+        panels = [
+            PromptPanel(title="Labs", items=[_q("Are codes covered?", "a.cpt_58340.covered")])
+        ]
+        assert "Still needed" not in render_panels(panels)
+
+    def test_still_needed_does_not_take_an_ordinal(self) -> None:
+        panels = [
+            PromptPanel(
+                items=[
+                    PromptQuestion(
+                        text="Q",
+                        options=[PromptOption(target_paths=["a.x", "a.y"])],
+                        still_needed=["CPT 1", "CPT 2"],
+                    )
+                ]
+            )
+        ]
+        assert numbered_questions(panels) == 1

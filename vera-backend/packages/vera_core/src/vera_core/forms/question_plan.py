@@ -73,6 +73,11 @@ class PromptQuestion(_Model):
     required_text: str | None = None
     # CPT codes this one question fans out across, when there is more than one.
     fanned_codes: list[str] = Field(default_factory=list)
+    # Which of a fan-out's members are still owed, when only some are. Named by
+    # `PlanFieldDescriptor.owner_title` rather than a path segment, so any fan-out axis reads
+    # correctly. Never set by the compiler — only by `call_plan.focus_questions`, which is why
+    # a compiled prompt renders byte-identically.
+    still_needed: list[str] = Field(default_factory=list)
     hints: list[str] = Field(default_factory=list)
     optional: bool = False
     # Routing questions only: the panel titles the answer chooses between.

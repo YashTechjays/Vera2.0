@@ -457,6 +457,8 @@ def _numbered_question(
             "   - One question for all of these codes; apply the answer to every code the "
             f"representative confirms: {', '.join(question.fanned_codes)}."
         )
+    if question.still_needed:
+        lines.append(f"   - Still needed for: {', '.join(question.still_needed)}.")
     if confirms:
         lines.append("   - Immediately after this answer:")
         lines.extend(f"     * {c.text}" for c in confirms)
