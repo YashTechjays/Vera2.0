@@ -678,15 +678,52 @@ def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[Prompt
     return out
 
 
-def owed_questions(panels: list[PromptPanel], paths: Collection[str]) -> list[PromptQuestion]:
-    """Every question that would still have to be SPOKEN to collect `paths`, in spoken order.
+def keep_questions(panels: list[PromptPanel], wanted: Collection[str]) -> list[PromptPanel]:
+    """The tree with ONLY the questions that answer a path in `wanted`, panels with nothing
+    left pruned.
 
-    The complement of `drop_questions`: that keeps a question with even one target outside
-    `excluded`, so this owes a question with even one target inside `paths` — one ask, however
-    many of its targets are open. A routing question has no targets and is therefore never
-    owed; it chooses between panels rather than collecting anything."""
-    wanted = set(paths)
-    return [q for q in iter_questions(panels) if not wanted.isdisjoint(q.target_paths)]
+    The complement of `drop_questions`, and it inherits both of that function's structural
+    rules. A confirm node's anchor is positional, so a confirm run travels with the question in
+    front of it and never survives alone. A routing question collects nothing and so can never
+    be wanted; it is kept only while at least TWO of the panels it routes between survive,
+    because with one branch left its rendered text names a panel that is no longer below it.
+    """
+    kept = set(wanted)
+    out: list[PromptPanel] = []
+    for panel in panels:
+        source = list(panel.items)
+        items: list[PromptItem] = []
+        i = 0
+        while i < len(source):
+            item = source[i]
+            if isinstance(item, PromptPanel):
+                items.extend(keep_questions([item], kept))
+                i += 1
+                continue
+            run: list[PromptQuestion] = []
+            j = i + 1
+            while j < len(source):
+                candidate = source[j]
+                if not (isinstance(candidate, PromptQuestion) and candidate.is_confirm):
+                    break
+                run.append(candidate)
+                j += 1
+            if item.routes_between:
+                items.append(item)  # provisional; pruned below, once the siblings are known
+            elif not kept.isdisjoint(item.target_paths):
+                items.append(item)
+                items.extend(node for node in run if not kept.isdisjoint(node.target_paths))
+            i = j
+        surviving = {child.title for child in items if isinstance(child, PromptPanel)}
+        items = [
+            item
+            for item in items
+            if not (isinstance(item, PromptQuestion) and item.routes_between)
+            or len(surviving.intersection(item.routes_between)) >= 2
+        ]
+        if items:
+            out.append(panel.model_copy(update={"items": items}))
+    return out
 
 
 def hydrate_panels(panels: list[PromptPanel], hydrate: Callable[[str], str]) -> list[PromptPanel]:

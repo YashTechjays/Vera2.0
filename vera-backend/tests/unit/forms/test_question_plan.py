@@ -20,7 +20,7 @@ from vera_core.forms.question_plan import (
     drop_questions,
     hydrate_panels,
     iter_questions,
-    owed_questions,
+    keep_questions,
 )
 
 from .test_schema_dsl import minimal_doc
@@ -329,44 +329,101 @@ _OWED_TREE = [
 ]
 
 
-class TestOwedQuestions:
-    """The complement of `drop_questions`. No longer what the completion guards count in —
-    they count `call_plan.owed_now` — but the standalone path-set query stays useful, so the
-    function is kept (unused by the worker) rather than deleted."""
+class TestKeepQuestions:
+    """The complement of `drop_questions`: keep the questions a path set still owes, drop the
+    rest, and prune any panel left with nothing to ask."""
 
-    def test_a_multi_target_question_is_owed_once_however_many_targets_are_open(self) -> None:
-        assert len(owed_questions(_OWED_TREE, {"a.covered", "a.copay", "a.coins"})) == 1
+    def test_a_multi_target_question_is_kept_once_however_many_targets_are_open(self) -> None:
+        kept = keep_questions(_OWED_TREE, {"a.covered", "a.copay", "a.coins"})
+        assert [q.text for q in iter_questions(kept)] == [
+            "Covered, and what copay and coinsurance?"
+        ]
 
-    def test_one_open_target_is_enough_to_owe_the_whole_question(self) -> None:
+    def test_one_open_target_is_enough_to_keep_the_whole_question(self) -> None:
         # The mirror of drop_questions, which keeps a question with even one askable target.
-        assert len(owed_questions(_OWED_TREE, {"a.copay"})) == 1
+        kept = keep_questions(_OWED_TREE, {"a.copay"})
+        assert [q.text for q in iter_questions(kept)] == [
+            "Covered, and what copay and coinsurance?"
+        ]
 
-    def test_nested_panels_are_reached(self) -> None:
-        owed = owed_questions(_OWED_TREE, {"a.covered", "a.prior_auth"})
-        assert [q.text for q in owed] == [
+    def test_nested_panels_are_reached_and_kept(self) -> None:
+        kept = keep_questions(_OWED_TREE, {"a.covered", "a.prior_auth"})
+        assert [q.text for q in iter_questions(kept)] == [
             "Covered, and what copay and coinsurance?",
             "Is prior authorization required?",
         ]
+        assert [p.title for p in kept[0].children] == ["Prior auth"]
 
-    def test_nothing_open_owes_nothing(self) -> None:
-        assert owed_questions(_OWED_TREE, set()) == []
+    def test_a_panel_with_nothing_owed_is_pruned(self) -> None:
+        kept = keep_questions(_OWED_TREE, {"a.covered"})
+        assert kept[0].children == []
 
-    def test_a_routing_question_is_never_owed(self) -> None:
-        # It has no target_paths — it chooses between panels rather than collecting anything,
-        # so counting it would inflate the ceiling by one ask that answers no field.
+    def test_nothing_open_keeps_nothing(self) -> None:
+        assert keep_questions(_OWED_TREE, set()) == []
+
+    def test_a_confirm_node_travels_with_its_anchor(self) -> None:
+        # The anchor is positional, not modeled: keeping the confirm without the question in
+        # front of it would re-anchor the bullet onto whatever lands there next.
         tree = [
             PromptPanel(
-                title="Coverage",
+                title="Basics",
                 items=[
-                    PromptQuestion(text="Individual or family?", routes_between=["Ind", "Fam"]),
                     PromptQuestion(
-                        text="Spouse name?",
-                        options=[PromptOption(target_paths=["a.spouse"])],
+                        text="Spouse name?", options=[PromptOption(target_paths=["a.spouse"])]
+                    ),
+                    PromptQuestion(
+                        text="Read back the DOB",
+                        options=[PromptOption(target_paths=["a.dob"])],
+                        is_confirm=True,
                     ),
                 ],
             )
         ]
-        assert [q.text for q in owed_questions(tree, {"a.spouse"})] == ["Spouse name?"]
+        assert [q.text for q in iter_questions(keep_questions(tree, {"a.spouse", "a.dob"}))] == [
+            "Spouse name?",
+            "Read back the DOB",
+        ]
+        assert [q.text for q in iter_questions(keep_questions(tree, {"a.spouse"}))] == [
+            "Spouse name?"
+        ]
+        assert keep_questions(tree, {"a.dob"}) == []
+
+    def test_a_routing_question_survives_only_while_two_branches_do(self) -> None:
+        # It collects nothing, so it can never itself be owed; it earns its place only while
+        # there is still a choice to make. With one branch left its own text would name a
+        # panel that is no longer below it.
+        def tree() -> list[PromptPanel]:
+            return [
+                PromptPanel(
+                    title="Egg cryo",
+                    items=[
+                        PromptQuestion(text="Elective or cancer?", routes_between=["Elec", "Canc"]),
+                        PromptPanel(
+                            title="Elec",
+                            items=[
+                                PromptQuestion(
+                                    text="Elective covered?",
+                                    options=[PromptOption(target_paths=["a.elec"])],
+                                )
+                            ],
+                        ),
+                        PromptPanel(
+                            title="Canc",
+                            items=[
+                                PromptQuestion(
+                                    text="Cancer covered?",
+                                    options=[PromptOption(target_paths=["a.canc"])],
+                                )
+                            ],
+                        ),
+                    ],
+                )
+            ]
+
+        both = keep_questions(tree(), {"a.elec", "a.canc"})
+        assert next(q.text for q in iter_questions(both)) == "Elective or cancer?"
+        one = keep_questions(tree(), {"a.elec"})
+        assert [q.text for q in iter_questions(one)] == ["Elective covered?"]
 
 
 class TestCoverage:
