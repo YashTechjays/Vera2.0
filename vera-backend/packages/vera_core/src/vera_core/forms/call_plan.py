@@ -67,6 +67,7 @@ from vera_core.forms.question_plan import (
     hydrate_panels,
     iter_questions,
     keep_questions,
+    map_questions,
 )
 
 logger = logging.getLogger(__name__)
@@ -271,17 +272,7 @@ def _stamp_still_needed(
             return node
         return node.model_copy(update={"still_needed": list(dict.fromkeys(titles))})
 
-    def panel(node: PromptPanel) -> PromptPanel:
-        return node.model_copy(
-            update={
-                "items": [
-                    panel(item) if isinstance(item, PromptPanel) else question(item)
-                    for item in node.items
-                ]
-            }
-        )
-
-    return [panel(node) for node in panels]
+    return map_questions(panels, question)
 
 
 def gating_seed(plan: CallPlan) -> dict[str, Any]:

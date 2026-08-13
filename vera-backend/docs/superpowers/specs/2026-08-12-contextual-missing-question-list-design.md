@@ -321,6 +321,21 @@ Three decisions this branch banks for it:
   any touched group, which is strictly coarser than the gate closure, and it stays the retry's
   scoping policy.
 
+### How a focused plan behaves until then (measured, not predicted)
+
+The new code paths degrade cleanly on a focused plan, so the deferral is safe — but not in the
+way first assumed. `_stamp_still_needed` reads `owner_title` only for the OWED targets, and on a
+focused plan those are exactly the descriptors `focus_call_plan` kept. So the clause is stamped,
+and stamped correctly: an 8-code fan-out focused to one code renders *"Still needed for: CPT
+58340"* rather than nothing. That is a free improvement to the retry path — the fan-out names the
+code it needs instead of re-asking all eight blind — and it is pinned by
+`test_a_focused_plan_names_only_members_it_kept_a_descriptor_for`, which asserts the invariant
+that matters: **a clause can never name a member the plan has no descriptor for.**
+
+`explode` does under-reach on a focused plan, because a dependent whose descriptor was dropped
+has no gates to read. Harmless (it simply does not pre-load) and fixed for free once
+`focus_task` derives `fields` from the kept questions.
+
 One question left open for that branch, because it is a product call with no bearing here:
 when a kept fan-out question can answer more paths than were requested, does the descriptor set
 widen to all of them (the rep's volunteered answer for a sibling code lands, but overwrites an

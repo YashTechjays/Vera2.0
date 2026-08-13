@@ -418,11 +418,10 @@ def render_digest(panels: list[PromptPanel]) -> str:
 
     blocks: list[str] = []
     for crumb, group in groupby(entries, key=lambda entry: entry[0]):
-        lines = [line for _crumb, line in group]
-        if crumb:
-            blocks.append("\n".join([f"{crumb}:", *(f"  {line}" for line in lines)]))
-        else:
-            blocks.append("\n".join(lines))
+        # A crumb heads its block and indents what follows; without one the lines stand alone.
+        head = [f"{crumb}:"] if crumb else []
+        indent = "  " if crumb else ""
+        blocks.append("\n".join([*head, *(f"{indent}{line}" for _crumb, line in group)]))
     return "\n\n".join(blocks)
 
 

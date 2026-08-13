@@ -36,6 +36,8 @@ from vera_core.forms.prompting import (
     PromptDocument,
     SessionBlock,
     TaskTextOverride,
+    numbered_questions,
+    render_digest,
     render_panels,
     render_task_prompts,
 )
@@ -799,3 +801,78 @@ class TestFocusQuestions:
             explode=True,
         )
         assert [q.text for q in iter_questions(again)] == texts
+
+
+class TestRealSchemaDigest:
+    """The reported defect, against the real documents: seven ambiguous field titles."""
+
+    def test_the_two_cycle_limits_and_two_89337_services_are_distinguishable(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        base = "sections.infertility_treatment"
+        owed = [
+            f"{base}.ovulation_induction.cycle_limit",
+            f"{base}.intrauterine_insemination.cycle_limit",
+            f"{base}.egg_cryopreservation_elective.cpt_89337.covered",
+            f"{base}.egg_cryopreservation_cancer.cpt_89337.covered",
+            f"{base}.frozen_embryo_transfer.cpt_58974.covered",
+            f"{base}.embryo_biopsy.cpt_89290.covered",
+            f"{base}.embryo_biopsy.cpt_89291.covered",
+        ]
+        panels = focus_questions(task, owed, {}, PLAN.shared_conditions)
+        digest = render_digest(panels)
+        assert "Ovulation Induction/Timed Intercourse (OI/TI)" in digest
+        assert "Intrauterine Insemination (IUI) [CPT 58323, 58322, 89261" in digest
+        assert "Egg Cryopreservation Elective [CPT 89337" in digest
+        assert "Egg Cryopreservation Cancer [CPT 89337" in digest
+        # Seven owed FIELDS, six spoken asks: 89290 and 89291 are one AskGroup question.
+        assert numbered_questions(panels) == 6
+        assert digest.count("cycle limit") == 2
+        # The routing question survives because BOTH egg cryo branches are owed.
+        assert "First settle which applies" in digest
+
+    def test_one_egg_cryo_branch_owed_drops_the_routing_question(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        owed = ["sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered"]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        assert "Egg Cryopreservation Elective [CPT 89337" in digest
+        assert "First settle which applies" not in digest
+
+    def test_a_partly_owed_eight_code_fan_out_names_the_two_it_needs(self) -> None:
+        task = plan_task(PLAN, "diagnostic_coverage")
+        base = "sections.diagnostic_testing.labs_xray_ultrasound"
+        owed = [f"{base}.cpt_58340.covered", f"{base}.cpt_82670.covered"]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        assert "(still needed for: CPT 58340, CPT 82670)" in digest
+
+    def test_a_focused_plan_names_only_members_it_kept_a_descriptor_for(self) -> None:
+        # focus_call_plan narrows descriptors but NOT panels (a known bug, fixed on a later
+        # branch), so a kept fan-out question can span targets the plan cannot collect. The
+        # clause must never name one of those: it is built from the OWED targets, which are the
+        # focused descriptors, so a focused retry says which code it needs instead of re-asking
+        # all eight blind.
+        wanted = "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"
+        focused = focus_call_plan(PLAN, [wanted])
+        stamped: list[str] = []
+        for task in focused.tasks:
+            owed = [field.path for field in task.fields]
+            collectable = {f.owner_title for f in task.fields if f.owner_title}
+            panels = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
+            render_digest(panels)
+            for question in iter_questions(panels):
+                assert set(question.still_needed) <= collectable
+                stamped.extend(question.still_needed)
+        assert stamped == ["CPT 58340"]
+
+    def test_both_catalogs_narrow_and_render_every_task(self) -> None:
+        # disease_only has no ask groups and no routing questions; the narrowing must not
+        # assume either exists.
+        for doc in (build_ibv_standard(), build_disease_only()):
+            plan = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+            for task in plan.tasks:
+                owed = [field.path for field in task.fields]
+                panels = focus_questions(task, owed, {}, plan.shared_conditions)
+                # Everything owed means everything kept — a mismatch is a real tree/descriptor
+                # disagreement, so investigate it rather than relaxing this.
+                assert numbered_questions(panels) == numbered_questions(task.panels), task.task_key
+                render_digest(panels)
+                focus_questions(task, owed, {}, plan.shared_conditions, explode=True)

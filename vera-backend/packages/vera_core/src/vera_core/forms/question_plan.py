@@ -635,100 +635,105 @@ def _conjoin(gates: list[Condition]) -> Condition | None:
 PromptPanel.model_rebuild()
 
 
+def _narrow(
+    panels: list[PromptPanel],
+    collects: Callable[[PromptQuestion], bool],
+    routes: Callable[[PromptQuestion, set[str | None]], bool],
+) -> list[PromptPanel]:
+    """The tree keeping only what `collects` and `routes` accept, panels left empty pruned.
+
+    Both narrowings share this walk because they must agree on structure, not just be similar:
+    they are exact complements, and a divergence in either rule below is a question whose
+    rendered text no longer matches its surroundings.
+
+    A confirm node's anchor is positional, not modeled — it is whatever question precedes it in
+    the same panel's items (the contract `_panel_lines` renders against) — so a confirm run
+    travels with its anchor and never survives alone. A routing question collects nothing, so
+    `routes` judges it against the titles of the child panels that survived beside it.
+    """
+    out: list[PromptPanel] = []
+    for panel in panels:
+        source = list(panel.items)
+        items: list[PromptItem] = []
+        i = 0
+        while i < len(source):
+            item = source[i]
+            if isinstance(item, PromptPanel):
+                items.extend(_narrow([item], collects, routes))
+                i += 1
+                continue
+            run: list[PromptQuestion] = []
+            j = i + 1
+            while j < len(source):
+                candidate = source[j]
+                if not (isinstance(candidate, PromptQuestion) and candidate.is_confirm):
+                    break
+                run.append(candidate)
+                j += 1
+            if item.routes_between or collects(item):
+                items.append(item)
+                items.extend(node for node in run if collects(node))
+            i = j
+        surviving = {child.title for child in items if isinstance(child, PromptPanel)}
+        items = [
+            entry
+            for entry in items
+            if not (isinstance(entry, PromptQuestion) and entry.routes_between)
+            or routes(entry, surviving)
+        ]
+        if items:
+            out.append(panel.model_copy(update={"items": items}))
+    return out
+
+
 def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[PromptPanel]:
     """The tree minus every question whose targets are ALL in `excluded`, and minus any
     panel left with nothing to ask.
 
     A question keeping even one askable target stays whole: its options name their own
     paths, and pruning an option would leave the spoken sentence promising an answer slot
-    that is no longer listed. A routing question has no targets and survives as long as the
-    panels it routes between do.
-
-    A confirm node's anchor is positional, not modeled — it's whatever question precedes
-    it in the same panel's items (the contract `_panel_lines` renders against). Dropping
-    the anchor without dropping the confirm run it owns would re-anchor those bullets onto
-    whatever question happens to end up in front of them next."""
-    out: list[PromptPanel] = []
-    for panel in panels:
-        source = list(panel.items)
-        items: list[PromptItem] = []
-        i = 0
-        while i < len(source):
-            item = source[i]
-            if isinstance(item, PromptPanel):
-                items.extend(drop_questions([item], excluded))
-                i += 1
-                continue
-            run: list[PromptQuestion] = []
-            j = i + 1
-            while j < len(source):
-                candidate = source[j]
-                if not (isinstance(candidate, PromptQuestion) and candidate.is_confirm):
-                    break
-                run.append(candidate)
-                j += 1
-            if not item.target_paths or not set(item.target_paths) <= excluded:
-                items.append(item)
-                items.extend(node for node in run if not set(node.target_paths) <= excluded)
-            i = j
-        # A routing question with no surviving panel to route into says nothing useful.
-        if not any(isinstance(entry, PromptPanel) for entry in items):
-            items = [
-                entry
-                for entry in items
-                if not (isinstance(entry, PromptQuestion) and entry.routes_between)
-            ]
-        if items:
-            out.append(panel.model_copy(update={"items": items}))
-    return out
+    that is no longer listed. A routing question survives as long as any of the panels below
+    it does."""
+    return _narrow(
+        panels,
+        lambda question: not set(question.target_paths) <= excluded,
+        lambda _question, surviving: bool(surviving),
+    )
 
 
 def keep_questions(panels: list[PromptPanel], wanted: Collection[str]) -> list[PromptPanel]:
     """The tree with ONLY the questions that answer a path in `wanted`, panels with nothing
     left pruned.
 
-    The complement of `drop_questions`, and it inherits both of that function's structural
-    rules. A confirm node's anchor is positional, so a confirm run travels with the question in
-    front of it and never survives alone. A routing question collects nothing and so can never
-    be wanted; it is kept only while at least TWO of the panels it routes between survive,
-    because with one branch left its rendered text names a panel that is no longer below it.
-    """
+    The complement of `drop_questions`. A routing question is kept only while at least TWO of
+    the panels it routes between survive, because with one branch left its rendered text names
+    a panel that is no longer below it."""
     kept = set(wanted)
-    out: list[PromptPanel] = []
-    for panel in panels:
-        source = list(panel.items)
-        items: list[PromptItem] = []
-        i = 0
-        while i < len(source):
-            item = source[i]
-            if isinstance(item, PromptPanel):
-                items.extend(keep_questions([item], kept))
-                i += 1
-                continue
-            run: list[PromptQuestion] = []
-            j = i + 1
-            while j < len(source):
-                candidate = source[j]
-                if not (isinstance(candidate, PromptQuestion) and candidate.is_confirm):
-                    break
-                run.append(candidate)
-                j += 1
-            if item.routes_between:
-                items.append(item)  # provisional; pruned below, once the siblings are known
-            elif not kept.isdisjoint(item.target_paths):
-                items.append(item)
-                items.extend(node for node in run if not kept.isdisjoint(node.target_paths))
-            i = j
-        surviving = {child.title for child in items if isinstance(child, PromptPanel)}
-        items = [
-            item
-            for item in items
-            if not (isinstance(item, PromptQuestion) and item.routes_between)
-            or len(surviving.intersection(item.routes_between)) >= 2
-        ]
-        if items:
-            out.append(panel.model_copy(update={"items": items}))
-    return out
+    return _narrow(
+        panels,
+        lambda question: not kept.isdisjoint(question.target_paths),
+        lambda question, surviving: len(surviving.intersection(question.routes_between)) >= 2,
+    )
+
+
+def map_questions(
+    panels: list[PromptPanel], transform: Callable[[PromptQuestion], PromptQuestion]
+) -> list[PromptPanel]:
+    """`transform` applied to every question in the tree, panel structure untouched.
+
+    Lives here so a consumer annotating questions does not have to know that panels nest."""
+
+    def panel(node: PromptPanel) -> PromptPanel:
+        return node.model_copy(
+            update={
+                "items": [
+                    panel(item) if isinstance(item, PromptPanel) else transform(item)
+                    for item in node.items
+                ]
+            }
+        )
+
+    return [panel(node) for node in panels]
 
 
 def hydrate_panels(panels: list[PromptPanel], hydrate: Callable[[str], str]) -> list[PromptPanel]:

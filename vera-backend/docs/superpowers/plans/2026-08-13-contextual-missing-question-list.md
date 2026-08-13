@@ -1531,10 +1531,11 @@ class TestRealSchemaDigest:
         digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
         assert "(still needed for: CPT 58340, CPT 82670)" in digest
 
-    def test_a_focused_plan_narrows_without_crashing(self) -> None:
-        # focus_call_plan narrows descriptors but NOT panels (a known bug, fixed on a later
-        # branch). Until then the new code paths must degrade rather than raise: every
-        # descriptor lookup misses, so the closure does not explode and no clause is stamped.
+    def test_a_focused_plan_names_only_members_it_kept_a_descriptor_for(self) -> None:
+        # CORRECTED DURING EXECUTION: the clause IS stamped on a focused plan, and correctly --
+        # `_stamp_still_needed` reads owner_title only for the OWED targets, which on a focused
+        # plan are exactly the descriptors that survived. The invariant to pin is therefore that
+        # a clause never names a member the plan has no descriptor for, not that none is stamped.
         focused = focus_call_plan(
             PLAN,
             ["sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"],
