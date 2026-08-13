@@ -386,7 +386,63 @@ class TestKeepQuestions:
         assert [q.text for q in iter_questions(keep_questions(tree, {"a.spouse"}))] == [
             "Spouse name?"
         ]
-        assert keep_questions(tree, {"a.dob"}) == []
+        # The confirm ALONE no longer vanishes: with its anchor already answered it is promoted
+        # to a standalone question, because rendering nothing while the field is still owed lost
+        # a required answer outright — see the standalone-promotion test above.
+        orphan = keep_questions(tree, {"a.dob"})
+        assert [q.text for q in iter_questions(orphan)] == ["Read back the DOB"]
+
+    def test_an_owed_confirm_whose_anchor_is_dropped_stands_alone(self) -> None:
+        # A confirm node normally travels with its anchor. But when the anchor is already
+        # answered and only the confirm is owed, dropping the run left NOTHING rendered while
+        # the guard still counted the field outstanding — silent loss of a required field.
+        # Promoted to a standalone question so it numbers, renders and counts.
+        tree = [
+            PromptPanel(
+                title="Basics",
+                items=[
+                    PromptQuestion(
+                        text="Individual or family?",
+                        options=[PromptOption(target_paths=["a.coverage_type"])],
+                    ),
+                    PromptQuestion(
+                        text='If "Coverage Type" is "Family": confirm the spouse name',
+                        options=[PromptOption(target_paths=["a.spouse"])],
+                        is_confirm=True,
+                    ),
+                ],
+            )
+        ]
+        kept = keep_questions(tree, {"a.spouse"})  # anchor answered, confirm still owed
+        assert [q.text for q in iter_questions(kept)] == [
+            'If "Coverage Type" is "Family": confirm the spouse name'
+        ]
+        # Standalone means it takes an ordinal — otherwise the count stays 0 and the gap
+        # ceiling it feeds collapses.
+        assert numbered_questions(kept) == 1
+        assert next(iter_questions(kept)).is_confirm is False
+
+    def test_a_confirm_kept_with_its_anchor_stays_a_nested_bullet(self) -> None:
+        tree = [
+            PromptPanel(
+                title="Basics",
+                items=[
+                    PromptQuestion(
+                        text="Individual or family?",
+                        options=[PromptOption(target_paths=["a.coverage_type"])],
+                    ),
+                    PromptQuestion(
+                        text="confirm the spouse name",
+                        options=[PromptOption(target_paths=["a.spouse"])],
+                        is_confirm=True,
+                    ),
+                ],
+            )
+        ]
+        kept = keep_questions(tree, {"a.coverage_type", "a.spouse"})
+        confirm = next(q for q in iter_questions(kept) if "spouse" in q.text)
+        assert confirm.is_confirm is True  # anchor present -> unchanged, unnumbered
+        assert numbered_questions(kept) == 1
 
     def test_a_routing_question_survives_only_while_two_branches_do(self) -> None:
         # It collects nothing, so it can never itself be owed; it earns its place only while

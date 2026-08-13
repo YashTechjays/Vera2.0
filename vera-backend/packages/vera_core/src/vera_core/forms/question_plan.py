@@ -639,6 +639,8 @@ def _narrow(
     panels: list[PromptPanel],
     collects: Callable[[PromptQuestion], bool],
     routes: Callable[[PromptQuestion, set[str | None]], bool],
+    *,
+    promote_orphan_confirms: bool = False,
 ) -> list[PromptPanel]:
     """The tree keeping only what `collects` and `routes` accept, panels left empty pruned.
 
@@ -659,7 +661,11 @@ def _narrow(
         while i < len(source):
             item = source[i]
             if isinstance(item, PromptPanel):
-                items.extend(_narrow([item], collects, routes))
+                items.extend(
+                    _narrow(
+                        [item], collects, routes, promote_orphan_confirms=promote_orphan_confirms
+                    )
+                )
                 i += 1
                 continue
             run: list[PromptQuestion] = []
@@ -673,6 +679,16 @@ def _narrow(
             if item.routes_between or collects(item):
                 items.append(item)
                 items.extend(node for node in run if collects(node))
+            elif promote_orphan_confirms:
+                # The anchor is out but a confirm behind it is still wanted. It cannot stay a
+                # nested bullet — there is nothing left to nest under — and dropping it renders
+                # NOTHING while the owed set still counts the field, which is silent loss of a
+                # required answer. So it stands alone: clearing `is_confirm` is what earns it an
+                # ordinal from `numbered_questions` and a line of its own from both renderers.
+                # Its text already carries its own condition, so it reads correctly unanchored.
+                items.extend(
+                    node.model_copy(update={"is_confirm": False}) for node in run if collects(node)
+                )
             i = j
         surviving = {child.title for child in items if isinstance(child, PromptPanel)}
         items = [
@@ -707,12 +723,17 @@ def keep_questions(panels: list[PromptPanel], wanted: Collection[str]) -> list[P
 
     The complement of `drop_questions`. A routing question is kept only while at least TWO of
     the panels it routes between survive, because with one branch left its rendered text names
-    a panel that is no longer below it."""
+    a panel that is no longer below it.
+
+    Unlike `drop_questions` this PROMOTES an orphaned confirm: narrowing routinely drops an
+    anchor that is already answered while the confirm behind it is still owed, and a confirm
+    that survives only as part of its anchor's run would then render nothing at all."""
     kept = set(wanted)
     return _narrow(
         panels,
         lambda question: not kept.isdisjoint(question.target_paths),
         lambda question, surviving: len(surviving.intersection(question.routes_between)) >= 2,
+        promote_orphan_confirms=True,
     )
 
 
