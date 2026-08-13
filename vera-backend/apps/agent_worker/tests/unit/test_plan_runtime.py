@@ -3459,3 +3459,24 @@ class TestRefusalJudgesSettledState:
         assert "have no answer on file" not in refusal
         assert "no answer is recorded yet" in refusal
         assert "do NOT ask it again" in refusal
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_is_private_and_reads_as_a_continuation(self) -> None:
+        # Live call cea003d0599a91f2b20255810bbc52b6: the agent relayed the refusal to the
+        # representative — "Sorry, I got ahead of myself" — inventing an error the rep never
+        # saw and advertising that the question list is machine-checked. Both guards must read
+        # as "keep going", never as a rebuke, and must forbid narrating the instruction.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            task_refusal = cast(str, await _tool(agent, "task_complete")())
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            gap_refusal = cast(str, await _tool(gap, "gap_complete")())
+        for refusal in (task_refusal, gap_refusal):
+            assert refusal.startswith("Keep going —")
+            assert "Not yet" not in refusal
+            assert "do not apologize" in refusal
+            assert "got ahead of yourself" in refusal

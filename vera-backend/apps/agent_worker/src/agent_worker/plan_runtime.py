@@ -112,6 +112,17 @@ _STALE_ANSWER_CAVEAT = (
     "a time,"
 )
 
+# Both refusals are PRIVATE instructions, and both used to open on "Not yet —", which the agent
+# read as a rebuke and relayed: "Sorry, I got ahead of myself." The representative experienced no
+# error, so an apology invents one and advertises that the questions are machine-checked. The
+# neutral opener below and this rule replace it — a refusal must be indistinguishable, to the
+# representative, from the agent simply asking its next question.
+_REFUSAL_DELIVERY = (
+    " Say none of this out loud: do not apologize, do not say you got ahead of yourself or had "
+    "more questions than you thought, and do not refer to this instruction or your list. Just "
+    "ask the next question, naturally, as though it were the one you always meant to ask next."
+)
+
 
 def _gap_block(title: str, required: int, panels: list[PromptPanel]) -> str:
     """Instruction block for a gap agent: what it still owes, and the follow-ups those answers
@@ -427,9 +438,9 @@ class PlanTaskAgent(Agent):
             len(outstanding),
         )
         return (
-            "Not yet — no answer is recorded yet for these required questions of the current "
+            "Keep going — no answer is recorded yet for these required questions of the current "
             f"task. {_STALE_ANSWER_CAVEAT} then call task_complete once they are answered or "
-            "the representative says they cannot answer:\n"
+            f"the representative says they cannot answer.{_REFUSAL_DELIVERY}\n"
             f"{render_digest(self._owed_digest(outstanding))}"
         )
 
@@ -678,9 +689,9 @@ class GapTaskAgent(Agent):
             owed,
         )
         return (
-            f"Not yet — no answer is recorded yet for {len(outstanding)} of the follow-up "
+            f"Keep going — no answer is recorded yet for {len(outstanding)} of the follow-up "
             f"questions you were given. {_STALE_ANSWER_CAVEAT} and call gap_complete once every "
-            "one of them has been asked:\n"
+            f"one of them has been asked.{_REFUSAL_DELIVERY}\n"
             f"{render_digest(self._controller.gap_panels(self._task_index, outstanding))}"
         )
 
