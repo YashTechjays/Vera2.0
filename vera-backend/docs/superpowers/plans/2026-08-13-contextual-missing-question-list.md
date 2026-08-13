@@ -1531,6 +1531,20 @@ class TestRealSchemaDigest:
         digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
         assert "(still needed for: CPT 58340, CPT 82670)" in digest
 
+    def test_a_focused_plan_narrows_without_crashing(self) -> None:
+        # focus_call_plan narrows descriptors but NOT panels (a known bug, fixed on a later
+        # branch). Until then the new code paths must degrade rather than raise: every
+        # descriptor lookup misses, so the closure does not explode and no clause is stamped.
+        focused = focus_call_plan(
+            PLAN,
+            ["sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"],
+        )
+        for task in focused.tasks:
+            owed = [field.path for field in task.fields]
+            panels = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
+            render_digest(panels)
+            assert all(not question.still_needed for question in iter_questions(panels))
+
     def test_both_catalogs_narrow_and_render_every_task(self) -> None:
         # disease_only has no ask groups and no routing questions; the narrowing must not
         # assume either exists.
