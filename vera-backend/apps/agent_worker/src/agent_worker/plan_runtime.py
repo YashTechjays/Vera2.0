@@ -24,7 +24,6 @@ never double-swap the active agent.
 
 import asyncio
 import logging
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -99,31 +98,36 @@ _GAP_FRUITLESS_REFUSALS = 2
 _TASK_FRUITLESS_REFUSALS = 2
 
 
-def _gap_block(title: str, fields: list[PlanFieldDescriptor]) -> str:
-    """Instruction block for a gap agent, listing every question it still owes."""
-    if fields:
-        count = len(fields)
-        subject = "question is" if count == 1 else "questions are"
-        owed = (
-            f"{count} required {subject} still unanswered from earlier in the call. Re-ask ONLY "
-            "the questions on this numbered list, politely, one at a time, and keep going until "
-            "every item on it has been asked — the list is the complete set:\n"
-            f"{_field_lines(fields, numbered=True)}"
-        )
-    else:
+def _gap_block(title: str, required: int, panels: list[PromptPanel]) -> str:
+    """Instruction block for a gap agent: what it still owes, and the follow-ups those answers
+    will open.
+
+    The follow-ups are pre-loaded because the Observer extracts in a detached pass — on the turn
+    right after the representative confirms coverage they are not yet owed, and an agent holding
+    an answer with no sanctioned next question invents one. They carry their own condition, so
+    one list expresses both tiers; `required` counts only the first."""
+    if not panels:
         owed = (
             "Required questions from earlier in the call are still unanswered. When the list "
             "arrives, re-ask ONLY those specific questions, politely, one at a time."
         )
+    else:
+        subject = "question is" if required == 1 else "questions are"
+        owed = (
+            f"{required} required {subject} still unanswered from earlier in the call. Ask every "
+            "question below whose condition holds, politely, one at a time, and re-ask ONLY "
+            'questions from this list. A question marked "Ask only if ..." is a follow-up: ask '
+            "it only once its condition is true — typically right after the representative "
+            f"confirms coverage.\n{render_panels(panels)}"
+        )
     return (
         f"# Current task: Follow-up questions ({title})\n"
         f"{owed}\n"
-        "Keep each question brief, but do not shorten the LIST — every question on it is owed. "
-        "If the representative cannot answer one, accept it and move to the next one on the list; "
-        "never press or repeat. This is a mid-call follow-up, NOT the end of the call: "
-        "do NOT say goodbye, do NOT thank the representative as if finishing, and do NOT "
-        "claim you have everything you need — more questions may still follow. Once every "
-        "question on the list has been asked, call gap_complete."
+        "Keep each question brief. If the representative cannot answer one, accept it and move "
+        "to the next one; never press or repeat. This is a mid-call follow-up, NOT the end of "
+        "the call: do NOT say goodbye, do NOT thank the representative as if finishing, and do "
+        "NOT claim you have everything you need — more questions may still follow. Once every "
+        "question whose condition holds has been asked, call gap_complete."
     )
 
 
@@ -156,40 +160,6 @@ def _completeness_block(panels: list[PromptPanel]) -> str:
         f"them, one at a time, in order. Call task_complete only once all {total} have been "
         "asked, whether or not the representative could answer them, and never while one of them "
         "is still unasked."
-    )
-
-
-def _owning_segment(path: str) -> str:
-    """The segment that owns the leaf, e.g. `...labs.cpt_58340.covered` → `cpt_58340`."""
-    parts = path.split(".")
-    return parts[-2] if len(parts) > 1 else path
-
-
-def _field_line(
-    field: PlanFieldDescriptor, title_counts: Counter[str], *, marker: str = "-"
-) -> str:
-    """One field, disambiguated when its title repeats in the list it's rendered into.
-
-    Titles are not unique — every CPT code's field is titled "Covered" — so a bare-title
-    line names nothing the agent could act on; every field-list renderer shares this."""
-    line = f"{marker} {field.title}"
-    if title_counts[field.title] > 1:
-        line += f" ({_owning_segment(field.path)})"
-    if field.values:
-        line += f" (expected one of: {', '.join(field.values)})"
-    return line
-
-
-def _field_lines(fields: list[PlanFieldDescriptor], *, numbered: bool = False) -> str:
-    """Questions as a list, naming the expected values where the schema fixes them.
-
-    `numbered` ordinals give the agent something to check itself against: a CPT-heavy task
-    renders a run of near-identical lines, and a bulleted run of fourteen carries no signal
-    that fourteen is how many were owed."""
-    title_counts = Counter(field.title for field in fields)
-    return "\n".join(
-        _field_line(field, title_counts, marker=f"{position}." if numbered else "-")
-        for position, field in enumerate(fields, start=1)
     )
 
 
@@ -544,19 +514,34 @@ class GapTaskAgent(Agent):
         # Questions owed on entry (0 until on_enter, where the answer snapshot exists) and the
         # list currently in the instructions, rewritten whenever that set shrinks.
         self._questions_owed = 0
-        self._listed_paths: tuple[str, ...] = ()
+        # The gap block currently in the instructions. Keyed on the TEXT, not the owed paths:
+        # `still_needed` and the follow-up filter both read answers, so a path-keyed cache
+        # would serve a stale list.
+        self._listed_block = ""
         self._rep_turns = 0
         self._outstanding_at_last_refusal: int | None = None
         self._fruitless_refusals = 0
         self._advanced_this_turn = False
-        super().__init__(instructions=self._build_instructions([]))
+        super().__init__(instructions=self._build_instructions(_gap_block(self._task.title, 0, [])))
 
-    def _build_instructions(self, fields: list[PlanFieldDescriptor]) -> str:
-        """This sweep's full instruction text, listing the questions it still owes."""
+    def _build_instructions(self, block: str) -> str:
         return _instructions(
             self._controller.plan,
-            _gap_block(self._task.title, fields),
+            block,
             extra_instructions=self._controller.extra_instructions,
+        )
+
+    def _gap_text(self, fields: list[PlanFieldDescriptor]) -> str:
+        """This sweep's block: the required count off the unexploded narrowing, the list off the
+        exploded one."""
+        if not fields:
+            return _gap_block(self._task.title, 0, [])
+        index = self._task_index
+        required = numbered_questions(self._controller.gap_panels(index, fields))
+        return _gap_block(
+            self._task.title,
+            required,
+            self._controller.gap_panels(index, fields, explode=True),
         )
 
     @property
@@ -587,11 +572,11 @@ class GapTaskAgent(Agent):
         """Put this sweep's outstanding questions in the INSTRUCTIONS, where they outlive the
         turn that named them — the `_apply_gating` seam, and rebuilt not appended for the
         reason given there."""
-        paths = tuple(field.path for field in fields)
-        if paths == self._listed_paths:
+        block = self._gap_text(fields)
+        if block == self._listed_block:
             return
-        self._listed_paths = paths
-        await self.update_instructions(self._build_instructions(fields))
+        self._listed_block = block
+        await self.update_instructions(self._build_instructions(block))
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
@@ -677,7 +662,7 @@ class GapTaskAgent(Agent):
             f"Not yet — {len(outstanding)} of the follow-up questions you were given still have "
             "no answer on file. Ask the representative for them now, one at a time, and call "
             "gap_complete only once every one of them has been asked:\n"
-            f"{_field_lines(outstanding, numbered=True)}"
+            f"{render_digest(self._controller.gap_panels(self._task_index, outstanding))}"
         )
 
 

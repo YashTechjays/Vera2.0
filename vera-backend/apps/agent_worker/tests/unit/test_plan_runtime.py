@@ -28,7 +28,6 @@ from agent_worker.plan_runtime import (
     PlanRunController,
     PlanTaskAgent,
     WrapUpAgent,
-    _field_lines,
 )
 from agent_worker.prompt import SCOPE_DISCIPLINE
 from agent_worker.rule_engine import RuleEngine
@@ -43,6 +42,7 @@ from vera_core.forms.call_plan import (
 from vera_core.forms.catalog.disease_only import build_disease_only
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.dsl import AllCondition, Codes, Comparison, RefCondition, RequiredWhen
+from vera_core.forms.prompting import numbered_questions
 from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
 ROOM = "call--t--c"
@@ -872,12 +872,25 @@ def _field(
     )
 
 
+def _answers_option(field: PlanFieldDescriptor) -> PromptOption:
+    """The option a real compile produces: the vocabulary rides on the OPTION, not the
+    descriptor, which is where `render_panels` reads it from (`question_plan._answers_text`)."""
+    return PromptOption(
+        answers=" | ".join(field.values) if field.values else "",
+        target_paths=[field.path],
+    )
+
+
 def _panels_for(fields: list[PlanFieldDescriptor]) -> list[PromptPanel]:
     """One question per field — the shape a plain (non-fanned) ask compiles to. Gives a
     hand-built fixture the "every field reachable from exactly one question" shape Task 2's
     validator guarantees for a real compiled plan, so `gap_fields`/`owed_question_count`
     (now tree-joined) see the same fields the old field-only walk did."""
-    return [PromptPanel(items=[_question(f.title, f.path) for f in fields])]
+    return [
+        PromptPanel(
+            items=[PromptQuestion(text=f.title, options=[_answers_option(f)]) for f in fields]
+        )
+    ]
 
 
 def _gap_plan() -> CallPlan:
@@ -1329,12 +1342,14 @@ def _multi_gap_plan(*, with_panels: bool = True) -> CallPlan:
     )
 
 
-# Every question `_multi_gap_plan()`'s intake task owes, as `_field_lines` renders it.
+# Every question `_multi_gap_plan()`'s intake task owes, as the digest renders it. Its
+# `_panels_for` fixture gives each field its own question titled after it, so the two
+# "Covered" fields collapse to one entry here; the titled-panel shape is covered by
+# `_titled_gap_plan`.
 _INTAKE_GAPS = (
     "Representative name",
     "Call reference",
-    "Covered (cpt_58340)",
-    "Covered (cpt_82670)",
+    "Covered",
     "Deductible",
 )
 
@@ -1946,41 +1961,6 @@ class TestPrematureCompletion:
         assert span.attributes["vera.completion.refused"] is False
 
 
-class TestFieldLines:
-    """Every CPT code's field is titled "Covered", so a bare-title list names nothing askable."""
-
-    def test_duplicated_titles_are_qualified_by_their_owning_path_segment(self) -> None:
-        lines = _field_lines(
-            [
-                _field("sections.diag.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
-                _field("sections.diag.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
-            ]
-        )
-        assert "- Covered (cpt_58340) (expected one of: Yes, No)" in lines
-        assert "- Covered (cpt_82670) (expected one of: Yes, No)" in lines
-
-    def test_a_unique_title_is_left_alone(self) -> None:
-        lines = _field_lines([_field("sections.intro.rep_name", "Representative name")])
-        assert lines == "- Representative name"
-
-    def test_numbering_gives_the_model_an_arithmetic_handle(self) -> None:
-        # A run of near-identical lines is nothing the agent can check itself against; the
-        # ordinals are what let it tell "3 of 5 asked" from "all of them".
-        lines = _field_lines(
-            [
-                _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
-                _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
-                _field("sections.intro.rep_name", "Representative name"),
-            ],
-            numbered=True,
-        )
-        assert lines == (
-            "1. Covered (cpt_58340) (expected one of: Yes, No)\n"
-            "2. Covered (cpt_82670) (expected one of: Yes, No)\n"
-            "3. Representative name"
-        )
-
-
 class TestConditionalQuestionsSurviveNarrowing:
     """A conditional gate is not settled, so its question must stay askable — and must still
     carry its condition. Plan B states that condition ON the question in the rendered list
@@ -2399,7 +2379,9 @@ class TestGapCoverage:
         with _session_patch(controller.gap_agents[0], MagicMock()):
             agent = await self._enter(controller)
         assert "5 required questions" in agent.instructions
-        assert "5. Deductible (expected one of: Met, Not met)" in agent.instructions
+        # `render_panels` numbers the ask and puts its vocabulary on the sub-line beneath.
+        assert "5. Deductible" in agent.instructions
+        assert "   - Answers: Met | Not met" in agent.instructions
         # "a couple" is idiomatically 2 and "a few" is 3 — either caps the sweep on its own.
         assert "a couple" not in agent.instructions
         assert "A few" not in agent.instructions
@@ -3352,3 +3334,43 @@ class TestRefusalNamesTheService:
         assert isinstance(refusal, str)
         assert "Egg Cryopreservation Cancer" not in refusal
         assert "Egg Cryopreservation Elective [CPT 89337]:" in refusal
+
+
+class TestGapInstructionCarriesContext:
+    """The gap agent has no other question list, so its instructions are the whole context."""
+
+    @pytest.mark.asyncio
+    async def test_the_gap_list_names_services_and_pre_loads_gated_follow_ups(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+        assert "Egg Cryopreservation Elective" in gap.instructions
+        assert "Is 89337 for elective egg cryo covered?" in gap.instructions
+        # The tier marker, and the retired absolutist wording.
+        assert 'A question marked "Ask only if ..." is a follow-up' in gap.instructions
+        assert "the list is the complete set" not in gap.instructions
+        assert "do not shorten the LIST" not in gap.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_lead_in_counts_the_required_questions_not_the_follow_ups(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        required = numbered_questions(controller.gap_panels(0, controller.gap_fields(0)))
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+        assert f"{required} required question" in gap.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_gap_refusal_uses_the_digest(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            refusal = await _tool(gap, "gap_complete")()
+        assert isinstance(refusal, str)
+        assert "Egg Cryopreservation Elective [CPT 89337]:" in refusal
+        assert "- Covered (cpt_89337)" not in refusal
