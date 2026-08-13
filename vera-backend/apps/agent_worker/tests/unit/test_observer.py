@@ -826,6 +826,12 @@ def test_extraction_instructions_carry_the_routing_note() -> None:
     text = _extraction_instructions(task)
     assert "record N/A here — never No" in text
     assert "- sections.s.plain: Plain" in text  # unnoted fields keep their bare line
+    # The unit convention is ONE header sentence, not a per-field annotation — the leaf
+    # titles already carry "(%)"/"($)", and annotating each field would multiply the cost
+    # on a CPT panel. (The bare-line assertion above is what pins that down.) No declared
+    # range is passed either: a "0-100" hint nudges the model into rescaling a fraction
+    # like 0.2 into 20%, which is an upstream ambiguity we refuse to guess at.
+    assert '"20%", never "20"' in text
 
 
 class TestDrainPending:
