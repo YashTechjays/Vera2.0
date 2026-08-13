@@ -1,7 +1,12 @@
 # Eval run — contextual owed-question list (branch `fix/task-complete-and-gap-pass-question-preparatino`)
 
 **Date:** 2026-08-13
-**Tree:** `e041d0b7` (8 implementation commits on top of merge `239a5720` with `origin/dev`)
+**Tree:** `e041d0b7` — **STALE, and deliberately kept so.** This run predates `b536592a` (the
+pre-refusal drain) and `f59702af` (the refusal-delivery rewrite), i.e. the two riskiest commits on
+the branch. Everything below describes the tree named here: in particular the quoted transcript
+still shows the retired `Not yet —` opener, and the refusals it captured had **no drain**, so the
+tool-call durations are all 0.00s. Read it as the *pre-drain* baseline, not as evidence about the
+shipped behaviour — for that see the live-call section at the bottom.
 **Command:** `VERA_EVALS_FULL=1 VERA_EVALS_ENABLED=1 uv run pytest apps/agent_worker/tests/evals -m evals -s -rs`
 **Result line:** `18 passed, 1 skipped, 43 deselected, 2 xpassed, 32 warnings in 1036.07s (0:17:16)`
 **Log:** scratchpad `evals.log`, 818 lines (not committed — contains full transcripts)
@@ -112,10 +117,16 @@ The strongest signal is the gap agent's own closing reason:
 > *"The representative confirmed CPT 58555 for ASC professional services is not covered, **and
 > since it is not covered, the remaining conditional follow-ups do not apply**."*
 
-The two-tier list worked as designed: the agent saw the pre-loaded conditional follow-ups, judged
-the gate false, and declined to ask them. This was the identified risk of dropping *"the list is
-the complete set"* from `_gap_block` — that the agent would ask conditionals unconditionally. The
-opposite happened.
+The agent saw the pre-loaded conditional follow-ups, judged the gate false, and declined to ask
+them.
+
+**Superseded — this observed only the favourable direction.** At this tree `_gap_block` told the
+agent that anything marked `Ask only if …` was a follow-up to defer, and had dropped *"the list is
+the complete set"*. But `render_panels` prints that same prose on **required** questions whose
+condition already holds (measured: 4 of 5 exploded questions on `embryo_biopsy`, including copay,
+prior auth and cycle limit), so the instruction could equally have deferred owed questions — the
+eval simply never hit a case where the gate was true. Code review caught it; the wording now tells
+the agent to evaluate the condition, and the completeness bound is back.
 
 ## What this run does NOT establish
 
@@ -134,3 +145,30 @@ opposite happened.
 A live browser-callee call driven into a `task_complete` refusal and through the gap pass, since
 that is the check the harness explicitly does not replace. The baseline eval run is optional and
 only buys attribution for failures already traced to open findings P1/P2/P8/P10.
+
+---
+
+# Live calls after the eval (the shipped behaviour)
+
+Three browser-callee calls, each on a later tree than the eval above.
+
+| Trace | Model | Tree | Result |
+|---|---|---|---|
+| `2650888a…` | gemini-2.5-flash | pre-drain | 6 refusals, **4 provably stale** (answers landed 0.8–2.8s later); agent re-asked finished services; 7 apologies/corrections |
+| `cea003d0…` | gemini-2.5-flash | + `b536592a` | drain visible (refusals 0.74–4.00s; 6 of 8 *accepted* calls paid 0.44–3.54s and were rescued); **no backward re-asks**; apologies 7 → 2, both legitimate |
+| `2fb9915e…` | gemini-3.6-flash | + `f59702af` | 6 refusals, all new wording, **zero narration leaks**; **0 still-owed questions** at question and field level, `completion_pct` 100 |
+
+Two facts the drain measurement settled, both against the initial assumption:
+
+- `drain_pending` only awaits passes that **already exist**. The constant's own comment says
+  scheduling lag before a pass starts is *"unreachable by any timeout here"* — so the 31.5s FET
+  case was never fixable by draining, and the reworded message is what covers that class.
+- The drain is doing more than the refusal count suggests: refusals went 6/14 → 7/15 (flat), but
+  6 of 8 accepted calls paid drain time, i.e. the drain converted would-be refusals into clean
+  completions.
+
+`2fb9915e…` also showed `form status=exception_review`, `review_reason=not_evaluated` — the
+post-call eval consumer is gated on `VERA_GCP_PROJECT`, which is unset locally, so that call got
+no post-call verification pass (`verified_pct` None while `completion_pct` is 100). Unrelated to
+this branch; tracked separately in the vault note *Post-Call Eval Bypasses the ResilientLLM
+Pattern*.

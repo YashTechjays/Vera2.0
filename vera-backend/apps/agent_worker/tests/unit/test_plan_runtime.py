@@ -3351,10 +3351,13 @@ class TestGapInstructionCarriesContext:
             await gap.on_enter()
         assert "Egg Cryopreservation Elective" in gap.instructions
         assert "Is 89337 for elective egg cryo covered?" in gap.instructions
-        # The tier marker, and the retired absolutist wording.
-        assert 'A question marked "Ask only if ..." is a follow-up' in gap.instructions
-        assert "the list is the complete set" not in gap.instructions
-        assert "do not shorten the LIST" not in gap.instructions
+        # A gate is NOT a tier marker: `render_panels` prints "Ask only if" on required
+        # questions whose condition already holds, so the prose must tell the agent to
+        # EVALUATE the condition, never to defer anything wearing one.
+        assert "is owed the moment its condition holds" in gap.instructions
+        assert "is a follow-up" not in gap.instructions
+        # The completeness bound has to survive the conditional wording.
+        assert "the complete set" in gap.instructions
 
     @pytest.mark.asyncio
     async def test_the_lead_in_counts_the_required_questions_not_the_follow_ups(self) -> None:
@@ -3480,3 +3483,68 @@ class TestRefusalJudgesSettledState:
             assert "Not yet" not in refusal
             assert "do not apologize" in refusal
             assert "got ahead of yourself" in refusal
+
+
+class TestGuardCountsMatchTheirLists:
+    """Review findings 3, 4 and 6a: a count or a ceiling that disagrees with the list beneath
+    it releases the guard early or misleads the agent's own arithmetic."""
+
+    @pytest.mark.asyncio
+    async def test_the_gap_ceiling_measures_the_list_the_agent_was_given(self) -> None:
+        # `owed_question_count` counts only the unconditionally-owed tier, but the instruction
+        # lists the exploded tree. Measuring the short number released the guard after that many
+        # rep turns with the conditional follow-ups still unasked.
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+        listed = numbered_questions(
+            controller.gap_panels(0, controller.gap_fields(0), explode=True)
+        )
+        assert gap._questions_owed == listed
+        assert listed >= controller.owed_question_count(0)
+
+    @pytest.mark.asyncio
+    async def test_the_gap_ceiling_does_not_shrink_as_answers_land(self) -> None:
+        # Snapshot at entry, like PlanTaskAgent._questions_at_entry — re-reading it mid-sweep
+        # would lower the bar every time an answer arrived.
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            at_entry = gap._questions_owed
+            controller.update_answers({"sections.t.cancer.cpt_89337.covered": "No"})
+            await _rep_turn(gap)
+        assert gap._questions_owed == at_entry
+
+    @pytest.mark.asyncio
+    async def test_the_gap_refusal_counts_spoken_asks_not_owed_fields(self) -> None:
+        # Eight owed codes of one fanned ask render as a single line; claiming "8 questions"
+        # over it is a number the agent cannot reconcile with what it sees.
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            refusal = cast(str, await _tool(gap, "gap_complete")())
+        listed = numbered_questions(controller.gap_panels(0, controller.gap_fields(0)))
+        assert f"for {listed} of the follow-up question" in refusal
+
+    @pytest.mark.asyncio
+    async def test_no_drain_once_the_turn_ceiling_has_released_the_guard(self) -> None:
+        # Past the ceiling the guard returns None unconditionally, so a drain there is pure
+        # silence — repeated on every remaining handoff of the call.
+        controller, _ = _controller(_titled_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            for _ in range(agent._questions_at_entry):
+                await _rep_turn(agent)
+            observer.drains = 0
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)  # ceiling released it
+        assert observer.drains == 0

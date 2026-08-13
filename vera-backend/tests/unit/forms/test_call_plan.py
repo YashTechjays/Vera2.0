@@ -876,3 +876,46 @@ class TestRealSchemaDigest:
                 assert numbered_questions(panels) == numbered_questions(task.panels), task.task_key
                 render_digest(panels)
                 focus_questions(task, owed, {}, plan.shared_conditions, explode=True)
+
+
+class TestReviewFindings:
+    """Regressions for the review of the owed-question digest."""
+
+    def test_explode_adds_only_the_members_with_nothing_on_file(self) -> None:
+        # A dependent fan-out pulled in WHOLE made `_stamp_still_needed` see owed == targets,
+        # so it named none of its members — defeating the clause for its whole reason to exist.
+        task = plan_task(PLAN, "diagnostic_coverage")
+        base = "sections.diagnostic_testing.labs_xray_ultrasound"
+        codes = ("58340", "82670", "83001", "83002", "84146", "84443", "84144", "76830")
+        seed = [f"{base}.cpt_{c}.covered" for c in codes]
+        on_file = {f"{base}.cpt_{c}.prior_auth": "No" for c in codes[2:]}  # 6 of 8
+        panels = focus_questions(task, seed, on_file, PLAN.shared_conditions, explode=True)
+        auth = next(q for q in iter_questions(panels) if "prior authorization" in q.text.lower())
+        assert auth.still_needed == ["CPT 58340", "CPT 82670"]
+
+    def test_explode_leaves_optional_follow_ups_out_of_the_sweep(self) -> None:
+        # The sweep counts its list as required questions; an optional item pads that claim.
+        task = plan_task(PLAN, "infertility_coverage")
+        base = "sections.infertility_treatment.embryo_biopsy"
+        seed = [f"{base}.cpt_89290.covered", f"{base}.cpt_89291.covered"]
+        panels = focus_questions(task, seed, {}, PLAN.shared_conditions, explode=True)
+        assert [q.text for q in iter_questions(panels) if q.optional] == []
+
+    def test_the_digest_keeps_the_answer_vocabulary(self) -> None:
+        # The field-title list carried "(expected one of: …)"; the digest must not lose it.
+        task = plan_task(PLAN, "insurance_basics")
+        owed = [f.path for f in task.fields if f.values][:1]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        vocab = next(f.values for f in task.fields if f.path == owed[0])
+        assert vocab is not None and " | ".join(vocab) in digest
+
+    def test_root_titles_survive_on_a_task_with_several_sections(self) -> None:
+        # Suppression is judged on the TASK's shape, not on how many roots survived: financial
+        # has 4 root panels and closing_admin 5, so narrowing to one must still name it.
+        task = plan_task(PLAN, "financial")
+        assert len(task.panels) > 1
+        owed = [f.path for f in task.fields if f.path.startswith("sections.lifetime_maximum")]
+        panels = focus_questions(task, owed, {}, PLAN.shared_conditions)
+        digest = render_digest(panels, task_sections=len(task.panels))
+        assert len(panels) == 1  # narrowed to a single surviving root
+        assert panels[0].title is not None and panels[0].title in digest

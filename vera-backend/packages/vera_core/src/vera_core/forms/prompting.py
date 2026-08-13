@@ -377,18 +377,25 @@ def numbered_questions(panels: list[PromptPanel]) -> int:
     )
 
 
-def render_digest(panels: list[PromptPanel]) -> str:
+def render_digest(panels: list[PromptPanel], *, task_sections: int | None = None) -> str:
     """The same tree as `render_panels`, compressed for a reader that ALREADY has the full list.
 
     Each panel's crumb — its title chain plus the nearest codes line — is printed once, with its
-    questions numbered beneath. Numbering is `render_panels`' own: one continuous counter across
-    every panel, and no ordinal for a routing question or a confirm node, so a refusal's
-    ordinals mean the same thing as the list the agent is reading. The sole root section panel
-    is left out of the crumb: it names the task, so repeating it on every line says nothing.
-    """
+    questions numbered beneath. Numbering follows `render_panels`' rule (one continuous counter,
+    no ordinal for a routing question or a confirm node) but restarts at 1 for the narrowed tree,
+    so the ordinals count the OWED questions and are not the ordinals of the agent's own list.
+
+    `task_sections` is the task's ORIGINAL root-panel count: a task with one section never gains
+    anything from repeating its name on every line, but a task with several (financial has four,
+    closing_admin five) needs it to tell them apart. Judged on the task's shape, never on how
+    many roots happened to survive the narrowing.
+
+    Panel-level gate prose is deliberately dropped — every current caller narrows to an
+    applicable-only set, where it would be noise. A caller rendering a digest of an EXPLODED set
+    would need it back."""
     numbering = count(1)
     entries: list[tuple[str, str]] = []
-    bare_root = len(panels) == 1
+    bare_root = (len(panels) if task_sections is None else task_sections) == 1
 
     def walk(panel: PromptPanel, titles: list[str], codes: str, root: bool) -> None:
         here = titles if (root and bare_root) else [*titles, panel.title or ""]
@@ -430,6 +437,10 @@ def _digest_line(question: PromptQuestion) -> str:
     labels = [option.label for option in question.options if option.label]
     if labels:
         parts.append(f"[either: {' / '.join(labels)}]")
+    elif answers := next((o.answers for o in question.options if o.answers), ""):
+        # The vocabulary the field-title list used to carry as "(expected one of: …)". A refusal
+        # that names the question but not its answer shape loses what the old lines had.
+        parts.append(f"[{answers}]")
     if question.still_needed:
         parts.append(f"(still needed for: {', '.join(question.still_needed)})")
     if question.gate_text is not None:

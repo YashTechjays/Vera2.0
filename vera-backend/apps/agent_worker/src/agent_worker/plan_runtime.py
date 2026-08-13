@@ -131,7 +131,13 @@ def _gap_block(title: str, required: int, panels: list[PromptPanel]) -> str:
     The follow-ups are pre-loaded because the Observer extracts in a detached pass — on the turn
     right after the representative confirms coverage they are not yet owed, and an agent holding
     an answer with no sanctioned next question invents one. They carry their own condition, so
-    one list expresses both tiers; `required` counts only the first."""
+    `required` is the count of questions owed with no condition left to satisfy; the list itself
+    is longer, and the sweep's turn ceiling measures the LIST, not this number — the two used to
+    disagree, which released the guard after `required` rep turns with the rest still unasked.
+
+    A gate is NOT a tier marker: `render_panels` prints "Ask only if" on every conditional
+    question, including required ones whose condition already holds, so the prose below must
+    tell the agent to evaluate the condition rather than to defer anything wearing one."""
     if not panels:
         owed = (
             "Required questions from earlier in the call are still unanswered. When the list "
@@ -140,11 +146,13 @@ def _gap_block(title: str, required: int, panels: list[PromptPanel]) -> str:
     else:
         subject = "question is" if required == 1 else "questions are"
         owed = (
-            f"{required} required {subject} still unanswered from earlier in the call. Ask every "
-            "question below whose condition holds, politely, one at a time, and re-ask ONLY "
-            'questions from this list. A question marked "Ask only if ..." is a follow-up: ask '
-            "it only once its condition is true — typically right after the representative "
-            f"confirms coverage.\n{render_panels(panels)}"
+            f"{required} required {subject} still unanswered from earlier in the call. The "
+            "numbered list below is the complete set — work through it in order, politely, one "
+            "at a time, and re-ask ONLY questions from it. Every question whose condition is "
+            'true is owed. A question marked "Ask only if ..." is owed the moment its condition '
+            "holds — usually as soon as the representative confirms coverage — and is skipped "
+            "only while that condition is false, never because it looks like an extra. Do not "
+            f"shorten the list on any other basis.\n{render_panels(panels)}"
         )
     return (
         f"# Current task: Follow-up questions ({title})\n"
@@ -380,7 +388,11 @@ class PlanTaskAgent(Agent):
             # A second chain-advancing call in one turn traverses a task without ever
             # entering its question loop. Inert, not a second Agent.
             return "Already moving on — continue with the next question."
-        await self._controller.settle_before_refusing(self._task_index)
+        # Only when a refusal is still reachable. Past the turn ceiling the guard returns None
+        # unconditionally, so draining there buys nothing and spends up to 4s of silence on
+        # every remaining handoff of the call.
+        if self._rep_turns < self._questions_at_entry:
+            await self._controller.settle_before_refusing(self._task_index)
         refusal = self._refuse_premature_completion()
         self._tag_completion_decision(refusal)
         if refusal is not None:
@@ -441,7 +453,7 @@ class PlanTaskAgent(Agent):
             "Keep going — no answer is recorded yet for these required questions of the current "
             f"task. {_STALE_ANSWER_CAVEAT} then call task_complete once they are answered or "
             f"the representative says they cannot answer.{_REFUSAL_DELIVERY}\n"
-            f"{render_digest(self._owed_digest(outstanding))}"
+            f"{render_digest(self._owed_digest(outstanding), task_sections=len(self._panels))}"
         )
 
     def _owed_digest(self, outstanding: list[PlanFieldDescriptor]) -> list[PromptPanel]:
@@ -545,6 +557,8 @@ class GapTaskAgent(Agent):
         # `still_needed` and the follow-up filter both read answers, so a path-keyed cache
         # would serve a stale list.
         self._listed_block = ""
+        # How many questions that block LISTS — the turn ceiling's yardstick.
+        self._listed_count = 0
         self._rep_turns = 0
         self._outstanding_at_last_refusal: int | None = None
         self._fruitless_refusals = 0
@@ -558,18 +572,19 @@ class GapTaskAgent(Agent):
             extra_instructions=self._controller.extra_instructions,
         )
 
-    def _gap_text(self, fields: list[PlanFieldDescriptor]) -> str:
-        """This sweep's block: the required count off the unexploded narrowing, the list off the
-        exploded one."""
+    def _gap_text(self, fields: list[PlanFieldDescriptor]) -> tuple[str, int]:
+        """This sweep's block, and how many questions it LISTS.
+
+        The count comes back because the turn ceiling has to measure the same list the agent
+        was given: `owed_question_count` counts only the unconditionally-owed tier, so using it
+        released the guard after that many rep turns with the conditional follow-ups still
+        unasked — the mismatch `PlanTaskAgent._questions_at_entry` was fixed for."""
         if not fields:
-            return _gap_block(self._task.title, 0, [])
+            return _gap_block(self._task.title, 0, []), 0
         index = self._task_index
         required = numbered_questions(self._controller.gap_panels(index, fields))
-        return _gap_block(
-            self._task.title,
-            required,
-            self._controller.gap_panels(index, fields, explode=True),
-        )
+        panels = self._controller.gap_panels(index, fields, explode=True)
+        return _gap_block(self._task.title, required, panels), numbered_questions(panels)
 
     @property
     def task_index(self) -> int:
@@ -591,15 +606,19 @@ class GapTaskAgent(Agent):
             await self._controller.prepare_successor(self, successor)
             self.session.update_agent(successor)
             return
-        self._questions_owed = self._controller.owed_question_count(self._task_index)
         await self._apply_gap_list(fields)
+        # Snapshot the ceiling off the list the agent was actually GIVEN, at entry only — the
+        # same window `PlanTaskAgent._questions_at_entry` measures. Re-reading it as answers land
+        # would shrink the ceiling mid-sweep and release the guard early.
+        self._questions_owed = self._listed_count
         self.session.generate_reply(instructions=_GAP_REASK_DIRECTIVE)
 
     async def _apply_gap_list(self, fields: list[PlanFieldDescriptor]) -> None:
         """Put this sweep's outstanding questions in the INSTRUCTIONS, where they outlive the
         turn that named them — the `_apply_gating` seam, and rebuilt not appended for the
         reason given there."""
-        block = self._gap_text(fields)
+        block, listed = self._gap_text(fields)
+        self._listed_count = listed
         if block == self._listed_block:
             return
         self._listed_block = block
@@ -633,8 +652,10 @@ class GapTaskAgent(Agent):
             # entering its question loop. Inert, not a second Agent.
             return "Already moving on — continue with the next question."
         # Same detached-extraction race as the main pass: the entry drain settled the state as
-        # of entry, not as of the answer the representative just gave.
-        await self._controller.settle_before_refusing(self._task_index)
+        # of entry, not as of the answer the representative just gave. Skipped past the turn
+        # ceiling, where the guard can no longer refuse (see PlanTaskAgent._task_complete).
+        if self._rep_turns < self._questions_owed:
+            await self._controller.settle_before_refusing(self._task_index)
         if (refusal := self._refuse_premature_gap_complete()) is not None:
             return refusal
         # Set before the first await — see the matching comment in
@@ -688,11 +709,16 @@ class GapTaskAgent(Agent):
             len(outstanding),
             owed,
         )
+        # Counted off the rendered tree, not `outstanding`: that is field-granular, so eight owed
+        # codes of one fanned ask would claim "8 questions" above a one-line list.
+        panels = self._controller.gap_panels(self._task_index, outstanding)
+        listed = numbered_questions(panels)
+        subject = "question" if listed == 1 else "questions"
         return (
-            f"Keep going — no answer is recorded yet for {len(outstanding)} of the follow-up "
-            f"questions you were given. {_STALE_ANSWER_CAVEAT} and call gap_complete once every "
-            f"one of them has been asked.{_REFUSAL_DELIVERY}\n"
-            f"{render_digest(self._controller.gap_panels(self._task_index, outstanding))}"
+            f"Keep going — no answer is recorded yet for {listed} of the follow-up {subject} "
+            f"you were given. {_STALE_ANSWER_CAVEAT} and call gap_complete once every one of "
+            f"them has been asked.{_REFUSAL_DELIVERY}\n"
+            f"{render_digest(panels, task_sections=len(self._task.panels))}"
         )
 
 

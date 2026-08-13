@@ -226,14 +226,20 @@ def _exploded(
     by_path: Mapping[str, PlanFieldDescriptor],
 ) -> set[str]:
     """`wanted` plus every question gated on something already in it, to a fixpoint."""
-    questions = [q for q in iter_questions(task.panels) if q.target_paths]
+    # An OPTIONAL follow-up is never owed, so pre-loading it would pad a list the sweep counts
+    # as required questions.
+    questions = [q for q in iter_questions(task.panels) if q.target_paths and not q.optional]
     wanted = set(wanted)
     while True:
         grew = False
         for question in questions:
             if not wanted.isdisjoint(question.target_paths):
                 continue
-            if all(has_value(answers, path) for path in question.target_paths):
+            # Only the members with nothing on file. Adding the answered ones too would make a
+            # partly-answered fan-out look wholly owed, and `_stamp_still_needed` would then
+            # name none of its members — defeating the clause for its whole reason to exist.
+            open_paths = {p for p in question.target_paths if not has_value(answers, p)}
+            if not open_paths:
                 continue  # on file already; a follow-up nobody owes is noise
             refs = {
                 ref
@@ -243,7 +249,7 @@ def _exploded(
                 for ref in condition_field_paths(gate, shared)
             }
             if not wanted.isdisjoint(refs):
-                wanted.update(question.target_paths)
+                wanted |= open_paths
                 grew = True
         if not grew:
             return wanted
