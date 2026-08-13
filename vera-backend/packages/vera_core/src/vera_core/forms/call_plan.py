@@ -102,6 +102,9 @@ class PlanFieldDescriptor(_Model):
     default: str | None = None
     # Prose for the Observer when this leaf sits under a routing branch (see `_exclusive_notes`).
     exclusive_note: str | None = None
+    # Nearest titled ancestor GROUP — how `still_needed` names this leaf when a fan-out owes
+    # only some of its members. None for a leaf sitting directly under its section.
+    owner_title: str | None = None
 
 
 class PlanTask(_Model):
@@ -236,6 +239,27 @@ def _exclusive_notes(doc: FormSchemaDoc) -> dict[str, str]:
     return notes
 
 
+def _owner_titles(doc: FormSchemaDoc) -> dict[str, str]:
+    """`{leaf path: nearest titled ancestor group's title}`.
+
+    Sections are deliberately out of reach — `_iter_fields` starts at `section.fields` — because
+    the section is the panel a question sits under, not a member of the fan-out."""
+    groups = {
+        path: field.title
+        for path, field in doc._iter_fields()
+        if isinstance(field, Group) and field.title
+    }
+    owners: dict[str, str] = {}
+    for path, _leaf in doc.leaf_items():
+        parts = path.split(".")
+        for cut in range(len(parts) - 1, 1, -1):
+            title = groups.get(".".join(parts[:cut]))
+            if title is not None:
+                owners[path] = title
+                break
+    return owners
+
+
 def compile_call_plan(
     doc: FormSchemaDoc,
     prompt_doc: PromptDocument | None,
@@ -254,6 +278,7 @@ def compile_call_plan(
     rendered = render_task_prompts(doc, prompt_doc)
     section_to_task = doc.section_to_task()
     exclusive_notes = _exclusive_notes(doc)
+    owner_titles = _owner_titles(doc)
     fields_by_task: dict[str, list[PlanFieldDescriptor]] = {}
     for path, leaf, gates in leaf_gates(doc):
         if leaf.role not in COLLECTABLE_ROLES:
@@ -277,6 +302,7 @@ def compile_call_plan(
                 inapplicable_value=leaf.inapplicable_value,
                 default=leaf.default,
                 exclusive_note=exclusive_notes.get(path),
+                owner_title=owner_titles.get(path),
             )
         )
 

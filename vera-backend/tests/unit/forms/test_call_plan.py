@@ -19,6 +19,7 @@ from vera_core.forms.call_plan import (
     gating_seed,
     owed_now,
 )
+from vera_core.forms.catalog.disease_only import build_disease_only
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc, Leaf, load_document
@@ -641,3 +642,33 @@ class TestGatingSeed:
         path = "sections.benefit_coverage.coverage_type"
         plan = self._fused({path: "Family"})
         assert path not in gating_seed(plan)
+
+
+def _descriptor(plan: CallPlan, suffix: str) -> PlanFieldDescriptor:
+    return next(f for t in plan.tasks for f in t.fields if f.path.endswith(suffix))
+
+
+class TestOwnerTitle:
+    """`still_needed` names a fan-out's members by their owning group's title, never by a
+    path segment, so it reads correctly on any schema."""
+
+    def test_a_cpt_leaf_is_owned_by_its_cpt_group(self) -> None:
+        assert (
+            _descriptor(PLAN, "labs_xray_ultrasound.cpt_58340.covered").owner_title == "CPT 58340"
+        )
+
+    def test_a_service_level_leaf_is_owned_by_its_service_group(self) -> None:
+        field = _descriptor(PLAN, "ovulation_induction.cycle_limit")
+        assert field.owner_title == "Ovulation Induction/Timed Intercourse (OI/TI)"
+
+    def test_a_leaf_directly_under_a_section_has_no_owning_group(self) -> None:
+        # Only GROUPS own; a section is the panel a question sits under, not a fan-out member.
+        assert _descriptor(PLAN, "infertility_treatment.infertility_tx_covered").owner_title is None
+
+    def test_every_descriptor_of_both_catalogs_compiles(self) -> None:
+        # disease_only has no ask groups at all; owner_title must still be well-defined.
+        for doc in (build_ibv_standard(), build_disease_only()):
+            plan = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+            for task in plan.tasks:
+                for field in task.fields:
+                    assert field.owner_title is None or field.owner_title
