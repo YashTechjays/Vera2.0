@@ -58,6 +58,7 @@ from vera_core.forms.dsl import (
     NumericConsistency,
     RequiredWhen,
     Validation,
+    condition_field_paths,
 )
 from vera_core.forms.prompting import PromptDocument, render_task_prompts
 from vera_core.forms.question_plan import (
@@ -65,6 +66,7 @@ from vera_core.forms.question_plan import (
     PromptQuestion,
     hydrate_panels,
     iter_questions,
+    keep_questions,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,6 +190,98 @@ def owed_now(
         ):
             owed.append(question)
     return owed
+
+
+def focus_questions(
+    task: PlanTask,
+    paths: Collection[str],
+    answers: Mapping[str, Any],
+    shared: dict[str, Condition],
+    *,
+    explode: bool = False,
+) -> list[PromptPanel]:
+    """`task`'s question tree narrowed to `paths`, each partly-owed fan-out told which members
+    it still needs.
+
+    `explode` grows the set to the transitive closure over gates: a question whose gate reads a
+    path being asked comes along, carrying its own `Ask only if …` prose. That pre-loads the
+    follow-ups an answer is about to open — the Observer extracts in a detached pass, so on the
+    turn right after the representative confirms coverage they are not yet owed, and an agent
+    holding an answer with no sanctioned next question is an agent inventing one.
+
+    Named for the operation, not for the owed set: the focused-retry path narrows the same tree
+    against a different path set.
+    """
+    by_path = {field.path: field for field in task.fields}
+    wanted = _exploded(task, set(paths), answers, shared, by_path) if explode else set(paths)
+    return _stamp_still_needed(keep_questions(task.panels, wanted), wanted, by_path)
+
+
+def _exploded(
+    task: PlanTask,
+    wanted: set[str],
+    answers: Mapping[str, Any],
+    shared: dict[str, Condition],
+    by_path: Mapping[str, PlanFieldDescriptor],
+) -> set[str]:
+    """`wanted` plus every question gated on something already in it, to a fixpoint."""
+    questions = [q for q in iter_questions(task.panels) if q.target_paths]
+    wanted = set(wanted)
+    while True:
+        grew = False
+        for question in questions:
+            if not wanted.isdisjoint(question.target_paths):
+                continue
+            if all(has_value(answers, path) for path in question.target_paths):
+                continue  # on file already; a follow-up nobody owes is noise
+            refs = {
+                ref
+                for path in question.target_paths
+                if (field := by_path.get(path)) is not None
+                for gate in field.gates
+                for ref in condition_field_paths(gate, shared)
+            }
+            if not wanted.isdisjoint(refs):
+                wanted.update(question.target_paths)
+                grew = True
+        if not grew:
+            return wanted
+
+
+def _stamp_still_needed(
+    panels: list[PromptPanel],
+    wanted: set[str],
+    by_path: Mapping[str, PlanFieldDescriptor],
+) -> list[PromptPanel]:
+    """`still_needed` on every question owing only SOME of its targets.
+
+    Suppressed unless every owed target has an `owner_title`: a half-named list is worse than
+    none, because the agent would read it as the complete remainder."""
+
+    def question(node: PromptQuestion) -> PromptQuestion:
+        owed = [path for path in node.target_paths if path in wanted]
+        if not owed or len(owed) == len(node.target_paths):
+            return node
+        titles = [
+            title
+            for path in owed
+            if (field := by_path.get(path)) is not None and (title := field.owner_title)
+        ]
+        if len(titles) != len(owed):
+            return node
+        return node.model_copy(update={"still_needed": list(dict.fromkeys(titles))})
+
+    def panel(node: PromptPanel) -> PromptPanel:
+        return node.model_copy(
+            update={
+                "items": [
+                    panel(item) if isinstance(item, PromptPanel) else question(item)
+                    for item in node.items
+                ]
+            }
+        )
+
+    return [panel(node) for node in panels]
 
 
 def gating_seed(plan: CallPlan) -> dict[str, Any]:

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from vera_core.forms.authoring import eq
 from vera_core.forms.call_plan import (
     CallPlan,
     PlanFieldDescriptor,
@@ -15,6 +16,7 @@ from vera_core.forms.call_plan import (
     bookend_paths,
     compile_call_plan,
     focus_call_plan,
+    focus_questions,
     fuse_prefill,
     gating_seed,
     owed_now,
@@ -22,7 +24,13 @@ from vera_core.forms.call_plan import (
 from vera_core.forms.catalog.disease_only import build_disease_only
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
-from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc, Leaf, load_document
+from vera_core.forms.dsl import (
+    PLACEHOLDER_RE,
+    AnyCondition,
+    FormSchemaDoc,
+    Leaf,
+    load_document,
+)
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
     PromptDocument,
@@ -672,3 +680,122 @@ class TestOwnerTitle:
             for task in plan.tasks:
                 for field in task.fields:
                     assert field.owner_title is None or field.owner_title
+
+
+def _focus_task() -> PlanTask:
+    """One service: a 2-code fanned `covered`, plus a copay gated on it."""
+    covered = ("s.cpt_1.covered", "s.cpt_2.covered")
+    gate = AnyCondition(any=[eq(covered[0], "Yes"), eq(covered[1], "Yes")])
+    return PlanTask(
+        task_key="t",
+        title="T",
+        prompt="p",
+        fields=[
+            PlanFieldDescriptor(
+                path=covered[0],
+                title="Covered",
+                type="enum",
+                role="ask",
+                required=True,
+                owner_title="CPT 1",
+            ),
+            PlanFieldDescriptor(
+                path=covered[1],
+                title="Covered",
+                type="enum",
+                role="ask",
+                required=True,
+                owner_title="CPT 2",
+            ),
+            PlanFieldDescriptor(
+                path="s.copay",
+                title="Copay ($)",
+                type="currency",
+                role="ask",
+                required=True,
+                gates=(gate,),
+                owner_title="Service",
+            ),
+        ],
+        panels=[
+            PromptPanel(
+                title="Service",
+                items=[
+                    PromptQuestion(
+                        text="Are codes 1, 2 covered?",
+                        options=[PromptOption(target_paths=list(covered))],
+                    ),
+                    PromptQuestion(
+                        text="What is the copay?",
+                        options=[PromptOption(target_paths=["s.copay"])],
+                        gate_text="this service is covered",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+class TestFocusQuestions:
+    def test_it_keeps_only_the_questions_that_answer_the_paths(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.copay"], {}, {})
+        assert [q.text for q in iter_questions(panels)] == ["What is the copay?"]
+
+    def test_a_fully_owed_fan_out_is_not_stamped(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == []
+
+    def test_a_partly_owed_fan_out_names_the_members_it_still_needs(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == ["CPT 2"]
+
+    def test_explode_pulls_in_a_question_gated_on_an_owed_path(self) -> None:
+        panels = focus_questions(
+            _focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {}, explode=True
+        )
+        assert [q.text for q in iter_questions(panels)] == [
+            "Are codes 1, 2 covered?",
+            "What is the copay?",
+        ]
+        # The dependent keeps its own condition, which is what makes it a FOLLOW-UP and not
+        # something to ask unconditionally.
+        assert next(q for q in iter_questions(panels) if q.text == "What is the copay?").gate_text
+
+    def test_explode_leaves_an_already_answered_dependent_alone(self) -> None:
+        panels = focus_questions(
+            _focus_task(),
+            ["s.cpt_1.covered", "s.cpt_2.covered"],
+            {"s.copay": "$30"},
+            {},
+            explode=True,
+        )
+        assert [q.text for q in iter_questions(panels)] == ["Are codes 1, 2 covered?"]
+
+    def test_without_explode_the_dependent_stays_out(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {})
+        assert [q.text for q in iter_questions(panels)] == ["Are codes 1, 2 covered?"]
+
+    def test_a_member_with_no_owner_title_suppresses_the_clause(self) -> None:
+        # Better to say nothing than to name a member the agent cannot act on.
+        task = _focus_task()
+        task.fields[1].owner_title = None
+        panels = focus_questions(task, ["s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == []
+
+    def test_explode_reaches_a_fixpoint_on_the_real_schema(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        owed = ["sections.infertility_treatment.embryo_biopsy.cpt_89290.covered"]
+        exploded = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
+        texts = [q.text for q in iter_questions(exploded)]
+        assert any("covered under this plan" in t for t in texts)
+        assert any("copay or coinsurance" in t for t in texts)
+        assert any("cycle limit" in t for t in texts)
+        # Idempotent: exploding the exploded set adds nothing.
+        again = focus_questions(
+            task,
+            [p for q in iter_questions(exploded) for p in q.target_paths],
+            {},
+            PLAN.shared_conditions,
+            explode=True,
+        )
+        assert [q.text for q in iter_questions(again)] == texts
