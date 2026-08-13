@@ -28,7 +28,7 @@ import {
 } from "@/lib/ibv/schema"
 import {
   activeDisputeValue,
-  applyAllFlags,
+  applyFlagsForPaths,
   defaultFlags,
   toggleApplied,
   toggleSwapped,
@@ -93,6 +93,8 @@ type IbvContextValue = {
   applyDispute: (path: string) => void
   swapDispute: (path: string) => void
   resolveAll: () => void
+  /** Resolve only the disputes on the given paths — a section header passes its own leaves. */
+  resolveOpenDisputes: (paths: string[]) => void
   pendingDisputeCount: number
   dirty: boolean
   saveState: SaveState
@@ -274,6 +276,10 @@ export function IbvProvider({
 
   const [dirty, setDirty] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>("idle")
+  // Reentrancy guard for save(): `saveState` is React state, so a rapid double
+  // click can fire a second save() before the "saving" state has reached the DOM
+  // and disabled the button — a ref reads/writes synchronously and closes that gap.
+  const savingRef = useRef(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [savedTick, setSavedTick] = useState(0)
@@ -625,16 +631,27 @@ export function IbvProvider({
     [disputes, flags, setFlags, setValue],
   )
 
-  const resolveAll = useCallback(() => {
-    setFlagsState((prev) => applyAllFlags(disputes, prev))
-    setValues((prev) => {
-      const next = { ...prev }
-      for (const [path, d] of Object.entries(disputes)) next[path] = d.currentValue
-      return next
-    })
-    setDirty(true)
-    setSaveState("idle")
-  }, [disputes])
+  const resolveOpenDisputes = useCallback(
+    (paths: string[]) => {
+      setFlagsState((prev) => applyFlagsForPaths(disputes, prev, paths))
+      setValues((prev) => {
+        const next = { ...prev }
+        for (const path of paths) {
+          const d = disputes[path]
+          if (d) next[path] = d.currentValue
+        }
+        return next
+      })
+      setDirty(true)
+      setSaveState("idle")
+    },
+    [disputes],
+  )
+
+  const resolveAll = useCallback(
+    () => resolveOpenDisputes(Object.keys(disputes)),
+    [disputes, resolveOpenDisputes],
+  )
 
   const pendingDisputeCount = useMemo(
     () => Object.keys(disputes).filter((p) => !(flags[p]?.applied ?? false)).length,
@@ -676,51 +693,65 @@ export function IbvProvider({
   )
 
   const save = useCallback(async () => {
-    // Block save when the reviewer cleared a mandatory field that had a value on
-    // load. The Save button is also disabled in this state — this guards any
-    // programmatic call. Fields that arrived empty don't block (partial save OK).
-    if (clearedRequired.length > 0) {
-      setError("Restore the cleared required fields before saving.")
-      setSaveState("idle")
-      return
-    }
-    setSaveState("saving")
-    if (mode === "mock" || !formId || !schema) {
-      await new Promise((r) => setTimeout(r, 400))
-      setDirty(false)
-      setSaveState("saved")
-      setSavedTick((t) => t + 1)
-      return
-    }
-    // API: edited values are corrections; applied-but-unchanged disputes are accepts.
-    const form_data: Record<string, string> = {}
-    const dispute_fields: string[] = []
-    const paths = new Set([...Object.keys(values), ...Object.keys(disputes)])
-    for (const path of paths) {
-      const changed = values[path] !== originalValues[path]
-      if (changed) {
-        form_data[path] = values[path] ?? ""
-      } else if (disputes[path] && flags[path]?.applied) {
-        form_data[path] = values[path] ?? ""
-        dispute_fields.push(path)
-      }
-    }
+    // A rapid double click (or a second call before "saving" reaches the DOM and
+    // disables the button) must not fire a second overlapping request — each one
+    // would independently 422 and toast the same error. savingRef is synchronous,
+    // unlike saveState, so it closes the gap React's own re-render can't.
+    if (savingRef.current) return
+    savingRef.current = true
     try {
-      const refreshed = await resolveDisputes(formId, {
-        form_data,
-        dispute_fields,
-        reasked_fields: [],
-      })
-      const { values: v, disputes: d, provenance: prov } = adaptDetail(refreshed, dateFormats)
-      seed(v, d, refreshed.patient_name)
-      setStatus(refreshed.status)
-      setStatusError(null) // resolving disputes clears any "resolve first" warning
-      setProvenance(prov)
-      setSaveState("saved")
-      setSavedTick((t) => t + 1)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save changes.")
-      setSaveState("idle")
+      // Block save when the reviewer cleared a mandatory field that had a value on
+      // load. The Save button is also disabled in this state — this guards any
+      // programmatic call. Fields that arrived empty don't block (partial save OK).
+      if (clearedRequired.length > 0) {
+        toast.error("Restore the cleared required fields before saving.")
+        setSaveState("idle")
+        return
+      }
+      setSaveState("saving")
+      if (mode === "mock" || !formId || !schema) {
+        await new Promise((r) => setTimeout(r, 400))
+        setDirty(false)
+        setSaveState("saved")
+        setSavedTick((t) => t + 1)
+        return
+      }
+      // API: edited values are corrections; applied-but-unchanged disputes are accepts.
+      const form_data: Record<string, string> = {}
+      const dispute_fields: string[] = []
+      const paths = new Set([...Object.keys(values), ...Object.keys(disputes)])
+      for (const path of paths) {
+        const changed = values[path] !== originalValues[path]
+        if (changed) {
+          form_data[path] = values[path] ?? ""
+        } else if (disputes[path] && flags[path]?.applied) {
+          form_data[path] = values[path] ?? ""
+          dispute_fields.push(path)
+        }
+      }
+      try {
+        const refreshed = await resolveDisputes(formId, {
+          form_data,
+          dispute_fields,
+          reasked_fields: [],
+        })
+        const { values: v, disputes: d, provenance: prov } = adaptDetail(refreshed, dateFormats)
+        seed(v, d, refreshed.patient_name)
+        setStatus(refreshed.status)
+        setStatusError(null) // resolving disputes clears any "resolve first" warning
+        setProvenance(prov)
+        setSaveState("saved")
+        setSavedTick((t) => t + 1)
+      } catch (err) {
+        // A save-time failure (e.g. a validation 422) doesn't invalidate the loaded
+        // form, so it must not trip the load-error state that unmounts SchemaForm
+        // (IbvFormModal renders the form only while `error` is null) — a toast keeps
+        // the form (and the offending field) visible so the reviewer can fix it.
+        toast.error(err instanceof ApiError ? err.message : "Could not save changes.")
+        setSaveState("idle")
+      }
+    } finally {
+      savingRef.current = false
     }
   }, [
     mode,
@@ -753,6 +784,7 @@ export function IbvProvider({
     applyDispute,
     swapDispute,
     resolveAll,
+    resolveOpenDisputes,
     pendingDisputeCount,
     dirty,
     saveState,

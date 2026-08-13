@@ -90,8 +90,10 @@ SYSTEM_ROLES: Final[dict[str, frozenset[str]]] = {
             "calls:read",
             "calls:publish",
             "calls:intervene",
+            "recordings:read",
             "forms:read",
             "forms:write",
+            "forms:export",
         }
     ),
 }

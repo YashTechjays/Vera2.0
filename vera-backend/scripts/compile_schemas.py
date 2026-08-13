@@ -26,7 +26,7 @@ def main(check_only: bool) -> int:
     for insurance_type, (filename, build) in SCHEMAS.items():
         target = OUT_DIR / filename
         compiled = compile_document(build())
-        current = target.read_text() if target.exists() else None
+        current = target.read_text(encoding="utf-8") if target.exists() else None
         if compiled == current:
             print(f"{insurance_type}: {filename} up to date")
             continue
@@ -34,7 +34,7 @@ def main(check_only: bool) -> int:
             stale.append(filename)
             print(f"{insurance_type}: {filename} STALE (rerun `just compile-schemas`)")
         else:
-            target.write_text(compiled)
+            target.write_text(compiled, encoding="utf-8")
             print(f"{insurance_type}: wrote {filename}")
     return 1 if stale else 0
 

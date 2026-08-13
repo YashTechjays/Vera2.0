@@ -53,13 +53,16 @@ export function toggleSwapped(f: DisputeFlags): DisputeFlags {
   return { ...f, swapped: !f.swapped }
 }
 
-/** Mark every dispute path applied (non-swapped) — for "Resolve all disputes". */
-export function applyAllFlags(
+/** Mark each disputed path in `paths` applied (non-swapped); paths carrying no
+ *  dispute are skipped, so callers may pass a section's whole leaf list. */
+export function applyFlagsForPaths(
   disputes: DisputeMap,
-  flags: DisputeFlagMap
+  flags: DisputeFlagMap,
+  paths: Iterable<string>
 ): DisputeFlagMap {
   const next: DisputeFlagMap = { ...flags }
-  for (const path of Object.keys(disputes)) {
+  for (const path of paths) {
+    if (!(path in disputes)) continue
     next[path] = { ...(next[path] ?? defaultFlags()), applied: true, swapped: false }
   }
   return next

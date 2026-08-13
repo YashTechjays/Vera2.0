@@ -690,6 +690,7 @@ async def test_resolve_with_invalid_promoted_date_returns_422(
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["data"]["fields"] == ["sections.patient_information.patient_dob"]
+    assert body["message"] == "Patient Date of Birth: must be in the format M/D/YYYY"
 
 
 async def test_resolve_accepts_a_date_in_the_leafs_declared_format(
@@ -762,6 +763,26 @@ async def test_resolve_with_invalid_non_promoted_date_returns_422(
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["data"]["fields"] == ["sections.patient_information.spouse_partner_dob"]
+    assert body["message"] == "Spouse DOB: must be in the format M/D/YYYY"
+
+
+async def test_resolve_with_invalid_plan_effective_date_names_the_field_and_format(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    promoted_field_form: UUID,
+) -> None:
+    """VR2-187 regression (the ticket's exact field): a badly-formatted date used to
+    422 with a generic "invalid field value", giving the reviewer no clue what was
+    wrong — the message must name the field and the format the review UI asks for."""
+    resp = await client.post(
+        f"/api/v1/patient-forms/{promoted_field_form}/disputes:resolve",
+        json={"form_data": {"sections.benefit_coverage.plan_effective_date": "31/13/2026"}},
+        headers=_auth(rbac_world.admin_token),
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["data"]["fields"] == ["sections.benefit_coverage.plan_effective_date"]
+    assert body["message"] == "Plan Effective Date: must be in the format M/D/YYYY"
 
 
 async def test_resolve_auto_formats_missing_plus_on_insurance_phone(
@@ -841,7 +862,9 @@ async def test_resolve_with_invalid_promoted_phone_returns_422(
         headers=_auth(rbac_world.admin_token),
     )
     assert resp.status_code == 422, resp.text
-    assert resp.json()["data"]["fields"] == [INSURANCE_PHONE]
+    body = resp.json()
+    assert body["data"]["fields"] == [INSURANCE_PHONE]
+    assert body["message"] == "Insurance Provider Phone: must be a valid ISO formatted phone number"
 
 
 # ---- baseline-derived dispute behavior --------------------------------------
