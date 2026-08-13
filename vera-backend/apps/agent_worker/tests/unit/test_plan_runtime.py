@@ -21,6 +21,7 @@ from agent_worker.intervention import TakeoverState, push_coaching_note
 from agent_worker.plan_runtime import (
     _GAP_FRUITLESS_REFUSALS,
     _OPENING_DIRECTIVE,
+    _REFUSAL_DRAIN_TIMEOUT_S,
     _TASK_FRUITLESS_REFUSALS,
     _WRAP_UP_DIRECTIVE,
     WRAP_UP_TASK_KEY,
@@ -67,9 +68,11 @@ class FakeObserverManager:
 
     def __init__(self) -> None:
         self.drains = 0
+        self.timeouts: list[float | None] = []
 
-    async def drain_pending(self) -> None:
+    async def drain_pending(self, timeout: float | None = None) -> None:  # noqa: ASYNC109
         self.drains += 1
+        self.timeouts.append(timeout)
 
 
 class FillsDuringDrainObserverManager:
@@ -82,7 +85,7 @@ class FillsDuringDrainObserverManager:
         self._controller = controller
         self._answers = answers
 
-    async def drain_pending(self) -> None:
+    async def drain_pending(self, timeout: float | None = None) -> None:  # noqa: ASYNC109
         self._controller.update_answers(self._answers)
 
 
@@ -3374,3 +3377,85 @@ class TestGapInstructionCarriesContext:
         assert isinstance(refusal, str)
         assert "Egg Cryopreservation Elective [CPT 89337]:" in refusal
         assert "- Covered (cpt_89337)" not in refusal
+
+
+class TestRefusalJudgesSettledState:
+    """Live call 2650888a871c330cff92314129c6dd0f: four of six refusals named questions whose
+    answers landed 0.8-2.8s later, because the Observer writes in a DETACHED pass and
+    `_task_complete` judged the snapshot as of the previous turn. The agent then re-asked a
+    service it had just finished — going BACKWARD mid-task and drawing a correction from the
+    representative."""
+
+    @pytest.mark.asyncio
+    async def test_a_pending_answer_landing_during_the_drain_prevents_the_refusal(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.attach_observer(
+            cast(
+                Any, FillsDuringDrainObserverManager(controller, {"sections.intro.rep_name": "Pat"})
+            )
+        )
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            result = await _tool(agent, "task_complete")()
+        # Advanced, not refused: the answer was in flight, not missing.
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_the_drain_is_bounded_tighter_than_the_observers_own_default(self) -> None:
+        # This wait lands mid-conversation with the representative listening, where the gap
+        # pass's lands at a silent agent-to-agent handoff.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            await _tool(agent, "task_complete")()
+        assert observer.timeouts == [_REFUSAL_DRAIN_TIMEOUT_S]
+        assert _REFUSAL_DRAIN_TIMEOUT_S < 8.0
+
+    @pytest.mark.asyncio
+    async def test_nothing_owed_costs_no_drain_at_all(self) -> None:
+        # The common path is a task_complete that is simply correct; it must not pay silence.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+        assert observer.drains == 0
+
+    @pytest.mark.asyncio
+    async def test_one_tool_call_spends_exactly_one_refusal_from_the_budget(self) -> None:
+        # The trap in adding a drain: judging twice per call would burn the budget twice as
+        # fast and corrupt the shrank comparison the budget resets on. With a budget of 2 and
+        # no progress between calls, the SECOND call must still refuse — it would advance if
+        # one tool call had spent two.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            first = await _tool(agent, "task_complete")()
+            second = await _tool(agent, "task_complete")()
+        assert isinstance(first, str)
+        assert isinstance(second, str)
+        assert _TASK_FRUITLESS_REFUSALS == 2  # the budget the assertion above is sized against
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_never_claims_an_answer_is_absent(self) -> None:
+        # The snapshot can always be one extraction behind, so the message must not assert
+        # something the agent can hear is false — it drove the backward re-ask on the live call.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            refusal = cast(str, await _tool(agent, "task_complete")())
+        assert "have no answer on file" not in refusal
+        assert "no answer is recorded yet" in refusal
+        assert "do NOT ask it again" in refusal

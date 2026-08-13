@@ -97,6 +97,21 @@ _GAP_FRUITLESS_REFUSALS = 2
 # Consecutive task_complete refusals that shrink nothing before the guard gives up.
 _TASK_FRUITLESS_REFUSALS = 2
 
+# Bound for the drain a completion guard pays before refusing. Deliberately tighter than the
+# Observer's own default (sized off the extraction attempt cap, for a gap pass that waits at a
+# silent agent-to-agent handoff): this wait lands MID-CONVERSATION with the representative
+# listening. On the live call the four provably-stale refusals needed 0.8-2.8s.
+_REFUSAL_DRAIN_TIMEOUT_S = 4.0
+
+# Shared by both completion guards, and shared deliberately: the drain above is bounded and
+# best-effort, so either guard can still be judging a snapshot the agent has already heard past.
+# Neither may claim a question is unanswered — only that nothing is recorded YET.
+_STALE_ANSWER_CAVEAT = (
+    "If you have already asked one and the representative answered it, do NOT ask it again — "
+    "that answer is still being written down. Ask only the ones you have not asked yet, one at "
+    "a time,"
+)
+
 
 def _gap_block(title: str, required: int, panels: list[PromptPanel]) -> str:
     """Instruction block for a gap agent: what it still owes, and the follow-ups those answers
@@ -354,6 +369,7 @@ class PlanTaskAgent(Agent):
             # A second chain-advancing call in one turn traverses a task without ever
             # entering its question loop. Inert, not a second Agent.
             return "Already moving on — continue with the next question."
+        await self._controller.settle_before_refusing(self._task_index)
         refusal = self._refuse_premature_completion()
         self._tag_completion_decision(refusal)
         if refusal is not None:
@@ -411,9 +427,9 @@ class PlanTaskAgent(Agent):
             len(outstanding),
         )
         return (
-            "Not yet — these required questions of the current task have no answer on file. "
-            "Ask the representative for them now (one at a time), and call task_complete once "
-            "they are answered or the representative says they cannot answer:\n"
+            "Not yet — no answer is recorded yet for these required questions of the current "
+            f"task. {_STALE_ANSWER_CAVEAT} then call task_complete once they are answered or "
+            "the representative says they cannot answer:\n"
             f"{render_digest(self._owed_digest(outstanding))}"
         )
 
@@ -605,6 +621,9 @@ class GapTaskAgent(Agent):
             # A second chain-advancing call in one turn traverses a task without ever
             # entering its question loop. Inert, not a second Agent.
             return "Already moving on — continue with the next question."
+        # Same detached-extraction race as the main pass: the entry drain settled the state as
+        # of entry, not as of the answer the representative just gave.
+        await self._controller.settle_before_refusing(self._task_index)
         if (refusal := self._refuse_premature_gap_complete()) is not None:
             return refusal
         # Set before the first await — see the matching comment in
@@ -659,9 +678,9 @@ class GapTaskAgent(Agent):
             owed,
         )
         return (
-            f"Not yet — {len(outstanding)} of the follow-up questions you were given still have "
-            "no answer on file. Ask the representative for them now, one at a time, and call "
-            "gap_complete only once every one of them has been asked:\n"
+            f"Not yet — no answer is recorded yet for {len(outstanding)} of the follow-up "
+            f"questions you were given. {_STALE_ANSWER_CAVEAT} and call gap_complete once every "
+            "one of them has been asked:\n"
             f"{render_digest(self._controller.gap_panels(self._task_index, outstanding))}"
         )
 
@@ -953,10 +972,14 @@ class PlanRunController:
         """Baseline plus what the call has collected. Read-only: `update_answers` is the writer."""
         return self._answers
 
-    async def drain_observer(self) -> None:
-        """Let extraction settle before a caller reads `gap_fields`. No-op without a manager."""
+    async def drain_observer(self, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        """Let extraction settle before a caller reads `gap_fields`. No-op without a manager.
+
+        `timeout` overrides the Observer's own bound; None takes it. Bounded and non-cancelling
+        either way — `drain_pending` returns at the bound without killing the pass it waited
+        on, so a slow extraction costs this caller the bound and loses nothing."""
         if self._observer_manager is not None:
-            await self._observer_manager.drain_pending()
+            await self._observer_manager.drain_pending(timeout)
 
     async def apply_directive_now(self, directive: Directive) -> None:
         """Apply a rule-engine redirect immediately, from the Observer's background task:
@@ -1151,6 +1174,20 @@ class PlanRunController:
             and is_required(field, self._answers, shared)
             and not answered(path)
         ]
+
+    async def settle_before_refusing(self, task_index: int) -> None:
+        """Let in-flight extraction land before a completion guard judges this task.
+
+        The Observer writes answers in a DETACHED pass, so a guard reading `gap_fields` sees the
+        state as of the previous turn — not what the representative just said. On live call
+        2650888a871c330cff92314129c6dd0f four of six refusals named questions whose answers
+        landed 0.8-2.8s later, and the agent re-asked a service it had just finished.
+
+        Paid only when something still looks owed, so a completion that is simply correct costs
+        no silence. `gap_fields` is a pure read, which is what lets it be consulted here and
+        again by the guard without spending the refusal budget twice."""
+        if self.gap_fields(task_index):
+            await self.drain_observer(_REFUSAL_DRAIN_TIMEOUT_S)
 
     def gap_panels(
         self,
