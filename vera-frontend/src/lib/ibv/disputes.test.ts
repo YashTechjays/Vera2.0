@@ -10,7 +10,7 @@ import {
   badgeValue,
   toggleApplied,
   toggleSwapped,
-  applyAllFlags,
+  applyFlagsForPaths,
   buildSavePayload,
   seedValues,
   type Dispute,
@@ -64,19 +64,27 @@ describe("active/badge values + flags", () => {
   })
 })
 
-describe("applyAllFlags", () => {
+describe("applyFlagsForPaths", () => {
+  const flags: DisputeFlagMap = {
+    "a.b": { applied: false, swapped: true },
+  }
+  const disputes: DisputeMap = {
+    "a.b": { previousValue: "1", currentValue: "2" },
+    "c.d": { previousValue: "3", currentValue: "4" },
+  }
+
   it("marks every dispute path applied (and not swapped)", () => {
-    const flags: DisputeFlagMap = {
-      "a.b": { applied: false, swapped: true },
-    }
-    const disputes: DisputeMap = {
-      "a.b": { previousValue: "1", currentValue: "2" },
-      "c.d": { previousValue: "3", currentValue: "4" },
-    }
-    const next = applyAllFlags(disputes, flags)
+    const next = applyFlagsForPaths(disputes, flags, Object.keys(disputes))
     expect(next["a.b"].applied).toBe(true)
     expect(next["a.b"].swapped).toBe(false)
     expect(next["c.d"].applied).toBe(true)
+  })
+
+  it("touches only the given paths, ignoring ones with no dispute", () => {
+    const next = applyFlagsForPaths(disputes, flags, ["a.b", "no.dispute"])
+    expect(next["a.b"].applied).toBe(true)
+    expect(next["c.d"]).toBeUndefined()
+    expect(next["no.dispute"]).toBeUndefined()
   })
 })
 

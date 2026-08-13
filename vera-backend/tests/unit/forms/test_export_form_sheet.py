@@ -394,7 +394,7 @@ def test_ibv_standard_renders_and_placement_lists_exist() -> None:
     that exist in the committed artifact, and rendering it end-to-end must
     not raise."""
     filename, _build = SCHEMAS["infertility_treatment"]
-    text = (FORM_SCHEMA_DIR / filename).read_text()
+    text = (FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8")
     doc = load_document(text)
     for key in (*LEFT_TOP, *RIGHT_TOP, *RAIL):
         assert key in doc.sections, f"placement list references missing section {key}"
@@ -421,7 +421,7 @@ def test_every_catalog_schema_renders() -> None:
     """Smoke over ALL shipped schemas (not just ibv_standard) — a schema
     without the top-band sections must still render via the below-band flow."""
     for filename, _build in SCHEMAS.values():
-        doc = load_document((FORM_SCHEMA_DIR / filename).read_text())
+        doc = load_document((FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8"))
         wb = Workbook()
         render_form_sheet(cast(Worksheet, wb.active), doc, {})
 
@@ -470,7 +470,7 @@ _IUI = "sections.infertility_treatment.intrauterine_insemination.cpt_58323"
 def test_a_filled_either_or_side_reaches_the_sheet_and_is_not_greyed() -> None:
     """The whole point of writing the fill rather than showing a placeholder: the export is the
     platform's final product, and an inapplicable cell is written blank and grey."""
-    doc = load_document((FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text("utf-8"))
+    doc = load_document((FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8"))
     answered = {
         "sections.infertility_treatment.infertility_tx_covered": "Yes",
         f"{_IUI}.covered": "Yes",
