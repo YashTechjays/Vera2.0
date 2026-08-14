@@ -875,6 +875,26 @@ def test_extraction_instructions_carry_a_leafs_special_values() -> None:
     assert "- sections.s.plain: plain" in text  # a leaf without them keeps its bare line
 
 
+def test_the_exact_value_rule_is_omitted_when_no_field_names_one() -> None:
+    """It explains a clause; four of the catalog's thirteen tasks carry no such clause at all,
+    and the rule is 227 chars on a prompt re-sent every pass."""
+    from agent_worker.observer import _extraction_instructions
+
+    marker = "or exactly:"
+    plain = _extraction_instructions(_plan(fields=[_field("sections.s.plain")]).tasks[0])
+    assert marker not in plain
+
+    with_special = PlanFieldDescriptor(
+        path="sections.s.total",
+        title="Total",
+        type="currency",
+        role="ask",
+        special_values=["No Limit"],
+    )
+    named = _extraction_instructions(_plan(fields=[with_special]).tasks[0])
+    assert marker in named
+
+
 def test_an_enums_special_values_join_its_existing_vocabulary_clause() -> None:
     """`values` and `special_values` are one vocabulary for an enum — `intake`'s
     `enum_accepted_values` already unions them. A second clause would be 27 redundant

@@ -141,15 +141,7 @@ def _canonicalized(answers: list[ExtractedAnswer], task: PlanTask) -> list[Extra
 
 
 def _extraction_instructions(task: PlanTask) -> str:
-    lines = [
-        "You extract answers from a phone call between an insurance-verification agent and "
-        "a payer representative. Return ONLY the fields below that the representative has "
-        "clearly answered in the transcript. Output a JSON array of "
-        '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
-        "Omit a field entirely if it is not yet answered. "
-        f"{ANSWER_UNIT_FORMAT_RULE} {EXACT_VALUE_RULE} "
-        "Use only these field_path values:",
-    ]
+    lines: list[str] = []
     for f in task.fields:
         # An enum's `special_values` are part of its one vocabulary; every other leaf gets
         # them as the separate "exact:" clause — see `special_values_hint`.
@@ -165,7 +157,19 @@ def _extraction_instructions(task: PlanTask) -> str:
         # different cycle limits, attribution was identical with and without it, as was value
         # formatting at n=6. It cost ~1.3k chars on the CPT panel, re-sent every pass.
         lines.append(f"- {f.path}: {f.title}{allowed}{specials}{note}")
-    return "\n".join(lines)
+    # The rule explains a clause, so it is carried only by a task that has one — four of the
+    # catalog's thirteen name no special value at all, and it is 227 chars on every pass.
+    names_exact = any(special_values_hint(f.special_values) for f in task.fields if not f.values)
+    preamble = (
+        "You extract answers from a phone call between an insurance-verification agent and "
+        "a payer representative. Return ONLY the fields below that the representative has "
+        "clearly answered in the transcript. Output a JSON array of "
+        '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
+        "Omit a field entirely if it is not yet answered. "
+        f"{ANSWER_UNIT_FORMAT_RULE} {EXACT_VALUE_RULE + ' ' if names_exact else ''}"
+        "Use only these field_path values:"
+    )
+    return "\n".join([preamble, *lines])
 
 
 def _parse_extraction(text: str) -> list[ExtractedAnswer]:
