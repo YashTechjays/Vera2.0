@@ -58,6 +58,7 @@ from vera_core.forms.dsl import (
     NumericConsistency,
     RequiredWhen,
     Validation,
+    condition_field_paths,
 )
 from vera_core.forms.prompting import PromptDocument, render_task_prompts
 from vera_core.forms.question_plan import (
@@ -65,6 +66,8 @@ from vera_core.forms.question_plan import (
     PromptQuestion,
     hydrate_panels,
     iter_questions,
+    keep_questions,
+    map_questions,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +105,9 @@ class PlanFieldDescriptor(_Model):
     default: str | None = None
     # Prose for the Observer when this leaf sits under a routing branch (see `_exclusive_notes`).
     exclusive_note: str | None = None
+    # Nearest titled ancestor GROUP — how `still_needed` names this leaf when a fan-out owes
+    # only some of its members. None for a leaf sitting directly under its section.
+    owner_title: str | None = None
 
 
 class PlanTask(_Model):
@@ -187,6 +193,94 @@ def owed_now(
     return owed
 
 
+def focus_questions(
+    task: PlanTask,
+    paths: Collection[str],
+    answers: Mapping[str, Any],
+    shared: dict[str, Condition],
+    *,
+    explode: bool = False,
+) -> list[PromptPanel]:
+    """`task`'s question tree narrowed to `paths`, each partly-owed fan-out told which members
+    it still needs.
+
+    `explode` grows the set to the transitive closure over gates: a question whose gate reads a
+    path being asked comes along, carrying its own `Ask only if …` prose. That pre-loads the
+    follow-ups an answer is about to open — the Observer extracts in a detached pass, so on the
+    turn right after the representative confirms coverage they are not yet owed, and an agent
+    holding an answer with no sanctioned next question is an agent inventing one.
+
+    Named for the operation, not for the owed set: the focused-retry path narrows the same tree
+    against a different path set.
+    """
+    by_path = {field.path: field for field in task.fields}
+    wanted = _exploded(task, set(paths), answers, shared, by_path) if explode else set(paths)
+    return _stamp_still_needed(keep_questions(task.panels, wanted), wanted, by_path)
+
+
+def _exploded(
+    task: PlanTask,
+    wanted: set[str],
+    answers: Mapping[str, Any],
+    shared: dict[str, Condition],
+    by_path: Mapping[str, PlanFieldDescriptor],
+) -> set[str]:
+    """`wanted` plus every question gated on something already in it, to a fixpoint."""
+    # An OPTIONAL follow-up is never owed, so pre-loading it would pad a list the sweep counts
+    # as required questions.
+    questions = [q for q in iter_questions(task.panels) if q.target_paths and not q.optional]
+    wanted = set(wanted)
+    while True:
+        grew = False
+        for question in questions:
+            if not wanted.isdisjoint(question.target_paths):
+                continue
+            # Only the members with nothing on file. Adding the answered ones too would make a
+            # partly-answered fan-out look wholly owed, and `_stamp_still_needed` would then
+            # name none of its members — defeating the clause for its whole reason to exist.
+            open_paths = {p for p in question.target_paths if not has_value(answers, p)}
+            if not open_paths:
+                continue  # on file already; a follow-up nobody owes is noise
+            refs = {
+                ref
+                for path in question.target_paths
+                if (field := by_path.get(path)) is not None
+                for gate in field.gates
+                for ref in condition_field_paths(gate, shared)
+            }
+            if not wanted.isdisjoint(refs):
+                wanted |= open_paths
+                grew = True
+        if not grew:
+            return wanted
+
+
+def _stamp_still_needed(
+    panels: list[PromptPanel],
+    wanted: set[str],
+    by_path: Mapping[str, PlanFieldDescriptor],
+) -> list[PromptPanel]:
+    """`still_needed` on every question owing only SOME of its targets.
+
+    Suppressed unless every owed target has an `owner_title`: a half-named list is worse than
+    none, because the agent would read it as the complete remainder."""
+
+    def question(node: PromptQuestion) -> PromptQuestion:
+        owed = [path for path in node.target_paths if path in wanted]
+        if not owed or len(owed) == len(node.target_paths):
+            return node
+        titles = [
+            title
+            for path in owed
+            if (field := by_path.get(path)) is not None and (title := field.owner_title)
+        ]
+        if len(titles) != len(owed):
+            return node
+        return node.model_copy(update={"still_needed": list(dict.fromkeys(titles))})
+
+    return map_questions(panels, question)
+
+
 def gating_seed(plan: CallPlan) -> dict[str, Any]:
     """The answers a gate may be judged against before the call has collected anything.
 
@@ -236,6 +330,27 @@ def _exclusive_notes(doc: FormSchemaDoc) -> dict[str, str]:
     return notes
 
 
+def _owner_titles(doc: FormSchemaDoc) -> dict[str, str]:
+    """`{leaf path: nearest titled ancestor group's title}`.
+
+    Sections are deliberately out of reach — `_iter_fields` starts at `section.fields` — because
+    the section is the panel a question sits under, not a member of the fan-out."""
+    groups = {
+        path: field.title
+        for path, field in doc._iter_fields()
+        if isinstance(field, Group) and field.title
+    }
+    owners: dict[str, str] = {}
+    for path, _leaf in doc.leaf_items():
+        parts = path.split(".")
+        for cut in range(len(parts) - 1, 1, -1):
+            title = groups.get(".".join(parts[:cut]))
+            if title is not None:
+                owners[path] = title
+                break
+    return owners
+
+
 def compile_call_plan(
     doc: FormSchemaDoc,
     prompt_doc: PromptDocument | None,
@@ -254,6 +369,7 @@ def compile_call_plan(
     rendered = render_task_prompts(doc, prompt_doc)
     section_to_task = doc.section_to_task()
     exclusive_notes = _exclusive_notes(doc)
+    owner_titles = _owner_titles(doc)
     fields_by_task: dict[str, list[PlanFieldDescriptor]] = {}
     for path, leaf, gates in leaf_gates(doc):
         if leaf.role not in COLLECTABLE_ROLES:
@@ -277,6 +393,7 @@ def compile_call_plan(
                 inapplicable_value=leaf.inapplicable_value,
                 default=leaf.default,
                 exclusive_note=exclusive_notes.get(path),
+                owner_title=owner_titles.get(path),
             )
         )
 
