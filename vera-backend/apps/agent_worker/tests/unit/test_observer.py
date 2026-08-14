@@ -871,7 +871,7 @@ def test_extraction_instructions_carry_a_leafs_special_values() -> None:
         special_values=["$0", "None", "No Deductible", "Unlimited", "No Limit"],
     )
     text = _extraction_instructions(_plan(fields=[total, _field("sections.s.plain")]).tasks[0])
-    assert "(exact: $0, None, No Deductible, Unlimited, No Limit)" in text
+    assert "(or exactly: $0, None, No Deductible, Unlimited, No Limit)" in text
     assert "- sections.s.plain: plain" in text  # a leaf without them keeps its bare line
 
 
@@ -905,8 +905,10 @@ def test_a_fan_outs_fields_are_named_by_their_owning_group() -> None:
             ]
         ).tasks[0]
     )
-    assert "Ovulation Induction/Timed Intercourse (OI/TI) — Cycle Limit (exact: No Limit)" in text
-    assert "In Vitro Fertilization (IVF) — Cycle Limit (exact: No Limit)" in text
+    assert (
+        "Ovulation Induction/Timed Intercourse (OI/TI) — Cycle Limit (or exactly: No Limit)" in text
+    )
+    assert "In Vitro Fertilization (IVF) — Cycle Limit (or exactly: No Limit)" in text
     assert "- sections.s.plain: plain" in text  # no owning group — title already unique
 
 
