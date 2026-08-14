@@ -183,6 +183,7 @@ def test_every_tool_requires_a_reason() -> None:
         "end_call",
         "task_complete",
         "gap_complete",
+        "representative_requests_end_call",
         "press_keypad",
         "transfer_to_verification",
         "give_up",
