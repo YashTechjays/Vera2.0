@@ -415,8 +415,7 @@ class PlanTaskAgent(Agent):
         description=(
             "The representative has asked to end the call — they must go, they have another "
             "call, or they asked to wrap up. Call this IMMEDIATELY, in that same turn: it "
-            "abandons every remaining question and moves straight to the closing questions "
-            "(their name and a call reference number). Never call it for 'hold on', 'let me "
+            "abandons every remaining questions. Never call it for 'hold on', 'let me "
             "check', 'one moment' or any other pause, and never because the current task is "
             "finished — that is what task_complete is for. " + TOOL_REASON_ARG
         ),
