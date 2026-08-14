@@ -465,6 +465,9 @@ def test_strip_nonspeech_tokens_removes_key_value_annotations() -> None:
     assert _strip_nonspeech_tokens("No, thank you global_timing:13.251s") == "No, thank you"
     assert _strip_nonspeech_tokens("Eligibility session_id:abc-123") == "Eligibility"
     assert _strip_nonspeech_tokens("Medical turnCount:4 done") == "Medical done"
+    # The conventional "key: value" rendering (space after the colon) is the same leak.
+    assert _strip_nonspeech_tokens("No, thank you global_timing: 13.251s") == "No, thank you"
+    assert _strip_nonspeech_tokens("Medical turnCount: 4 done") == "Medical done"
 
 
 def test_strip_nonspeech_tokens_removes_brackets_tags_and_labels() -> None:
