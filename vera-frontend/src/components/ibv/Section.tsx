@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { ChevronDown } from "lucide-react"
+import { Check, ChevronDown } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
@@ -7,6 +7,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { FieldRow } from "./FieldRow"
 import { SectionMatrix } from "./SectionMatrix"
 import { useIbv } from "./IbvProvider"
@@ -81,9 +82,22 @@ export function Section({
   compact?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
+  const { disputes, flagsFor, resolveOpenDisputes } = useIbv()
   const green = section.role === "context"
   const table = getSectionTable(sectionKey, section)
-  const rows = table ? table.leaves : flattenSection(sectionKey, section)
+  const allRows = flattenSection(sectionKey, section)
+  // A table section renders only its section-level leaves here; the rest of
+  // `allRows` is drawn by the matrix below.
+  const rows = table ? table.leaves : allRows
+
+  // This section's own unresolved disputes — the header button resolves exactly
+  // this set, never a sibling section's. Taken from `allRows`, not `rows`: a
+  // table section's CPT-row cells are nested leaves that `rows` leaves out.
+  const pendingPaths = allRows
+    .filter((r) => !isGroup(r.field))
+    .map((r) => r.path)
+    .filter((p) => p in disputes && !flagsFor(p).applied)
+  const pendingLabel = `${pendingPaths.length} dispute${pendingPaths.length === 1 ? "" : "s"}`
 
   return (
     <Collapsible
@@ -102,25 +116,45 @@ export function Section({
         !table && (green ? "border-[#1f9d57]" : "border-ibv-input-border")
       )}
     >
-      <CollapsibleTrigger
-        className={cn(
-          "relative flex w-full items-center justify-center px-6 py-0.5 text-center text-[13.3px] font-bold text-black",
-          // Matrix headers own their full border; field-row headers only need a
-          // bottom separator (the section frame supplies the other edges).
-          table ? "border" : "border-b",
-          green
-            ? "border-[#1f9d57] bg-[#22c55e]"
-            : "border-ibv-input-border bg-ibv-label-bg"
-        )}
-      >
-        {section.title}
-        <ChevronDown
+      {/* Positions both the chevron and the resolve pill, which must stay a DOM
+          sibling of the trigger — CollapsibleTrigger renders its own <button>. */}
+      <div className="relative">
+        <CollapsibleTrigger
           className={cn(
-            "absolute right-2 size-3.5 transition-transform",
-            open ? "" : "-rotate-90"
+            "flex w-full items-center justify-center px-6 py-0.5 text-center text-[13.3px] font-bold text-black",
+            // Matrix headers own their full border; field-row headers only need a
+            // bottom separator (the section frame supplies the other edges).
+            table ? "border" : "border-b",
+            green
+              ? "border-[#1f9d57] bg-[#22c55e]"
+              : "border-ibv-input-border bg-ibv-label-bg"
           )}
-        />
-      </CollapsibleTrigger>
+        >
+          {section.title}
+          <ChevronDown
+            className={cn(
+              "absolute right-2 size-3.5 transition-transform",
+              open ? "" : "-rotate-90"
+            )}
+          />
+        </CollapsibleTrigger>
+        {pendingPaths.length > 0 && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => resolveOpenDisputes(pendingPaths)}
+                aria-label={`Resolve ${pendingLabel} in ${section.title}`}
+                className="absolute right-8 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-full bg-[#003e64] px-1.5 py-0.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#002a45]"
+              >
+                <Check className="size-3" />
+                {pendingPaths.length}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Resolve {pendingLabel} in this section</TooltipContent>
+          </Tooltip>
+        )}
+      </div>
       <CollapsibleContent>
         {table ? (
           // FieldRow expects an ancestor to supply its left/right edge (it only

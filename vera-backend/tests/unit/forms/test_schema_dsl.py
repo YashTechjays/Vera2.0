@@ -88,13 +88,13 @@ class TestCompiledArtifacts:
         """The committed JSON must equal a fresh compile — catches hand-edits/drift."""
         filename, build = SCHEMAS[insurance_type]
         compiled = compile_document(build())
-        committed = (FORM_SCHEMA_DIR / filename).read_text()
+        committed = (FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8")
         assert compiled == committed, f"{filename} is stale; run `just compile-schemas`"
 
     @pytest.mark.parametrize("insurance_type", sorted(SCHEMAS))
     def test_round_trip(self, insurance_type: str) -> None:
         filename, _build = SCHEMAS[insurance_type]
-        text = (FORM_SCHEMA_DIR / filename).read_text()
+        text = (FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8")
         assert compile_document(load_document(text)) == text
 
     def test_ibv_collection_paths_are_role_filtered(self) -> None:

@@ -28,7 +28,7 @@ import {
 } from "@/lib/ibv/schema"
 import {
   activeDisputeValue,
-  applyAllFlags,
+  applyFlagsForPaths,
   defaultFlags,
   resolveConfidence,
   toggleApplied,
@@ -95,6 +95,8 @@ type IbvContextValue = {
   applyDispute: (path: string) => void
   swapDispute: (path: string) => void
   resolveAll: () => void
+  /** Resolve only the disputes on the given paths — a section header passes its own leaves. */
+  resolveOpenDisputes: (paths: string[]) => void
   pendingDisputeCount: number
   dirty: boolean
   saveState: SaveState
@@ -636,16 +638,27 @@ export function IbvProvider({
     [disputes, flags, setFlags, setValue],
   )
 
-  const resolveAll = useCallback(() => {
-    setFlagsState((prev) => applyAllFlags(disputes, prev))
-    setValues((prev) => {
-      const next = { ...prev }
-      for (const [path, d] of Object.entries(disputes)) next[path] = d.currentValue
-      return next
-    })
-    setDirty(true)
-    setSaveState("idle")
-  }, [disputes])
+  const resolveOpenDisputes = useCallback(
+    (paths: string[]) => {
+      setFlagsState((prev) => applyFlagsForPaths(disputes, prev, paths))
+      setValues((prev) => {
+        const next = { ...prev }
+        for (const path of paths) {
+          const d = disputes[path]
+          if (d) next[path] = d.currentValue
+        }
+        return next
+      })
+      setDirty(true)
+      setSaveState("idle")
+    },
+    [disputes],
+  )
+
+  const resolveAll = useCallback(
+    () => resolveOpenDisputes(Object.keys(disputes)),
+    [disputes, resolveOpenDisputes],
+  )
 
   const pendingDisputeCount = useMemo(
     () => Object.keys(disputes).filter((p) => !(flags[p]?.applied ?? false)).length,
@@ -784,6 +797,7 @@ export function IbvProvider({
     applyDispute,
     swapDispute,
     resolveAll,
+    resolveOpenDisputes,
     pendingDisputeCount,
     dirty,
     saveState,

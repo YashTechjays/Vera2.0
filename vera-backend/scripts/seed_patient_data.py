@@ -122,39 +122,47 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     },
 }
 
-# (section_key, field_key) -> (ai_call_value, confidence, evidence, judge): EXCEPTION_REVIEW
+# Section-rooted leaf path -> (ai_call_value, confidence, evidence, judge): EXCEPTION_REVIEW
 # only. Each becomes an INTAKE baseline (the `_OVERRIDES`/generic-fill value, superseded)
 # plus a diverging current AI_CALL answer — the dispute signal `is_disputed` reads
 # (`vera_core.forms.review`).
 #
 # `judge` is the post-call verdict (confidence, supported) persisted as a
-# `field_evaluation`, or None for an answer the judge never reached. The four entries
+# `field_evaluation`, or None for an answer the judge never reached. The entries
 # below deliberately cover every state the reviewer's confidence chip can render:
 # judge-supported high, judge-supported medium, judge-REJECTED (whose score must not
 # colour the field), and no verdict at all (falls back to the capture score).
-_DISPUTES: dict[tuple[str, str], tuple[str, int, str, tuple[int, bool] | None]] = {
-    ("insurance_information", "doctor_inside_network"): (
+_DISPUTES: dict[str, tuple[str, int, str, tuple[int, bool] | None]] = {
+    "insurance_information.doctor_inside_network": (
         "No",
         92,
         "representative said the doctor is out-of-network this year",
         (100, True),
     ),
-    ("benefit_coverage", "coverage_type"): (
+    "benefit_coverage.coverage_type": (
         "Individual",
         88,
         "representative corrected the policy to individual-only",
         (92, True),
     ),
-    ("hospital_information", "tax_id"): (
+    "hospital_information.tax_id": (
         "123456789",
         95,
         "representative read back a different tax ID",
         (95, False),
     ),
-    ("insurance_information", "policy_number"): (
+    "insurance_information.policy_number": (
         "POL-661599",
         85,
         "representative gave a different policy number",
+        None,
+    ),
+    # A matrix-cell leaf, so the `ui.layout: "table"` section header exercises the
+    # same per-section resolve as a plain field row.
+    "diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered": (
+        "No",
+        90,
+        "representative said labs are not covered under this plan",
         None,
     ),
 }
@@ -289,7 +297,7 @@ async def seed_patient(status: FormStatus) -> None:
         payload_root = {"sections": payload} if is_v2(schema_json) else payload
         prefix = "sections." if is_v2(schema_json) else ""
         disputes = (
-            {f"{prefix}{section}.{field}": value for (section, field), value in _DISPUTES.items()}
+            {f"{prefix}{path}": value for path, value in _DISPUTES.items()}
             if status is FormStatus.EXCEPTION_REVIEW
             else {}
         )
