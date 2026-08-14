@@ -875,43 +875,6 @@ def test_extraction_instructions_carry_a_leafs_special_values() -> None:
     assert "- sections.s.plain: plain" in text  # a leaf without them keeps its bare line
 
 
-def test_a_fan_outs_fields_are_named_by_their_owning_group() -> None:
-    """72 of the CPT panel's 73 fields share a title with another ("Cycle Limit" x8,
-    "Covered" x14), so the path was the only disambiguator. On call
-    019fffcd-b013-7fd2-854d-7811d571a5e9 the extractor filed a cycle limit under
-    `additional_notes` — 8-way ambiguous too — and the answer was erased by the next pass.
-
-    Per-field, NOT all-or-nothing like `call_plan.still_needed`: that rule guards a list the
-    agent reads as the complete remainder, whereas these lines are independent, and a leaf
-    directly under a section has no owning group precisely because its title is unique."""
-    from agent_worker.observer import _extraction_instructions
-
-    def cycle_limit(service: str, owner: str) -> PlanFieldDescriptor:
-        return PlanFieldDescriptor(
-            path=f"sections.infertility_treatment.{service}.cycle_limit",
-            title="Cycle Limit",
-            type="text",
-            role="ask",
-            special_values=["No Limit"],
-            owner_title=owner,
-        )
-
-    text = _extraction_instructions(
-        _plan(
-            fields=[
-                cycle_limit("ovulation_induction", "Ovulation Induction/Timed Intercourse (OI/TI)"),
-                cycle_limit("in_vitro_fertilization", "In Vitro Fertilization (IVF)"),
-                _field("sections.s.plain"),
-            ]
-        ).tasks[0]
-    )
-    assert (
-        "Ovulation Induction/Timed Intercourse (OI/TI) — Cycle Limit (or exactly: No Limit)" in text
-    )
-    assert "In Vitro Fertilization (IVF) — Cycle Limit (or exactly: No Limit)" in text
-    assert "- sections.s.plain: plain" in text  # no owning group — title already unique
-
-
 def test_an_enums_special_values_join_its_existing_vocabulary_clause() -> None:
     """`values` and `special_values` are one vocabulary for an enum — `intake`'s
     `enum_accepted_values` already unions them. A second clause would be 27 redundant

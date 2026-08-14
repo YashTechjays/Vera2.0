@@ -156,13 +156,15 @@ def _extraction_instructions(task: PlanTask) -> str:
         vocabulary = [*f.values, *(f.special_values or [])] if f.values else []
         allowed = f" (one of: {', '.join(vocabulary)})" if vocabulary else ""
         specials = "" if f.values else special_values_hint(f.special_values)
-        # A fan-out repeats one title across every member ("Cycle Limit" on all 8 services), so
-        # the owning group is what tells the extractor WHICH one the rep just answered.
-        name = f"{f.owner_title} — {f.title}" if f.owner_title else f.title
         # Routing branches are not gated on the choice, so without this the extractor infers `No`
         # for the branch the rep did not take — a coverage claim, where `N/A` is the truth.
         note = f" — {f.exclusive_note}" if f.exclusive_note else ""
-        lines.append(f"- {f.path}: {name}{allowed}{specials}{note}")
+        # The PATH is the disambiguator, not the title. A fan-out repeats one title across every
+        # member ("Cycle Limit" on all 8 services, "Covered" on 14), so prefixing `owner_title`
+        # looks necessary — it is not: measured over a window covering three services with three
+        # different cycle limits, attribution was identical with and without it, as was value
+        # formatting at n=6. It cost ~1.3k chars on the CPT panel, re-sent every pass.
+        lines.append(f"- {f.path}: {f.title}{allowed}{specials}{note}")
     return "\n".join(lines)
 
 
