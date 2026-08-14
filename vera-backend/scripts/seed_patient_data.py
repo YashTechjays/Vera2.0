@@ -18,7 +18,7 @@ import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,7 @@ from vera_core.forms.intake import (
 )
 from vera_core.models import (
     Call,
+    ExportArtifact,
     FieldAnswer,
     FieldEvaluation,
     FormSchema,
@@ -122,48 +123,59 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     },
 }
 
-# Section-rooted leaf path -> (ai_call_value, confidence, evidence, judge): EXCEPTION_REVIEW
-# only. Each becomes an INTAKE baseline (the `_OVERRIDES`/generic-fill value, superseded)
-# plus a diverging current AI_CALL answer — the dispute signal `is_disputed` reads
-# (`vera_core.forms.review`).
+
+class _Judge(NamedTuple):
+    """The post-call judge's verdict, persisted as a `field_evaluation`."""
+
+    confidence: int
+    supported: bool
+
+
+class _Dispute(NamedTuple):
+    ai_value: str
+    confidence: int
+    evidence: str
+    judge: _Judge | None = None
+
+
+# Section-rooted leaf path -> the diverging AI answer: EXCEPTION_REVIEW only. Each becomes
+# an INTAKE baseline (the `_OVERRIDES`/generic-fill value, superseded) plus a diverging
+# current AI_CALL answer — the dispute signal `is_disputed` reads (`vera_core.forms.review`).
 #
-# `judge` is the post-call verdict (confidence, supported) persisted as a
-# `field_evaluation`, or None for an answer the judge never reached. The entries
-# below deliberately cover every state the reviewer's confidence chip can render:
-# judge-supported high, judge-supported medium, judge-REJECTED (whose score must not
-# colour the field), and no verdict at all (falls back to the capture score).
-_DISPUTES: dict[str, tuple[str, int, str, tuple[int, bool] | None]] = {
-    "insurance_information.doctor_inside_network": (
+# Between them the entries span every state the reviewer's confidence chip renders against
+# the frontend's 95/85/75 bands (`vera-frontend/src/lib/ibv/disputes.ts`): judge-supported
+# high, judge-supported medium, judge-REJECTED (whose score must not colour the field), and
+# no verdict at all (falls back to the capture score), on a plain field row and a matrix cell.
+_DISPUTES: dict[str, _Dispute] = {
+    "insurance_information.doctor_inside_network": _Dispute(
         "No",
         92,
         "representative said the doctor is out-of-network this year",
-        (100, True),
+        _Judge(100, True),
     ),
-    "benefit_coverage.coverage_type": (
+    "benefit_coverage.coverage_type": _Dispute(
         "Individual",
         88,
         "representative corrected the policy to individual-only",
-        (92, True),
+        _Judge(92, True),
     ),
-    "hospital_information.tax_id": (
+    "hospital_information.tax_id": _Dispute(
         "123456789",
         95,
         "representative read back a different tax ID",
-        (95, False),
+        _Judge(95, False),
     ),
-    "insurance_information.policy_number": (
+    "insurance_information.policy_number": _Dispute(
         "POL-661599",
         85,
         "representative gave a different policy number",
-        None,
     ),
     # A matrix-cell leaf, so the `ui.layout: "table"` section header exercises the
     # same per-section resolve as a plain field row.
-    "diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered": (
+    "diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered": _Dispute(
         "No",
         90,
         "representative said labs are not covered under this plan",
-        None,
     ),
 }
 
@@ -273,6 +285,12 @@ async def seed_patient(status: FormStatus) -> None:
         promoted = promote_columns(lambda p: resolve_path(payload, p), doc)
 
         marker = _MARKER_CHART_NUMBER[status]
+        # `patient_form`'s ON DELETE RESTRICT children block the delete and must go first
+        # (an exported form leaves an export_artifact); field_answer and its
+        # field_evaluation cascade with the form.
+        superseded = select(PatientForm.id).where(PatientForm.chart_number == marker)
+        for child in (Call, ExportArtifact):
+            await session.execute(delete(child).where(child.form_id.in_(superseded)))
         await session.execute(delete(PatientForm).where(PatientForm.chart_number == marker))
 
         form = PatientForm(
@@ -302,10 +320,11 @@ async def seed_patient(status: FormStatus) -> None:
             else {}
         )
 
-        # The AI answers need a call to hang off: `load_field_provenance` joins only
-        # ai_call answers whose call_id is in the attempt timeline, so a call-less
-        # seed renders no provenance and no judge verdict at all.
-        call = None
+        # `load_field_provenance` joins ai_call answers by call_id, so answers seeded
+        # without a call render no provenance and no judge verdict at all. Only enough
+        # call for that join — no snapshot or recording, so the attempt timeline's
+        # changed-field diff and playback stay empty by design.
+        call_id = None
         if disputes:
             call = Call(
                 tenant_id=tenant_id,
@@ -315,9 +334,10 @@ async def seed_patient(status: FormStatus) -> None:
             )
             session.add(call)
             await session.flush()
+            call_id = call.id
 
         rows: list[FieldAnswer] = []
-        judged: list[tuple[FieldAnswer, tuple[int, bool]]] = []
+        judged: list[tuple[FieldAnswer, _Judge]] = []
         for path, raw in iter_leaf_answers(payload_root):
             dispute = disputes.get(path)
             rows.append(
@@ -331,21 +351,20 @@ async def seed_patient(status: FormStatus) -> None:
                 )
             )
             if dispute is not None:
-                ai_value, confidence, evidence, judge = dispute
                 answer = FieldAnswer(
                     tenant_id=tenant_id,
                     form_id=form.id,
-                    call_id=call.id if call else None,
+                    call_id=call_id,
                     field_path=path,
-                    value={"value": ai_value},
+                    value={"value": dispute.ai_value},
                     source=AnswerSource.AI_CALL.value,
-                    confidence=confidence,
-                    evidence=evidence,
+                    confidence=dispute.confidence,
+                    evidence=dispute.evidence,
                     is_current=True,
                 )
                 rows.append(answer)
-                if judge is not None:
-                    judged.append((answer, judge))
+                if dispute.judge is not None:
+                    judged.append((answer, dispute.judge))
         session.add_all(rows)
         await session.flush()
 
@@ -353,11 +372,11 @@ async def seed_patient(status: FormStatus) -> None:
             FieldEvaluation(
                 tenant_id=tenant_id,
                 answer_id=answer.id,
-                confidence=judge_confidence,
-                supported=supported,
+                confidence=judge.confidence,
+                supported=judge.supported,
                 evidence=answer.evidence,
             )
-            for answer, (judge_confidence, supported) in judged
+            for answer, judge in judged
         )
 
         print(
