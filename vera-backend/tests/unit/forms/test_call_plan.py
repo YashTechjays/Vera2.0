@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from vera_core.forms.authoring import eq
 from vera_core.forms.call_plan import (
     CallPlan,
     PlanFieldDescriptor,
@@ -15,18 +16,28 @@ from vera_core.forms.call_plan import (
     bookend_paths,
     compile_call_plan,
     focus_call_plan,
+    focus_questions,
     fuse_prefill,
     gating_seed,
     owed_now,
 )
+from vera_core.forms.catalog.disease_only import build_disease_only
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
-from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc, Leaf, load_document
+from vera_core.forms.dsl import (
+    PLACEHOLDER_RE,
+    AnyCondition,
+    FormSchemaDoc,
+    Leaf,
+    load_document,
+)
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
     PromptDocument,
     SessionBlock,
     TaskTextOverride,
+    numbered_questions,
+    render_digest,
     render_panels,
     render_task_prompts,
 )
@@ -641,3 +652,270 @@ class TestGatingSeed:
         path = "sections.benefit_coverage.coverage_type"
         plan = self._fused({path: "Family"})
         assert path not in gating_seed(plan)
+
+
+def _descriptor(plan: CallPlan, suffix: str) -> PlanFieldDescriptor:
+    return next(f for t in plan.tasks for f in t.fields if f.path.endswith(suffix))
+
+
+class TestOwnerTitle:
+    """`still_needed` names a fan-out's members by their owning group's title, never by a
+    path segment, so it reads correctly on any schema."""
+
+    def test_a_cpt_leaf_is_owned_by_its_cpt_group(self) -> None:
+        assert (
+            _descriptor(PLAN, "labs_xray_ultrasound.cpt_58340.covered").owner_title == "CPT 58340"
+        )
+
+    def test_a_service_level_leaf_is_owned_by_its_service_group(self) -> None:
+        field = _descriptor(PLAN, "ovulation_induction.cycle_limit")
+        assert field.owner_title == "Ovulation Induction/Timed Intercourse (OI/TI)"
+
+    def test_a_leaf_directly_under_a_section_has_no_owning_group(self) -> None:
+        # Only GROUPS own; a section is the panel a question sits under, not a fan-out member.
+        assert _descriptor(PLAN, "infertility_treatment.infertility_tx_covered").owner_title is None
+
+    def test_every_descriptor_of_both_catalogs_compiles(self) -> None:
+        # disease_only has no ask groups at all; owner_title must still be well-defined.
+        for doc in (build_ibv_standard(), build_disease_only()):
+            plan = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+            for task in plan.tasks:
+                for field in task.fields:
+                    assert field.owner_title is None or field.owner_title
+
+
+def _focus_task() -> PlanTask:
+    """One service: a 2-code fanned `covered`, plus a copay gated on it."""
+    covered = ("s.cpt_1.covered", "s.cpt_2.covered")
+    gate = AnyCondition(any=[eq(covered[0], "Yes"), eq(covered[1], "Yes")])
+    return PlanTask(
+        task_key="t",
+        title="T",
+        prompt="p",
+        fields=[
+            PlanFieldDescriptor(
+                path=covered[0],
+                title="Covered",
+                type="enum",
+                role="ask",
+                required=True,
+                owner_title="CPT 1",
+            ),
+            PlanFieldDescriptor(
+                path=covered[1],
+                title="Covered",
+                type="enum",
+                role="ask",
+                required=True,
+                owner_title="CPT 2",
+            ),
+            PlanFieldDescriptor(
+                path="s.copay",
+                title="Copay ($)",
+                type="currency",
+                role="ask",
+                required=True,
+                gates=(gate,),
+                owner_title="Service",
+            ),
+        ],
+        panels=[
+            PromptPanel(
+                title="Service",
+                items=[
+                    PromptQuestion(
+                        text="Are codes 1, 2 covered?",
+                        options=[PromptOption(target_paths=list(covered))],
+                    ),
+                    PromptQuestion(
+                        text="What is the copay?",
+                        options=[PromptOption(target_paths=["s.copay"])],
+                        gate_text="this service is covered",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+class TestFocusQuestions:
+    def test_it_keeps_only_the_questions_that_answer_the_paths(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.copay"], {}, {})
+        assert [q.text for q in iter_questions(panels)] == ["What is the copay?"]
+
+    def test_a_fully_owed_fan_out_is_not_stamped(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == []
+
+    def test_a_partly_owed_fan_out_names_the_members_it_still_needs(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == ["CPT 2"]
+
+    def test_explode_pulls_in_a_question_gated_on_an_owed_path(self) -> None:
+        panels = focus_questions(
+            _focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {}, explode=True
+        )
+        assert [q.text for q in iter_questions(panels)] == [
+            "Are codes 1, 2 covered?",
+            "What is the copay?",
+        ]
+        # The dependent keeps its own condition, which is what makes it a FOLLOW-UP and not
+        # something to ask unconditionally.
+        assert next(q for q in iter_questions(panels) if q.text == "What is the copay?").gate_text
+
+    def test_explode_leaves_an_already_answered_dependent_alone(self) -> None:
+        panels = focus_questions(
+            _focus_task(),
+            ["s.cpt_1.covered", "s.cpt_2.covered"],
+            {"s.copay": "$30"},
+            {},
+            explode=True,
+        )
+        assert [q.text for q in iter_questions(panels)] == ["Are codes 1, 2 covered?"]
+
+    def test_without_explode_the_dependent_stays_out(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {})
+        assert [q.text for q in iter_questions(panels)] == ["Are codes 1, 2 covered?"]
+
+    def test_a_member_with_no_owner_title_suppresses_the_clause(self) -> None:
+        # Better to say nothing than to name a member the agent cannot act on.
+        task = _focus_task()
+        task.fields[1].owner_title = None
+        panels = focus_questions(task, ["s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == []
+
+    def test_explode_reaches_a_fixpoint_on_the_real_schema(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        owed = ["sections.infertility_treatment.embryo_biopsy.cpt_89290.covered"]
+        exploded = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
+        texts = [q.text for q in iter_questions(exploded)]
+        assert any("covered under this plan" in t for t in texts)
+        assert any("copay or coinsurance" in t for t in texts)
+        assert any("cycle limit" in t for t in texts)
+        # Idempotent: exploding the exploded set adds nothing.
+        again = focus_questions(
+            task,
+            [p for q in iter_questions(exploded) for p in q.target_paths],
+            {},
+            PLAN.shared_conditions,
+            explode=True,
+        )
+        assert [q.text for q in iter_questions(again)] == texts
+
+
+class TestRealSchemaDigest:
+    """The reported defect, against the real documents: seven ambiguous field titles."""
+
+    def test_the_two_cycle_limits_and_two_89337_services_are_distinguishable(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        base = "sections.infertility_treatment"
+        owed = [
+            f"{base}.ovulation_induction.cycle_limit",
+            f"{base}.intrauterine_insemination.cycle_limit",
+            f"{base}.egg_cryopreservation_elective.cpt_89337.covered",
+            f"{base}.egg_cryopreservation_cancer.cpt_89337.covered",
+            f"{base}.frozen_embryo_transfer.cpt_58974.covered",
+            f"{base}.embryo_biopsy.cpt_89290.covered",
+            f"{base}.embryo_biopsy.cpt_89291.covered",
+        ]
+        panels = focus_questions(task, owed, {}, PLAN.shared_conditions)
+        digest = render_digest(panels)
+        assert "Ovulation Induction/Timed Intercourse (OI/TI)" in digest
+        assert "Intrauterine Insemination (IUI) [CPT 58323, 58322, 89261" in digest
+        assert "Egg Cryopreservation Elective [CPT 89337" in digest
+        assert "Egg Cryopreservation Cancer [CPT 89337" in digest
+        # Seven owed FIELDS, six spoken asks: 89290 and 89291 are one AskGroup question.
+        assert numbered_questions(panels) == 6
+        assert digest.count("cycle limit") == 2
+        # The routing question survives because BOTH egg cryo branches are owed.
+        assert "First settle which applies" in digest
+
+    def test_one_egg_cryo_branch_owed_drops_the_routing_question(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        owed = ["sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered"]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        assert "Egg Cryopreservation Elective [CPT 89337" in digest
+        assert "First settle which applies" not in digest
+
+    def test_a_partly_owed_eight_code_fan_out_names_the_two_it_needs(self) -> None:
+        task = plan_task(PLAN, "diagnostic_coverage")
+        base = "sections.diagnostic_testing.labs_xray_ultrasound"
+        owed = [f"{base}.cpt_58340.covered", f"{base}.cpt_82670.covered"]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        assert "(still needed for: CPT 58340, CPT 82670)" in digest
+
+    def test_a_focused_plan_names_only_members_it_kept_a_descriptor_for(self) -> None:
+        # focus_call_plan narrows descriptors but NOT panels (a known bug, fixed on a later
+        # branch), so a kept fan-out question can span targets the plan cannot collect. The
+        # clause must never name one of those: it is built from the OWED targets, which are the
+        # focused descriptors, so a focused retry says which code it needs instead of re-asking
+        # all eight blind.
+        wanted = "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"
+        focused = focus_call_plan(PLAN, [wanted])
+        stamped: list[str] = []
+        for task in focused.tasks:
+            owed = [field.path for field in task.fields]
+            collectable = {f.owner_title for f in task.fields if f.owner_title}
+            panels = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
+            render_digest(panels)
+            for question in iter_questions(panels):
+                assert set(question.still_needed) <= collectable
+                stamped.extend(question.still_needed)
+        assert stamped == ["CPT 58340"]
+
+    def test_both_catalogs_narrow_and_render_every_task(self) -> None:
+        # disease_only has no ask groups and no routing questions; the narrowing must not
+        # assume either exists.
+        for doc in (build_ibv_standard(), build_disease_only()):
+            plan = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+            for task in plan.tasks:
+                owed = [field.path for field in task.fields]
+                panels = focus_questions(task, owed, {}, plan.shared_conditions)
+                # Everything owed means everything kept — a mismatch is a real tree/descriptor
+                # disagreement, so investigate it rather than relaxing this.
+                assert numbered_questions(panels) == numbered_questions(task.panels), task.task_key
+                render_digest(panels)
+                focus_questions(task, owed, {}, plan.shared_conditions, explode=True)
+
+
+class TestReviewFindings:
+    """Regressions for the review of the owed-question digest."""
+
+    def test_explode_adds_only_the_members_with_nothing_on_file(self) -> None:
+        # A dependent fan-out pulled in WHOLE made `_stamp_still_needed` see owed == targets,
+        # so it named none of its members — defeating the clause for its whole reason to exist.
+        task = plan_task(PLAN, "diagnostic_coverage")
+        base = "sections.diagnostic_testing.labs_xray_ultrasound"
+        codes = ("58340", "82670", "83001", "83002", "84146", "84443", "84144", "76830")
+        seed = [f"{base}.cpt_{c}.covered" for c in codes]
+        on_file = {f"{base}.cpt_{c}.prior_auth": "No" for c in codes[2:]}  # 6 of 8
+        panels = focus_questions(task, seed, on_file, PLAN.shared_conditions, explode=True)
+        auth = next(q for q in iter_questions(panels) if "prior authorization" in q.text.lower())
+        assert auth.still_needed == ["CPT 58340", "CPT 82670"]
+
+    def test_explode_leaves_optional_follow_ups_out_of_the_sweep(self) -> None:
+        # The sweep counts its list as required questions; an optional item pads that claim.
+        task = plan_task(PLAN, "infertility_coverage")
+        base = "sections.infertility_treatment.embryo_biopsy"
+        seed = [f"{base}.cpt_89290.covered", f"{base}.cpt_89291.covered"]
+        panels = focus_questions(task, seed, {}, PLAN.shared_conditions, explode=True)
+        assert [q.text for q in iter_questions(panels) if q.optional] == []
+
+    def test_the_digest_keeps_the_answer_vocabulary(self) -> None:
+        # The field-title list carried "(expected one of: …)"; the digest must not lose it.
+        task = plan_task(PLAN, "insurance_basics")
+        owed = [f.path for f in task.fields if f.values][:1]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        vocab = next(f.values for f in task.fields if f.path == owed[0])
+        assert vocab is not None and " | ".join(vocab) in digest
+
+    def test_root_titles_survive_on_a_task_with_several_sections(self) -> None:
+        # Suppression is judged on the TASK's shape, not on how many roots survived: financial
+        # has 4 root panels and closing_admin 5, so narrowing to one must still name it.
+        task = plan_task(PLAN, "financial")
+        assert len(task.panels) > 1
+        owed = [f.path for f in task.fields if f.path.startswith("sections.lifetime_maximum")]
+        panels = focus_questions(task, owed, {}, PLAN.shared_conditions)
+        digest = render_digest(panels, task_sections=len(task.panels))
+        assert len(panels) == 1  # narrowed to a single surviving root
+        assert panels[0].title is not None and panels[0].title in digest

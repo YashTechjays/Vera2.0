@@ -17,7 +17,7 @@ Pure and DB-free; consumed by the seeder and the call-time prompt pipeline.
 
 import logging
 from collections.abc import Callable, Iterator
-from itertools import count
+from itertools import count, groupby
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -377,6 +377,77 @@ def numbered_questions(panels: list[PromptPanel]) -> int:
     )
 
 
+def render_digest(panels: list[PromptPanel], *, task_sections: int | None = None) -> str:
+    """The same tree as `render_panels`, compressed for a reader that ALREADY has the full list.
+
+    Each panel's crumb — its title chain plus the nearest codes line — is printed once, with its
+    questions numbered beneath. Numbering follows `render_panels`' rule (one continuous counter,
+    no ordinal for a routing question or a confirm node) but restarts at 1 for the narrowed tree,
+    so the ordinals count the OWED questions and are not the ordinals of the agent's own list.
+
+    `task_sections` is the task's ORIGINAL root-panel count: a task with one section never gains
+    anything from repeating its name on every line, but a task with several (financial has four,
+    closing_admin five) needs it to tell them apart. Judged on the task's shape, never on how
+    many roots happened to survive the narrowing.
+
+    Panel-level gate prose is deliberately dropped — every current caller narrows to an
+    applicable-only set, where it would be noise. A caller rendering a digest of an EXPLODED set
+    would need it back."""
+    numbering = count(1)
+    entries: list[tuple[str, str]] = []
+    bare_root = (len(panels) if task_sections is None else task_sections) == 1
+
+    def walk(panel: PromptPanel, titles: list[str], codes: str, root: bool) -> None:
+        here = titles if (root and bare_root) else [*titles, panel.title or ""]
+        here = [title for title in here if title]
+        codes = (_codes_text(panel.codes) if panel.codes is not None else "") or codes
+        crumb = " > ".join(here)
+        if codes:
+            crumb = f"{crumb} [{codes}]" if crumb else f"[{codes}]"
+        for item in panel.items:
+            if isinstance(item, PromptPanel):
+                walk(item, here, codes, False)
+            elif item.routes_between:
+                entries.append(
+                    (
+                        crumb,
+                        f"* First settle which applies: {item.text} "
+                        f"({' or '.join(item.routes_between)} — only one applies)",
+                    )
+                )
+            elif item.is_confirm:
+                entries.append((crumb, f"* {item.text}"))
+            else:
+                entries.append((crumb, f"{next(numbering)}. {_digest_line(item)}"))
+
+    for panel in panels:
+        walk(panel, [], "", True)
+
+    blocks: list[str] = []
+    for crumb, group in groupby(entries, key=lambda entry: entry[0]):
+        # A crumb heads its block and indents what follows; without one the lines stand alone.
+        head = [f"{crumb}:"] if crumb else []
+        indent = "  " if crumb else ""
+        blocks.append("\n".join([*head, *(f"{indent}{line}" for _crumb, line in group)]))
+    return "\n\n".join(blocks)
+
+
+def _digest_line(question: PromptQuestion) -> str:
+    parts = [question.text]
+    labels = [option.label for option in question.options if option.label]
+    if labels:
+        parts.append(f"[either: {' / '.join(labels)}]")
+    elif answers := next((o.answers for o in question.options if o.answers), ""):
+        # The vocabulary the field-title list used to carry as "(expected one of: …)". A refusal
+        # that names the question but not its answer shape loses what the old lines had.
+        parts.append(f"[{answers}]")
+    if question.still_needed:
+        parts.append(f"(still needed for: {', '.join(question.still_needed)})")
+    if question.gate_text is not None:
+        parts.append(f"(only if {question.gate_text})")
+    return " ".join(parts)
+
+
 def _panel_lines(panel: PromptPanel, depth: int, numbering: Iterator[int]) -> list[str]:
     """One panel: heading, codes, its gate stated once, then its questions.
 
@@ -457,6 +528,8 @@ def _numbered_question(
             "   - One question for all of these codes; apply the answer to every code the "
             f"representative confirms: {', '.join(question.fanned_codes)}."
         )
+    if question.still_needed:
+        lines.append(f"   - Still needed for: {', '.join(question.still_needed)}.")
     if confirms:
         lines.append("   - Immediately after this answer:")
         lines.extend(f"     * {c.text}" for c in confirms)

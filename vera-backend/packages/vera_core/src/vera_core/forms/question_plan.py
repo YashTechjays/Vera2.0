@@ -73,6 +73,11 @@ class PromptQuestion(_Model):
     required_text: str | None = None
     # CPT codes this one question fans out across, when there is more than one.
     fanned_codes: list[str] = Field(default_factory=list)
+    # Which of a fan-out's members are still owed, when only some are. Named by
+    # `PlanFieldDescriptor.owner_title` rather than a path segment, so any fan-out axis reads
+    # correctly. Never set by the compiler — only by `call_plan.focus_questions`, which is why
+    # a compiled prompt renders byte-identically.
+    still_needed: list[str] = Field(default_factory=list)
     hints: list[str] = Field(default_factory=list)
     optional: bool = False
     # Routing questions only: the panel titles the answer chooses between.
@@ -630,19 +635,24 @@ def _conjoin(gates: list[Condition]) -> Condition | None:
 PromptPanel.model_rebuild()
 
 
-def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[PromptPanel]:
-    """The tree minus every question whose targets are ALL in `excluded`, and minus any
-    panel left with nothing to ask.
+def _narrow(
+    panels: list[PromptPanel],
+    collects: Callable[[PromptQuestion], bool],
+    routes: Callable[[PromptQuestion, set[str | None]], bool],
+    *,
+    promote_orphan_confirms: bool = False,
+) -> list[PromptPanel]:
+    """The tree keeping only what `collects` and `routes` accept, panels left empty pruned.
 
-    A question keeping even one askable target stays whole: its options name their own
-    paths, and pruning an option would leave the spoken sentence promising an answer slot
-    that is no longer listed. A routing question has no targets and survives as long as the
-    panels it routes between do.
+    Both narrowings share this walk because they must agree on structure, not just be similar:
+    they are exact complements, and a divergence in either rule below is a question whose
+    rendered text no longer matches its surroundings.
 
-    A confirm node's anchor is positional, not modeled — it's whatever question precedes
-    it in the same panel's items (the contract `_panel_lines` renders against). Dropping
-    the anchor without dropping the confirm run it owns would re-anchor those bullets onto
-    whatever question happens to end up in front of them next."""
+    A confirm node's anchor is positional, not modeled — it is whatever question precedes it in
+    the same panel's items (the contract `_panel_lines` renders against) — so a confirm run
+    travels with its anchor and never survives alone. A routing question collects nothing, so
+    `routes` judges it against the titles of the child panels that survived beside it.
+    """
     out: list[PromptPanel] = []
     for panel in panels:
         source = list(panel.items)
@@ -651,7 +661,11 @@ def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[Prompt
         while i < len(source):
             item = source[i]
             if isinstance(item, PromptPanel):
-                items.extend(drop_questions([item], excluded))
+                items.extend(
+                    _narrow(
+                        [item], collects, routes, promote_orphan_confirms=promote_orphan_confirms
+                    )
+                )
                 i += 1
                 continue
             run: list[PromptQuestion] = []
@@ -662,31 +676,85 @@ def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[Prompt
                     break
                 run.append(candidate)
                 j += 1
-            if not item.target_paths or not set(item.target_paths) <= excluded:
+            if item.routes_between or collects(item):
                 items.append(item)
-                items.extend(node for node in run if not set(node.target_paths) <= excluded)
+                items.extend(node for node in run if collects(node))
+            elif promote_orphan_confirms:
+                # The anchor is out but a confirm behind it is still wanted. It cannot stay a
+                # nested bullet — there is nothing left to nest under — and dropping it renders
+                # NOTHING while the owed set still counts the field, which is silent loss of a
+                # required answer. So it stands alone: clearing `is_confirm` is what earns it an
+                # ordinal from `numbered_questions` and a line of its own from both renderers.
+                # Its text already carries its own condition, so it reads correctly unanchored.
+                items.extend(
+                    node.model_copy(update={"is_confirm": False}) for node in run if collects(node)
+                )
             i = j
-        # A routing question with no surviving panel to route into says nothing useful.
-        if not any(isinstance(entry, PromptPanel) for entry in items):
-            items = [
-                entry
-                for entry in items
-                if not (isinstance(entry, PromptQuestion) and entry.routes_between)
-            ]
+        surviving = {child.title for child in items if isinstance(child, PromptPanel)}
+        items = [
+            entry
+            for entry in items
+            if not (isinstance(entry, PromptQuestion) and entry.routes_between)
+            or routes(entry, surviving)
+        ]
         if items:
             out.append(panel.model_copy(update={"items": items}))
     return out
 
 
-def owed_questions(panels: list[PromptPanel], paths: Collection[str]) -> list[PromptQuestion]:
-    """Every question that would still have to be SPOKEN to collect `paths`, in spoken order.
+def drop_questions(panels: list[PromptPanel], excluded: set[str]) -> list[PromptPanel]:
+    """The tree minus every question whose targets are ALL in `excluded`, and minus any
+    panel left with nothing to ask.
 
-    The complement of `drop_questions`: that keeps a question with even one target outside
-    `excluded`, so this owes a question with even one target inside `paths` — one ask, however
-    many of its targets are open. A routing question has no targets and is therefore never
-    owed; it chooses between panels rather than collecting anything."""
-    wanted = set(paths)
-    return [q for q in iter_questions(panels) if not wanted.isdisjoint(q.target_paths)]
+    A question keeping even one askable target stays whole: its options name their own
+    paths, and pruning an option would leave the spoken sentence promising an answer slot
+    that is no longer listed. A routing question survives as long as any of the panels below
+    it does."""
+    return _narrow(
+        panels,
+        lambda question: not set(question.target_paths) <= excluded,
+        lambda _question, surviving: bool(surviving),
+    )
+
+
+def keep_questions(panels: list[PromptPanel], wanted: Collection[str]) -> list[PromptPanel]:
+    """The tree with ONLY the questions that answer a path in `wanted`, panels with nothing
+    left pruned.
+
+    The complement of `drop_questions`. A routing question is kept only while at least TWO of
+    the panels it routes between survive, because with one branch left its rendered text names
+    a panel that is no longer below it.
+
+    Unlike `drop_questions` this PROMOTES an orphaned confirm: narrowing routinely drops an
+    anchor that is already answered while the confirm behind it is still owed, and a confirm
+    that survives only as part of its anchor's run would then render nothing at all."""
+    kept = set(wanted)
+    return _narrow(
+        panels,
+        lambda question: not kept.isdisjoint(question.target_paths),
+        lambda question, surviving: len(surviving.intersection(question.routes_between)) >= 2,
+        promote_orphan_confirms=True,
+    )
+
+
+def map_questions(
+    panels: list[PromptPanel], transform: Callable[[PromptQuestion], PromptQuestion]
+) -> list[PromptPanel]:
+    """`transform` applied to every question in the tree, panel structure untouched.
+
+    Lives here so a consumer annotating questions does not have to know that panels nest."""
+
+    def panel(node: PromptPanel) -> PromptPanel:
+        return node.model_copy(
+            update={
+                "items": [
+                    panel(item) if isinstance(item, PromptPanel) else transform(item)
+                    for item in node.items
+                ]
+            }
+        )
+
+    return [panel(node) for node in panels]
 
 
 def hydrate_panels(panels: list[PromptPanel], hydrate: Callable[[str], str]) -> list[PromptPanel]:
