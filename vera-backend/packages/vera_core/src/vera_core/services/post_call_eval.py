@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord, AuditSink
+from vera_core.forms.answers import canonical_special_value, special_values_by_path
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
@@ -337,6 +338,13 @@ async def evaluate_call(
     # inserts for one path would violate the fa_current_uq partial unique index
     # (the batch demote runs before the inserts) and poison-loop the job.
     clean = list({ef.field_path: ef for ef in clean}.values())
+    # This writer bypasses record_answer, so it snaps sentinels itself — an un-snapped
+    # "unlimited" leaves its gated follow-ups unsatisfied and can redial the payer below.
+    declared = special_values_by_path(doc)
+    clean = [
+        replace(ef, value=canonical_special_value(ef.value, declared.get(ef.field_path)))
+        for ef in clean
+    ]
     # Demote the outgoing current rows in one statement BEFORE adding their
     # replacements, so the merge invariant (one current row per path) holds at flush.
     await _demote_current(session, form_id, [ef.field_path for ef in clean])

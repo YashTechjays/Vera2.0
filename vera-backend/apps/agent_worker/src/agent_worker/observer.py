@@ -31,7 +31,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from opentelemetry import trace
@@ -39,9 +39,14 @@ from opentelemetry import trace
 from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
+from vera_core.forms.answers import canonical_special_value
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
-from vera_core.forms.extraction_prompt import ANSWER_UNIT_FORMAT_RULE
+from vera_core.forms.extraction_prompt import (
+    ANSWER_UNIT_FORMAT_RULE,
+    EXACT_VALUE_RULE,
+    special_values_hint,
+)
 from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
@@ -120,7 +125,19 @@ class ResilientAnswerExtractor:
             set_status_on_exception=False,
         ):
             reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
-        return _parse_extraction(reply)
+        return _canonicalized(_parse_extraction(reply), task)
+
+
+def _canonicalized(answers: list[ExtractedAnswer], task: PlanTask) -> list[ExtractedAnswer]:
+    """Every sentinel answer spelled as its leaf declares it — see `canonical_special_value`."""
+    declared = {f.path: f.special_values for f in task.fields}
+    return [
+        replace(
+            answer,
+            value=canonical_special_value(answer.value, declared.get(answer.field_path)),
+        )
+        for answer in answers
+    ]
 
 
 def _extraction_instructions(task: PlanTask) -> str:
@@ -130,15 +147,22 @@ def _extraction_instructions(task: PlanTask) -> str:
         "clearly answered in the transcript. Output a JSON array of "
         '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
         "Omit a field entirely if it is not yet answered. "
-        f"{ANSWER_UNIT_FORMAT_RULE} "
+        f"{ANSWER_UNIT_FORMAT_RULE} {EXACT_VALUE_RULE} "
         "Use only these field_path values:",
     ]
     for f in task.fields:
-        allowed = f" (one of: {', '.join(f.values)})" if f.values else ""
+        # An enum's `special_values` are part of its one vocabulary; every other leaf gets
+        # them as the separate "exact:" clause — see `special_values_hint`.
+        vocabulary = [*f.values, *(f.special_values or [])] if f.values else []
+        allowed = f" (one of: {', '.join(vocabulary)})" if vocabulary else ""
+        specials = "" if f.values else special_values_hint(f.special_values)
+        # A fan-out repeats one title across every member ("Cycle Limit" on all 8 services), so
+        # the owning group is what tells the extractor WHICH one the rep just answered.
+        name = f"{f.owner_title} — {f.title}" if f.owner_title else f.title
         # Routing branches are not gated on the choice, so without this the extractor infers `No`
         # for the branch the rep did not take — a coverage claim, where `N/A` is the truth.
         note = f" — {f.exclusive_note}" if f.exclusive_note else ""
-        lines.append(f"- {f.path}: {f.title}{allowed}{note}")
+        lines.append(f"- {f.path}: {name}{allowed}{specials}{note}")
     return "\n".join(lines)
 
 

@@ -1255,6 +1255,53 @@ async def test_observer_answer_without_evidence_anchor_is_judged_with_none(
     assert by_path[_NOTES_PATH].evidence_seq == 2
 
 
+async def test_a_special_value_is_stored_as_the_schema_spells_it(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """This writer bypasses record_answer, and gates compare byte-exact — so an
+    un-snapped "unlimited" here leaves met/remaining unsatisfied and can redial the payer
+    (`retryable_required_paths`), as well as shipping the variant into the export."""
+    ctx = seeded_ai_processing_form
+    schema: Any = copy.deepcopy(_SCHEMA_JSON)
+    schema["sections"]["coverage"]["fields"]["notes"]["special_values"] = ["No Limit", "Unlimited"]
+    await ctx.session.execute(
+        update(SchemaVersion)
+        .where(
+            SchemaVersion.id
+            == select(PatientForm.schema_version_id)
+            .where(PatientForm.id == ctx.form_id)
+            .scalar_subquery()
+        )
+        .values(schema_json=schema)
+    )
+    await ctx.session.flush()
+
+    turns = [TranscriptTurn(0, "user", "that one is unlimited")]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(_NOTES_PATH, " unlimited ", 92, 0)],
+        verdicts=[JudgeVerdict(_NOTES_PATH, True, 90, "that one is unlimited")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    stored = (
+        await ctx.session.execute(
+            select(FieldAnswer.value).where(FieldAnswer.field_path == _NOTES_PATH)
+        )
+    ).scalar_one()
+    assert stored == {"value": "Unlimited"}
+
+
 async def _require_notes_and_set_threshold(ctx: _SeedCtx, threshold: float) -> None:
     """Scope a two-required-field schema (notes flipped to required) and the fill
     threshold to a single test — leaves the shared `_SCHEMA_JSON` untouched so the

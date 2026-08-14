@@ -8,6 +8,8 @@ column, which is the defect this text exists to prevent. Same pattern as
 `vera_core.call_health.HEALTH_SYSTEM_PROMPT`: prompt text in `vera_core`, consumed by an app.
 """
 
+from collections.abc import Sequence
+
 # `percent`-typed leaves (coinsurance) were stored inconsistently — a bare "20" from the
 # extractor sitting beside the "0%" the either/or auto-fill writes from the leaf's authored
 # `inapplicable_value`. Storage IS display here (the review UI and the xlsx export render the
@@ -27,3 +29,25 @@ ANSWER_UNIT_FORMAT_RULE = (
     'Write a percentage answer as digits with the sign and nothing else — "20%", never '
     '"20" or "twenty percent"; "0%" for none.'
 )
+
+
+# Says once what a per-field clause would otherwise repeat on all 72 annotated fields — the
+# wrapper, not the literals, is the cost: spelling the rule inline came to +18% on the whole
+# prompt and +22% on the CPT panel, re-sent on every extraction pass with no caching.
+EXACT_VALUE_RULE = (
+    'Where a field lists values after "exact:", and the answer is one of them, write it '
+    "exactly as shown there."
+)
+
+
+def special_values_hint(special_values: Sequence[str] | None) -> str:
+    """The clause naming a NON-enum leaf's declared answers, or "" when it has none.
+
+    Kept out of the enum `(one of: …)` clause because these are ALTERNATIVES to a normal
+    answer, not the whole vocabulary — a deductible is usually an amount, and "one of" would
+    push the model to pick a sentinel over the figure it was told. An enum has no such
+    figure, so its caller folds both lists into the one clause instead (as `intake`'s
+    `enum_accepted_values` already does)."""
+    if not special_values:
+        return ""
+    return f" (exact: {', '.join(special_values)})"

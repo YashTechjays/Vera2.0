@@ -2,6 +2,7 @@
 dedup, rotation drain, crash isolation, and the record → emit → apply-directive chain."""
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -632,6 +633,30 @@ class TestResilientExtractor:
         assert llm.calls[0][1] == "Representative: yes"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("extracted", "stored"), [(" unlimited ", "Unlimited"), ("$1,500.00", "$1,500.00")]
+    )
+    async def test_the_declared_spelling_wins_and_an_amount_is_untouched(
+        self, extracted: str, stored: str
+    ) -> None:
+        """Wiring for `forms.answers.canonical_special_value` — the gate compares byte-exact,
+        so "unlimited" would leave an Unlimited deductible owing met+remaining."""
+        total = PlanFieldDescriptor(
+            path="sections.a.total",
+            title="Total",
+            type="currency",
+            role="ask",
+            special_values=["$0", "Unlimited", "No Limit"],
+        )
+        llm = FakeCompletionLLM(
+            json.dumps([{"field_path": "sections.a.total", "value": extracted, "confidence": 90}])
+        )
+        out = await ResilientAnswerExtractor(llm).extract(
+            _plan(fields=[total]).tasks[0], "Representative: ..."
+        )
+        assert out == [ExtractedAnswer("sections.a.total", stored, 90)]
+
+    @pytest.mark.asyncio
     async def test_chain_exhausted_propagates(self) -> None:
         # It must NOT return [] — that is indistinguishable from "the rep answered nothing",
         # which would let the caller retire the window as extracted. The raise is what lets
@@ -832,6 +857,76 @@ def test_extraction_instructions_carry_the_routing_note() -> None:
     # range is passed either: a "0-100" hint nudges the model into rescaling a fraction
     # like 0.2 into 20%, which is an upstream ambiguity we refuse to guess at.
     assert '"20%", never "20"' in text
+
+
+def test_extraction_instructions_carry_a_leafs_special_values() -> None:
+    """Gates compare byte-exact, so an extractor never shown the literals settles them by luck."""
+    from agent_worker.observer import _extraction_instructions
+
+    total = PlanFieldDescriptor(
+        path="sections.deductibles.individual.total",
+        title="Total",
+        type="currency",
+        role="ask",
+        special_values=["$0", "None", "No Deductible", "Unlimited", "No Limit"],
+    )
+    text = _extraction_instructions(_plan(fields=[total, _field("sections.s.plain")]).tasks[0])
+    assert "(exact: $0, None, No Deductible, Unlimited, No Limit)" in text
+    assert "- sections.s.plain: plain" in text  # a leaf without them keeps its bare line
+
+
+def test_a_fan_outs_fields_are_named_by_their_owning_group() -> None:
+    """72 of the CPT panel's 73 fields share a title with another ("Cycle Limit" x8,
+    "Covered" x14), so the path was the only disambiguator. On call
+    019fffcd-b013-7fd2-854d-7811d571a5e9 the extractor filed a cycle limit under
+    `additional_notes` — 8-way ambiguous too — and the answer was erased by the next pass.
+
+    Per-field, NOT all-or-nothing like `call_plan.still_needed`: that rule guards a list the
+    agent reads as the complete remainder, whereas these lines are independent, and a leaf
+    directly under a section has no owning group precisely because its title is unique."""
+    from agent_worker.observer import _extraction_instructions
+
+    def cycle_limit(service: str, owner: str) -> PlanFieldDescriptor:
+        return PlanFieldDescriptor(
+            path=f"sections.infertility_treatment.{service}.cycle_limit",
+            title="Cycle Limit",
+            type="text",
+            role="ask",
+            special_values=["No Limit"],
+            owner_title=owner,
+        )
+
+    text = _extraction_instructions(
+        _plan(
+            fields=[
+                cycle_limit("ovulation_induction", "Ovulation Induction/Timed Intercourse (OI/TI)"),
+                cycle_limit("in_vitro_fertilization", "In Vitro Fertilization (IVF)"),
+                _field("sections.s.plain"),
+            ]
+        ).tasks[0]
+    )
+    assert "Ovulation Induction/Timed Intercourse (OI/TI) — Cycle Limit (exact: No Limit)" in text
+    assert "In Vitro Fertilization (IVF) — Cycle Limit (exact: No Limit)" in text
+    assert "- sections.s.plain: plain" in text  # no owning group — title already unique
+
+
+def test_an_enums_special_values_join_its_existing_vocabulary_clause() -> None:
+    """`values` and `special_values` are one vocabulary for an enum — `intake`'s
+    `enum_accepted_values` already unions them. A second clause would be 27 redundant
+    annotations on the CPT panel, where every `prior_auth` leaf carries both."""
+    from agent_worker.observer import _extraction_instructions
+
+    prior_auth = PlanFieldDescriptor(
+        path="sections.s.prior_auth",
+        title="Prior Auth",
+        type="enum",
+        role="ask",
+        values=["Yes", "No", "N/A"],
+        special_values=["Prior auth department"],
+    )
+    text = _extraction_instructions(_plan(fields=[prior_auth]).tasks[0])
+    line = next(ln for ln in text.splitlines() if ln.startswith("- sections.s.prior_auth"))
+    assert line.endswith("(one of: Yes, No, N/A, Prior auth department)")
 
 
 class TestDrainPending:
