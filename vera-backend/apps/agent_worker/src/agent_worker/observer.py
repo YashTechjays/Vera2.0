@@ -39,7 +39,7 @@ from opentelemetry import trace
 from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
-from vera_core.forms.answers import canonical_special_value
+from vera_core.forms.answers import canonical_answer, literals_of
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
 from vera_core.forms.extraction_prompt import (
@@ -129,12 +129,15 @@ class ResilientAnswerExtractor:
 
 
 def _canonicalized(answers: list[ExtractedAnswer], task: PlanTask) -> list[ExtractedAnswer]:
-    """Every sentinel answer spelled as its leaf declares it — see `canonical_special_value`."""
-    declared = {f.path: f.special_values for f in task.fields}
+    """Every answer spelled as its leaf declares it — see `canonical_answer`."""
+    fields = {f.path: f for f in task.fields}
     return [
         replace(
             answer,
-            value=canonical_special_value(answer.value, declared.get(answer.field_path)),
+            value=canonical_answer(
+                answer.value,
+                literals_of(field) if (field := fields.get(answer.field_path)) else None,
+            ),
         )
         for answer in answers
     ]
@@ -142,24 +145,24 @@ def _canonicalized(answers: list[ExtractedAnswer], task: PlanTask) -> list[Extra
 
 def _extraction_instructions(task: PlanTask) -> str:
     lines: list[str] = []
+    names_exact = False
     for f in task.fields:
-        # An enum's `special_values` are part of its one vocabulary; every other leaf gets
-        # them as the separate "exact:" clause — see `special_values_hint`.
-        vocabulary = [*f.values, *(f.special_values or [])] if f.values else []
-        allowed = f" (one of: {', '.join(vocabulary)})" if vocabulary else ""
-        specials = "" if f.values else special_values_hint(f.special_values)
+        # An enum's vocabulary is one clause, and deliberately NOT `literals_of().gate`: a rep
+        # never states the `inapplicable_value` the either/or auto-fill writes. Every other
+        # leaf's named answers are ALTERNATIVES to a normal answer, so they get "exact:".
+        if f.values:
+            vocabulary = f" (one of: {', '.join([*f.values, *(f.special_values or [])])})"
+        else:
+            vocabulary = special_values_hint(f.special_values)
+            # The rule explains that clause, so only a task carrying one carries it (227 chars).
+            names_exact = names_exact or bool(vocabulary)
         # Routing branches are not gated on the choice, so without this the extractor infers `No`
         # for the branch the rep did not take — a coverage claim, where `N/A` is the truth.
         note = f" — {f.exclusive_note}" if f.exclusive_note else ""
-        # The PATH is the disambiguator, not the title. A fan-out repeats one title across every
-        # member ("Cycle Limit" on all 8 services, "Covered" on 14), so prefixing `owner_title`
-        # looks necessary — it is not: measured over a window covering three services with three
-        # different cycle limits, attribution was identical with and without it, as was value
-        # formatting at n=6. It cost ~1.3k chars on the CPT panel, re-sent every pass.
-        lines.append(f"- {f.path}: {f.title}{allowed}{specials}{note}")
-    # The rule explains a clause, so it is carried only by a task that has one — four of the
-    # catalog's thirteen name no special value at all, and it is 227 chars on every pass.
-    names_exact = any(special_values_hint(f.special_values) for f in task.fields if not f.values)
+        # The PATH disambiguates a repeated title, so `owner_title` is not prefixed: measured
+        # over three services with three different cycle limits it changed neither attribution
+        # nor formatting, and cost ~1.3k chars on the CPT panel, re-sent every pass.
+        lines.append(f"- {f.path}: {f.title}{vocabulary}{note}")
     preamble = (
         "You extract answers from a phone call between an insurance-verification agent and "
         "a payer representative. Return ONLY the fields below that the representative has "
@@ -392,7 +395,13 @@ class ObserverManager:
         # gate-evaluation set: three behaviours here need the intake values, namely the dedup in
         # `_record_locked`, `_derive_remaining_locked`'s "a prefilled remaining wins", and the
         # rule engine, whose terminate rules read ask-role paths a clinic may fill.
-        self._on_file: dict[str, Any] = dict(plan.prefilled)
+        # Snapped on the way in: the rule engine compares byte-exact, and a prefill written
+        # before the writers canonicalized carries whatever spelling its source used.
+        literals = {f.path: literals_of(f) for t in plan.tasks for f in t.fields}
+        self._on_file: dict[str, Any] = {
+            path: canonical_answer(value, literals.get(path))
+            for path, value in plan.prefilled.items()
+        }
         # What THIS CALL collected, which is all the controller may gate on — see
         # `PlanRunController.update_answers`.
         self._recorded: dict[str, Any] = {}

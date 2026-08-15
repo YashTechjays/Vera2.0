@@ -21,7 +21,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.audit import AuditRecord, AuditSink
-from vera_core.forms.answers import canonical_special_value, special_values_by_path
+from vera_core.forms.answers import canonical_answer, leaf_literals, spoken_literals
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
@@ -308,9 +308,12 @@ async def evaluate_call(
     missing = [p for p in paths if p not in answered]
     extracted: list[ExtractedField] = []
     extract_failed = False
+    literals = leaf_literals(doc)
     if missing:
         try:
-            extracted = await deps.llm.extract(field_paths=missing, turns=turns)
+            extracted = await deps.llm.extract(
+                field_paths=missing, turns=turns, special_values=spoken_literals(literals)
+            )
         except Exception as exc:
             # Do NOT return yet: the Observer's answers below still deserve their
             # judge pass — forfeiting it would reproduce the "answers but no
@@ -338,12 +341,10 @@ async def evaluate_call(
     # inserts for one path would violate the fa_current_uq partial unique index
     # (the batch demote runs before the inserts) and poison-loop the job.
     clean = list({ef.field_path: ef for ef in clean}.values())
-    # This writer bypasses record_answer, so it snaps sentinels itself — an un-snapped
-    # "unlimited" leaves its gated follow-ups unsatisfied and can redial the payer below.
-    declared = special_values_by_path(doc)
+    # Gates compare byte-exact, so an un-snapped "unlimited" leaves its gated follow-ups
+    # unsatisfied and can redial the payer below (`canonical_answer`).
     clean = [
-        replace(ef, value=canonical_special_value(ef.value, declared.get(ef.field_path)))
-        for ef in clean
+        replace(ef, value=canonical_answer(ef.value, literals.get(ef.field_path))) for ef in clean
     ]
     # Demote the outgoing current rows in one statement BEFORE adding their
     # replacements, so the merge invariant (one current row per path) holds at flush.
@@ -447,8 +448,12 @@ async def evaluate_call(
     # in-memory: the only current-row changes since the (4a) fetch are the
     # top-up inserts in `kept` (their paths come from `missing`, so they are
     # disjoint from `current_rows` and the batch demote touched no fetched row).
+    # Snapped here too, not just on the rows written above: an intake, human or
+    # older-release answer reaches this map unsnapped, and every gate decision below —
+    # completion, the verified fraction, unsatisfied/retryable, after_state — reads it.
     current_values: dict[str, object] = {
-        row.field_path: unwrap_value(row.value) for row in current_rows
+        row.field_path: canonical_answer(unwrap_value(row.value), literals.get(row.field_path))
+        for row in current_rows
     }
     current_values.update({ef.field_path: ef.value for ef, _ in kept})
     form.completion_pct = form_completion_pct(current_values, version.schema_json)

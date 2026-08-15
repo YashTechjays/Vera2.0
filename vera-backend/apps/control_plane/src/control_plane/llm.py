@@ -9,9 +9,19 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from vera_core.forms.extraction_prompt import ANSWER_UNIT_FORMAT_RULE
+from vera_core.forms.extraction_prompt import (
+    ANSWER_UNIT_FORMAT_RULE,
+    EXACT_VALUE_RULE,
+    special_values_hint,
+)
 from vera_core.forms.review import is_blank_answer
-from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
+from vera_core.integrations.llm import (
+    ExtractedField,
+    JudgeVerdict,
+    LLMClient,
+    SpecialValues,
+    TranscriptTurn,
+)
 
 logger = logging.getLogger("control_plane.llm")
 
@@ -20,14 +30,32 @@ def _turns_block(turns: list[TranscriptTurn]) -> str:
     return "\n".join(f"[{t.seq}] {t.role}: {t.text}" for t in turns)
 
 
-def build_extract_prompt(field_paths: list[str], turns: list[TranscriptTurn]) -> str:
+def build_extract_prompt(
+    field_paths: list[str],
+    turns: list[TranscriptTurn],
+    special_values: SpecialValues | None = None,
+) -> str:
+    """The top-up prompt. `special_values` names the requested paths' authored literals: an
+    extractor never shown them writes no non-numeric answer at all, so an "unlimited"
+    deductible comes back empty and its gated follow-ups keep the payer on the redial list."""
+    named_by_path = special_values or {}
+    named = "\n".join(
+        f"- {path}{hint}"
+        for path in field_paths
+        if (hint := special_values_hint(named_by_path.get(path)))
+    )
+    # A form whose requested paths name nothing gets the prompt byte-for-byte as before.
+    exact_rule = f" {EXACT_VALUE_RULE}" if named else ""
+    named_block = f"named answers:\n{named}\n\n" if named else ""
     return (
         "You are extracting insurance-benefit answers from a de-identified call "
         "transcript. Turns are numbered [n]. For each requested field_path, return the "
         "value stated by the payer, a 0-100 confidence, and evidence_seq = the [n] of the "
         "turn that supports it. Omit fields not present. Do NOT invent values. "
-        f"{ANSWER_UNIT_FORMAT_RULE}\n\n"
-        f"field_paths:\n{json.dumps(field_paths)}\n\ntranscript:\n{_turns_block(turns)}"
+        f"{ANSWER_UNIT_FORMAT_RULE}{exact_rule}\n\n"
+        f"field_paths:\n{json.dumps(field_paths)}\n\n"
+        f"{named_block}"
+        f"transcript:\n{_turns_block(turns)}"
     )
 
 
@@ -149,9 +177,15 @@ class VertexLLMClient(LLMClient):
         return self._loads_response(resp.text)
 
     async def extract(
-        self, *, field_paths: list[str], turns: list[TranscriptTurn]
+        self,
+        *,
+        field_paths: list[str],
+        turns: list[TranscriptTurn],
+        special_values: SpecialValues | None = None,
     ) -> list[ExtractedField]:
-        data = await self._generate(build_extract_prompt(field_paths, turns), _EXTRACT_SCHEMA)
+        data = await self._generate(
+            build_extract_prompt(field_paths, turns, special_values), _EXTRACT_SCHEMA
+        )
         return parse_extract_response(data)
 
     async def judge(

@@ -55,6 +55,7 @@ from control_plane.queueability import ensure_queueable, ensure_va_capacity
 from control_plane.responses import ResponseModel, ok
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session
+from vera_core.forms.answers import canonical_answer, canonicalize_answers, leaf_literals
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.export import build_workbook
@@ -255,6 +256,9 @@ async def _create_patient_form(
         answers = normalize_phone_answers(answers, doc)
         answers = _normalize_date_answers_or_422(answers, doc)
         _validate_enum_answers_or_422(answers, doc)
+        # After the enum check, so its 422 contract is unchanged: this snaps the literals no
+        # validator covers, which `gating_seed` would otherwise seed the call's gates with.
+        answers = canonicalize_answers(answers, doc)
         promoted = _promote_or_422(dict(answers).get, doc)
     else:
         answers = list(iter_leaf_answers(intake_payload))
@@ -1037,6 +1041,7 @@ async def resolve_disputes(
     doc = _v2_doc(version.schema_json)
     phone_paths = phone_promoted_paths(doc) if doc is not None else set()
     date_paths = date_leaf_paths(doc) if doc is not None else {}
+    literals = leaf_literals(doc) if doc is not None else {}
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
@@ -1103,6 +1108,9 @@ async def resolve_disputes(
             new_value = normalize_phone_prefix(new_value)
         if path in date_paths:
             new_value = _normalize_date_value_or_422(new_value, path, date_paths[path], doc)
+        # Before the change comparison below, so a reviewer's variant of an authored literal
+        # never becomes the baseline the call's gates are evaluated against.
+        new_value = canonical_answer(new_value, literals.get(path))
         cur = current_by_path.get(path)
         if cur is None:
             # No current answer to dispute — just record the human value (baseline edit).

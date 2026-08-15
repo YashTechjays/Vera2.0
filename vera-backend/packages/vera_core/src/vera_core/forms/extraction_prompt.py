@@ -31,18 +31,9 @@ ANSWER_UNIT_FORMAT_RULE = (
 )
 
 
-# Says once what a per-field clause would otherwise repeat on all 72 annotated fields — the
-# wrapper, not the literals, is the cost: spelling the rule inline came to +18% on the whole
-# prompt and +22% on the CPT panel, re-sent on every extraction pass with no caching.
-#
-# "ADDITIONAL possibilities, not the full range" is doing the real work. An earlier wording
-# ("values after `exact:`") read as the field's WHOLE vocabulary, and the model then treated a
-# normal answer as not belonging: on call 01a00003-e418-78b3-8044-3d64086d1022 every numeric
-# cycle limit was diverted into the neighbouring free-text `Additional Notes` and the leaf
-# itself came back empty. Measured over the two transcripts that pull hardest in opposite
-# directions — a sentinel on a currency leaf, a normal value on a text leaf beside a catch-all
-# — that phrasing scored 3/3 and 0/3; this one scores 3/3 and 3/3. Re-run the pair before
-# touching this text.
+# "ADDITIONAL possibilities, not the full range" is load-bearing: read as the field's WHOLE
+# vocabulary, the model treats a normal answer as not belonging and diverts it to a neighbouring
+# free-text leaf. Said once here rather than per-field, which cost +18% of the whole prompt.
 EXACT_VALUE_RULE = (
     'Some fields list a few named answers after "or exactly:". Those are ADDITIONAL '
     "possibilities, not the full range — answer normally in every other case, and only when "
@@ -51,16 +42,10 @@ EXACT_VALUE_RULE = (
 
 
 def special_values_hint(special_values: Sequence[str] | None) -> str:
-    """The clause naming a NON-enum leaf's declared answers, or "" when it has none.
-
-    Kept out of the enum `(one of: …)` clause because these are ALTERNATIVES to a normal
-    answer, not the whole vocabulary — a deductible is usually an amount, and "one of" would
-    push the model to pick a sentinel over the figure it was told. An enum has no such
-    figure, so its caller folds both lists into the one clause instead (as `intake`'s
-    `enum_accepted_values` already does).
-
-    The clause is NOT optional on a currency leaf: without it the model declines to write a
-    non-numeric answer at all, and "that one is unlimited" was dropped in 3 of 3 runs."""
+    """The clause naming a NON-enum leaf's declared answers, or "" when it has none."""
+    # Not optional on a currency leaf: without it the model writes no non-numeric answer at all.
+    # Kept out of the enum `(one of: …)` clause because here they are ALTERNATIVES to a normal
+    # answer, and "one of" pushes the model to pick a sentinel over the figure it was told.
     if not special_values:
         return ""
     return f" (or exactly: {', '.join(special_values)})"

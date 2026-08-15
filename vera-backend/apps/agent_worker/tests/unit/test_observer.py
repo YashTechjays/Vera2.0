@@ -14,6 +14,7 @@ from agent_worker.observer import (
     ExtractedAnswer,
     ObserverManager,
     ResilientAnswerExtractor,
+    _extraction_instructions,
     _parse_extraction,
     _render_turn,
     _Turn,
@@ -28,8 +29,9 @@ from vera_core.observability.otel_testing import assert_no_phi_values
 ROOM = "call--t--c"
 
 
-def _field(path: str) -> PlanFieldDescriptor:
-    return PlanFieldDescriptor(path=path, title=path.split(".")[-1], type="text", role="ask")
+def _field(path: str, **overrides: Any) -> PlanFieldDescriptor:
+    defaults: dict[str, Any] = {"title": path.split(".")[-1], "type": "text", "role": "ask"}
+    return PlanFieldDescriptor(path=path, **{**defaults, **overrides})
 
 
 def _plan(
@@ -243,6 +245,22 @@ class TestRecording:
         assert controller.answers["sections.a.x"] == "Family"
         # No new ai_call row and no emit — a mere confirmation leaves the INTAKE row current.
         assert run_state.records == []
+        assert bus.events == []
+
+    @pytest.mark.asyncio
+    async def test_a_prefill_is_snapped_before_it_seeds_the_gate_baseline(self) -> None:
+        """`_on_file` is what the rule engine compares byte-exact, and it is seeded from
+        `plan.prefilled` — a prefill written before the writers canonicalized carries whatever
+        spelling its source used, so the dedup below would also miss the rep confirming it."""
+        total = _field(
+            "sections.a.total", type="currency", special_values=["$0", "Unlimited", "No Limit"]
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.total", "No Limit", 90)])
+        manager, run_state, bus, _ = _manager(
+            _plan(fields=[total], prefilled={"sections.a.total": " no limit "}), extractor
+        )
+        await _feed(manager, _rep("There is no limit on that one."))
+        assert run_state.records == []  # snapped seed == snapped answer, so nothing to write
         assert bus.events == []
 
     @pytest.mark.asyncio
@@ -639,14 +657,10 @@ class TestResilientExtractor:
     async def test_the_declared_spelling_wins_and_an_amount_is_untouched(
         self, extracted: str, stored: str
     ) -> None:
-        """Wiring for `forms.answers.canonical_special_value` — the gate compares byte-exact,
+        """Wiring for `forms.answers.canonical_answer` — the gate compares byte-exact,
         so "unlimited" would leave an Unlimited deductible owing met+remaining."""
-        total = PlanFieldDescriptor(
-            path="sections.a.total",
-            title="Total",
-            type="currency",
-            role="ask",
-            special_values=["$0", "Unlimited", "No Limit"],
+        total = _field(
+            "sections.a.total", type="currency", special_values=["$0", "Unlimited", "No Limit"]
         )
         llm = FakeCompletionLLM(
             json.dumps([{"field_path": "sections.a.total", "value": extracted, "confidence": 90}])
@@ -824,7 +838,6 @@ class TestDerivedRemaining:
 
 def test_extraction_instructions_carry_the_routing_note() -> None:
     """Without it the extractor writes `No` for the branch the rep did not take."""
-    from agent_worker.observer import _extraction_instructions
     from vera_core.forms.call_plan import PlanFieldDescriptor, PlanTask
 
     task = PlanTask(
@@ -861,13 +874,9 @@ def test_extraction_instructions_carry_the_routing_note() -> None:
 
 def test_extraction_instructions_carry_a_leafs_special_values() -> None:
     """Gates compare byte-exact, so an extractor never shown the literals settles them by luck."""
-    from agent_worker.observer import _extraction_instructions
-
-    total = PlanFieldDescriptor(
-        path="sections.deductibles.individual.total",
-        title="Total",
+    total = _field(
+        "sections.deductibles.individual.total",
         type="currency",
-        role="ask",
         special_values=["$0", "None", "No Deductible", "Unlimited", "No Limit"],
     )
     text = _extraction_instructions(_plan(fields=[total, _field("sections.s.plain")]).tasks[0])
@@ -878,40 +887,43 @@ def test_extraction_instructions_carry_a_leafs_special_values() -> None:
 def test_the_exact_value_rule_is_omitted_when_no_field_names_one() -> None:
     """It explains a clause; four of the catalog's thirteen tasks carry no such clause at all,
     and the rule is 227 chars on a prompt re-sent every pass."""
-    from agent_worker.observer import _extraction_instructions
-
     marker = "or exactly:"
     plain = _extraction_instructions(_plan(fields=[_field("sections.s.plain")]).tasks[0])
     assert marker not in plain
 
-    with_special = PlanFieldDescriptor(
-        path="sections.s.total",
-        title="Total",
-        type="currency",
-        role="ask",
-        special_values=["No Limit"],
-    )
+    with_special = _field("sections.s.total", type="currency", special_values=["No Limit"])
     named = _extraction_instructions(_plan(fields=[with_special]).tasks[0])
     assert marker in named
 
 
 def test_an_enums_special_values_join_its_existing_vocabulary_clause() -> None:
-    """`values` and `special_values` are one vocabulary for an enum — `intake`'s
-    `enum_accepted_values` already unions them. A second clause would be 27 redundant
-    annotations on the CPT panel, where every `prior_auth` leaf carries both."""
-    from agent_worker.observer import _extraction_instructions
-
-    prior_auth = PlanFieldDescriptor(
-        path="sections.s.prior_auth",
-        title="Prior Auth",
+    """`values` and `special_values` are one vocabulary for an enum. A second clause would be
+    27 redundant annotations on the CPT panel, where every `prior_auth` leaf carries both."""
+    prior_auth = _field(
+        "sections.s.prior_auth",
         type="enum",
-        role="ask",
         values=["Yes", "No", "N/A"],
         special_values=["Prior auth department"],
     )
     text = _extraction_instructions(_plan(fields=[prior_auth]).tasks[0])
     line = next(ln for ln in text.splitlines() if ln.startswith("- sections.s.prior_auth"))
     assert line.endswith("(one of: Yes, No, N/A, Prior auth department)")
+
+
+def test_an_enum_is_never_offered_the_value_the_auto_fill_writes() -> None:
+    """The snap compares against `literals_of().gate`, which folds in `inapplicable_value` —
+    but a representative never SAYS it, so the prompt must not list it as an answer. Four
+    catalog enums (pcp_referral_required, telehealth_covered, both gender leaves) declare an
+    `N/A` outside their `values`."""
+    referral = _field(
+        "sections.s.pcp_referral_required",
+        type="enum",
+        values=["Yes", "No"],
+        inapplicable_value="N/A",
+    )
+    text = _extraction_instructions(_plan(fields=[referral]).tasks[0])
+    line = next(ln for ln in text.splitlines() if ln.startswith("- sections.s.pcp_referral"))
+    assert line.endswith("(one of: Yes, No)")
 
 
 class TestDrainPending:
