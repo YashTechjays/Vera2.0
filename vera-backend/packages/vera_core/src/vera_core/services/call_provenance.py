@@ -61,9 +61,11 @@ def snapshot_changed_paths(
 ) -> list[str]:
     """Field paths whose value differs between a call's before/after snapshots.
     Paths only — values never leave. Tolerates None/partial snapshots."""
+    # after_state stays {} until the post-call eval fills it — no diff until then.
+    if not after:
+        return []
     b = before or {}
-    a = after or {}
-    return sorted(p for p in set(b) | set(a) if b.get(p, _MISSING) != a.get(p, _MISSING))
+    return sorted(p for p in set(b) | set(after) if b.get(p, _MISSING) != after.get(p, _MISSING))
 
 
 async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallAttempt]:

@@ -87,7 +87,9 @@ class FieldAnswer(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
 
 class CallFormSnapshot(Base, UUIDv7PKMixin, CreatedAtMixin, TenantColumnMixin):
     """One frozen before/after JSONB per call — the spec's snapshot/isolation
-    requirement, kept as an immutable per-call audit artifact (1-1 with call)."""
+    requirement, kept as an immutable per-call audit artifact (1-1 with call).
+    before_state is written at dispatch; after_state stays `{}` (the reserved
+    not-yet-finalized sentinel) until the post-call eval fills it."""
 
     __tablename__ = "call_form_snapshot"
     __table_args__ = (UniqueConstraint("call_id"),)

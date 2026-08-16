@@ -48,6 +48,7 @@ from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models import (
     Call,
     CallEvent,
+    CallFormSnapshot,
     CallLineage,
     InsuranceProvider,
     PatientForm,
@@ -385,6 +386,10 @@ async def try_dispatch(
             # Tells the worker a browser speaker stands in for an answered SIP callee.
             metadata["browser_callee"] = True
 
+        # Read once, outside the savepoint: the retry-focus gates and the pre-call
+        # snapshot below both need the form's current values.
+        values = await current_values_by_path(session, form.id)
+
         # Retry scope: with a call reference number captured, the retry is FOCUSED —
         # stage a plan narrowed to the still-missing (group-expanded) fields so the
         # agent asks ONLY those, never announcing a prior call. Without a reference
@@ -405,7 +410,6 @@ async def try_dispatch(
                 # Pass the form's real values so eq/in gates evaluate exactly — without
                 # them a sentinel reads every value-gate as unmatched and silently drops
                 # its still-missing dependents from the retry (issue 6).
-                values = await current_values_by_path(session, form.id)
                 retryable = retryable_required_paths(
                     status_by_path, version.schema_json, floor=retry_floor, values=values
                 )
@@ -446,6 +450,17 @@ async def try_dispatch(
                 )
                 session.add(call)
                 await session.flush()
+                # before_state must be captured pre-call: answers stream in live during
+                # the call, so a closeout-time capture already contains them and the
+                # attempt's changed_paths diff would collapse to 0.
+                session.add(
+                    CallFormSnapshot(
+                        tenant_id=tenant_id,
+                        call_id=call.id,
+                        before_state=values,
+                        after_state={},
+                    )
+                )
                 # For RETRY calls: find the most-recent prior call so we can write a
                 # CallLineage row. The retry is SCOPED by the plan itself (a focused
                 # retry stages a narrowed plan via focus_call_plan above), never by a

@@ -455,7 +455,7 @@ async def evaluate_call(
     form.verified_pct = round(verified_fraction * 100, 2)
 
     # (8) Update call_form_snapshot.after_state (the before_state row was written
-    #     by the callback; here we fill in after_state).
+    #     at dispatch — or backfilled by the closeout callback for legacy calls).
     result = cast(
         CursorResult[Any],
         await session.execute(

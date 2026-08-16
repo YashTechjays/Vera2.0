@@ -31,6 +31,7 @@ from vera_core.forms.review import FieldStatus
 from vera_core.models import (
     Call,
     CallEvent,
+    CallFormSnapshot,
     FieldAnswer,
     InsuranceProvider,
     PatientForm,
@@ -356,6 +357,32 @@ async def test_dispatch_dials_the_forms_payer_number(
     assert metadata["enable_ivr_navigation"] is True
     assert metadata["persona_tweak"] == {"greeting": "Custom greeting"}
     assert metadata["enable_observer"] is True  # tenant default: AI form filling on
+
+
+async def test_dispatch_snapshots_form_state_before_the_call(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    # before_state must capture the form as it stood BEFORE the call — answers
+    # stream in live during the call, so a closeout-time capture already contains
+    # them and the attempt's changed_paths diff collapses to 0 (VR2 field-update bug).
+    tenant = _tenant()
+    form = _form(tenant.id)
+    session = FakeSession(
+        tenant=tenant,
+        candidates=[form],
+        field_answers={form.id: [("cov.a", {"value": "x"})]},
+    )
+    livekit = FakeLiveKit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit)
+
+    assert dispatched == 1
+    call = session.calls_added()[0]
+    snapshots = [o for o in session.added if isinstance(o, CallFormSnapshot)]
+    assert len(snapshots) == 1
+    assert snapshots[0].call_id == call.id
+    assert snapshots[0].before_state == {"cov.a": "x"}
+    assert snapshots[0].after_state == {}
 
 
 async def test_dispatch_stamps_ivr_disabled_when_form_toggle_off(
