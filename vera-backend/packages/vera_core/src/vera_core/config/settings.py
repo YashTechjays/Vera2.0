@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     post_call_block_ms: int = 5_000  # VERA_POST_CALL_BLOCK_MS
     post_call_reclaim_idle_ms: int = 60_000  # VERA_POST_CALL_RECLAIM_IDLE_MS
     post_call_llm_timeout_ms: int = 120_000  # VERA_POST_CALL_LLM_TIMEOUT_MS
+    post_call_llm_max_concurrency: int = 8  # VERA_POST_CALL_LLM_MAX_CONCURRENCY
     # Pipeline sweeper: reconciles stuck calls (worker crash / lost event) and
     # wakes the dispatcher on a timer (working-hours reopen, queue expiry).
     pipeline_sweep_interval_seconds: int = 60  # VERA_PIPELINE_SWEEP_INTERVAL_SECONDS

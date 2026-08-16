@@ -1,4 +1,6 @@
 import asyncio
+import json
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -49,6 +51,38 @@ class _StubJudgeClient(VertexLLMClient):
 
 def _enum_of(call: tuple[str, dict[str, Any]]) -> list[str]:
     return cast(list[str], call[1]["items"]["properties"]["field_path"]["enum"])
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero the error-retry backoff so retry tests don't sleep for real."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_RETRY_BACKOFF_S", 0.0)
+
+
+@pytest.fixture
+def recorded_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record asyncio.sleep delays, with the backoff set to a distinctive 7.0."""
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _recording_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(llm_mod, "_JUDGE_RETRY_BACKOFF_S", 7.0)
+    monkeypatch.setattr("asyncio.sleep", _recording_sleep)
+    return sleeps
+
+
+def _fake_genai_client(kwargs_sink: dict[str, Any], generate_content: Any = None) -> type:
+    """A genai.Client stand-in that records ctor kwargs and serves generate_content."""
+
+    class _FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs_sink.update(kwargs)
+            self.aio = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+
+    return _FakeClient
 
 
 def test_extract_prompt_numbers_turns_and_lists_paths() -> None:
@@ -285,16 +319,74 @@ async def test_judge_runs_chunks_of_one_attempt_concurrently(
     assert sorted(v.field_path for v in out) == ["a", "b", "c"]
 
 
+async def test_judge_bounds_concurrent_vertex_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """max_concurrency caps in-flight generate_content calls — without the cap, a
+    burst of chunks (x the consumer's 16-job gather) trips the Vertex quota."""
+    in_flight = 0
+    peak = 0
+
+    async def _fake_generate_content(*, model: str, contents: str, config: Any) -> Any:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)
+        in_flight -= 1
+        paths = cast(list[str], config.response_schema["items"]["properties"]["field_path"]["enum"])
+        return SimpleNamespace(text=json.dumps([_vd(p) for p in paths]))
+
+    monkeypatch.setattr(
+        "control_plane.llm.genai.Client", _fake_genai_client({}, _fake_generate_content)
+    )
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 1)
+    client = VertexLLMClient(project="p", location="l", model="m", max_concurrency=2)
+    out = await client.judge(extracted=[_ef(p) for p in "abcd"], turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b", "c", "d"]
+    assert peak == 2
+
+
+async def test_judge_retries_a_fully_errored_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One transient blip failing EVERY chunk of an attempt (concurrent chunks fail
+    together) must not forfeit the remaining attempts."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 1)
+    responses: list[_Queued] = [
+        RuntimeError("burst"),
+        RuntimeError("burst"),
+        [_vd("a")],
+        [_vd("b")],
+    ]
+    stub = _StubJudgeClient(responses)
+    out = await stub.judge(extracted=[_ef("a"), _ef("b")], turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b"]
+
+
+async def test_judge_backs_off_before_retrying_an_errored_attempt(
+    monkeypatch: pytest.MonkeyPatch, recorded_sleeps: list[float]
+) -> None:
+    """An errored attempt retries only after the backoff pause — an instant re-fire
+    lands in the same exhausted quota window."""
+    monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
+    stub = _StubJudgeClient([[_vd("a"), _vd("b")], RuntimeError("blip"), [_vd("c")]])
+    out = await stub.judge(extracted=[_ef("a"), _ef("b"), _ef("c")], turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b", "c"]
+    assert recorded_sleeps == [7.0]
+
+
+async def test_judge_retries_dropped_fields_without_backoff(
+    recorded_sleeps: list[float],
+) -> None:
+    """A drop-item retry (no error, model just omitted fields) is not rate-limit
+    shaped and must stay immediate."""
+    stub = _StubJudgeClient([[_vd("a")], [_vd("b")]])
+    out = await stub.judge(extracted=[_ef("a"), _ef("b")], turns=[])
+    assert sorted(v.field_path for v in out) == ["a", "b"]
+    assert recorded_sleeps == []
+
+
 def test_vertex_client_sets_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """The genai client must carry a request timeout — without one, a stalled
     Vertex call holds the form in AI_PROCESSING until the sweeper's 5-min grace."""
     captured: dict[str, Any] = {}
-
-    class _FakeGenaiClient:
-        def __init__(self, **kwargs: Any) -> None:
-            captured.update(kwargs)
-
-    monkeypatch.setattr("control_plane.llm.genai.Client", _FakeGenaiClient)
+    monkeypatch.setattr("control_plane.llm.genai.Client", _fake_genai_client(captured))
     VertexLLMClient(project="p", location="l", model="m", timeout_ms=45_000)
     assert captured["http_options"].timeout == 45_000
 

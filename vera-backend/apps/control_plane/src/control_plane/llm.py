@@ -101,6 +101,9 @@ _JUDGE_MAX_ATTEMPTS = 3
 # schema limit and 400 the whole call. Chunk to bound the enum AND the batch the
 # model must return in full (smaller batches drop fewer items).
 _JUDGE_CHUNK_SIZE = 50
+# Errored chunks retry after this pause — concurrent chunks fail together (429
+# bursts), and an instant re-fire lands in the same exhausted quota window.
+_JUDGE_RETRY_BACKOFF_S = 2.0
 
 
 def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
@@ -122,7 +125,13 @@ def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
 
 class VertexLLMClient(LLMClient):
     def __init__(
-        self, *, project: str, location: str, model: str, timeout_ms: int = 120_000
+        self,
+        *,
+        project: str,
+        location: str,
+        model: str,
+        timeout_ms: int = 120_000,
+        max_concurrency: int = 8,
     ) -> None:
         self._client = genai.Client(
             vertexai=True,
@@ -131,6 +140,9 @@ class VertexLLMClient(LLMClient):
             http_options=types.HttpOptions(timeout=timeout_ms),
         )
         self._model = model
+        # One shared client serves every post-call job, so this caps process-wide
+        # Vertex fan-out (the consumer gathers up to 16 jobs, each with several chunks).
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     @staticmethod
     def _loads_response(text: str | None) -> list[dict[str, Any]]:
@@ -144,14 +156,15 @@ class VertexLLMClient(LLMClient):
         return json.loads(text)  # type: ignore[no-any-return]
 
     async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
-        resp = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=schema,
-            ),
-        )
+        async with self._semaphore:
+            resp = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            )
         return self._loads_response(resp.text)
 
     async def extract(
@@ -178,16 +191,20 @@ class VertexLLMClient(LLMClient):
         by_path: dict[str, JudgeVerdict] = {}
         last_error: Exception | None = None
         turns_block = _turns_block(turns)
+        errored = False
         for _ in range(_JUDGE_MAX_ATTEMPTS):
             pending = [ef for ef in extracted if ef.field_path not in by_path]
             if not pending:
                 break
+            if errored:
+                await asyncio.sleep(_JUDGE_RETRY_BACKOFF_S)
             chunks = list(batched(pending, _JUDGE_CHUNK_SIZE))
             # gather, not TaskGroup: a failed chunk must not cancel its siblings (salvage contract).
             results = await asyncio.gather(
                 *(self._judge_chunk(chunk, turns_block) for chunk in chunks),
                 return_exceptions=True,
             )
+            errored = any(isinstance(r, Exception) for r in results)
             progressed = False
             for chunk, result in zip(chunks, results, strict=True):
                 if isinstance(result, BaseException):
@@ -203,7 +220,9 @@ class VertexLLMClient(LLMClient):
                 for v in result:
                     by_path[v.field_path] = v
                     progressed = True
-            if not progressed:  # a whole failed/empty attempt — don't spin the rest
+            # Errors are transient-shaped, so an errored attempt keeps its retries;
+            # a clean attempt that returned nothing new won't improve on a re-ask.
+            if not progressed and not errored:
                 break
         # An error that left ANY field unjudged must surface so the caller routes to
         # LLM_ERROR review — otherwise those fields look unsatisfied and the payer is
