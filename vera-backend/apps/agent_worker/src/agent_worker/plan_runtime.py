@@ -106,11 +106,12 @@ _REFUSAL_DRAIN_TIMEOUT_S = 4.0
 # Shared by both completion guards, and shared deliberately: the drain above is bounded and
 # best-effort, so either guard can still be judging a snapshot the agent has already heard past.
 # Neither may claim a question is unanswered — only that nothing is recorded YET.
-_STALE_ANSWER_CAVEAT = (
-    "If you have already asked one and the representative answered it, do NOT ask it again — "
-    "that answer is still being written down. Ask only the ones you have not asked yet, one at "
-    "a time,"
-)
+#
+# It must NOT forbid re-asking: when the whole digest is already asked, a prohibition leaves silence
+# as the only legal move (45s of dead air on call 01a008f8). Nor may anything here tell the agent
+# what to do once they are all answered — prose about calling the tool makes it emit the call as
+# TEXT, which TTS speaks aloud. Both measured; see the Obsidian issue note before editing.
+_STALE_ANSWER_CAVEAT = "Ask only the ones you have not asked yet, one at a time,"
 
 # Both refusals are PRIVATE instructions, and both used to open on "Not yet —", which the agent
 # read as a rebuke and relayed: "Sorry, I got ahead of myself." The representative experienced no

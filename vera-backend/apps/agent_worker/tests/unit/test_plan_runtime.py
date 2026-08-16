@@ -3461,7 +3461,10 @@ class TestRefusalJudgesSettledState:
             refusal = cast(str, await _tool(agent, "task_complete")())
         assert "have no answer on file" not in refusal
         assert "no answer is recorded yet" in refusal
-        assert "do NOT ask it again" in refusal
+        # And it must not forbid the re-ask. It used to, and that is what stalled call 01a008f8:
+        # when every question in the digest has already been asked, a prohibition leaves silence
+        # as the only legal move. Allowed to speak, the agent reads the answer back instead.
+        assert "do NOT ask it again" not in refusal
 
     @pytest.mark.asyncio
     async def test_the_refusal_is_private_and_reads_as_a_continuation(self) -> None:
