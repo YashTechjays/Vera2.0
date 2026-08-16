@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { copyText } from "@/lib/clipboard"
 import { usePermission } from "@/lib/auth/permissions"
+import { LIVE_CALL_ACTIVITY_EVENT, LIVE_CALL_ACTIVITY_INTERVAL_MS } from "@/lib/auth/idle"
 import { ApiError } from "@/lib/api/client"
 import { endCall } from "@/lib/api/calls"
 import type { CallHealth } from "@/lib/api/callEvents"
@@ -43,6 +44,9 @@ import { LiveCallRoom } from "./LiveCallRoom"
 import { useCallStatus } from "./useCallStatus"
 import { useLiveDuration } from "./useLiveDuration"
 import type { LiveCall } from "@/lib/mock-data"
+
+// Test transport only, and only whether the button renders — the backend's VERA_BROWSER_CALLEE_TRANSPORT is the authority.
+const BROWSER_CALLEE = import.meta.env.VITE_BROWSER_CALLEE_TRANSPORT === "true"
 
 /** Collapsible form panel; loads the call's own form on expand (VR2-64). */
 function FormPanel({
@@ -202,6 +206,16 @@ export function LiveCallModal({
   // supervisor's own connection dropping (LiveCallRoom shows a connection-lost state).
   const callEnded = sseEnded
 
+  // Watching a live call needs no mouse and no audio-room connection, so the beacon is
+  // keyed to the modal showing an un-ended call, not to LiveKit state (VR2-167).
+  useEffect(() => {
+    if (!open || callEnded) return
+    const beat = () => window.dispatchEvent(new Event(LIVE_CALL_ACTIVITY_EVENT))
+    beat()
+    const id = window.setInterval(beat, LIVE_CALL_ACTIVITY_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [open, callEnded])
+
   // The list is poll-driven and its DB status lags the worker's shutdown drain by
   // many seconds (VR2-72) — surface the SSE terminal signal so it updates now.
   const endedCallId = callEnded ? call?.id : undefined
@@ -212,6 +226,7 @@ export function LiveCallModal({
   const replaced = roomStatus?.phase === "replaced"
   const closeAllowed = shouldAllowClose(mode, callEnded, false, replaced)
   const intervene = interveneButtonState(canIntervene, roomStatus)
+  const canUpgradeFromListen = mode === "listen" && !callEnded
   const endCallState = endCallButtonState(call?.isOwner ?? false, mode === "intervene", roomStatus)
   const canCoach = coachingPanelVisible(canIntervene, call?.isOwner ?? false, callEnded)
 
@@ -258,11 +273,12 @@ export function LiveCallModal({
     }
   }
 
-  // An intervene token can be refused (e.g. 409 if someone took the mic first) — fall back to listening.
+  // A publish token can be refused (409 on the mic lock, or the test transport is off) — fall back to listening.
   function handleJoinFailed(error: unknown) {
-    if (mode !== "intervene") return
+    if (mode === "listen") return
+    const attempted = mode === "callee" ? "join as the payer rep" : "intervene"
     setMode("listen")
-    setActionError(error instanceof ApiError ? error.message : "Could not intervene.")
+    setActionError(error instanceof ApiError ? error.message : `Could not ${attempted}.`)
   }
 
   return (
@@ -423,7 +439,7 @@ export function LiveCallModal({
                 <LiveCallRoom
                   key={`${call.id}:${mode}`}
                   callId={call.id}
-                  microphone={mode === "intervene"}
+                  mode={mode}
                   ended={sseEnded}
                   endedStatus={terminalStatus}
                   onStatus={setRoomStatus}
@@ -476,7 +492,7 @@ export function LiveCallModal({
                 {ending ? "Ending…" : "End Call"}
               </Button>
             )}
-            {(mode === "listen" || callEnded) && (
+            {(mode !== "intervene" || callEnded) && (
               <Button variant="outline" onClick={() => handleOpenChange(false)}>
                 Close
               </Button>
@@ -487,19 +503,33 @@ export function LiveCallModal({
               <span className="text-sm text-muted-foreground">{endCallState.title}</span>
             )}
           </div>
-          {intervene.visible && mode === "listen" && !callEnded && (
-            <Button
-              onClick={() => {
-                setActionError(null)
-                setMode("intervene")
-              }}
-              disabled={intervene.disabled}
-              title={intervene.title}
-              className="bg-orange-500 text-white hover:bg-orange-600"
-            >
-              Intervene
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {BROWSER_CALLEE && canUpgradeFromListen && (
+              <Button
+                onClick={() => {
+                  setActionError(null)
+                  setMode("callee")
+                }}
+                disabled={roomStatus?.phase !== "live"}
+                className="bg-sky-600 text-white hover:bg-sky-700"
+              >
+                Join as payer rep
+              </Button>
+            )}
+            {intervene.visible && canUpgradeFromListen && (
+              <Button
+                onClick={() => {
+                  setActionError(null)
+                  setMode("intervene")
+                }}
+                disabled={intervene.disabled}
+                title={intervene.title}
+                className="bg-orange-500 text-white hover:bg-orange-600"
+              >
+                Intervene
+              </Button>
+            )}
+          </div>
         </div>
 
         <Keypad open={keypadOpen} onOpenChange={setKeypadOpen} />

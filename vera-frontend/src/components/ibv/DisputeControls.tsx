@@ -96,15 +96,17 @@ export function DisputeBadge({
 type DisputeControlsProps = {
   dispute: Dispute
   flags: DisputeFlags
-  /** absolute placement of the cluster inside the input box */
+  /** absolute placement of the cluster inside the input box, vertical alignment included */
   className: string
   onSwap: () => void
   onApply: () => void
+  /** false on a disabled input: Swap writes the value, which the reviewer could not type back (VR2-166) */
+  canSwap: boolean
 }
 
 /**
- * Narrow cells (the 340px rail, matrix textareas): swap/apply only — there is no
- * room beside the value for a chip, so the tooltip carries prior/captured/evidence.
+ * Narrow cells (the 340px rail): swap/apply only — there is no room beside the
+ * value for a chip, so the tooltip carries prior/captured/evidence.
  */
 export function CompactDisputeControls({
   dispute,
@@ -112,12 +114,13 @@ export function CompactDisputeControls({
   className,
   onSwap,
   onApply,
+  canSwap,
 }: DisputeControlsProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <div className={cn("absolute flex items-center gap-0.5", className)}>
-          <SwapButton swapped={flags.swapped} onClick={onSwap} />
+          {canSwap && <SwapButton swapped={flags.swapped} onClick={onSwap} />}
           <ApplyButton applied={flags.applied} onClick={onApply} />
         </div>
       </TooltipTrigger>
@@ -136,14 +139,15 @@ export function InlineDisputeControls({
   onSwap,
   onApply,
   bareBadge,
+  canSwap,
 }: DisputeControlsProps & {
-  /** drop the chip's label — for the tightest columns (enums) */
+  /** drop the chip's label — for the tightest columns (short values) */
   bareBadge?: boolean
 }) {
   const label = flags.swapped ? "Captured" : "Prior"
   return (
-    <div className={cn("absolute top-1/2 flex -translate-y-1/2 items-center gap-1", className)}>
-      <SwapButton swapped={flags.swapped} onClick={onSwap} />
+    <div className={cn("absolute flex items-center gap-1", className)}>
+      {canSwap && <SwapButton swapped={flags.swapped} onClick={onSwap} />}
       <ApplyButton applied={flags.applied} onClick={onApply} />
       <DisputeBadge
         value={badgeValue(dispute, flags)}

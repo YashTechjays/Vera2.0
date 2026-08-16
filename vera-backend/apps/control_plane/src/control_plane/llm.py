@@ -9,6 +9,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+from vera_core.forms.extraction_prompt import ANSWER_UNIT_FORMAT_RULE
 from vera_core.forms.review import is_blank_answer
 from vera_core.integrations.llm import ExtractedField, JudgeVerdict, LLMClient, TranscriptTurn
 
@@ -24,7 +25,8 @@ def build_extract_prompt(field_paths: list[str], turns: list[TranscriptTurn]) ->
         "You are extracting insurance-benefit answers from a de-identified call "
         "transcript. Turns are numbered [n]. For each requested field_path, return the "
         "value stated by the payer, a 0-100 confidence, and evidence_seq = the [n] of the "
-        "turn that supports it. Omit fields not present. Do NOT invent values.\n\n"
+        "turn that supports it. Omit fields not present. Do NOT invent values. "
+        f"{ANSWER_UNIT_FORMAT_RULE}\n\n"
         f"field_paths:\n{json.dumps(field_paths)}\n\ntranscript:\n{_turns_block(turns)}"
     )
 

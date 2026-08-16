@@ -21,6 +21,8 @@ type Props = {
   highlightClass?: string
   /** extra right padding so inline dispute controls don't overlap the text */
   inputPaddingRight?: string
+  /** extra top padding — the strip a textarea keeps clear for dispute controls */
+  inputPaddingTop?: string
   /** drop the cell's right border (the section frame supplies that edge, so it
    *  would otherwise be a doubled line) — used by the single-column field rows */
   noRightBorder?: boolean
@@ -95,6 +97,7 @@ export function FieldRenderer({
   invalid,
   highlightClass,
   inputPaddingRight,
+  inputPaddingTop,
   noRightBorder,
   borderless,
 }: Props) {
@@ -105,9 +108,11 @@ export function FieldRenderer({
   )
   // Something worth explaining on hover: gated off, or failing validation.
   const explainable = disabled || invalid
-  const padStyle = inputPaddingRight
-    ? { paddingRight: inputPaddingRight }
-    : undefined
+  // stays undefined when neither pad is set, so the control renders with no style attr
+  const padStyle =
+    inputPaddingRight || inputPaddingTop
+      ? { paddingRight: inputPaddingRight, paddingTop: inputPaddingTop }
+      : undefined
   // `default` is the value the form assumes when nothing is recorded — surface
   // it (or the skip value for inapplicable fields) without writing a value.
   // For date fields, prefer the date_format pattern over a generic default like

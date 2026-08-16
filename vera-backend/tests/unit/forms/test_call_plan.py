@@ -3,27 +3,45 @@ the agent worker builds PlanTaskAgents from. Pure fusion — prompt text comes f
 render_task_prompts, field descriptors from leaf_gates; nothing is recompiled here."""
 
 import uuid
+from uuid import uuid4
 
 import pytest
 
+from vera_core.forms.authoring import eq
 from vera_core.forms.call_plan import (
     CallPlan,
+    PlanFieldDescriptor,
     PlanTask,
     _render_value,
     bookend_paths,
     compile_call_plan,
     focus_call_plan,
+    focus_questions,
     fuse_prefill,
+    gating_seed,
+    owed_now,
 )
+from vera_core.forms.catalog.disease_only import build_disease_only
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
-from vera_core.forms.dsl import PLACEHOLDER_RE, FormSchemaDoc, Leaf, load_document
+from vera_core.forms.dsl import (
+    PLACEHOLDER_RE,
+    AnyCondition,
+    FormSchemaDoc,
+    Leaf,
+    load_document,
+)
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
     PromptDocument,
     SessionBlock,
     TaskTextOverride,
+    numbered_questions,
+    render_digest,
+    render_panels,
     render_task_prompts,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion, iter_questions
 
 from .test_prompting import FORM_SCHEMA_DIR
 
@@ -383,6 +401,50 @@ SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
 MEMBER_ID = "sections.insurance_information.policy_number"
 
 
+class TestPanelsMatchThePrompt:
+    """The plan carries the prompt twice — as text and as the tree the worker re-renders.
+    Anything that transforms one must transform the other, or narrowing a task silently
+    changes what it says."""
+
+    def _plan(self) -> CallPlan:
+        return compile_call_plan(
+            build_ibv_standard(), None, schema_version_id=uuid4(), prompt_version_id=None
+        )
+
+    def test_every_task_reassembles_from_its_pieces(self) -> None:
+        for task in self._plan().tasks:
+            parts = (task.lead_in, render_panels(task.panels), task.trailing)
+            assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
+
+    def test_every_fused_task_reassembles_from_its_pieces(self) -> None:
+        # The FUSED tree is what `_narrowed_block` re-renders, and `fuse_prefill` rewrites
+        # `prompt` as one whole string: a spoken string the fuse touches in the text but not
+        # in the tree diverges only here, never in the compile-time check above.
+        fused = fuse_prefill(
+            build_ibv_standard(),
+            self._plan(),
+            {SPOUSE_NAME: "Jane Doe", MEMBER_ID: "ABC123"},
+            current_year=2026,
+        )
+        for task in fused.tasks:
+            parts = (task.lead_in, render_panels(task.panels), task.trailing)
+            assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
+
+    def test_the_stored_tree_keeps_the_immediate_confirmations(self) -> None:
+        # Built once and shared: building it a second time without the confirm nodes gave the
+        # worker a tree whose re-render dropped every "Immediately after this answer" block.
+        plan = self._plan()
+        confirms = sum(q.is_confirm for t in plan.tasks for q in iter_questions(t.panels))
+        assert confirms > 0
+
+    def test_fusing_hydrates_the_tree_as_well_as_the_text(self) -> None:
+        # A task-entry re-render must not speak a raw {{token}}.
+        doc = build_ibv_standard()
+        fused = fuse_prefill(doc, self._plan(), {}, current_year=2026)
+        for task in fused.tasks:
+            assert "{{current_year}}" not in render_panels(task.panels), task.task_key
+
+
 class TestConfirmSlot:
     def test_expands_to_confirm_when_value_on_file(self) -> None:
         plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
@@ -420,15 +482,440 @@ class TestConfirmSlot:
         """The numbered-question list never carried the confirm/ask label — only the
         two bullet contexts (immediate/end-of-task) do."""
         plan = fuse_prefill(IBV, PLAN, {MEMBER_ID: "ABC123"}, current_year=2026)
+        # matched by content, not by ordinal: the ordinal moves whenever a question is added.
         line = next(
             line
             for line in plan_task(plan, "insurance_basics").prompt.splitlines()
-            if line.startswith("6.")
+            if "member ID" in line
         )
-        assert line == "6. I have the member ID as ABC123 — can you confirm that is correct?"
+        assert line.endswith("I have the member ID as ABC123 — can you confirm that is correct?")
+        assert "confirm — " not in line
 
 
-def test_gate_text_carries_the_condition_prose() -> None:
-    fields = {f.path: f for t in PLAN.tasks for f in t.fields}
-    assert fields[SPOUSE_NAME].gate_text == '"Coverage Type" is "Family"'
-    assert fields["sections.benefit_coverage.coverage_type"].gate_text is None
+class TestAlternativePairs:
+    """The grouping rule itself is covered in test_conditions.py; this asserts only that the
+    compiled plan CARRIES it, since the worker is DB-free and cannot derive it."""
+
+    def test_the_plan_carries_per_code_pairs(self) -> None:
+        assert PLAN.alternative_pairs
+        for pair in PLAN.alternative_pairs:
+            assert len({path.rsplit(".", 1)[0] for path in pair}) == 1, pair
+
+
+class TestDescriptorCarriesDefault:
+    """`completion_pct_v2` counts a leaf with a `default` as filled and the export writes it, but
+    the descriptor did not carry it — so the bot chased six fields the form already called done."""
+
+    def test_default_reaches_the_descriptor(self) -> None:
+        by_path = {f.path: f for task in PLAN.tasks for f in task.fields}
+        group_name = by_path["sections.insurance_information.group_name"]
+        assert group_name.default == "N/A"
+        assert group_name.required is True
+
+    def test_a_leaf_without_a_default_carries_none(self) -> None:
+        by_path = {f.path: f for task in PLAN.tasks for f in task.fields}
+        assert by_path["sections.insurance_representative.rep_name"].default is None
+
+
+class TestExclusiveNotes:
+    """A routing `alternatives` picks ONE branch but gates none of them, so the Observer inferred
+    `No` for the branch not taken — a coverage claim, at confidence 90 on a live call, where `N/A`
+    is the truth. The schema has to tell it; it cannot know from the transcript."""
+
+    def _noted(self) -> dict[str, str]:
+        return {f.path: f.exclusive_note for t in PLAN.tasks for f in t.fields if f.exclusive_note}
+
+    def test_a_routing_branchs_leaves_name_their_sibling(self) -> None:
+        noted = self._noted()
+        elective = noted[
+            "sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered"
+        ]
+        assert "Egg Cryopreservation Cancer" in elective
+        assert "record N/A here" in elective
+        assert "never No" in elective
+
+    def test_the_note_is_symmetric(self) -> None:
+        noted = self._noted()
+        cancer = noted[
+            "sections.infertility_treatment.egg_cryopreservation_cancer.cpt_89337.covered"
+        ]
+        assert "Egg Cryopreservation Elective" in cancer
+
+    def test_both_asc_branches_are_noted(self) -> None:
+        noted = self._noted()
+        professional = noted["sections.general_coverage.asc_professional.cpt_58555.covered"]
+        assert "ASC Facility" in professional
+        assert (
+            "ASC Professional Services"
+            in (noted["sections.general_coverage.asc_facility.cpt_58555.covered"])
+        )
+
+    def test_a_leaf_level_either_or_gets_no_note(self) -> None:
+        # cost pairs are alternatives over LEAVES — an either/or over two answers, not a routing
+        # choice between services. Answering coinsurance says nothing about applicability.
+        noted = self._noted()
+        cost = "sections.infertility_treatment.intrauterine_insemination.cpt_58323.copay"
+        assert cost not in noted
+
+    def test_an_unrelated_leaf_gets_no_note(self) -> None:
+        assert "sections.insurance_representative.rep_name" not in self._noted()
+
+
+def _plan_field(path: str, title: str, *, required: bool = True) -> PlanFieldDescriptor:
+    return PlanFieldDescriptor(path=path, title=title, type="text", role="ask", required=required)
+
+
+class TestOwedNow:
+    """`owed_now` is the tree↔descriptor join the worker's completion guards run on
+    (`agent_worker.plan_runtime.PlanRunController.gap_fields` / `owed_question_count`)."""
+
+    @staticmethod
+    def _task(panels: list[PromptPanel], fields: list[PlanFieldDescriptor]) -> PlanTask:
+        return PlanTask(task_key="t", title="T", prompt="p", panels=panels, fields=fields)
+
+    def test_a_routing_question_is_never_owed_even_if_it_carried_a_target(self) -> None:
+        # No real routing question carries a target today (`routes_between` questions collect
+        # nothing by construction), but the skip must not depend on that — it is keyed on
+        # `routes_between` alone, defensively, so a future builder bug can't resurrect the
+        # tree/descriptor disagreement this task exists to remove.
+        path = "sections.a.leaf"
+        field = _plan_field(path, "Leaf")
+        routing = PromptQuestion(
+            text="Which applies?",
+            routes_between=["Branch A", "Branch B"],
+            options=[PromptOption(target_paths=[path])],
+        )
+        task = self._task([PromptPanel(items=[routing])], [field])
+        assert owed_now(task, {}, {}) == []
+
+    def test_a_target_the_field_list_no_longer_carries_is_skipped_not_crashed(self) -> None:
+        # `focus_call_plan` narrows `fields` but leaves `panels` untouched, so a focused
+        # plan's tree can reference a path no descriptor backs any more.
+        kept_path, dropped_path = "sections.a.kept", "sections.a.dropped"
+        kept = _plan_field(kept_path, "Kept")
+        question = PromptQuestion(
+            text="Kept and dropped?",
+            options=[PromptOption(target_paths=[kept_path, dropped_path])],
+        )
+        task = self._task([PromptPanel(items=[question])], [kept])
+        assert owed_now(task, {}, {}) == [question]  # `kept` alone owes it; `dropped` never raises
+
+    def test_owed_questions_come_back_in_spoken_order(self) -> None:
+        first_path, second_path, third_path = (
+            "sections.a.first",
+            "sections.a.second",
+            "sections.a.third",
+        )
+        first = PromptQuestion(text="First?", options=[PromptOption(target_paths=[first_path])])
+        second = PromptQuestion(text="Second?", options=[PromptOption(target_paths=[second_path])])
+        third = PromptQuestion(text="Third?", options=[PromptOption(target_paths=[third_path])])
+        fields = [_plan_field(p, p) for p in (first_path, second_path, third_path)]
+        task = self._task([PromptPanel(items=[first, second]), PromptPanel(items=[third])], fields)
+        # `second` is answered and drops out; `first`/`third` must still come back in the order
+        # the tree speaks them, across a panel boundary, not in field or insertion order.
+        assert owed_now(task, {second_path: "X"}, {}) == [first, third]
+
+
+class TestGatingSeed:
+    """`ask` is collected ON the call, so a pre-call value for one must not settle a gate."""
+
+    def _fused(self, values: dict[str, object]) -> CallPlan:
+        return fuse_prefill(IBV, PLAN, values, current_year=2026)
+
+    def test_ask_role_prefill_is_dropped(self) -> None:
+        path = "sections.enrollment.enrollment_required"
+        plan = self._fused({path: "N/A"})
+        assert plan.prefilled[path] == "N/A"
+        assert path not in gating_seed(plan)
+
+    def test_confirm_role_prefill_survives(self) -> None:
+        # On file to be read back — the member-ID pattern.
+        path = "sections.insurance_information.policy_number"
+        plan = self._fused({path: "ABC123"})
+        assert gating_seed(plan)[path] == "ABC123"
+
+    def test_context_role_prefill_survives(self) -> None:
+        # No task collects it; it is what the clinic supplied.
+        path = "sections.patient_information.spouse_gender"
+        plan = self._fused({path: "Male"})
+        assert gating_seed(plan)[path] == "Male"
+
+    def test_prefilled_itself_is_not_mutated(self) -> None:
+        path = "sections.enrollment.enrollment_required"
+        plan = self._fused({path: "N/A"})
+        gating_seed(plan)
+        assert plan.prefilled == {path: "N/A"}
+
+    def test_a_human_typed_ask_value_is_dropped_too(self) -> None:
+        """Provenance is not consulted, only role: `field_answer.source` never reaches the
+        worker, and the payer's representative is the authority on an ask leaf either way."""
+        path = "sections.benefit_coverage.coverage_type"
+        plan = self._fused({path: "Family"})
+        assert path not in gating_seed(plan)
+
+
+def _descriptor(plan: CallPlan, suffix: str) -> PlanFieldDescriptor:
+    return next(f for t in plan.tasks for f in t.fields if f.path.endswith(suffix))
+
+
+class TestOwnerTitle:
+    """`still_needed` names a fan-out's members by their owning group's title, never by a
+    path segment, so it reads correctly on any schema."""
+
+    def test_a_cpt_leaf_is_owned_by_its_cpt_group(self) -> None:
+        assert (
+            _descriptor(PLAN, "labs_xray_ultrasound.cpt_58340.covered").owner_title == "CPT 58340"
+        )
+
+    def test_a_service_level_leaf_is_owned_by_its_service_group(self) -> None:
+        field = _descriptor(PLAN, "ovulation_induction.cycle_limit")
+        assert field.owner_title == "Ovulation Induction/Timed Intercourse (OI/TI)"
+
+    def test_a_leaf_directly_under_a_section_has_no_owning_group(self) -> None:
+        # Only GROUPS own; a section is the panel a question sits under, not a fan-out member.
+        assert _descriptor(PLAN, "infertility_treatment.infertility_tx_covered").owner_title is None
+
+    def test_every_descriptor_of_both_catalogs_compiles(self) -> None:
+        # disease_only has no ask groups at all; owner_title must still be well-defined.
+        for doc in (build_ibv_standard(), build_disease_only()):
+            plan = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+            for task in plan.tasks:
+                for field in task.fields:
+                    assert field.owner_title is None or field.owner_title
+
+
+def _focus_task() -> PlanTask:
+    """One service: a 2-code fanned `covered`, plus a copay gated on it."""
+    covered = ("s.cpt_1.covered", "s.cpt_2.covered")
+    gate = AnyCondition(any=[eq(covered[0], "Yes"), eq(covered[1], "Yes")])
+    return PlanTask(
+        task_key="t",
+        title="T",
+        prompt="p",
+        fields=[
+            PlanFieldDescriptor(
+                path=covered[0],
+                title="Covered",
+                type="enum",
+                role="ask",
+                required=True,
+                owner_title="CPT 1",
+            ),
+            PlanFieldDescriptor(
+                path=covered[1],
+                title="Covered",
+                type="enum",
+                role="ask",
+                required=True,
+                owner_title="CPT 2",
+            ),
+            PlanFieldDescriptor(
+                path="s.copay",
+                title="Copay ($)",
+                type="currency",
+                role="ask",
+                required=True,
+                gates=(gate,),
+                owner_title="Service",
+            ),
+        ],
+        panels=[
+            PromptPanel(
+                title="Service",
+                items=[
+                    PromptQuestion(
+                        text="Are codes 1, 2 covered?",
+                        options=[PromptOption(target_paths=list(covered))],
+                    ),
+                    PromptQuestion(
+                        text="What is the copay?",
+                        options=[PromptOption(target_paths=["s.copay"])],
+                        gate_text="this service is covered",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+class TestFocusQuestions:
+    def test_it_keeps_only_the_questions_that_answer_the_paths(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.copay"], {}, {})
+        assert [q.text for q in iter_questions(panels)] == ["What is the copay?"]
+
+    def test_a_fully_owed_fan_out_is_not_stamped(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == []
+
+    def test_a_partly_owed_fan_out_names_the_members_it_still_needs(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == ["CPT 2"]
+
+    def test_explode_pulls_in_a_question_gated_on_an_owed_path(self) -> None:
+        panels = focus_questions(
+            _focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {}, explode=True
+        )
+        assert [q.text for q in iter_questions(panels)] == [
+            "Are codes 1, 2 covered?",
+            "What is the copay?",
+        ]
+        # The dependent keeps its own condition, which is what makes it a FOLLOW-UP and not
+        # something to ask unconditionally.
+        assert next(q for q in iter_questions(panels) if q.text == "What is the copay?").gate_text
+
+    def test_explode_leaves_an_already_answered_dependent_alone(self) -> None:
+        panels = focus_questions(
+            _focus_task(),
+            ["s.cpt_1.covered", "s.cpt_2.covered"],
+            {"s.copay": "$30"},
+            {},
+            explode=True,
+        )
+        assert [q.text for q in iter_questions(panels)] == ["Are codes 1, 2 covered?"]
+
+    def test_without_explode_the_dependent_stays_out(self) -> None:
+        panels = focus_questions(_focus_task(), ["s.cpt_1.covered", "s.cpt_2.covered"], {}, {})
+        assert [q.text for q in iter_questions(panels)] == ["Are codes 1, 2 covered?"]
+
+    def test_a_member_with_no_owner_title_suppresses_the_clause(self) -> None:
+        # Better to say nothing than to name a member the agent cannot act on.
+        task = _focus_task()
+        task.fields[1].owner_title = None
+        panels = focus_questions(task, ["s.cpt_2.covered"], {}, {})
+        assert next(iter_questions(panels)).still_needed == []
+
+    def test_explode_reaches_a_fixpoint_on_the_real_schema(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        owed = ["sections.infertility_treatment.embryo_biopsy.cpt_89290.covered"]
+        exploded = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
+        texts = [q.text for q in iter_questions(exploded)]
+        assert any("covered under this plan" in t for t in texts)
+        assert any("copay or coinsurance" in t for t in texts)
+        assert any("cycle limit" in t for t in texts)
+        # Idempotent: exploding the exploded set adds nothing.
+        again = focus_questions(
+            task,
+            [p for q in iter_questions(exploded) for p in q.target_paths],
+            {},
+            PLAN.shared_conditions,
+            explode=True,
+        )
+        assert [q.text for q in iter_questions(again)] == texts
+
+
+class TestRealSchemaDigest:
+    """The reported defect, against the real documents: seven ambiguous field titles."""
+
+    def test_the_two_cycle_limits_and_two_89337_services_are_distinguishable(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        base = "sections.infertility_treatment"
+        owed = [
+            f"{base}.ovulation_induction.cycle_limit",
+            f"{base}.intrauterine_insemination.cycle_limit",
+            f"{base}.egg_cryopreservation_elective.cpt_89337.covered",
+            f"{base}.egg_cryopreservation_cancer.cpt_89337.covered",
+            f"{base}.frozen_embryo_transfer.cpt_58974.covered",
+            f"{base}.embryo_biopsy.cpt_89290.covered",
+            f"{base}.embryo_biopsy.cpt_89291.covered",
+        ]
+        panels = focus_questions(task, owed, {}, PLAN.shared_conditions)
+        digest = render_digest(panels)
+        assert "Ovulation Induction/Timed Intercourse (OI/TI)" in digest
+        assert "Intrauterine Insemination (IUI) [CPT 58323, 58322, 89261" in digest
+        assert "Egg Cryopreservation Elective [CPT 89337" in digest
+        assert "Egg Cryopreservation Cancer [CPT 89337" in digest
+        # Seven owed FIELDS, six spoken asks: 89290 and 89291 are one AskGroup question.
+        assert numbered_questions(panels) == 6
+        assert digest.count("cycle limit") == 2
+        # The routing question survives because BOTH egg cryo branches are owed.
+        assert "First settle which applies" in digest
+
+    def test_one_egg_cryo_branch_owed_drops_the_routing_question(self) -> None:
+        task = plan_task(PLAN, "infertility_coverage")
+        owed = ["sections.infertility_treatment.egg_cryopreservation_elective.cpt_89337.covered"]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        assert "Egg Cryopreservation Elective [CPT 89337" in digest
+        assert "First settle which applies" not in digest
+
+    def test_a_partly_owed_eight_code_fan_out_names_the_two_it_needs(self) -> None:
+        task = plan_task(PLAN, "diagnostic_coverage")
+        base = "sections.diagnostic_testing.labs_xray_ultrasound"
+        owed = [f"{base}.cpt_58340.covered", f"{base}.cpt_82670.covered"]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        assert "(still needed for: CPT 58340, CPT 82670)" in digest
+
+    def test_a_focused_plan_names_only_members_it_kept_a_descriptor_for(self) -> None:
+        # focus_call_plan narrows descriptors but NOT panels (a known bug, fixed on a later
+        # branch), so a kept fan-out question can span targets the plan cannot collect. The
+        # clause must never name one of those: it is built from the OWED targets, which are the
+        # focused descriptors, so a focused retry says which code it needs instead of re-asking
+        # all eight blind.
+        wanted = "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"
+        focused = focus_call_plan(PLAN, [wanted])
+        stamped: list[str] = []
+        for task in focused.tasks:
+            owed = [field.path for field in task.fields]
+            collectable = {f.owner_title for f in task.fields if f.owner_title}
+            panels = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
+            render_digest(panels)
+            for question in iter_questions(panels):
+                assert set(question.still_needed) <= collectable
+                stamped.extend(question.still_needed)
+        assert stamped == ["CPT 58340"]
+
+    def test_both_catalogs_narrow_and_render_every_task(self) -> None:
+        # disease_only has no ask groups and no routing questions; the narrowing must not
+        # assume either exists.
+        for doc in (build_ibv_standard(), build_disease_only()):
+            plan = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+            for task in plan.tasks:
+                owed = [field.path for field in task.fields]
+                panels = focus_questions(task, owed, {}, plan.shared_conditions)
+                # Everything owed means everything kept — a mismatch is a real tree/descriptor
+                # disagreement, so investigate it rather than relaxing this.
+                assert numbered_questions(panels) == numbered_questions(task.panels), task.task_key
+                render_digest(panels)
+                focus_questions(task, owed, {}, plan.shared_conditions, explode=True)
+
+
+class TestReviewFindings:
+    """Regressions for the review of the owed-question digest."""
+
+    def test_explode_adds_only_the_members_with_nothing_on_file(self) -> None:
+        # A dependent fan-out pulled in WHOLE made `_stamp_still_needed` see owed == targets,
+        # so it named none of its members — defeating the clause for its whole reason to exist.
+        task = plan_task(PLAN, "diagnostic_coverage")
+        base = "sections.diagnostic_testing.labs_xray_ultrasound"
+        codes = ("58340", "82670", "83001", "83002", "84146", "84443", "84144", "76830")
+        seed = [f"{base}.cpt_{c}.covered" for c in codes]
+        on_file = {f"{base}.cpt_{c}.prior_auth": "No" for c in codes[2:]}  # 6 of 8
+        panels = focus_questions(task, seed, on_file, PLAN.shared_conditions, explode=True)
+        auth = next(q for q in iter_questions(panels) if "prior authorization" in q.text.lower())
+        assert auth.still_needed == ["CPT 58340", "CPT 82670"]
+
+    def test_explode_leaves_optional_follow_ups_out_of_the_sweep(self) -> None:
+        # The sweep counts its list as required questions; an optional item pads that claim.
+        task = plan_task(PLAN, "infertility_coverage")
+        base = "sections.infertility_treatment.embryo_biopsy"
+        seed = [f"{base}.cpt_89290.covered", f"{base}.cpt_89291.covered"]
+        panels = focus_questions(task, seed, {}, PLAN.shared_conditions, explode=True)
+        assert [q.text for q in iter_questions(panels) if q.optional] == []
+
+    def test_the_digest_keeps_the_answer_vocabulary(self) -> None:
+        # The field-title list carried "(expected one of: …)"; the digest must not lose it.
+        task = plan_task(PLAN, "insurance_basics")
+        owed = [f.path for f in task.fields if f.values][:1]
+        digest = render_digest(focus_questions(task, owed, {}, PLAN.shared_conditions))
+        vocab = next(f.values for f in task.fields if f.path == owed[0])
+        assert vocab is not None and " | ".join(vocab) in digest
+
+    def test_root_titles_survive_on_a_task_with_several_sections(self) -> None:
+        # Suppression is judged on the TASK's shape, not on how many roots survived: financial
+        # has 4 root panels and closing_admin 5, so narrowing to one must still name it.
+        task = plan_task(PLAN, "financial")
+        assert len(task.panels) > 1
+        owed = [f.path for f in task.fields if f.path.startswith("sections.lifetime_maximum")]
+        panels = focus_questions(task, owed, {}, PLAN.shared_conditions)
+        digest = render_digest(panels, task_sections=len(task.panels))
+        assert len(panels) == 1  # narrowed to a single surviving root
+        assert panels[0].title is not None and panels[0].title in digest

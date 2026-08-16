@@ -21,6 +21,8 @@ from agent_worker.main import (
     SpeakerReady,
     _is_ready_speaker,
     classify_sip_disconnect,
+    should_emit_answered,
+    transport_of,
     wait_for_speaker,
 )
 from vera_core.events import CallFailureReason
@@ -259,3 +261,27 @@ async def test_sip_disconnect_before_answer_fails(reason: int, expected: CallFai
     result = await wait_for_speaker(ctx, timeout_s=2.0)  # type: ignore[arg-type]
     assert result == CallFailed(expected)
     await task
+
+
+def test_sip_callee_is_answered() -> None:
+    assert should_emit_answered(_active_sip(), {}) is True  # type: ignore[arg-type]
+
+
+def test_browser_speaker_is_not_answered_by_default() -> None:
+    """Voice Lab browser mode: a browser caller is not an answered phone call."""
+    assert should_emit_answered(_FakeParticipant("caller-abc"), {}) is False  # type: ignore[arg-type]
+
+
+def test_browser_speaker_is_answered_under_browser_callee_transport() -> None:
+    speaker = _FakeParticipant("caller-abc")
+    assert should_emit_answered(speaker, {"browser_callee": True}) is True  # type: ignore[arg-type]
+
+
+def test_transport_is_sip_for_a_phone_callee() -> None:
+    assert transport_of(_active_sip()) == "sip"  # type: ignore[arg-type]
+
+
+def test_transport_is_browser_for_a_browser_speaker() -> None:
+    """Ground truth is the speaker's kind, so a browser callee is never traced as a
+    real payer call — with or without the browser_callee metadata."""
+    assert transport_of(_FakeParticipant("caller-abc")) == "browser"  # type: ignore[arg-type]

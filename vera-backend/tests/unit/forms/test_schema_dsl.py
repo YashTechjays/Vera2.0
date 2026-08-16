@@ -8,6 +8,9 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
+from vera_core.forms.catalog.disease_only import build_disease_only
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
+from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
     FieldPrompt,
     FormSchemaDoc,
@@ -18,7 +21,10 @@ from vera_core.forms.dsl import (
     format_date,
     load_document,
     parse_date_format,
+    validate_confirm_defaults,
+    validate_question_coverage,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 
@@ -82,13 +88,13 @@ class TestCompiledArtifacts:
         """The committed JSON must equal a fresh compile — catches hand-edits/drift."""
         filename, build = SCHEMAS[insurance_type]
         compiled = compile_document(build())
-        committed = (FORM_SCHEMA_DIR / filename).read_text()
+        committed = (FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8")
         assert compiled == committed, f"{filename} is stale; run `just compile-schemas`"
 
     @pytest.mark.parametrize("insurance_type", sorted(SCHEMAS))
     def test_round_trip(self, insurance_type: str) -> None:
         filename, _build = SCHEMAS[insurance_type]
-        text = (FORM_SCHEMA_DIR / filename).read_text()
+        text = (FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8")
         assert compile_document(load_document(text)) == text
 
     def test_ibv_collection_paths_are_role_filtered(self) -> None:
@@ -701,3 +707,105 @@ class TestNumericConsistencyValidation:
     def test_round_trips_through_compile_and_load(self) -> None:
         doc = FormSchemaDoc.model_validate(triplet_doc())
         assert load_document(compile_document(doc)) == doc
+
+
+def test_every_collectable_path_is_reachable_from_exactly_one_question() -> None:
+    """The completion guard walks questions; a path no question targets can never be
+    asked for, and a path two questions target would be double-counted (spec §8)."""
+    for build in (build_ibv_standard, build_disease_only):
+        doc = build()
+        assert validate_question_coverage(doc) == []
+
+
+def test_the_document_validator_rejects_an_uncovered_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule is a BUILD failure, not an advisory list — model_validate must raise."""
+    monkeypatch.setattr("vera_core.forms.question_plan.build_question_plan", lambda *a, **k: [])
+    with pytest.raises(ValidationError, match="not reachable from any spoken question"):
+        FormSchemaDoc.model_validate(minimal_doc())
+
+
+def test_a_routing_questions_target_does_not_count_as_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`owed_now` (call_plan.py) skips every `routes_between` question unconditionally, so a
+    routing question that carried a target would satisfy this rule while staying
+    permanently un-owed at runtime — the exact silent-miss class the rule exists to catch."""
+    doc_dict = minimal_doc()
+    del doc_dict["sections"]["basics"]["fields"]["notes"]
+
+    def fake_build_question_plan(doc: Any, task: Any, anchors: Any = None) -> list[PromptPanel]:
+        return [
+            PromptPanel(
+                items=[
+                    PromptQuestion(
+                        text="Which plan applies?",
+                        routes_between=["Plan A", "Plan B"],
+                        options=[PromptOption(target_paths=["sections.basics.plan_type"])],
+                    )
+                ]
+            )
+        ]
+
+    monkeypatch.setattr(
+        "vera_core.forms.question_plan.build_question_plan", fake_build_question_plan
+    )
+    with pytest.raises(ValidationError, match="not reachable from any spoken question"):
+        FormSchemaDoc.model_validate(doc_dict)
+
+
+def test_no_catalog_uses_an_end_of_task_confirm() -> None:
+    """`validate_question_coverage` exempts them (spoken by the end_confirms block, not the
+    tree), so an authored one would be invisible to any tree-walking owed set — see Task 3."""
+    for build in (build_ibv_standard, build_disease_only):
+        assert [
+            path
+            for path, leaf, _ in leaf_gates(build())
+            if leaf.confirm_in_task is not None and not leaf.confirm_in_task.confirm_immediate
+        ] == []
+
+
+def test_no_catalog_gates_on_a_defaulted_confirm_leaf() -> None:
+    """`gating_seed` keeps confirm-role prefills authoritative (the member-ID read-back), so a
+    `default` on one would still settle its gate and delete the questions behind it — the
+    exact failure removed for ask-role leaves."""
+    for build in (build_ibv_standard, build_disease_only):
+        assert validate_confirm_defaults(build()) == []
+
+
+def test_the_document_validator_rejects_a_defaulted_confirm_gate() -> None:
+    """A build failure, not an advisory list."""
+    doc = minimal_doc()
+    doc["sections"]["basics"]["fields"]["member_id"] = {
+        "type": "text",
+        "title": "Member ID",
+        "role": "confirm",
+        "default": "N/A",
+        "prompt": {
+            "confirm": "I have {{value}} on file — is that right?",
+            "ask": "Can I get the member ID?",
+        },
+    }
+    doc["sections"]["basics"]["fields"]["notes"]["applicable_when"] = {
+        "field": "sections.basics.member_id",
+        "op": "eq",
+        "value": "Yes",
+    }
+    with pytest.raises(ValidationError, match="declares a default and is referenced by"):
+        FormSchemaDoc.model_validate(doc)
+
+
+def test_a_defaulted_confirm_leaf_that_gates_nothing_is_fine() -> None:
+    """The rule is about deleting other questions, not about defaults — `spouse_partner_name`
+    carries one legitimately."""
+    doc = minimal_doc()
+    doc["sections"]["basics"]["fields"]["member_id"] = {
+        "type": "text",
+        "title": "Member ID",
+        "role": "confirm",
+        "default": "N/A",
+        "prompt": {
+            "confirm": "I have {{value}} on file — is that right?",
+            "ask": "Can I get the member ID?",
+        },
+    }
+    assert validate_confirm_defaults(FormSchemaDoc.model_validate(doc)) == []

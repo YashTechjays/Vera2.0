@@ -25,6 +25,12 @@ PARTICIPANT_MODE_ATTR = "vera.mode"
 PARTICIPANT_MODE_LISTENER = "listener"
 PARTICIPANT_MODE_INTERVENER = "intervener"
 
+# Span attribute naming how the callee reached the room, stamped by both processes so a
+# browser-callee test call is never read as a real payer call in Langfuse.
+TRANSPORT_ATTR = "vera.transport"
+TRANSPORT_SIP = "sip"
+TRANSPORT_BROWSER = "browser"
+
 _OBSERVER_PREFIXES = (MONITOR_IDENTITY_PREFIX, SUPERVISOR_IDENTITY_PREFIX)
 
 _SESSION_SEP = "~"  # supervisor identity: user id ~ session id

@@ -19,7 +19,16 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from vera_core.forms.conditions import is_applicable, is_required, is_v2, leaf_gates
+from vera_core.forms.conditions import (
+    AlternativeIndex,
+    alternative_index,
+    alternative_pairs,
+    is_applicable,
+    is_required,
+    is_satisfied,
+    is_v2,
+    leaf_gates,
+)
 from vera_core.forms.dsl import COLLECTED_ROLES, FormSchemaDoc
 from vera_core.models.enums import AnswerSource, DisputeActionType
 
@@ -149,10 +158,9 @@ def completion_pct_v2(values: Mapping[str, Any], schema_json: Mapping[str, Any])
     ]
     if not relevant:
         return 100.0
+    alternatives = alternative_index(alternative_pairs(doc))
     filled = sum(
-        1
-        for path, leaf in relevant
-        if leaf.default is not None or str(values.get(path) or "").strip() != ""
+        1 for path, leaf in relevant if is_satisfied(path, leaf.default, values, alternatives)
     )
     return round(filled / len(relevant) * 100, 2)
 
@@ -233,9 +241,12 @@ def is_field_satisfied(status: FieldStatus | None, *, floor: int) -> bool:
 def _required_paths(
     schema_json: Mapping[str, Any], values: Mapping[str, Any], *, askable_only: bool
 ) -> list[str]:
-    """Paths of required, applicable leaves — optionally only collectible
-    (ask/confirm role) ones. v2: filters by role + applicability. v1: returns
-    all required paths (no role concept)."""
+    """Paths of required, applicable leaves that could still owe an answer — optionally only
+    collectible (ask/confirm role) ones. v2: filters by role + applicability. v1: returns
+    all required paths (no role concept).
+
+    A leaf declaring a `default` is excluded: `completion_pct_v2` counts it filled and the export
+    writes it, so leaving it here would block auto-completion on a field the form calls done."""
     if is_v2(schema_json):
         doc = FormSchemaDoc.model_validate(schema_json)
         shared = doc.shared_conditions or {}
@@ -243,10 +254,57 @@ def _required_paths(
             path
             for path, leaf, gates in leaf_gates(doc)
             if (not askable_only or leaf.role in COLLECTED_ROLES)
+            and leaf.default is None
             and is_applicable(gates, values, shared)
             and is_required(leaf, values, shared)
         ]
     return all_required_paths(schema_json)
+
+
+def _alternatives(schema_json: Mapping[str, Any]) -> AlternativeIndex:
+    """The either/or index; empty for v1, which has no `alternatives` concept."""
+    if not is_v2(schema_json):
+        return {}
+    return alternative_index(alternative_pairs(FormSchemaDoc.model_validate(schema_json)))
+
+
+def _satisfied(
+    path: str,
+    status_by_path: Mapping[str, FieldStatus],
+    alternatives: AlternativeIndex,
+    *,
+    floor: int,
+) -> bool:
+    """Satisfied itself, or by a sibling in its either/or group — one answer satisfies the pair.
+
+    Judged with `is_field_satisfied` rather than `conditions.has_value` because `_gate_values` may
+    hand these callers a sentinel map instead of real values, and because a low-confidence AI
+    answer must not satisfy its sibling any more than it satisfies itself."""
+    return is_field_satisfied(status_by_path.get(path), floor=floor) or any(
+        is_field_satisfied(status_by_path.get(other), floor=floor)
+        for other in alternatives.get(path, ())
+    )
+
+
+def _unsatisfied(
+    status_by_path: Mapping[str, FieldStatus],
+    schema_json: Mapping[str, Any],
+    values: Mapping[str, Any] | None,
+    *,
+    floor: int,
+    askable_only: bool,
+) -> tuple[list[str], list[str]]:
+    """`(applicable required paths, those still unsatisfied)` — the one set all three public
+    consumers measure, so the auto-complete gate, the retry set and `verified_pct` cannot drift
+    apart. They did: the alternatives rule reached the first two and not the third."""
+    gate_values = _gate_values(status_by_path, values)
+    applicable = _required_paths(schema_json, gate_values, askable_only=askable_only)
+    alternatives = _alternatives(schema_json)
+    return applicable, [
+        path
+        for path in applicable
+        if not _satisfied(path, status_by_path, alternatives, floor=floor)
+    ]
 
 
 def _gate_values(
@@ -273,12 +331,7 @@ def unsatisfied_required_paths(
     The authoritative completeness check: a form may only auto-COMPLETE when this
     is empty — an unsatisfied non-askable field can never be fixed by a retry
     call, so it must route to human review instead."""
-    gate_values = _gate_values(status_by_path, values)
-    return [
-        path
-        for path in _required_paths(schema_json, gate_values, askable_only=False)
-        if not is_field_satisfied(status_by_path.get(path), floor=floor)
-    ]
+    return _unsatisfied(status_by_path, schema_json, values, floor=floor, askable_only=False)[1]
 
 
 def retryable_required_paths(
@@ -291,12 +344,7 @@ def retryable_required_paths(
     """Paths of required, applicable, askable fields that are not yet satisfied.
     These are the fields a retry call should attempt to fill. See _gate_values
     for the values-vs-sentinel evaluation contract."""
-    gate_values = _gate_values(status_by_path, values)
-    return [
-        path
-        for path in _required_paths(schema_json, gate_values, askable_only=True)
-        if not is_field_satisfied(status_by_path.get(path), floor=floor)
-    ]
+    return _unsatisfied(status_by_path, schema_json, values, floor=floor, askable_only=True)[1]
 
 
 def satisfied_required_fraction(
@@ -310,14 +358,12 @@ def satisfied_required_fraction(
     same set unsatisfied_required_paths measures. No applicable-required fields -> 1.0.
     Satisfaction is verified (is_field_satisfied: AI answers need supported +
     confidence >= floor), not mere value presence."""
-    gate_values = _gate_values(status_by_path, values)
-    applicable = _required_paths(schema_json, gate_values, askable_only=False)
+    applicable, unsatisfied = _unsatisfied(
+        status_by_path, schema_json, values, floor=floor, askable_only=False
+    )
     if not applicable:
         return 1.0
-    satisfied = sum(
-        1 for path in applicable if is_field_satisfied(status_by_path.get(path), floor=floor)
-    )
-    return satisfied / len(applicable)
+    return (len(applicable) - len(unsatisfied)) / len(applicable)
 
 
 def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[str]:

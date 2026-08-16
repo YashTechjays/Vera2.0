@@ -41,6 +41,7 @@ from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
+from vera_core.forms.extraction_prompt import ANSWER_UNIT_FORMAT_RULE
 from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
@@ -128,11 +129,16 @@ def _extraction_instructions(task: PlanTask) -> str:
         "a payer representative. Return ONLY the fields below that the representative has "
         "clearly answered in the transcript. Output a JSON array of "
         '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
-        "Omit a field entirely if it is not yet answered. Use only these field_path values:",
+        "Omit a field entirely if it is not yet answered. "
+        f"{ANSWER_UNIT_FORMAT_RULE} "
+        "Use only these field_path values:",
     ]
     for f in task.fields:
         allowed = f" (one of: {', '.join(f.values)})" if f.values else ""
-        lines.append(f"- {f.path}: {f.title}{allowed}")
+        # Routing branches are not gated on the choice, so without this the extractor infers `No`
+        # for the branch the rep did not take — a coverage claim, where `N/A` is the truth.
+        note = f" — {f.exclusive_note}" if f.exclusive_note else ""
+        lines.append(f"- {f.path}: {f.title}{allowed}{note}")
     return "\n".join(lines)
 
 
@@ -257,12 +263,7 @@ class TaskObserver:
         arrived since the last pass (so a turn finalized just before the handoff is still
         extracted, without a redundant LLM call when nothing is new)."""
         self._closed = True
-        # Discard each batch BEFORE awaiting it: `add_done_callback` runs via call_soon, so an
-        # already-finished pass stays in the set and a membership loop would spin forever.
-        while self._passes:
-            passes = list(self._passes)
-            self._passes.difference_update(passes)
-            await asyncio.gather(*passes, return_exceptions=True)
+        await self.drain_passes()
         try:
             await self._one_pass()
         except Exception as exc:
@@ -271,6 +272,18 @@ class TaskObserver:
                 self._task.task_key,
                 type(exc).__name__,
             )
+
+    async def drain_passes(self) -> None:
+        """Await in-flight passes WITHOUT closing — this observer stays live and keeps
+        taking turns afterward. Used at a handoff: the manager's own rotation is lazy (it
+        fires from the NEXT `ingest`), so the task that just finished is still `_active`,
+        not yet `_retiring`, and its last answer may still be mid-extraction."""
+        # Discard each batch BEFORE awaiting it: `add_done_callback` runs via call_soon, so an
+        # already-finished pass stays in the set and a membership loop would spin forever.
+        while self._passes:
+            passes = list(self._passes)
+            self._passes.difference_update(passes)
+            await asyncio.gather(*passes, return_exceptions=True)
 
 
 _SPEAKER_LABELS = {
@@ -302,6 +315,17 @@ class TranscriptSource(Protocol):
 # force-cancels (a crashed writer may never write the sentinel).
 _TAIL_DRAIN_TIMEOUT_S = 5.0
 
+# Default bound for drain_pending, used when the caller (main.py) doesn't derive one from
+# settings (see ObserverManager's drain_timeout param) — e.g. Voice Lab, tests. NOT sized off
+# the 15.3s/23.2s completion-latency figures: drain_pending only waits on passes that already
+# EXIST, so scheduling lag before a pass starts is either already spent or unreachable by any
+# timeout here. It is sized off the extraction chain's own attempt cap
+# (observer_extract_attempt_timeout_seconds, 8.0s today) plus adapter overhead — one in-flight
+# attempt, not the whole fallback cascade. Kept tight because the gap pass CHAINS agent to
+# agent with no speech between them, so every extra second here is silent dead air repeated
+# once per swept task, not a one-time cost.
+_DRAIN_TIMEOUT_S = 10.0
+
 
 class ObserverManager:
     """Tails the transcript Redis stream, routes each turn to the active task's Observer, and
@@ -319,6 +343,7 @@ class ObserverManager:
         transcript: TranscriptSource,
         room_name: str,
         now_ms: Callable[[], int] | None = None,
+        drain_timeout: float | None = None,
     ) -> None:
         self._plan = plan
         self._controller = controller
@@ -328,10 +353,19 @@ class ObserverManager:
         self._transcript = transcript
         self._room = room_name
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        # `drain_pending`'s default when its caller doesn't pass one explicitly. main.py
+        # derives this from the extraction chain's own attempt-timeout setting so the two
+        # budgets can't drift apart; falls back to _DRAIN_TIMEOUT_S when unset (Voice Lab).
+        self._drain_timeout = _DRAIN_TIMEOUT_S if drain_timeout is None else drain_timeout
         self._rule_engine = RuleEngine(plan)
-        # Call-scoped answer snapshot (seeded with intake prefill), the dedup key and the
-        # rule engine's input. Grows across tasks — a flow rule may span them.
-        self._answers: dict[str, Any] = dict(plan.prefilled)
+        # Everything on file for this form — intake included, all roles. NOT the controller's
+        # gate-evaluation set: three behaviours here need the intake values, namely the dedup in
+        # `_record_locked`, `_derive_remaining_locked`'s "a prefilled remaining wins", and the
+        # rule engine, whose terminate rules read ask-role paths a clinic may fill.
+        self._on_file: dict[str, Any] = dict(plan.prefilled)
+        # What THIS CALL collected, which is all the controller may gate on — see
+        # `PlanRunController.update_answers`.
+        self._recorded: dict[str, Any] = {}
         self._triplets = [triplet_paths(rule.triplet) for rule in plan.numeric_consistencies]
         self._derived: dict[str, str] = {}
         self._seq = 0
@@ -339,10 +373,13 @@ class ObserverManager:
         self._active: TaskObserver | None = None
         # The task we just left, still taking turns for one more rep turn (see `_rotate`).
         self._retiring: TaskObserver | None = None
+        # Background tasks a drain still owes a wait to: aclose() tasks from `_schedule_close`,
+        # plus any drain_pending() batch member still pending past its timeout (kept here as a
+        # strong ref so it isn't GC'd mid-flight, and so a later drain/aclose still awaits it).
         self._closing: set[asyncio.Task[None]] = set()
         self._tail_task: asyncio.Task[None] | None = None
         # A retiring Observer's pass runs concurrently with the active one's, and `_record`
-        # read-modify-writes `_answers` across awaits.
+        # read-modify-writes `_on_file` across awaits.
         self._record_lock = asyncio.Lock()
 
     def start(self) -> None:
@@ -429,16 +466,56 @@ class ObserverManager:
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
 
+    async def drain_pending(self, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        """Await whatever extraction is still in flight before a caller reads the answer map.
+
+        Three sources, because the manager's own rotation is LAZY (`_rotate` fires from the
+        NEXT `ingest`, not from a cursor change): the task that just finished is still
+        `_active`, not yet `_retiring`, so its last answer may be mid-pass right here; a
+        prior handoff may have left an observer in `_retiring` with its grace turn not yet
+        used; and `_closing` may hold aclose() tasks from an even earlier handoff.
+
+        The gap sweep decides what is still owed; extraction lands ~15s after the turn that
+        produced it (p90 23s), so without draining all three the sweep re-asks the last
+        question the rep just answered. Bounded and best-effort: `asyncio.wait` (never
+        `wait_for`/`asyncio.timeout`) so a timeout returns the caller WITHOUT cancelling the
+        extraction it was waiting for — a cancelled pass is an answer lost for good, which is
+        worse than the phantom gap this exists to fix.
+
+        Every task this drains carries its OWN `add_done_callback(self._closing.discard)`,
+        added at creation — none of it is removed from `_closing` up front, only `done`
+        members after a wait that actually completed. So `drain_pending` being CANCELLED
+        mid-wait (a hangup during the outro, session teardown) loses no tracking: everything
+        stays in `_closing` for the next drain or the final `aclose` to pick up; the answer
+        still lands, just later than this call waited."""
+        self._close_retiring()
+        batch: set[asyncio.Task[None]] = set(self._closing)
+        if self._active is not None:
+            drain = asyncio.create_task(self._active.drain_passes())
+            self._closing.add(drain)
+            drain.add_done_callback(self._closing.discard)
+            batch.add(drain)
+        if not batch:
+            return
+        bound = self._drain_timeout if timeout is None else timeout
+        done, pending = await asyncio.wait(batch, timeout=bound)
+        self._closing.difference_update(done)
+        if pending:
+            logger.warning("observer manager %s: drain timed out", self._room)
+
     async def _record(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
         async with self._record_lock:
             await self._record_locked(answer, evidence_seq)
 
     async def _record_locked(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
-        if self._answers.get(answer.field_path) == answer.value:
-            # Unchanged — do not re-write or re-emit. INTENTIONALLY covers the intake
-            # prefill seed too: a rep merely confirming a prefilled value leaves no
-            # ai_call row (the INTAKE row stays current). The form reads the same either
-            # way — only the answer's provenance differs.
+        if self._on_file.get(answer.field_path) == answer.value:
+            # Unchanged — skip the write and the emit either way, so a rep merely confirming
+            # a prefilled value still leaves no ai_call row (the INTAKE row stays current).
+            # But the controller must still learn it: `gating_seed` drops ask-role prefills
+            # from its baseline, so this is the only place left that can tell it the call
+            # itself stated the value — otherwise the field is owed for the rest of the call.
+            if self._recorded.get(answer.field_path) != answer.value:
+                self._push_recorded(answer.field_path, answer.value)
             return
         ts = self._now_ms()
         await self._run_state.record_answer(
@@ -461,9 +538,30 @@ class ObserverManager:
         )
         # Mark dedup only after the write+emit land, so a failed emit is retried on the
         # next pass (the CP consumer is idempotent under the redelivery).
-        self._answers[answer.field_path] = answer.value
-        self._controller.update_answers(self._answers)
-        # This span's body reads `self._answers`, raw extracted field values. `evaluate` is
+        self._on_file[answer.field_path] = answer.value
+        self._push_recorded(answer.field_path, answer.value)
+        # Path, confidence and task only — never the value (PHI). Both knobs off for the
+        # same reason as the rule-engine span below: this span's body sits beside raw
+        # extracted values.
+        with tracer.start_as_current_span(
+            "vera.observer.answer_recorded",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as answer_span:
+            try:
+                attrs: dict[str, str | int] = {"vera.field.path": answer.field_path}
+                if self._active_index is not None:
+                    attrs["vera.task.key"] = self._plan.tasks[self._active_index].task_key
+                if answer.confidence is not None:
+                    attrs["vera.field.confidence"] = answer.confidence
+                answer_span.set_attributes(attrs)
+            except Exception as exc:
+                logger.warning(
+                    "observer manager %s: answer-recorded span tagging failed (%s)",
+                    self._room,
+                    type(exc).__name__,
+                )
+        # This span's body reads `self._on_file`, raw extracted field values. `evaluate` is
         # pure string comparison and is documented not to raise, so the two knobs below are
         # defense-in-depth here — but they stay off, as on every Vera-owned span whose body
         # touches PHI: record_exception=False drops the exception EVENT,
@@ -473,7 +571,7 @@ class ObserverManager:
             record_exception=False,
             set_status_on_exception=False,
         ) as span:
-            directive = self._rule_engine.evaluate(self._answers)
+            directive = self._rule_engine.evaluate(self._on_file)
             try:
                 span.set_attribute("vera.rule_engine.fired", directive is not None)
                 if directive is not None:
@@ -491,6 +589,12 @@ class ObserverManager:
                 await self._controller.apply_directive_now(directive)
         await self._derive_remaining_locked(answer, evidence_seq)
 
+    def _push_recorded(self, field_path: str, value: str) -> None:
+        """Tell the controller the call collected this value — the one sync point onto
+        `_baseline`, which `gating_seed` may have excluded this path from entirely."""
+        self._recorded[field_path] = value
+        self._controller.update_answers(self._recorded)
+
     async def _derive_remaining_locked(
         self, trigger: ExtractedAnswer, evidence_seq: int | None
     ) -> None:
@@ -498,12 +602,12 @@ class ObserverManager:
         for total_path, met_path, remaining_path in self._triplets:
             if trigger.field_path not in (total_path, met_path):
                 continue
-            current = self._answers.get(remaining_path)
+            current = self._on_file.get(remaining_path)
             if not is_blank_answer(current) and current != self._derived.get(remaining_path):
                 continue  # a rep-stated or prefilled remaining wins — never overwrite it
             value = derive_remaining(
-                str(self._answers.get(total_path) or ""),
-                str(self._answers.get(met_path) or ""),
+                str(self._on_file.get(total_path) or ""),
+                str(self._on_file.get(met_path) or ""),
             )
             if value is None:
                 continue

@@ -3,10 +3,12 @@ skip-scan on applicable_when, wrap-up, and the agent-owned cursor write."""
 
 import asyncio
 import functools
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from conftest import chat_ctx_texts, ctx_texts
@@ -19,19 +21,30 @@ from agent_worker.intervention import TakeoverState, push_coaching_note
 from agent_worker.plan_runtime import (
     _GAP_FRUITLESS_REFUSALS,
     _OPENING_DIRECTIVE,
+    _REFUSAL_DRAIN_TIMEOUT_S,
+    _TASK_FRUITLESS_REFUSALS,
     _WRAP_UP_DIRECTIVE,
     WRAP_UP_TASK_KEY,
     GapTaskAgent,
     PlanRunController,
     PlanTaskAgent,
     WrapUpAgent,
-    _conditional_lines,
-    _field_lines,
-    _gating_block,
 )
 from agent_worker.prompt import SCOPE_DISCIPLINE
-from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
-from vera_core.forms.dsl import AllCondition, Comparison, RefCondition, RequiredWhen
+from agent_worker.rule_engine import RuleEngine
+from vera_core.forms.call_plan import (
+    CallPlan,
+    PlanFieldDescriptor,
+    PlanSession,
+    PlanTask,
+    compile_call_plan,
+    fuse_prefill,
+)
+from vera_core.forms.catalog.disease_only import build_disease_only
+from vera_core.forms.catalog.ibv_standard import build_ibv_standard
+from vera_core.forms.dsl import AllCondition, Codes, Comparison, RefCondition, RequiredWhen
+from vera_core.forms.prompting import numbered_questions
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
 
 ROOM = "call--t--c"
 
@@ -47,6 +60,33 @@ class FakeRunState:
         if self.fail:
             raise RuntimeError("redis down")
         self.cursor_writes.append((room_name, task_key))
+
+
+class FakeObserverManager:
+    """Stands in for `ObserverManager` so `GapTaskAgent.on_enter` awaiting the drain is
+    provable without a real transcript stream."""
+
+    def __init__(self) -> None:
+        self.drains = 0
+        self.timeouts: list[float | None] = []
+
+    async def drain_pending(self, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        self.drains += 1
+        self.timeouts.append(timeout)
+
+
+class FillsDuringDrainObserverManager:
+    """A fake whose `drain_pending` fills the controller's answers itself — pins that
+    `on_enter` AWAITS the drain before reading `gap_fields`, not merely calls it. Moving the
+    `await` below the `gap_fields` read would keep `test_on_enter_awaits_the_attached_
+    observers_drain` green (it only counts calls) while re-introducing the phantom gap."""
+
+    def __init__(self, controller: PlanRunController, answers: dict[str, Any]) -> None:
+        self._controller = controller
+        self._answers = answers
+
+    async def drain_pending(self, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        self._controller.update_answers(self._answers)
 
 
 def _plan() -> CallPlan:
@@ -108,6 +148,25 @@ async def _rep_turn(agent: Agent, said: str = "Pat") -> None:
     """One completed rep turn, as the session would deliver it."""
     await agent.on_user_turn_completed(
         agent.chat_ctx.copy(), new_message=ChatMessage(role="user", content=[said])
+    )
+
+
+async def _enter(controller: PlanRunController, index: int) -> Agent:
+    """Enter a task agent under a mock session, as the runtime would."""
+    agent = controller.agents[index]
+    with _session_patch(agent, MagicMock()):
+        await agent.on_enter()
+        await controller.drain_cursor_writes()
+    return agent
+
+
+def _question(text: str, *paths: str, gate_text: str | None = None) -> PromptQuestion:
+    # gate_text has to reach the model: `render_panels` states a conditional question's gate ON
+    # the question, which is what replaced the separate "do NOT ask these" block.
+    return PromptQuestion(
+        text=text,
+        options=[PromptOption(target_paths=list(paths))],
+        gate_text=gate_text,
     )
 
 
@@ -192,7 +251,16 @@ class TestConstruction:
     def test_task_agent_is_dialogue_only(self) -> None:
         controller, _ = _controller()
         names = [t.info.name for t in controller.agents[0].tools if isinstance(t, FunctionTool)]
-        assert names == ["task_complete"]  # no answer-write tools, no end_call
+        # Both tools only ROUTE the call — no answer-write tools, and no end_call.
+        assert sorted(names) == ["representative_requests_end_call", "task_complete"]
+
+    def test_task_of_path_maps_every_collectable_field_to_its_task(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        assert controller._task_of_path["sections.intro.rep_name"] == 0
+        assert controller._task_of_path["sections.cov.deductible"] == 2
+        assert controller._task_of_path["sections.close.ref_number"] == 3
+        # a path no task collects (a context/prefilled leaf) is simply absent
+        assert "sections.a.in_network" not in controller._task_of_path
 
     def test_task_agents_get_their_schema_task_key_as_id(self) -> None:
         controller, _ = _controller()
@@ -218,6 +286,20 @@ class TestHandoff:
         assert span.attributes["vera.handoff.from_task"] == "intro_task"
         assert span.attributes["vera.handoff.to_task"] == "gated_task"
         assert span.attributes["vera.handoff.reason"] == "task_complete"
+
+    @pytest.mark.asyncio
+    async def test_a_clean_completion_tags_zero_owed_and_not_refused(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller()  # `_plan()` tasks carry no fields — nothing is ever owed
+        agent = controller.agents[0]
+        tracer = trace.get_tracer("test")
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "task_complete")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.completion.owed_count"] == 0
+        assert span.attributes["vera.completion.refused"] is False
 
     @pytest.mark.asyncio
     async def test_task_complete_to_wrap_up_tags_the_sentinel(self, otel_spans: Any) -> None:
@@ -780,7 +862,7 @@ def _field(
     required: bool | RequiredWhen = True,
     gates: tuple[Comparison, ...] = (),
     values: list[str] | None = None,
-    gate_text: str | None = None,
+    default: str | None = None,
 ) -> PlanFieldDescriptor:
     return PlanFieldDescriptor(
         path=path,
@@ -790,8 +872,29 @@ def _field(
         required=required,
         gates=gates,
         values=values,
-        gate_text=gate_text,
+        default=default,
     )
+
+
+def _answers_option(field: PlanFieldDescriptor) -> PromptOption:
+    """The option a real compile produces: the vocabulary rides on the OPTION, not the
+    descriptor, which is where `render_panels` reads it from (`question_plan._answers_text`)."""
+    return PromptOption(
+        answers=" | ".join(field.values) if field.values else "",
+        target_paths=[field.path],
+    )
+
+
+def _panels_for(fields: list[PlanFieldDescriptor]) -> list[PromptPanel]:
+    """One question per field — the shape a plain (non-fanned) ask compiles to. Gives a
+    hand-built fixture the "every field reachable from exactly one question" shape Task 2's
+    validator guarantees for a real compiled plan, so `gap_fields`/`owed_question_count`
+    (now tree-joined) see the same fields the old field-only walk did."""
+    return [
+        PromptPanel(
+            items=[PromptQuestion(text=f.title, options=[_answers_option(f)]) for f in fields]
+        )
+    ]
 
 
 def _gap_plan() -> CallPlan:
@@ -799,6 +902,12 @@ def _gap_plan() -> CallPlan:
     that collects the reference number and says goodbye. The gap pass sweeps the three
     substantive tasks BEFORE it. `gated_task` is only applicable when in_network == "Yes";
     `coverage_task.oon_note` gates the opposite way."""
+    intro_fields = [
+        _field("sections.intro.rep_name", "Representative name"),
+        _field("sections.intro.notes", "Notes", required=False),
+    ]
+    gated_fields = [_field("sections.gated.copay", "Copay")]
+    closing_fields = [_field("sections.close.ref_number", "Reference number")]
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -811,22 +920,26 @@ def _gap_plan() -> CallPlan:
                 title="Introduction",
                 intro="Hello rep.",
                 prompt="Intro.",
-                fields=[
-                    _field("sections.intro.rep_name", "Representative name"),
-                    _field("sections.intro.notes", "Notes", required=False),
-                ],
+                fields=intro_fields,
+                panels=_panels_for(intro_fields),
             ),
             PlanTask(
                 task_key="gated_task",
                 title="Gated",
                 prompt="In network only.",
                 applicable_when=Comparison(field="sections.a.in_network", op="eq", value="Yes"),
-                fields=[_field("sections.gated.copay", "Copay")],
+                fields=gated_fields,
+                panels=_panels_for(gated_fields),
             ),
             PlanTask(
                 task_key="coverage_task",
                 title="Coverage",
-                prompt="Coverage details.",
+                prompt=(
+                    "Coverage details.\n\n### Coverage\n1. Has the deductible been met?\n"
+                    "2. Any out-of-network note?\n"
+                    '   - Ask only if "Doctor Inside Network" is "No".'
+                ),
+                lead_in="Coverage details.",
                 fields=[
                     _field("sections.cov.deductible", "Deductible", values=["Met", "Not met"]),
                     _field(
@@ -835,13 +948,27 @@ def _gap_plan() -> CallPlan:
                         gates=(Comparison(field="sections.a.in_network", op="eq", value="No"),),
                     ),
                 ],
+                panels=[
+                    PromptPanel(
+                        title="Coverage",
+                        items=[
+                            _question("Has the deductible been met?", "sections.cov.deductible"),
+                            _question(
+                                "Any out-of-network note?",
+                                "sections.cov.oon_note",
+                                gate_text='"Doctor Inside Network" is "No"',
+                            ),
+                        ],
+                    )
+                ],
             ),
             PlanTask(
                 task_key="closing_task",
                 title="Wrap Up",
                 prompt="Collect the reference number, then end the call.",
                 outro="have a wonderful day!",
-                fields=[_field("sections.close.ref_number", "Reference number")],
+                fields=closing_fields,
+                panels=_panels_for(closing_fields),
             ),
         ],
     )
@@ -990,25 +1117,6 @@ def test_composite_gate_with_both_conjuncts_true_is_applicable() -> None:
     assert _MALE_PARTNER_COVERED in {f.path for f in controller.applicable_fields(idx)}
 
 
-def test_gating_block_lists_conditional_fields_with_their_condition() -> None:
-    block = _gating_block(
-        applicable=[],
-        excluded=[],
-        conditional=[
-            PlanFieldDescriptor(
-                path=_SPOUSE_NAME,
-                title="Spouse / Partner Name",
-                type="text",
-                role="confirm",
-                gate_text='"Coverage Type" is "Family"',
-            )
-        ],
-    )
-    assert "# Conditional on this call" in block
-    assert 'Spouse / Partner Name — only if "Coverage Type" is "Family"' in block
-    assert "do NOT ask these" not in block
-
-
 def test_conditional_field_is_never_also_excluded() -> None:
     """The three buckets partition the task's fields — no field in two, none dropped."""
     controller, _ = _controller(_gating_plan())
@@ -1025,10 +1133,192 @@ def test_conditional_field_is_never_also_excluded() -> None:
     assert set().union(*buckets) == {f.path for f in controller.plan.tasks[idx].fields}
 
 
-def _multi_gap_plan() -> CallPlan:
+def _intra_task_gate_plan() -> CallPlan:
+    """closing_admin's shape: `tpa_name` is gated on `tpa_exists`, asked in the SAME task, so
+    at entry that gate is undecided — not excluded. `auth_dept` is gated on a field the
+    previous task collected, so at entry it IS decided."""
+    coverage_fields = [_field("sections.cov.prior_auth", "Prior auth", values=["Yes", "No"])]
+    admin_fields = [
+        _field("sections.admin.tpa_exists", "TPA Exists", values=["Yes", "No"]),
+        _field(
+            "sections.admin.tpa_name",
+            "TPA Name",
+            gates=(Comparison(field="sections.admin.tpa_exists", op="eq", value="Yes"),),
+        ),
+        _field(
+            "sections.admin.auth_dept",
+            "Authorization Department Name",
+            gates=(Comparison(field="sections.cov.prior_auth", op="eq", value="Yes"),),
+        ),
+    ]
+    closing_fields = [_field("sections.close.ref_number", "Reference number")]
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="coverage_task",
+                title="Coverage",
+                prompt="Coverage.",
+                fields=coverage_fields,
+                panels=_panels_for(coverage_fields),
+            ),
+            PlanTask(
+                task_key="admin_task",
+                title="Administrative Details",
+                prompt="Admin.",
+                fields=admin_fields,
+                panels=_panels_for(admin_fields),
+            ),
+            PlanTask(
+                task_key="closing_task",
+                title="Wrap Up",
+                prompt="Reference number then end.",
+                fields=closing_fields,
+                panels=_panels_for(closing_fields),
+            ),
+        ],
+    )
+
+
+class TestEntryDecidability:
+    """A gate is only decided at task entry when every field it references was collected by an
+    EARLIER task. 131 of ibv_standard's 149 gated questions are gated on a field their own task
+    asks, and declaring those excluded told the agent not to ask the follow-up it needed."""
+
+    def test_a_gate_on_a_field_this_task_asks_is_undecided_so_never_excluded(self) -> None:
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "Yes"})
+        assert "TPA Name" not in [f.title for f in controller.excluded_fields(1)]
+        assert "TPA Name" in [f.title for f in controller.conditional_fields(1)]
+
+    def test_an_earlier_task_left_unanswered_upstream_still_decides(self) -> None:
+        # The rep never reached prior auth (its own gate was off), so the value is final at "" —
+        # the auth department question is genuinely out, not merely unasked. The harder input:
+        # an explicit "No" and a never-answered "" reach the same single comparison.
+        controller, _ = _controller(_intra_task_gate_plan())
+        assert "Authorization Department Name" in [f.title for f in controller.excluded_fields(1)]
+
+    def test_a_path_no_task_collects_is_undecided_here_and_in_the_compiler(self) -> None:
+        # `_settled` and `question_plan._entry_decided` decide the same gates by task
+        # position, so they have to agree on a path neither can attribute to a task: an
+        # absent context value is "not supplied", which is unknown, not false. The compiler
+        # calling it decided while this keeps the question is the one unsafe direction — the
+        # question gets asked with its condition stated nowhere.
+        controller, _ = _controller(_intra_task_gate_plan())
+        unknown = "sections.patient_information.spouse_gender"
+        assert unknown not in controller._task_of_path
+        assert not controller._settled(unknown, 1)
+
+    def test_gap_fields_still_uses_full_chains(self) -> None:
+        # At end of call the intra-task gate IS decided, which is what the sweep needs.
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers(
+            {"sections.cov.prior_auth": "No", "sections.admin.tpa_exists": "No"}
+        )
+        assert "TPA Name" not in [f.title for f in controller.gap_fields(1)]
+
+    @pytest.mark.asyncio
+    async def test_a_same_task_follow_up_is_never_dropped_from_the_list(self) -> None:
+        # At entry `tpa_exists` is unanswered. The old block listed TPA Name under "do NOT ask
+        # these" and never withdrew it when the rep said yes; dropping it from the list now
+        # would be the same bug in a new shape.
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "No"})
+        assert "TPA Name" in [f.title for f in controller.conditional_fields(1)]
+        assert [f.title for f in controller.excluded_fields(1)] == ["Authorization Department Name"]
+
+    @pytest.mark.asyncio
+    async def test_a_task_whose_only_failing_gates_are_undecided_gets_no_block(self) -> None:
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "Yes"})
+        before = controller.agents[1].instructions
+        agent = await _enter(controller, 1)
+        assert agent.instructions == before
+
+    @pytest.mark.asyncio
+    async def test_a_task_is_not_skipped_because_its_own_gate_question_is_unanswered(
+        self,
+    ) -> None:
+        # On full chains a task whose EVERY question is intra-task-gated would skip itself
+        # before asking anything. Entry decidability makes that impossible by construction.
+        controller, _ = _controller(_intra_task_gate_plan())
+        controller.update_answers({"sections.cov.prior_auth": "No"})
+        agent = controller.agents[1]
+        session = MagicMock()
+        with _session_patch(agent, session):
+            await agent.on_enter()
+            await controller.drain_cursor_writes()
+        session.update_agent.assert_not_called()
+
+
+_CPT_COVERED = "sections.diag.cpt_58340.covered"
+_CPT_COPAY = "sections.diag.cpt_58340.copay"
+_CPT_COINSURANCE = "sections.diag.cpt_58340.coinsurance"
+_CPT_PRIOR_AUTH = "sections.diag.cpt_58340.prior_auth"
+
+
+def _panel_plan(*, extra_field: bool = False) -> CallPlan:
+    """One task whose three fields are asked by ONE spoken panel question — the shape the
+    compiler now emits as the normal case, and the one a field count mis-measures.
+    `extra_field` adds a required field no question targets."""
+    fields = [
+        _field(_CPT_COVERED, "Covered", values=["Yes", "No"]),
+        _field(_CPT_COPAY, "Copay ($)"),
+        _field(_CPT_COINSURANCE, "Coinsurance (%)"),
+    ]
+    if extra_field:
+        fields.append(_field(_CPT_PRIOR_AUTH, "Prior Authorization Required"))
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="diagnostic_testing",
+                title="Diagnostic Testing",
+                prompt="Ask about 58340.",
+                fields=fields,
+                panels=[
+                    PromptPanel(
+                        title="CPT 58340",
+                        items=[
+                            _question(
+                                "For 58340, is it covered, and what copay and coinsurance apply?",
+                                _CPT_COVERED,
+                                _CPT_COPAY,
+                                _CPT_COINSURANCE,
+                            )
+                        ],
+                    )
+                ],
+            ),
+            PlanTask(task_key="closing_task", title="Wrap Up", prompt="Close the call."),
+        ],
+    )
+
+
+def _multi_gap_plan(*, with_panels: bool = True) -> CallPlan:
     """A sweepable task with FIVE required-and-unanswered fields — the shape one field per
     task cannot express. Two share the title "Covered" (the CPT shape), so its list exercises
-    numbering and path qualification together."""
+    numbering and path qualification together.
+
+    `with_panels=False` reproduces a task with no compiled question tree at all (never
+    produced by a real compile — Task 2 guarantees total coverage — but exercised here to
+    prove such a task owes nothing countable rather than falling back to its field list)."""
+    intake_fields = [
+        _field("sections.intake.rep_name", "Representative name"),
+        _field("sections.intake.call_ref", "Call reference"),
+        _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
+        _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
+        _field("sections.intake.deductible", "Deductible", values=["Met", "Not met"]),
+    ]
+    closing_fields = [_field("sections.close.ref_number", "Reference number")]
     return CallPlan(
         schema_name="Test",
         insurance_type="ibv_standard",
@@ -1041,31 +1331,29 @@ def _multi_gap_plan() -> CallPlan:
                 title="Intake",
                 intro="Hello rep.",
                 prompt="Intake.",
-                fields=[
-                    _field("sections.intake.rep_name", "Representative name"),
-                    _field("sections.intake.call_ref", "Call reference"),
-                    _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
-                    _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
-                    _field("sections.intake.deductible", "Deductible", values=["Met", "Not met"]),
-                ],
+                fields=intake_fields,
+                panels=_panels_for(intake_fields) if with_panels else [],
             ),
             PlanTask(task_key="coverage_task", title="Coverage", prompt="Coverage."),
             PlanTask(
                 task_key="closing_task",
                 title="Wrap Up",
                 prompt="Collect the reference number, then end the call.",
-                fields=[_field("sections.close.ref_number", "Reference number")],
+                fields=closing_fields,
+                panels=_panels_for(closing_fields),
             ),
         ],
     )
 
 
-# Every question `_multi_gap_plan()`'s intake task owes, as `_field_lines` renders it.
+# Every question `_multi_gap_plan()`'s intake task owes, as the digest renders it. Its
+# `_panels_for` fixture gives each field its own question titled after it, so the two
+# "Covered" fields collapse to one entry here; the titled-panel shape is covered by
+# `_titled_gap_plan`.
 _INTAKE_GAPS = (
     "Representative name",
     "Call reference",
-    "Covered (cpt_58340)",
-    "Covered (cpt_82670)",
+    "Covered",
     "Deductible",
 )
 
@@ -1074,41 +1362,46 @@ class TestGating:
     """`coverage_task` is the shape that failed on a live eval: one applicable question
     (deductible) plus one the gates exclude (oon_note, gated on in_network == "No")."""
 
-    async def _enter(self, controller: PlanRunController, index: int) -> Agent:
-        agent = controller.agents[index]
-        with _session_patch(agent, MagicMock()):
-            await agent.on_enter()
-            await controller.drain_cursor_writes()
-        return agent
-
     @pytest.mark.asyncio
-    async def test_gating_lands_in_the_instructions_not_a_one_shot_directive(self) -> None:
-        # The defect: the list was a generate_reply directive, which LiveKit staples to a COPY
-        # of the chat ctx and discards — so from turn 2 the agent asked the excluded question.
-        # Instructions persist for every turn of the task, which is the whole fix.
+    async def test_a_gated_out_question_is_absent_rather_than_retracted(self) -> None:
+        # The old shape listed every question and appended "do NOT ask these" underneath,
+        # leaving the agent to reconcile two contradictory lists while SCOPE_DISCIPLINE told
+        # it the first one was complete. Now the list it reads IS the list it should ask.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
-        agent = await self._enter(controller, 2)
-        assert "OON note" in agent.instructions
-        assert "Deductible" in agent.instructions
+        agent = await _enter(controller, 2)
+        assert "Any out-of-network note?" not in agent.instructions
+        assert "Has the deductible been met?" in agent.instructions
+        assert "do NOT ask these" not in agent.instructions
 
     @pytest.mark.asyncio
-    async def test_the_applicable_questions_are_named_before_the_excluded_ones(self) -> None:
-        # An exclusions-only list read as "the whole task is excluded" and the task completed
-        # itself immediately. Leading with what DOES apply is what prevents that reading.
+    async def test_the_narrowing_lands_in_the_instructions_not_a_one_shot_directive(
+        self,
+    ) -> None:
+        # A generate_reply directive is stapled to a COPY of the chat ctx and discarded, so
+        # from turn 2 the agent could no longer see it and asked the excluded question anyway.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
-        agent = await self._enter(controller, 2)
-        assert agent.instructions.index("Deductible") < agent.instructions.index("OON note")
-        assert "apply on THIS call" in agent.instructions
+        agent = await _enter(controller, 2)
+        assert "Has the deductible been met?" in agent.instructions
+        assert "Coverage details." in agent.instructions  # the authored lead-in survives
 
     @pytest.mark.asyncio
     async def test_a_task_with_nothing_excluded_keeps_its_original_instructions(self) -> None:
         # No gates in play → no narrowing text at all, so the common case is untouched.
         controller, _ = _controller(_gap_plan())
         before = controller.agents[0].instructions
-        agent = await self._enter(controller, 0)
+        agent = await _enter(controller, 0)
         assert agent.instructions == before
+
+    @pytest.mark.asyncio
+    async def test_a_gate_on_a_field_no_task_collects_still_narrows(self) -> None:
+        # `in_network` is prefilled context, not a question, so its value is final at entry —
+        # the decidability split must not weaken the case the narrowing exists for.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await _enter(controller, 2)
+        assert "Any out-of-network note?" not in agent.instructions
 
     @pytest.mark.asyncio
     async def test_re_entry_re_narrows_instead_of_stacking(self) -> None:
@@ -1116,10 +1409,331 @@ class TestGating:
         # answers, not appended again.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})
-        agent = await self._enter(controller, 2)
+        agent = await _enter(controller, 2)
         once = agent.instructions
-        await self._enter(controller, 2)
+        await _enter(controller, 2)
         assert agent.instructions == once
+
+
+def _two_section_plan() -> CallPlan:
+    """A task rendering TWO independently numbered lists — the real `insurance_basics` shape
+    (### Insurance Information 1..7, ### Benefit Coverage 1..9), where a live call asked the
+    first section and called task_complete. Plus a routing question, which renders unnumbered
+    and so must not be counted."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="insurance_basics",
+                title="Insurance Basics",
+                prompt="Ask both sections.",
+                fields=[
+                    _field("sections.info.plan_type", "Plan type"),
+                    _field("sections.info.group_no", "Group number"),
+                    _field("sections.cov.deductible", "Deductible"),
+                ],
+                panels=[
+                    PromptPanel(
+                        title="Insurance Information",
+                        items=[
+                            PromptQuestion(text="Individual or family?", routes_between=["A", "B"]),
+                            _question("What type of plan is this?", "sections.info.plan_type"),
+                            _question("What is the group number?", "sections.info.group_no"),
+                        ],
+                    ),
+                    PromptPanel(
+                        title="Benefit Coverage",
+                        items=[
+                            _question("Has the deductible been met?", "sections.cov.deductible")
+                        ],
+                    ),
+                ],
+            ),
+            PlanTask(task_key="closing_task", title="Wrap Up", prompt="Close."),
+        ],
+    )
+
+
+class TestCompletenessRule:
+    """The task agent's LOWER bound — see `_completeness_block` for why it exists. These pin the
+    rendered wording, because the wording IS the fix."""
+
+    def test_the_stated_range_matches_the_rendered_list(self) -> None:
+        # Two sections, one of them holding a routing question that renders unnumbered — so the
+        # list runs 1..3 continuously and the rule must name that exact range.
+        instructions = _controller(_two_section_plan())[0].agents[0].instructions
+        assert "The list above runs 1 to 3 and is the complete set" in instructions
+        assert "3. Has the deductible been met?" in instructions
+
+    def test_a_lone_question_reads_as_one(self) -> None:
+        # The plural template rendered "all 1 have been asked", which is the kind of sloppiness
+        # a prompt cannot afford — it is the model's only description of what it owes.
+        controller, _ = _controller(_panel_plan())
+        assert "exactly 1 question" in controller.agents[0].instructions
+
+    def test_a_task_with_no_compiled_panels_gets_no_rule(self) -> None:
+        # Nothing to be complete about, and a "0 questions" line would be worse than silence.
+        controller, _ = _controller(_multi_gap_plan(with_panels=False))
+        assert "COMPLETENESS" not in controller.agents[0].instructions
+
+    @pytest.mark.asyncio
+    async def test_the_total_follows_the_gates_narrowing(self) -> None:
+        # The count has to describe the list the agent can SEE, not the compiled one.
+        controller, _ = _controller(_gap_plan())
+        assert "The list above runs 1 to 2" in controller.agents[2].instructions
+        controller.update_answers({"sections.a.in_network": "Yes"})  # excludes oon_note
+        agent = await _enter(controller, 2)
+        assert "exactly 1 question" in agent.instructions
+
+    def test_the_gap_sweep_and_wrap_up_do_not_get_it(self) -> None:
+        # Both already state their own bound, and task_complete is not even their tool. True from
+        # construction: each builds its instructions in __init__.
+        controller, _ = _controller(_multi_gap_plan())
+        assert "COMPLETENESS" not in controller.gap_agents[0].instructions
+        assert "COMPLETENESS" not in controller.wrap_up_agent.instructions
+
+
+class TestOwedQuestionCount:
+    """The turn ceiling both guards below judge by, in the unit the agent actually speaks."""
+
+    def test_one_panel_question_over_three_open_fields_counts_once(self) -> None:
+        controller, _ = _controller(_panel_plan())
+        assert len(controller.gap_fields(0)) == 3
+        assert controller.owed_question_count(0) == 1
+
+    def test_a_task_with_no_compiled_panels_owes_nothing_countable(self) -> None:
+        # A field list is no longer a fallback source of truth: with no question tree to walk,
+        # there is nothing the guard can count against (never produced by a real compile, where
+        # Task 2's coverage validator guarantees every field has a covering question).
+        controller, _ = _controller(_multi_gap_plan(with_panels=False))
+        assert controller.owed_question_count(0) == 0
+
+    def test_an_orphan_field_no_question_covers_is_never_counted(self) -> None:
+        # Never produced by a real compile (Task 2's validator guarantees every field has a
+        # covering question); retired the old "+1 ask of its own" fallback that compensated
+        # for exactly the tree/field-list disagreement this task removes.
+        controller, _ = _controller(_panel_plan(extra_field=True))
+        assert controller.owed_question_count(0) == 1
+        assert "Prior Authorization Required" not in [f.title for f in controller.gap_fields(0)]
+
+    def test_a_question_whose_targets_are_all_answered_is_not_owed(self) -> None:
+        controller, _ = _controller(_panel_plan())
+        controller.update_answers({_CPT_COVERED: "Yes", _CPT_COPAY: "20", _CPT_COINSURANCE: "10"})
+        assert controller.owed_question_count(0) == 0
+
+    def test_a_partly_answered_question_is_still_owed_once(self) -> None:
+        controller, _ = _controller(_panel_plan())
+        controller.update_answers({_CPT_COVERED: "Yes"})
+        assert len(controller.gap_fields(0)) == 2
+        assert controller.owed_question_count(0) == 1
+
+
+def _ibv_plan() -> CallPlan:
+    return compile_call_plan(
+        build_ibv_standard(), None, schema_version_id=uuid4(), prompt_version_id=None
+    )
+
+
+# `_task_index` already exists above (TestEntryDecidability's `_gating_plan` fixtures) — reused
+# rather than redefined.
+_S = "sections."
+_RUN_B_ANSWERS = {
+    _S + "insurance_information.doctor_inside_network": "Yes",
+    _S + "insurance_information.facility_inside_network": "Yes",
+    _S + "insurance_information.plan_type": "PPO",
+    _S + "insurance_information.cob_status": "Secondary",
+    _S + "insurance_information.policy_number": "X",
+    _S + "insurance_information.group_name": "X",
+    _S + "insurance_information.group_number": "X",
+    _S + "insurance_information.policy_situs": "X",
+    _S + "benefit_coverage.benefit_year_type": "Calendar Year",
+    _S + "benefit_coverage.coverage_type": "Family",
+    _S + "patient_information.spouse_partner_name": "X",
+    _S + "patient_information.spouse_partner_dob": "X",
+}
+
+
+def test_run_b_owes_six_questions_including_the_defaulted_one() -> None:
+    """Live trace 6e1f496cb72d0182af27281c90bdca64. `gap_fields` reported 5 because
+    `is_satisfied` short-circuits on `default is not None`, hiding telehealth_covered.
+    The tree-joined owed set consults no default, so it is 6."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    controller.update_answers(dict(_RUN_B_ANSWERS))
+    owed = {f.path.split(".")[-1] for f in controller.gap_fields(index)}
+    assert owed == {
+        "plan_effective_date",
+        "plan_year_information",
+        "telehealth_covered",
+        "plan_fund_type",
+        "employer_support_size",
+        "infertility_plan_mandate",
+    }
+    assert "pcp_referral_required" not in owed  # gated out: plan_type is not HMO
+
+
+@pytest.mark.asyncio
+async def test_run_b_shape_is_refused_after_eleven_turns() -> None:
+    """The trace: 11 rep turns into a 16-question task with 6 still owed. The old guard
+    compared whole-task turns (11) against the CURRENT outstanding count (6) and bailed.
+    Both sides must measure the same window."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    agent = controller.agents[index]
+    with _session_patch(agent, MagicMock()):
+        await agent.on_enter()
+        controller.update_answers(dict(_RUN_B_ANSWERS))
+        for _ in range(11):
+            await _rep_turn(agent)
+        result = await _tool(agent, "task_complete")()
+    assert isinstance(result, str)
+    # The refusal names the owed QUESTION, not the storage field ("Telehealth Covered").
+    assert "Does this plan cover telehealth services?" in result
+
+
+def test_an_hmo_plan_owes_the_referral_question_and_a_ppo_plan_does_not() -> None:
+    """Completion must be allowed with a gated-out question unasked — the correct
+    behaviour the broken guard also produced, and which must survive the fix."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    hmo = dict(_RUN_B_ANSWERS) | {_S + "insurance_information.plan_type": "HMO"}
+    controller.update_answers(hmo)
+    assert "pcp_referral_required" in {f.path.split(".")[-1] for f in controller.gap_fields(index)}
+    controller.update_answers(dict(_RUN_B_ANSWERS))  # PPO
+    assert "pcp_referral_required" not in {
+        f.path.split(".")[-1] for f in controller.gap_fields(index)
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_task_with_every_question_answered_completes_immediately() -> None:
+    """No spurious refusal: a task owing nothing hands off on the first call, whatever
+    the turn count.
+
+    `on_enter` must run BEFORE `update_answers` — entering against zero answers snapshots
+    a non-zero `_questions_at_entry`, so the turn ceiling (`_rep_turns >= _questions_at_entry`,
+    0 >= 14) stays False and cannot itself return None. Only the empty-`gap_fields` exit can
+    free `task_complete` here; entering after the answers were already on file would zero the
+    snapshot too and let the turn ceiling mask that exit instead of testing it.
+    """
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    agent = controller.agents[index]
+    with _session_patch(agent, MagicMock()):
+        await agent.on_enter()
+        answers = dict(_RUN_B_ANSWERS) | {
+            _S + "benefit_coverage." + key: "X"
+            for key in (
+                "plan_effective_date",
+                "plan_year_information",
+                "telehealth_covered",
+                "plan_fund_type",
+                "employer_support_size",
+                "infertility_plan_mandate",
+            )
+        }
+        controller.update_answers(answers)
+        assert isinstance(await _tool(agent, "task_complete")(), Agent)
+
+
+def test_a_termination_flow_rule_still_routes_the_call_to_wrap_up() -> None:
+    """Both networks No and out-of-network No must still end the call early, and the
+    completion work must not interfere with a deliberate early end.
+
+    This catalog terminates by SKIPPING to wrap_up, not by a bare `Terminate` — every
+    flow rule pairs `action="terminate_call"` with `skip_to_task="wrap_up"`, and the
+    engine prefers `skip_to_task` (`rule_engine.py:52`). The distinction matters:
+    `_terminated` is set only for `Terminate` (`plan_runtime.py:899-901`), so this path
+    leaves the end-of-call gap sweep enabled rather than suppressing it.
+    """
+    engine = RuleEngine(_ibv_plan())
+    directive = engine.evaluate(
+        {
+            _S + "insurance_information.doctor_inside_network": "No",
+            _S + "insurance_information.facility_inside_network": "No",
+            _S + "insurance_information.out_of_network_coverage": "No",
+        }
+    )
+    assert isinstance(directive, SkipToTask)
+    assert directive.rule_key == "no_out_of_network_coverage"
+    assert directive.task_key == "wrap_up"
+
+
+def test_small_group_plus_self_insured_still_fires_the_consistency_rule() -> None:
+    engine = RuleEngine(_ibv_plan())
+    directive = engine.evaluate(
+        {
+            _S + "benefit_coverage.employer_support_size": "Small Group",
+            _S + "benefit_coverage.plan_fund_type": "Self Insured",
+        }
+    )
+    assert getattr(directive, "rule_key", None) == "small_group_self_insured_conflict"
+
+
+def test_the_gap_sweep_still_fires_only_before_the_last_task() -> None:
+    """The sweep's position is deliberately unchanged (spec §5). A later refactor that
+    moves or repeats it must fail here, not on a live call."""
+    controller, _ = _controller(_ibv_plan())
+    assert controller._closing_task_index == len(controller.plan.tasks) - 1
+
+
+def test_the_sweep_sees_a_question_whose_only_gap_carries_a_default() -> None:
+    """telehealth_covered carries default="N/A", so `is_satisfied` hid it from every
+    guard AND from the sweep. This is the sweep's whole behaviour change."""
+    controller, _ = _controller(_ibv_plan())
+    index = _task_index(controller, "insurance_basics")
+    answers = dict(_RUN_B_ANSWERS) | {
+        _S + "benefit_coverage." + key: "X"
+        for key in (
+            "plan_effective_date",
+            "plan_year_information",
+            "plan_fund_type",
+            "employer_support_size",
+            "infertility_plan_mandate",
+        )
+    }
+    controller.update_answers(answers)
+    assert [f.path.split(".")[-1] for f in controller.gap_fields(index)] == ["telehealth_covered"]
+
+
+_COMPLETENESS_TOTAL_RE = re.compile(r"runs 1 to (\d+)|is exactly (\d+) question")
+
+
+def _stated_total(instructions: str) -> int:
+    """The task total the rendered COMPLETENESS block actually told the agent to ask, parsed
+    from the agent's OWN instructions — so the pin below reads the prompt, not a second
+    derivation of it."""
+    match = _COMPLETENESS_TOTAL_RE.search(instructions)
+    if match is None:
+        return 0  # no COMPLETENESS block: no compiled panels, or the task was skipped
+    return int(match.group(1) or match.group(2))
+
+
+class TestQuestionsAtEntryPinnedToTheStatedTotal:
+    """Regression fence for the entry-ceiling defect: `_questions_at_entry` used to snapshot
+    `owed_question_count`, which is answer-sensitive under `is_applicable` — at entry, before
+    anything is answered, a task whose follow-ups sit behind an unanswered gate reads as owing
+    almost nothing (`male_partner_coverage` snapshotted 0, and a guard compared against 0 can
+    never refuse). The ceiling must instead equal what COMPLETENESS actually told the agent to
+    ask — checked here across the real compiled catalog, not a hand-built fixture small enough
+    to hide the gap."""
+
+    @pytest.mark.asyncio
+    async def test_every_ibv_standard_task_ceiling_matches_its_own_stated_total(self) -> None:
+        controller, _ = _controller(_ibv_plan())
+        for index, task in enumerate(controller.plan.tasks):
+            agent = controller.agents[index]
+            session = MagicMock()
+            with _session_patch(agent, session):
+                await agent.on_enter()
+                await controller.drain_cursor_writes()
+            if session.update_agent.called:
+                continue  # every question gated out: skipped silently, ceiling never read
+            assert agent._questions_at_entry == _stated_total(agent.instructions), task.task_key
 
 
 class TestPrematureCompletion:
@@ -1128,6 +1742,7 @@ class TestPrematureCompletion:
         controller, _ = _controller(_gap_plan())
         agent = controller.agents[0]  # intro_task: rep_name required + unanswered
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             result = await _tool(agent, "task_complete")()
         # A str parks the plan on this task; an Agent would have advanced it.
         assert isinstance(result, str)
@@ -1140,21 +1755,74 @@ class TestPrematureCompletion:
         controller.update_answers({"sections.a.in_network": "Yes"})
         agent = controller.agents[2]
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             result = cast(str, await _tool(agent, "task_complete")())
-        assert "Deductible" in result
-        assert "OON note" not in result  # inapplicable, so never outstanding
+        assert "Has the deductible been met?" in result
+        # inapplicable, so never outstanding
+        assert "Any out-of-network note?" not in result
 
     @pytest.mark.asyncio
     async def test_a_second_task_complete_advances_even_with_questions_still_open(self) -> None:
         # THE no-deadlock property. A rep who cannot answer never empties gap_fields, so an
         # unconditional guard would refuse every completion and strand the call on this task.
+        # Needs three task_complete calls now (budget of 2), with a real rep turn between
+        # retries — but the TURN CEILING is what frees it here: coverage_task owes 2 questions,
+        # and 2 rep turns have landed by the third call. The budget's OWN escape path (no rep
+        # turn between calls) is pinned separately, by
+        # test_repeated_task_complete_advances_even_with_no_rep_turns.
         controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "No"})  # opens oon_note too
+        agent = controller.agents[2]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            assert isinstance(await _tool(agent, "task_complete")(), str)
+            await _rep_turn(agent)
+            assert isinstance(await _tool(agent, "task_complete")(), str)
+            await _rep_turn(agent)
+            third = await _tool(agent, "task_complete")()
+        assert isinstance(third, Agent)
+        assert third is not agent
+
+    @pytest.mark.asyncio
+    async def test_two_task_completes_in_one_turn_produce_one_handoff(self) -> None:
+        """A doubled tool call walked straight past a task without entering its question
+        loop (P10, 2026-07-30). The second call must be inert."""
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
         agent = controller.agents[0]
         with _session_patch(agent, MagicMock()):
-            assert isinstance(await _tool(agent, "task_complete")(), str)
+            first = await _tool(agent, "task_complete")()
             second = await _tool(agent, "task_complete")()
-        assert isinstance(second, Agent)
-        assert second is not agent
+        assert isinstance(first, Agent)
+        assert isinstance(second, str)
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_task_completes_produce_one_handoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real shape behind P10: LiveKit dispatches every function call in one LLM
+        response as its OWN task (voice/generation.py), so two `task_complete` calls race
+        rather than run one after the other. `asyncio.Lock.acquire` on a free lock never
+        yields, so nothing suspends here by accident today — force the genuine checkpoint
+        `advance_from` would hit for real once a directive holds the controller lock across
+        an awaited `session.interrupt()` (see `apply_directive_now`)."""
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        agent = controller.agents[0]
+        real_advance_from = controller.advance_from
+
+        async def suspending_advance_from(index: int) -> Agent:
+            await asyncio.sleep(0)  # the checkpoint a contested lock would force for real
+            return await real_advance_from(index)
+
+        monkeypatch.setattr(controller, "advance_from", suspending_advance_from)
+        with _session_patch(agent, MagicMock()):
+            first, second = await asyncio.gather(
+                _tool(agent, "task_complete")(), _tool(agent, "task_complete")()
+            )
+        results = [first, second]
+        assert sum(isinstance(r, Agent) for r in results) == 1
+        assert sum(isinstance(r, str) for r in results) == 1
 
     @pytest.mark.asyncio
     async def test_a_complete_task_is_never_refused(self) -> None:
@@ -1180,6 +1848,11 @@ class TestPrematureCompletion:
         controller, _ = _controller(_gap_plan())
         agent = controller.agents[0]  # intro_task: rep_name required + unanswered
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            # intro_task's own list is 2 questions (rep_name + the optional "notes"), and the
+            # ceiling counts both — one turn per question on the fixture's own stated total,
+            # not a magic constant.
+            await _rep_turn(agent)
             await _rep_turn(agent)
             result = await _tool(agent, "task_complete")()
         assert isinstance(result, Agent)
@@ -1191,10 +1864,36 @@ class TestPrematureCompletion:
         controller.update_answers({"sections.a.in_network": "No"})  # opens oon_note too
         agent = controller.agents[2]
         with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
             await _rep_turn(agent)
             result = cast(str, await _tool(agent, "task_complete")())
-        assert "Deductible" in result
-        assert "OON note" in result
+        assert "Has the deductible been met?" in result
+        assert "Any out-of-network note?" in result
+
+    @pytest.mark.asyncio
+    async def test_a_panel_answered_in_one_turn_is_not_refused(self) -> None:
+        # The regression: one spoken question covers three fields, so one exchange CAN have
+        # answered all three. Counting fields made the ceiling 3 and the guard fought the merge.
+        controller, _ = _controller(_panel_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            await _rep_turn(agent, "Covered, twenty dollar copay, ten percent coinsurance.")
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_an_orphan_field_cannot_hold_the_ceiling_up(self) -> None:
+        # Never produced by a real compile (Task 2's validator guarantees every field has a
+        # covering question) — an orphan field is invisible to gap_fields, so the one real
+        # panel question's turn heuristic is all that gates completion here.
+        controller, _ = _controller(_panel_plan(extra_field=True))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            await _rep_turn(agent)
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
 
     @pytest.mark.asyncio
     async def test_takeover_still_wins_over_the_guard(self) -> None:
@@ -1207,79 +1906,86 @@ class TestPrematureCompletion:
             result = cast(str, await _tool(agent, "task_complete")())
         assert "supervisor" in result
 
+    @pytest.mark.asyncio
+    async def test_repeated_task_complete_advances_even_with_no_rep_turns(self) -> None:
+        # The budget's own scenario: a model that calls task_complete straight back off the
+        # forced follow-up, with no rep turn in between, must still eventually escape.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        results: list[Any] = []
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            for _ in range(_TASK_FRUITLESS_REFUSALS + 3):
+                results.append(await _tool(agent, "task_complete")())
+                if isinstance(results[-1], Agent):
+                    break
+        assert isinstance(results[-1], Agent), results[-1]
+        # ...but it refused first; a guard that never refuses would pass the line above vacuously
+        assert any(isinstance(r, str) for r in results)
+        # Pins the CONTRACT, not just reachability: `_TASK_FRUITLESS_REFUSALS` is named for
+        # the count, and a check-before-increment ordering silently makes it 3.
+        assert sum(isinstance(r, str) for r in results) == _TASK_FRUITLESS_REFUSALS
 
-class TestFieldLines:
-    """Every CPT code's field is titled "Covered", so a bare-title list names nothing askable."""
+    @pytest.mark.asyncio
+    async def test_a_refusal_tags_its_owed_count_on_the_span(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
 
-    def test_duplicated_titles_are_qualified_by_their_owning_path_segment(self) -> None:
-        lines = _field_lines(
-            [
-                _field("sections.diag.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
-                _field("sections.diag.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
-            ]
-        )
-        assert "- Covered (cpt_58340) (expected one of: Yes, No)" in lines
-        assert "- Covered (cpt_82670) (expected one of: Yes, No)" in lines
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, str)
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.completion.owed_count"] == 1  # rep_name only
+        assert span.attributes["vera.completion.refused"] is True
 
-    def test_a_unique_title_is_left_alone(self) -> None:
-        lines = _field_lines([_field("sections.intro.rep_name", "Representative name")])
-        assert lines == "- Representative name"
+    @pytest.mark.asyncio
+    async def test_advancing_via_the_refusal_budget_still_tags_the_owed_count(
+        self, otel_spans: Any
+    ) -> None:
+        """The motivating case: the refusal budget's escape valve advances a task while
+        `gap_fields` is still non-empty — what a model-authored `reason` string used to hide."""
+        from opentelemetry import trace
 
-    def test_numbering_gives_the_model_an_arithmetic_handle(self) -> None:
-        # A run of near-identical lines is nothing the agent can check itself against; the
-        # ordinals are what let it tell "3 of 5 asked" from "all of them".
-        lines = _field_lines(
-            [
-                _field("sections.labs.cpt_58340.covered", "Covered", values=["Yes", "No"]),
-                _field("sections.labs.cpt_82670.covered", "Covered", values=["Yes", "No"]),
-                _field("sections.intro.rep_name", "Representative name"),
-            ],
-            numbered=True,
-        )
-        assert lines == (
-            "1. Covered (cpt_58340) (expected one of: Yes, No)\n"
-            "2. Covered (cpt_82670) (expected one of: Yes, No)\n"
-            "3. Representative name"
-        )
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        tracer = trace.get_tracer("test")
+        result: Any = None
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await agent.on_enter()
+            for _ in range(_TASK_FRUITLESS_REFUSALS + 3):
+                result = await _tool(agent, "task_complete")()
+                if isinstance(result, Agent):
+                    break
+        assert isinstance(result, Agent)
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.completion.owed_count"] == 1  # rep_name still unanswered
+        assert span.attributes["vera.completion.refused"] is False
 
 
-class TestConditionalLines:
-    """The conditional bucket tells the agent to ASK these — an unidentifiable field there
-    is worse than one merely omitted from the excluded bucket, so it needs the same
-    disambiguation as `_field_lines` (regression: the real IBV schema has 4 title
-    collisions, the worst being 14 byte-identical "Covered" fields)."""
+class TestConditionalQuestionsSurviveNarrowing:
+    """A conditional gate is not settled, so its question must stay askable — and must still
+    carry its condition. Plan B states that condition ON the question in the rendered list
+    instead of in a separate block, which is what removed the two-contradictory-lists problem
+    (regression: the real IBV schema has 4 title collisions, the worst being 14 byte-identical
+    "Covered" fields, which a bare-title block could not tell apart)."""
 
-    def test_duplicated_titles_are_qualified_like_field_lines(self) -> None:
-        lines = _conditional_lines(
-            [
-                _field(
-                    "sections.diag.labs.cpt_58340.covered",
-                    "Covered",
-                    values=["Yes", "No"],
-                    gate_text='"Diagnostic Testing Covered" is "Yes"',
-                ),
-                _field(
-                    "sections.diag.labs.cpt_82670.covered",
-                    "Covered",
-                    values=["Yes", "No"],
-                    gate_text='"Diagnostic Testing Covered" is "Yes"',
-                ),
-            ]
-        )
-        assert (
-            "- Covered (cpt_58340) (expected one of: Yes, No) — only if "
-            '"Diagnostic Testing Covered" is "Yes"' in lines
-        )
-        assert (
-            "- Covered (cpt_82670) (expected one of: Yes, No) — only if "
-            '"Diagnostic Testing Covered" is "Yes"' in lines
-        )
+    @pytest.mark.asyncio
+    async def test_a_conditional_question_keeps_its_condition_in_the_list(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "No"})  # oon_note conditional
+        agent = await _enter(controller, 2)
+        assert "Any out-of-network note?" in agent.instructions
+        assert '"Doctor Inside Network" is "No"' in agent.instructions
 
-    def test_a_unique_title_is_left_alone(self) -> None:
-        lines = _conditional_lines(
-            [_field("sections.intro.rep_name", "Representative name", gate_text='"X" is "Y"')]
-        )
-        assert lines == '- Representative name — only if "X" is "Y"'
+    @pytest.mark.asyncio
+    async def test_only_a_decided_gate_removes_a_question(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})  # oon_note decided false
+        agent = await _enter(controller, 2)
+        assert "Any out-of-network note?" not in agent.instructions
 
 
 class TestGapDetection:
@@ -1557,6 +2263,90 @@ class TestGapAgent:
         assert isinstance(result, str)
         assert "supervisor" in result.lower()
 
+    @pytest.mark.asyncio
+    async def test_two_gap_completes_in_one_turn_produce_one_handoff(self) -> None:
+        """Same P10 guard as PlanTaskAgent's task_complete (see
+        test_two_task_completes_in_one_turn_produce_one_handoff), mirrored for the gap
+        sweep's tool. The second call must be inert."""
+        controller, _ = _controller(_gap_plan())
+        agent = controller.gap_agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            controller.update_answers({"sections.intro.rep_name": "Pat"})
+            first = await _tool(agent, "gap_complete")()
+            second = await _tool(agent, "gap_complete")()
+        assert isinstance(first, Agent)
+        assert isinstance(second, str)
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_gap_completes_produce_one_handoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same real shape as PlanTaskAgent's task_complete (see
+        test_two_concurrent_task_completes_produce_one_handoff): two `gap_complete` calls
+        from one LLM response race on the SAME agent rather than run sequentially."""
+        controller, _ = _controller(_gap_plan())
+        agent = controller.gap_agents[0]
+        real_advance_gap_from = controller.advance_gap_from
+
+        async def suspending_advance_gap_from(index: int) -> Agent:
+            await asyncio.sleep(0)  # the checkpoint a contested lock would force for real
+            return await real_advance_gap_from(index)
+
+        monkeypatch.setattr(controller, "advance_gap_from", suspending_advance_gap_from)
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            controller.update_answers({"sections.intro.rep_name": "Pat"})
+            first, second = await asyncio.gather(
+                _tool(agent, "gap_complete")(), _tool(agent, "gap_complete")()
+            )
+        results = [first, second]
+        assert sum(isinstance(r, Agent) for r in results) == 1
+        assert sum(isinstance(r, str) for r in results) == 1
+
+    @pytest.mark.asyncio
+    async def test_on_enter_awaits_the_attached_observers_drain(self) -> None:
+        # Extraction lands ~15s after the turn that produced it, so the sweep must wait for
+        # the retiring observer's final pass before it decides what is still owed.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = controller.gap_agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+        assert observer.drains == 1
+
+    @pytest.mark.asyncio
+    async def test_on_enter_skips_the_drain_without_an_attached_observer(self) -> None:
+        # Voice Lab and every other test build a bare controller — drain_observer must be a
+        # true no-op, not a hang waiting on a manager that was never attached.
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = controller.gap_agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()  # must not raise or hang
+
+    @pytest.mark.asyncio
+    async def test_on_enter_reads_gap_fields_only_after_the_drain_lands(self) -> None:
+        # intro_task's only required field is rep_name; the fake fills it FROM INSIDE
+        # drain_pending. If on_enter read gap_fields before awaiting the drain, it would
+        # still see rep_name owed and re-ask it.
+        controller, _ = _controller(_gap_plan())
+        controller.attach_observer(
+            cast(
+                Any, FillsDuringDrainObserverManager(controller, {"sections.intro.rep_name": "Pat"})
+            )
+        )
+        agent = controller.gap_agents[0]
+        mock_session = MagicMock()
+        with _session_patch(agent, mock_session):
+            await agent.on_enter()
+        mock_session.generate_reply.assert_not_called()
+        # gated_task/coverage_task were never visited, so the pass skips straight to the
+        # closer — same landing spot as test_on_enter_with_no_gaps_moves_on_without_speaking.
+        mock_session.update_agent.assert_called_once_with(controller.agents[_CLOSER])
+
 
 class TestGapCoverage:
     """The pass must re-ask EVERY missing question of the task it sweeps. It asked two or three
@@ -1593,7 +2383,9 @@ class TestGapCoverage:
         with _session_patch(controller.gap_agents[0], MagicMock()):
             agent = await self._enter(controller)
         assert "5 required questions" in agent.instructions
-        assert "5. Deductible (expected one of: Met, Not met)" in agent.instructions
+        # `render_panels` numbers the ask and puts its vocabulary on the sub-line beneath.
+        assert "5. Deductible" in agent.instructions
+        assert "   - Answers: Met | Not met" in agent.instructions
         # "a couple" is idiomatically 2 and "a few" is 3 — either caps the sweep on its own.
         assert "a couple" not in agent.instructions
         assert "A few" not in agent.instructions
@@ -1641,6 +2433,9 @@ class TestGapCoverage:
         assert isinstance(results[-1], Agent), results[-1]
         # ...but it refused first; a guard that never refuses would pass the line above vacuously
         assert any(isinstance(r, str) for r in results)
+        # Pins the CONTRACT, not just reachability: `_GAP_FRUITLESS_REFUSALS` is named for
+        # the count, and a check-before-increment ordering would silently make it one more.
+        assert sum(isinstance(r, str) for r in results) == _GAP_FRUITLESS_REFUSALS
 
     @pytest.mark.asyncio
     async def test_a_swept_task_with_nothing_left_open_is_never_refused(self) -> None:
@@ -1657,6 +2452,17 @@ class TestGapCoverage:
         )
         with _session_patch(controller.gap_agents[0], MagicMock()):
             result = await _tool(controller.gap_agents[0], "gap_complete")()
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_a_swept_panel_answered_in_one_turn_is_not_refused(self) -> None:
+        # Same regression as the main pass: the sweep owes ONE spoken question, so one rep
+        # exchange has discharged it even though three fields are still unextracted.
+        controller, _ = _controller(_panel_plan())
+        with _session_patch(controller.gap_agents[0], MagicMock()):
+            agent = await self._enter(controller)
+            await _rep_turn(agent, "Covered, twenty dollar copay, ten percent coinsurance.")
+            result = await _tool(agent, "gap_complete")()
         assert isinstance(result, Agent)
 
 
@@ -1716,8 +2522,12 @@ async def _insist_complete(agent: Agent) -> Agent:
     """`task_complete`, retried through one refusal.
 
     These walks leave required questions unanswered on purpose — that is what gives the gap
-    pass something to sweep — so the premature-completion guard refuses the first call. It
-    refuses only once, and the walk is asserting the handoff chain, not the guard."""
+    pass something to sweep. The main pass can now refuse up to `_TASK_FRUITLESS_REFUSALS`
+    times before giving up, but this helper still retries only ONCE — safe today only because
+    `_walk` calls `note_task_entered` directly rather than `on_enter`, so `_questions_at_entry`
+    never advances past its `__init__` default of 0 and the guard is a permanent no-op for every
+    walk-driven call. Wiring `_walk` to call `on_enter` properly would make the guard real again
+    and could trip the assert below on a second refusal."""
     result = await _tool(agent, "task_complete")()
     if isinstance(result, str):
         result = await _tool(agent, "task_complete")()
@@ -2210,19 +3020,17 @@ class TestGatedOutTask:
         mock_session.update_agent.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_a_partly_gated_task_excludes_only_the_gated_question(self) -> None:
-        # The other half of the same defect: the task runs, but the model must be told which of
-        # its listed questions are out of scope this call — and only those. See TestGating for
-        # why this lives in the instructions rather than the per-reply lead.
+    async def test_a_partly_gated_task_drops_only_the_gated_question(self) -> None:
+        # The other half of the same defect: the task runs, but its list must carry only the
+        # questions that apply on this call.
         controller, _ = _controller(_gap_plan())
         controller.update_answers({"sections.a.in_network": "Yes"})  # gates out `oon_note`
         controller.opening_line("Hello rep.")
         coverage = controller.agents[2]
         with _session_patch(coverage, MagicMock()):
             await coverage.on_enter()
-        excluded_section = coverage.instructions.split("do NOT ask these")[1]
-        assert "OON note" in excluded_section
-        assert "Deductible" not in excluded_section  # the applicable one is not excluded
+        assert "Any out-of-network note?" not in coverage.instructions
+        assert "Has the deductible been met?" in coverage.instructions
 
     @pytest.mark.asyncio
     async def test_an_ungated_task_keeps_the_plain_lead(self) -> None:
@@ -2234,3 +3042,617 @@ class TestGatedOutTask:
         with _session_patch(coverage, mock_session):
             await coverage.on_enter()
         assert mock_session.generate_reply.call_args.kwargs["instructions"] == _OPENING_DIRECTIVE
+
+
+_COPAY = "sections.svc.cpt_1.copay"
+_COINS = "sections.svc.cpt_1.coinsurance"
+_OTHER_COPAY = "sections.svc.cpt_2.copay"
+_GROUP_NAME = "sections.svc.group_name"
+
+
+def _pair_plan() -> CallPlan:
+    """One spoken question over an either/or cost pair, as `cost_pair` authors it, plus a
+    second code's copay (its own question — a fan-out this task's join must not conflate
+    with the pair) that must NOT be satisfied by the first's, and a defaulted field WITH its
+    own reachable question — `default` must not hide it, the shape a real compile emits."""
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        alternative_pairs=[(_COPAY, _COINS)],
+        tasks=[
+            PlanTask(
+                task_key="cost",
+                title="Cost",
+                prompt="Ask the cost.",
+                fields=[
+                    _field(_COPAY, "Copay ($)"),
+                    _field(_COINS, "Coinsurance (%)"),
+                    _field(_OTHER_COPAY, "Copay ($)"),
+                    _field(_GROUP_NAME, "Group Name", default="N/A"),
+                ],
+                panels=[
+                    PromptPanel(
+                        title="CPT 1",
+                        items=[_question("What is the copay or coinsurance?", _COPAY, _COINS)],
+                    ),
+                    PromptPanel(
+                        title="CPT 2",
+                        items=[_question("What is the copay?", _OTHER_COPAY)],
+                    ),
+                    PromptPanel(
+                        title="Group",
+                        items=[_question("What is the group name?", _GROUP_NAME)],
+                    ),
+                ],
+            ),
+            PlanTask(task_key="closing_task", title="Wrap Up", prompt="Close."),
+        ],
+    )
+
+
+class TestAlternativesAwareGapFields:
+    """A live call's gap sweep owed ten phantom fields: for each, the OTHER side of the pair had
+    been answered. `gap_fields` never consulted the alternatives the schema declares."""
+
+    def test_a_sibling_answer_closes_the_gap(self) -> None:
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({_COINS: "30"})
+        assert _COPAY not in {f.path for f in controller.gap_fields(0)}
+
+    def test_both_answered_closes_the_gap_without_hiding_either(self) -> None:
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({_COPAY: "$25", _COINS: "30"})
+        open_paths = {f.path for f in controller.gap_fields(0)}
+        assert _COPAY not in open_paths and _COINS not in open_paths
+        # Satisfaction, not applicability: both are still applicable, so both still render.
+        assert {_COPAY, _COINS} <= {f.path for f in controller.applicable_fields(0)}
+
+    def test_neither_answered_owes_the_pair_as_one_ask(self) -> None:
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({})
+        open_paths = {f.path for f in controller.gap_fields(0)}
+        assert {_COPAY, _COINS} <= open_paths
+        # One spoken question covers both, so the turn ceiling counts them once.
+        assert controller.owed_question_count(0) == 3  # the pair + cpt_2's copay + group name
+
+    def test_a_default_does_not_hide_a_reachable_question(self) -> None:
+        # This task's rule: `default` says what the field holds when uncollected, never that
+        # the question need not be asked. `is_satisfied` still reads it, so the percentage,
+        # the export and intake are unchanged.
+        controller, _ = _controller(_pair_plan())
+        controller.update_answers({})
+        assert _GROUP_NAME in {f.path for f in controller.gap_fields(0)}
+
+
+def _fused_plan(build: Any, values: dict[str, Any]) -> CallPlan:
+    doc = build()
+    template = compile_call_plan(doc, None, schema_version_id=uuid4(), prompt_version_id=None)
+    return fuse_prefill(doc, template, values, current_year=2026)
+
+
+def _plan_task_index(plan: CallPlan, task_key: str) -> int:
+    return next(i for i, task in enumerate(plan.tasks) if task.task_key == task_key)
+
+
+class TestAnIntakeDefaultNeverDeletesAQuestion:
+    """The intake UI seeds every leaf `default`, so these arrive as real field_answer rows.
+    Before `gating_seed` they settled their gate at task entry and the dependent question was
+    dropped from the compiled list — recovered, if at all, by the end-of-call sweep."""
+
+    def test_enrollment_provider_survives_the_defaulted_gate(self) -> None:
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "closing_admin"))
+        }
+        assert "sections.enrollment.enrollment_provider_name" not in excluded
+        assert "sections.enrollment.enrollment_provider_phone" not in excluded
+
+    def test_renewal_date_survives_the_defaulted_gate(self) -> None:
+        plan = _fused_plan(
+            build_disease_only, {"sections.coverage_summary.benefit_year_type": "Calendar Year"}
+        )
+        controller, _ = _controller(plan)
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "policy_basics"))
+        }
+        assert "sections.coverage_summary.renewal_date" not in excluded
+
+    def test_the_gate_field_itself_becomes_owed(self) -> None:
+        """`owed_now` requires `not has_value`, so the intake row also hid the gate question
+        from the completion guard — the second half of the same failure."""
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        owed = {f.path for f in controller.gap_fields(_plan_task_index(plan, "closing_admin"))}
+        assert "sections.enrollment.enrollment_required" in owed
+
+
+class TestTheBoundsOfTheGatingChange:
+    """Both pass before the fix as well. They are the fence around it."""
+
+    def test_an_earlier_tasks_answer_still_decides_a_later_gate(self) -> None:
+        """The position half of `_settled` is untouched. `coverage_type` is collected in
+        `insurance_basics` and gates 17 questions in `financial` / `male_partner`, so those
+        stay excluded whether or not it was seeded — which is also what keeps the worker no
+        LESS decisive than the compiler (`question_plan._entry_decided`)."""
+        plan = _fused_plan(
+            build_ibv_standard, {"sections.benefit_coverage.coverage_type": "Individual"}
+        )
+        controller, _ = _controller(plan)
+        index = _plan_task_index(plan, "male_partner")
+        assert controller.applicable_fields(index) == []
+        assert len(controller.excluded_fields(index)) == 9
+        assert controller.conditional_fields(index) == []
+
+    def test_a_context_prefill_still_decides_its_gate(self) -> None:
+        """`context` is clinic-supplied background and stays authoritative — an absent spouse
+        gender must still exclude the male-partner questions rather than ask about them."""
+        plan = _fused_plan(
+            build_ibv_standard,
+            {
+                "sections.benefit_coverage.coverage_type": "Family",
+                "sections.patient_information.spouse_gender": "N/A",
+            },
+        )
+        controller, _ = _controller(plan)
+        assert len(controller.excluded_fields(_plan_task_index(plan, "male_partner"))) == 9
+
+    def test_a_confirm_prefill_still_settles_its_own_answered_check(self) -> None:
+        """`confirm` values stay in the baseline, so a prefilled member ID is not re-owed."""
+        path = "sections.insurance_information.policy_number"
+        plan = _fused_plan(build_ibv_standard, {path: "ABC123"})
+        controller, _ = _controller(plan)
+        owed = {f.path for f in controller.gap_fields(_plan_task_index(plan, "insurance_basics"))}
+        assert path not in owed
+
+
+class TestTheObserverCannotReArmTheDeletion:
+    """`ObserverManager` pushes through `update_answers` on every recorded answer. If that
+    replaced the controller's map with an unfiltered one — or if the Observer pushed its own
+    `_on_file` rather than `_recorded` — the intake default would be back in place by the time
+    `closing_admin` is entered, and the question would be deleted again on a real call while
+    every constructor-level test stayed green."""
+
+    def test_a_recorded_answer_does_not_restore_the_intake_default(self) -> None:
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        # What the Observer sends after extracting one unrelated answer earlier in the call.
+        controller.update_answers({"sections.insurance_representative.rep_name": "Pat"})
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "closing_admin"))
+        }
+        assert "sections.enrollment.enrollment_provider_name" not in excluded
+
+    def test_the_call_can_still_settle_the_gate_it_owns(self) -> None:
+        """The merge must not swallow a real answer: once the rep says "No", the provider
+        question is genuinely excluded."""
+        plan = _fused_plan(build_ibv_standard, {"sections.enrollment.enrollment_required": "N/A"})
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.enrollment.enrollment_required": "No"})
+        excluded = {
+            f.path for f in controller.excluded_fields(_plan_task_index(plan, "closing_admin"))
+        }
+        assert "sections.enrollment.enrollment_provider_name" in excluded
+
+    def test_an_unrelated_recorded_answer_does_not_drop_the_baseline(self) -> None:
+        """The discriminating case for merge-vs-replace. A confirm-role prefill lives in the
+        baseline; a wholesale replace on the next recorded answer would drop it, and every
+        gate and owed-set decision that reads it would silently change mid-call."""
+        policy = "sections.insurance_information.policy_number"
+        plan = _fused_plan(build_ibv_standard, {policy: "ABC123"})
+        controller, _ = _controller(plan)
+        controller.update_answers({"sections.insurance_representative.rep_name": "Pat"})
+        owed = {f.path for f in controller.gap_fields(_plan_task_index(plan, "insurance_basics"))}
+        assert policy not in owed
+
+
+class TestEndCallRequest:
+    """A representative can ask to end the call at any point. Nothing in the plan is a
+    condition over that — it is an utterance — so the agent holding the turn routes it,
+    to the closing task (which asks for the name and reference number), never straight to
+    the wrap-up agent (which has no fields and would hang up without asking)."""
+
+    @pytest.mark.asyncio
+    async def test_the_request_hands_off_to_the_closing_task(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = await _enter(controller, 0)
+        with _session_patch(agent, MagicMock()):
+            successor = await _tool(agent, "representative_requests_end_call")()
+        assert successor is controller.agents[_CLOSER]
+        assert successor is not controller.wrap_up_agent
+
+    @pytest.mark.asyncio
+    async def test_the_request_skips_the_gap_pass(self) -> None:
+        """Nothing sets a flag for this — it falls out of the call graph — so pin it."""
+        controller, _ = _controller(_gap_plan())
+        controller.update_answers({"sections.a.in_network": "Yes"})
+        agent = await _enter(controller, 0)
+        with _session_patch(agent, MagicMock()):
+            successor = await _tool(agent, "representative_requests_end_call")()
+        assert successor is controller.agents[_CLOSER]
+        assert controller._next_gap_task(0) is not None  # a gap really was outstanding
+        # and completing the closer still goes straight out, never back into the sweep
+        controller.note_task_entered(_CLOSER)
+        assert await controller.advance_from(_CLOSER) is controller.wrap_up_agent
+
+    @pytest.mark.asyncio
+    async def test_the_request_bypasses_the_premature_completion_guard(self) -> None:
+        """Abandoning the questions this task still owes is the point."""
+        controller, _ = _controller(_gap_plan())
+        agent = await _enter(controller, 0)
+        with _session_patch(agent, MagicMock()):
+            assert isinstance(await _tool(agent, "task_complete")(), str)  # refused
+            successor = await _tool(agent, "representative_requests_end_call")()
+        assert successor is controller.agents[_CLOSER]
+
+    @pytest.mark.asyncio
+    async def test_the_request_is_inert_on_the_closing_task(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = await _enter(controller, _CLOSER)
+        with _session_patch(agent, MagicMock()):
+            assert isinstance(await _tool(agent, "representative_requests_end_call")(), str)
+
+    @pytest.mark.asyncio
+    async def test_a_single_task_plan_has_nowhere_to_jump(self) -> None:
+        plan = _gap_plan()
+        plan.tasks = [plan.tasks[0]]
+        controller, _ = _controller(plan)
+        agent = await _enter(controller, 0)
+        with _session_patch(agent, MagicMock()):
+            assert isinstance(await _tool(agent, "representative_requests_end_call")(), str)
+
+    @pytest.mark.asyncio
+    async def test_a_second_advancing_call_in_one_turn_is_inert(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = await _enter(controller, 0)
+        controller.update_answers({"sections.intro.rep_name": "Pat", "sections.intro.notes": "-"})
+        with _session_patch(agent, MagicMock()):
+            first = await _tool(agent, "representative_requests_end_call")()
+            second = await _tool(agent, "task_complete")()
+        assert first is controller.agents[_CLOSER]
+        assert isinstance(second, str)
+
+    @pytest.mark.asyncio
+    async def test_takeover_refuses_the_request(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        agent = await _enter(controller, 0)
+        session = MagicMock()
+        with _session_patch(agent, session):
+            session.userdata.engaged = True  # _session_patch installs a fresh latch
+            assert isinstance(await _tool(agent, "representative_requests_end_call")(), str)
+        assert controller.active_task_index == 0
+
+    @pytest.mark.asyncio
+    async def test_an_inapplicable_closer_still_gets_a_spoken_goodbye(self) -> None:
+        # The abandoned task's outro must not leak into `signed_off`, or the wrap-up agent
+        # hangs up silently believing a closing line was already spoken.
+        plan = _gap_plan()
+        plan.tasks[_CLOSER].applicable_when = Comparison(
+            field="sections.a.in_network", op="eq", value="Yes"
+        )
+        controller, _ = _controller(plan)
+        controller.note_task_outro("Moving on.")  # an earlier task's outro
+        agent = await _enter(controller, 0)
+        with _session_patch(agent, MagicMock()):
+            successor = await _tool(agent, "representative_requests_end_call")()
+        assert successor is controller.wrap_up_agent
+        assert controller.signed_off is False
+
+    @pytest.mark.asyncio
+    async def test_the_handoff_span_names_the_reason(self, otel_spans: Any) -> None:
+        from opentelemetry import trace
+
+        controller, _ = _controller(_gap_plan())
+        agent = await _enter(controller, 0)
+        tracer = trace.get_tracer("test")
+        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
+            await _tool(agent, "representative_requests_end_call")()
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
+        assert span.attributes["vera.handoff.from_task"] == "intro_task"
+        assert span.attributes["vera.handoff.to_task"] == "closing_task"
+        assert span.attributes["vera.handoff.reason"] == "end_call_requested"
+
+
+def _titled_gap_plan() -> CallPlan:
+    """Two services whose leaf titles COLLIDE — the real CPT shape. Only the panel titles tell
+    the two "Covered" questions apart, which is the whole point of the refusal rewrite."""
+    fields = [
+        _field("sections.t.elective.cpt_89337.covered", "Covered", values=["Yes", "No"]),
+        _field("sections.t.cancer.cpt_89337.covered", "Covered", values=["Yes", "No"]),
+        _field("sections.t.elective.cycle_limit", "Cycle Limit"),
+    ]
+    for field in fields:
+        field.owner_title = "CPT 89337" if "cpt_89337" in field.path else "Egg Cryo Elective"
+    closing = [_field("sections.close.ref_number", "Reference number")]
+    panels = [
+        PromptPanel(
+            title="Infertility Treatment",
+            items=[
+                PromptPanel(
+                    title="Egg Cryopreservation Elective",
+                    codes=Codes(cpt=["89337"]),
+                    items=[
+                        _question("Is 89337 for elective egg cryo covered?", fields[0].path),
+                        _question("What is the cycle limit for elective egg cryo?", fields[2].path),
+                    ],
+                ),
+                PromptPanel(
+                    title="Egg Cryopreservation Cancer",
+                    codes=Codes(cpt=["89337"]),
+                    items=[
+                        _question("Is 89337 for cancer-related egg cryo covered?", fields[1].path)
+                    ],
+                ),
+            ],
+        )
+    ]
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=[
+            PlanTask(
+                task_key="treatment",
+                title="Treatment",
+                intro="Hello rep.",
+                prompt="Treatment.",
+                fields=fields,
+                panels=panels,
+            ),
+            PlanTask(
+                task_key="closing_task",
+                title="Wrap Up",
+                prompt="Close.",
+                fields=closing,
+                panels=_panels_for(closing),
+            ),
+        ],
+    )
+
+
+class TestRefusalNamesTheService:
+    """The defect: two "Cycle Limit" lines and two "Covered (cpt_89337)" lines, with nothing
+    saying which service either belonged to."""
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_names_each_owed_question_under_its_service(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        agent = await _enter(controller, 0)
+        with _session_patch(agent, MagicMock()):
+            refusal = await _tool(agent, "task_complete")()
+        assert isinstance(refusal, str)
+        assert "Egg Cryopreservation Elective [CPT 89337]:" in refusal
+        assert "Egg Cryopreservation Cancer [CPT 89337]:" in refusal
+        assert "Is 89337 for elective egg cryo covered?" in refusal
+        assert "Is 89337 for cancer-related egg cryo covered?" in refusal
+        # The old rendering: a bare storage-field title with no subject.
+        assert "- Covered (cpt_89337)" not in refusal
+        # The section panel names the task, so it never repeats on a line.
+        assert "Infertility Treatment" not in refusal
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_lists_only_what_is_still_owed(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        controller.update_answers({"sections.t.cancer.cpt_89337.covered": "No"})
+        agent = await _enter(controller, 0)
+        with _session_patch(agent, MagicMock()):
+            refusal = await _tool(agent, "task_complete")()
+        assert isinstance(refusal, str)
+        assert "Egg Cryopreservation Cancer" not in refusal
+        assert "Egg Cryopreservation Elective [CPT 89337]:" in refusal
+
+
+class TestGapInstructionCarriesContext:
+    """The gap agent has no other question list, so its instructions are the whole context."""
+
+    @pytest.mark.asyncio
+    async def test_the_gap_list_names_services_and_pre_loads_gated_follow_ups(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+        assert "Egg Cryopreservation Elective" in gap.instructions
+        assert "Is 89337 for elective egg cryo covered?" in gap.instructions
+        # A gate is NOT a tier marker: `render_panels` prints "Ask only if" on required
+        # questions whose condition already holds, so the prose must tell the agent to
+        # EVALUATE the condition, never to defer anything wearing one.
+        assert "is owed the moment its condition holds" in gap.instructions
+        assert "is a follow-up" not in gap.instructions
+        # The completeness bound has to survive the conditional wording.
+        assert "the complete set" in gap.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_lead_in_counts_the_required_questions_not_the_follow_ups(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        required = numbered_questions(controller.gap_panels(0, controller.gap_fields(0)))
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+        assert f"{required} required question" in gap.instructions
+
+    @pytest.mark.asyncio
+    async def test_the_gap_refusal_uses_the_digest(self) -> None:
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            refusal = await _tool(gap, "gap_complete")()
+        assert isinstance(refusal, str)
+        assert "Egg Cryopreservation Elective [CPT 89337]:" in refusal
+        assert "- Covered (cpt_89337)" not in refusal
+
+
+class TestRefusalJudgesSettledState:
+    """Live call 2650888a871c330cff92314129c6dd0f: four of six refusals named questions whose
+    answers landed 0.8-2.8s later, because the Observer writes in a DETACHED pass and
+    `_task_complete` judged the snapshot as of the previous turn. The agent then re-asked a
+    service it had just finished — going BACKWARD mid-task and drawing a correction from the
+    representative."""
+
+    @pytest.mark.asyncio
+    async def test_a_pending_answer_landing_during_the_drain_prevents_the_refusal(self) -> None:
+        controller, _ = _controller(_gap_plan())
+        controller.attach_observer(
+            cast(
+                Any, FillsDuringDrainObserverManager(controller, {"sections.intro.rep_name": "Pat"})
+            )
+        )
+        agent = controller.agents[0]  # intro_task: rep_name required + unanswered
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            result = await _tool(agent, "task_complete")()
+        # Advanced, not refused: the answer was in flight, not missing.
+        assert isinstance(result, Agent)
+
+    @pytest.mark.asyncio
+    async def test_the_drain_is_bounded_tighter_than_the_observers_own_default(self) -> None:
+        # This wait lands mid-conversation with the representative listening, where the gap
+        # pass's lands at a silent agent-to-agent handoff.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            await _tool(agent, "task_complete")()
+        assert observer.timeouts == [_REFUSAL_DRAIN_TIMEOUT_S]
+        assert _REFUSAL_DRAIN_TIMEOUT_S < 8.0
+
+    @pytest.mark.asyncio
+    async def test_nothing_owed_costs_no_drain_at_all(self) -> None:
+        # The common path is a task_complete that is simply correct; it must not pay silence.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        controller.update_answers({"sections.intro.rep_name": "Pat"})
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)
+        assert observer.drains == 0
+
+    @pytest.mark.asyncio
+    async def test_one_tool_call_spends_exactly_one_refusal_from_the_budget(self) -> None:
+        # The trap in adding a drain: judging twice per call would burn the budget twice as
+        # fast and corrupt the shrank comparison the budget resets on. With a budget of 2 and
+        # no progress between calls, the SECOND call must still refuse — it would advance if
+        # one tool call had spent two.
+        controller, _ = _controller(_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            first = await _tool(agent, "task_complete")()
+            second = await _tool(agent, "task_complete")()
+        assert isinstance(first, str)
+        assert isinstance(second, str)
+        assert _TASK_FRUITLESS_REFUSALS == 2  # the budget the assertion above is sized against
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_never_claims_an_answer_is_absent(self) -> None:
+        # The snapshot can always be one extraction behind, so the message must not assert
+        # something the agent can hear is false — it drove the backward re-ask on the live call.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            refusal = cast(str, await _tool(agent, "task_complete")())
+        assert "have no answer on file" not in refusal
+        assert "no answer is recorded yet" in refusal
+        assert "do NOT ask it again" in refusal
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_is_private_and_reads_as_a_continuation(self) -> None:
+        # Live call cea003d0599a91f2b20255810bbc52b6: the agent relayed the refusal to the
+        # representative — "Sorry, I got ahead of myself" — inventing an error the rep never
+        # saw and advertising that the question list is machine-checked. Both guards must read
+        # as "keep going", never as a rebuke, and must forbid narrating the instruction.
+        controller, _ = _controller(_gap_plan())
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            task_refusal = cast(str, await _tool(agent, "task_complete")())
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            gap_refusal = cast(str, await _tool(gap, "gap_complete")())
+        for refusal in (task_refusal, gap_refusal):
+            assert refusal.startswith("Keep going —")
+            assert "Not yet" not in refusal
+            assert "do not apologize" in refusal
+            assert "got ahead of yourself" in refusal
+
+
+class TestGuardCountsMatchTheirLists:
+    """Review findings 3, 4 and 6a: a count or a ceiling that disagrees with the list beneath
+    it releases the guard early or misleads the agent's own arithmetic."""
+
+    @pytest.mark.asyncio
+    async def test_the_gap_ceiling_measures_the_list_the_agent_was_given(self) -> None:
+        # `owed_question_count` counts only the unconditionally-owed tier, but the instruction
+        # lists the exploded tree. Measuring the short number released the guard after that many
+        # rep turns with the conditional follow-ups still unasked.
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+        listed = numbered_questions(
+            controller.gap_panels(0, controller.gap_fields(0), explode=True)
+        )
+        assert gap._questions_owed == listed
+        assert listed >= controller.owed_question_count(0)
+
+    @pytest.mark.asyncio
+    async def test_the_gap_ceiling_does_not_shrink_as_answers_land(self) -> None:
+        # Snapshot at entry, like PlanTaskAgent._questions_at_entry — re-reading it mid-sweep
+        # would lower the bar every time an answer arrived.
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            at_entry = gap._questions_owed
+            controller.update_answers({"sections.t.cancer.cpt_89337.covered": "No"})
+            await _rep_turn(gap)
+        assert gap._questions_owed == at_entry
+
+    @pytest.mark.asyncio
+    async def test_the_gap_refusal_counts_spoken_asks_not_owed_fields(self) -> None:
+        # Eight owed codes of one fanned ask render as a single line; claiming "8 questions"
+        # over it is a number the agent cannot reconcile with what it sees.
+        controller, _ = _controller(_titled_gap_plan())
+        await _enter(controller, 0)
+        gap = controller.gap_agents[0]
+        with _session_patch(gap, MagicMock()):
+            await gap.on_enter()
+            refusal = cast(str, await _tool(gap, "gap_complete")())
+        listed = numbered_questions(controller.gap_panels(0, controller.gap_fields(0)))
+        assert f"for {listed} of the follow-up question" in refusal
+
+    @pytest.mark.asyncio
+    async def test_no_drain_once_the_turn_ceiling_has_released_the_guard(self) -> None:
+        # Past the ceiling the guard returns None unconditionally, so a drain there is pure
+        # silence — repeated on every remaining handoff of the call.
+        controller, _ = _controller(_titled_gap_plan())
+        observer = FakeObserverManager()
+        controller.attach_observer(cast(Any, observer))
+        agent = controller.agents[0]
+        with _session_patch(agent, MagicMock()):
+            await agent.on_enter()
+            for _ in range(agent._questions_at_entry):
+                await _rep_turn(agent)
+            observer.drains = 0
+            result = await _tool(agent, "task_complete")()
+        assert isinstance(result, Agent)  # ceiling released it
+        assert observer.drains == 0

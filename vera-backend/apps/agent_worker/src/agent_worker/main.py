@@ -64,6 +64,9 @@ from vera_core.events import (
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
+    TRANSPORT_ATTR,
+    TRANSPORT_BROWSER,
+    TRANSPORT_SIP,
     call_trace_attributes,
     is_observer_identity,
     parse_room_name,
@@ -100,6 +103,22 @@ def _is_ready_speaker(participant: rtc.Participant) -> bool:
     if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
         return participant.attributes.get(_SIP_CALL_STATUS_ATTR) == _SIP_CALL_STATUS_ACTIVE
     return True
+
+
+def transport_of(speaker: rtc.Participant) -> str:
+    """How the callee reached the room, for the call's Langfuse span."""
+    if speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return TRANSPORT_SIP
+    return TRANSPORT_BROWSER
+
+
+def should_emit_answered(speaker: rtc.Participant, meta: dict[str, object]) -> bool:
+    """The SIP callee answering is the "call is live" signal; under browser-callee
+    transport the browser speaker stands in for it (a Voice Lab browser caller, which
+    sets no such metadata, does not)."""
+    if speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        return True
+    return bool(meta.get("browser_callee"))
 
 
 @dataclass(frozen=True)
@@ -397,9 +416,9 @@ async def entrypoint(ctx: JobContext) -> None:
                         await events_redis.aclose()
                 return
             speaker = outcome.participant
-            # The SIP callee answering is the "call is live" signal; a browser caller
-            # (voice-lab browser mode) is not an answered phone call.
-            if lifecycle is not None and speaker.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            # From the resolved speaker, not the metadata: what actually reached the room.
+            trace.get_current_span().set_attribute(TRANSPORT_ATTR, transport_of(speaker))
+            if lifecycle is not None and should_emit_answered(speaker, meta):
                 await lifecycle.answered(now_ms=int(time.time() * 1000))
 
         # Tenant persona overlay arrives as opaque dispatch metadata (set by the control
@@ -532,7 +551,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     end_grace_seconds=settings.transcript_end_grace_seconds,
                 ),
                 room_name=room_name,
+                # One in-flight attempt's cap plus adapter overhead, not the whole
+                # Gemini->OpenAI fallback cascade — tied to the same setting so the two
+                # budgets can't drift, since the gap pass chains agent to agent with no
+                # speech between them and every extra second here is repeated dead air.
+                drain_timeout=settings.observer_extract_attempt_timeout_seconds + 2.0,
             )
+            controller.attach_observer(observer_manager)
             observer_manager.start()
 
         # Call-health observer (real /calls flow only: needs both the per-call

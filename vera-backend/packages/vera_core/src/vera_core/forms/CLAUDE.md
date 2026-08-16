@@ -83,6 +83,18 @@ fails CI on any drift, and round-trip (`load → compile` = identity) must hold.
   call; `context` = injected as agent background; `input`/`readonly` (and every
   leaf of a `ui_only` section) = never voice-touched. `system_fields` binds
   platform handles to paths and wins over role in the UI color coding.
+- **Role decides whether an intake value may settle a GATE.** `call_plan.gating_seed` drops
+  `ask`-role paths from the worker's pre-call baseline: an `ask` leaf is collected on the
+  call, so a value on file for one is a baseline, never an answer. `confirm` stays (on file
+  to be read back), `context`/`input` stay (clinic-supplied). `PlanRunController.update_answers`
+  MERGES the call's answers onto that baseline — a wholesale replace puts the intake values
+  back, which is why the Observer pushes `_recorded` and not its full `_on_file` map.
+- **`default` is an export/completion fallback, never an answer.** The export writes it when
+  nothing was collected (`export_form_sheet`) and `completion_pct_v2` counts it filled; the
+  call's owed set (`owed_now`) ignores it. The intake UI materializes it into `field_answer`
+  at create, so a `default` on a leaf that GATES another question used to delete that question
+  from the compiled prompt — `validate_confirm_defaults` rejects the confirm case, and
+  `gating_seed` makes the ask case inert.
 - `rep_call_reference_number_field` is the one generalized place to look for a
   schema's rep call reference number, regardless of insurance type — a retry
   mechanism reads it to decide whether a previous attempt already captured a

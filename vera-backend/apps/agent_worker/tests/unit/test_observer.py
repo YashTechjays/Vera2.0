@@ -32,18 +32,18 @@ def _field(path: str) -> PlanFieldDescriptor:
 
 
 def _plan(
+    fields: list[PlanFieldDescriptor] | None = None,
     *,
     flow_rules: list[FlowRule] | None = None,
     numeric_consistencies: list[NumericConsistency] | None = None,
     prefilled: dict[str, Any] | None = None,
 ) -> CallPlan:
-    return CallPlan(
-        schema_name="Test",
-        insurance_type="ibv_standard",
-        dsl_version="2.1",
-        schema_version_id=uuid.uuid4(),
-        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
-        tasks=[
+    # `fields` overrides the default two-task shape with a single task ("t1") whitelisting
+    # exactly those fields — for tests that only care about one task's extraction/whitelist.
+    tasks = (
+        [PlanTask(task_key="t1", title="T1", prompt=".", fields=fields)]
+        if fields is not None
+        else [
             PlanTask(
                 task_key="t1",
                 title="T1",
@@ -56,7 +56,15 @@ def _plan(
                 ],
             ),
             PlanTask(task_key="t2", title="T2", prompt=".", fields=[_field("sections.b.y")]),
-        ],
+        ]
+    )
+    return CallPlan(
+        schema_name="Test",
+        insurance_type="ibv_standard",
+        dsl_version="2.1",
+        schema_version_id=uuid.uuid4(),
+        session=PlanSession(persona="P.", goal="G.", base_instructions="B."),
+        tasks=tasks,
         flow_rules=flow_rules or [],
         numeric_consistencies=numeric_consistencies or [],
         prefilled=prefilled or {},
@@ -99,6 +107,18 @@ class FakeExtractor:
         if self.raises:
             raise RuntimeError("gemini exploded")
         return list(self.answers)
+
+
+class SlowExtractor(FakeExtractor):
+    """`FakeExtractor` that takes `delay` seconds, so a drain has something to wait for."""
+
+    def __init__(self, answers: list[ExtractedAnswer], *, delay: float) -> None:
+        super().__init__(answers)
+        self.delay = delay
+
+    async def extract(self, task: Any, transcript: str) -> list[ExtractedAnswer]:
+        await asyncio.sleep(self.delay)
+        return await super().extract(task, transcript)
 
 
 class FakeTranscript:
@@ -210,6 +230,21 @@ class TestRecording:
         assert len(bus.events) == 1
 
     @pytest.mark.asyncio
+    async def test_confirming_an_ask_role_prefill_still_reaches_the_controller(self) -> None:
+        # sections.a.x is `ask`-role (see `_field`), which `gating_seed` drops from the
+        # controller's baseline — the dedup branch below is the only place left that can
+        # still tell the controller the call stated it.
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Family", 90)])
+        manager, run_state, bus, controller = _manager(
+            _plan(prefilled={"sections.a.x": "Family"}), extractor
+        )
+        await _feed(manager, _rep("It's family coverage."))
+        assert controller.answers["sections.a.x"] == "Family"
+        # No new ai_call row and no emit — a mere confirmation leaves the INTAKE row current.
+        assert run_state.records == []
+        assert bus.events == []
+
+    @pytest.mark.asyncio
     async def test_bot_turn_does_not_trigger_a_pass_but_counts_a_seq(self) -> None:
         extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
         manager, run_state, _, _ = _manager(_plan(), extractor)
@@ -217,6 +252,55 @@ class TestRecording:
         assert extractor.calls == 0
         await _feed(manager, _rep("Yes."))  # seq 1
         assert run_state.records[0][3] == 1  # evidence_seq = latest rep turn seq
+
+
+class TestAnswerRecordedSpan:
+    """Path, confidence and task only — never the value — fixing a call that recorded 233
+    answers and exposed zero field paths in its trace."""
+
+    @pytest.mark.asyncio
+    async def test_a_recorded_answer_emits_a_span_naming_the_path_but_not_the_value(
+        self, otel_spans: Any
+    ) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _rep("yes it is"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.observer.answer_recorded"
+        )
+        assert span.attributes["vera.field.path"] == "sections.a.x"
+        assert span.attributes["vera.field.confidence"] == 90
+        assert span.attributes["vera.task.key"] == "t1"
+        # PHI must never reach a span (design's per-span denylist check): substring-checked
+        # against the span name, every attribute VALUE, status description and events — not
+        # merely "the path is present but the value happens not to collide with it".
+        assert_no_phi_values(span, "Yes")
+        assert "Yes" not in str(span.attributes)
+
+    @pytest.mark.asyncio
+    async def test_confidence_is_omitted_rather_than_coerced_when_absent(
+        self, otel_spans: Any
+    ) -> None:
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", None)])
+        manager, _, _, _ = _manager(_plan(), extractor)
+        await _feed(manager, _rep("yes it is"))
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.observer.answer_recorded"
+        )
+        assert "vera.field.confidence" not in span.attributes
+
+    @pytest.mark.asyncio
+    async def test_task_key_is_omitted_when_no_task_is_active(self, otel_spans: Any) -> None:
+        # `_active_index` is only ever None while no TaskObserver is feeding turns, so this
+        # is not reachable through the normal ingest path — exercised directly on the
+        # write-path method instead.
+        manager, _, _, _ = _manager(_plan(), FakeExtractor([]))
+        manager._active_index = None
+        await manager._record_locked(ExtractedAnswer("sections.a.x", "Yes", 90), None)
+        span = next(
+            s for s in otel_spans.get_finished_spans() if s.name == "vera.observer.answer_recorded"
+        )
+        assert "vera.task.key" not in span.attributes
 
 
 class TestStreamFiltering:
@@ -684,7 +768,9 @@ class TestDerivedRemaining:
             extractor,
         )
         await _feed(manager, _rep("Total 25k, met 5k."))
-        assert controller.answers[REMAINING] == "$1,000"
+        # Blocked derivation means nothing was ever RECORDED for it, and the Observer now
+        # pushes only what the call collected — the controller never sees the prefill either.
+        assert REMAINING not in controller.answers
         assert not any(path == REMAINING for _, path, _, _ in run_state.records)
 
     @pytest.mark.asyncio
@@ -709,3 +795,145 @@ class TestDerivedRemaining:
         await _feed(manager, _rep("Same again.", ts=2))
         derived = [r for r in run_state.records if r[1] == REMAINING]
         assert len(derived) == 1
+
+
+def test_extraction_instructions_carry_the_routing_note() -> None:
+    """Without it the extractor writes `No` for the branch the rep did not take."""
+    from agent_worker.observer import _extraction_instructions
+    from vera_core.forms.call_plan import PlanFieldDescriptor, PlanTask
+
+    task = PlanTask(
+        task_key="t",
+        title="T",
+        prompt="p",
+        fields=[
+            PlanFieldDescriptor(
+                path="sections.s.branch_a.covered",
+                title="Covered",
+                type="enum",
+                role="ask",
+                values=["Yes", "No", "N/A"],
+                exclusive_note="Only one of A or B applies. …record N/A here — never No…",
+            ),
+            PlanFieldDescriptor(
+                path="sections.s.plain",
+                title="Plain",
+                type="text",
+                role="ask",
+            ),
+        ],
+    )
+    text = _extraction_instructions(task)
+    assert "record N/A here — never No" in text
+    assert "- sections.s.plain: Plain" in text  # unnoted fields keep their bare line
+    # The unit convention is ONE header sentence, not a per-field annotation — the leaf
+    # titles already carry "(%)"/"($)", and annotating each field would multiply the cost
+    # on a CPT panel. (The bare-line assertion above is what pins that down.) No declared
+    # range is passed either: a "0-100" hint nudges the model into rescaling a fraction
+    # like 0.2 into 20%, which is an upstream ambiguity we refuse to guess at.
+    assert '"20%", never "20"' in text
+
+
+class TestDrainPending:
+    @pytest.mark.asyncio
+    async def test_drain_awaits_the_still_active_observers_in_flight_pass(self) -> None:
+        """The real call site: `note_task_entered` then `drain_observer`, with no transcript
+        turn in between. `_rotate` is LAZY (it fires from the NEXT `ingest`), so the task that
+        just finished is still `_active` here — never `_retiring`. Draining only
+        `_retiring`/`_closing` (the fix's first cut) misses this pass entirely, and the sweep
+        re-asks a question the rep just answered."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.05)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))  # schedules a pass on the ACTIVE observer
+        await manager.drain_pending(timeout=5.0)
+        assert run_state.records, "the active observer's in-flight pass was not drained"
+
+    @pytest.mark.asyncio
+    async def test_drain_awaits_the_retiring_observers_final_pass(self) -> None:
+        """The shutdown-adjacent case: by the time `aclose()` retires the active observer
+        (`_rotate(None)`), a straddling answer sits in `_retiring`, not `_active`. Still a
+        real path (final call teardown), just not the one the gap sweep hits."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.05)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)  # task ended; the outgoing observer retires
+        await manager.drain_pending(timeout=5.0)
+        assert run_state.records, "the final extraction pass had not completed when drain returned"
+
+    @pytest.mark.asyncio
+    async def test_drain_returns_on_timeout_instead_of_stalling(self) -> None:
+        """The barrier must never become a hang: a slow extractor falls through."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.2)
+        manager, _run_state, _bus, _controller = _manager(
+            _plan([_field("sections.a.b")]), extractor
+        )
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)
+        await asyncio.wait_for(manager.drain_pending(timeout=0.05), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_drain_timeout_does_not_cancel_the_pending_extraction(self) -> None:
+        """`asyncio.timeout` cancels on expiry, and that cancellation cascades through
+        `gather` into every awaited child — including the extraction pass itself, which is
+        strictly worse than the phantom gap this barrier exists to fix (the answer is not
+        late, it is gone). `asyncio.wait` never cancels: the pass keeps running after
+        `drain_pending` returns, and its answer still lands, just later."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.1)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)
+        await manager.drain_pending(timeout=0.02)  # times out well before the 0.1s pass ends
+        assert run_state.records == [], "should not have landed yet at this point"
+        await asyncio.sleep(0.15)  # let the still-running pass finish in the background
+        assert run_state.records, "the pending extraction was cancelled, not just delayed"
+
+    @pytest.mark.asyncio
+    async def test_drain_does_not_wedge_the_loop_on_already_done_closing_entries(self) -> None:
+        """Regression fence for the hazard `TaskObserver.aclose` already guards against (see
+        its comment): gathering already-completed tasks without removing them from the
+        tracked set first can resolve WITHOUT ever yielding to the loop, so a `while
+        self._closing:` loop around it spins forever rather than merely lingering. Constructs
+        the state directly (a done task in `_closing` with no done_callback to discard it) so
+        the repro does not depend on winning a callback-timing race."""
+
+        async def _noop() -> None:
+            return None
+
+        done_task = asyncio.create_task(_noop())
+        await done_task  # already completed; never wired to a callback that discards it
+        manager, _run_state, _bus, _controller = _manager(_plan(), FakeExtractor([]))
+        manager._closing.add(done_task)
+
+        ticked = False
+
+        async def _tick() -> None:
+            nonlocal ticked
+            await asyncio.sleep(0)
+            ticked = True
+
+        ticker = asyncio.create_task(_tick())
+        await asyncio.wait_for(manager.drain_pending(timeout=1.0), timeout=1.0)
+        await ticker
+        assert ticked, "a concurrent task never got a turn — the loop was starved"
+        assert done_task not in manager._closing
+
+    @pytest.mark.asyncio
+    async def test_cancelling_drain_pending_does_not_orphan_closing(self) -> None:
+        """A drain cancelled mid-wait (hangup during the outro, session teardown) must not
+        strand the adopted task outside `_closing`: removing it from the tracked set up
+        front, before the await, is exactly what a cancellation skips past — the
+        `if pending:` restore line never runs. Each task now carries its OWN discard
+        callback and is only ever removed after a wait that actually completed, so a
+        cancelled drain leaves it there for `aclose` to keep waiting on."""
+        extractor = SlowExtractor([ExtractedAnswer("sections.a.b", "Yes", 90)], delay=0.1)
+        manager, run_state, _bus, _controller = _manager(_plan([_field("sections.a.b")]), extractor)
+        manager.ingest(_rep("yes it is"))
+        manager._rotate(None)  # retires the observer; drain_pending will schedule its close
+        drain = asyncio.create_task(manager.drain_pending(timeout=5.0))
+        await asyncio.sleep(0)  # let drain_pending run its setup and reach the await
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+        assert manager._closing, "the adopted close task was stranded outside _closing"
+        await manager.aclose()
+        assert run_state.records, "aclose stopped waiting for the in-flight pass"

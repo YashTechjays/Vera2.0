@@ -2,7 +2,9 @@
 
 Pulls admitted forms from the tenant's queue, checks concurrency limits and
 insurance-provider working hours, and initiates calls. Invoked on two events:
-(1) a form is enqueued, (2) a call ends and a concurrency slot frees up.
+(1) a form is enqueued, (2) a call ends and a concurrency slot frees up. Under
+browser-callee transport (a test-only gateway flag) no SIP call is placed and the
+room simply waits for a browser participant.
 
 Mostly PHI-free — it operates on form IDs, statuses, and tenant/provider config. The one
 exception is the dispatch `metadata`, which carries `agent_context` (raw patient/provider
@@ -61,7 +63,13 @@ from vera_core.models.enums import (
     FormStatus,
     VersionStatus,
 )
-from vera_core.observability.correlation import call_trace_attributes, room_name_for_call
+from vera_core.observability.correlation import (
+    TRANSPORT_ATTR,
+    TRANSPORT_BROWSER,
+    TRANSPORT_SIP,
+    call_trace_attributes,
+    room_name_for_call,
+)
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.field_answers import current_values_by_path
@@ -303,11 +311,14 @@ async def try_dispatch(
     )
     tweak_fields = tweak.model_dump(exclude_none=True)
 
+    # getattr: livekit is duck-typed, and a gateway without the flag is a SIP gateway.
+    browser_callee: bool = getattr(livekit, "browser_callee_transport", False)
+
     # Resolve the tenant's outbound SIP trunk once for the whole pass — every
     # candidate dials through the same trunk. Skip the lookup entirely when
-    # there's nothing to dispatch.
+    # there's nothing to dispatch, or when no SIP call will be placed at all.
     trunk_id: str | None = None
-    if candidates:
+    if candidates and not browser_callee:
         creds = await get_integration_credentials(
             session, kms, integration_type_name="livekit_outbound_trunk_id"
         )
@@ -370,6 +381,9 @@ async def try_dispatch(
             metadata["enable_ivr_navigation"] = True
         if tweak_fields:
             metadata["persona_tweak"] = tweak_fields
+        if browser_callee:
+            # Tells the worker a browser speaker stands in for an answered SIP callee.
+            metadata["browser_callee"] = True
 
         # Retry scope: with a call reference number captured, the retry is FOCUSED —
         # stage a plan narrowed to the still-missing (group-expanded) fields so the
@@ -452,6 +466,7 @@ async def try_dispatch(
                 span_attrs: dict[str, Any] = {
                     **call_trace_attributes(room_name),
                     "vera.dispatch.ivr_enabled": bool(metadata.get("enable_ivr_navigation")),
+                    TRANSPORT_ATTR: TRANSPORT_BROWSER if browser_callee else TRANSPORT_SIP,
                 }
                 if staged_plan is not None:
                     span_attrs["vera.dispatch.task_count"] = len(staged_plan[0].tasks)
@@ -529,37 +544,38 @@ async def try_dispatch(
         # evidence (FAILED + retry accounting) instead of rolling it back. Pace
         # every dial attempt ~1/s (carrier CPS limit) — failed dials still consume
         # carrier capacity — sleep between attempts, never before the first.
-        if dial_attempted:
-            await asyncio.sleep(dial_pacing_s)
-        dial_attempted = True
-        try:
-            await livekit.create_sip_participant(
-                room_name, form.insurance_provider_phone_number, trunk_id
-            )
-        except OutboundDialError as exc:
-            # str(exc), not .diagnostic: keeps the detail when there is no code to render.
-            logger.warning("dispatch: outbound dial failed for call %s: %s", call.id, exc)
-            with contextlib.suppress(Exception):  # room teardown is best-effort
-                await livekit.delete_room(room_name)
-            requeued = apply_terminal_call_status(
-                call,
-                form,
-                CallStatus.FAILED,
-                tenant_max_retries=tenant.max_retries,
-                auto_retry_enabled=tenant.auto_retry_enabled,
-            )
-            call.ended_at = func.now()
-            if requeued:
-                form.enqueued_at = func.now()
-            session.add(
-                CallEvent(
-                    tenant_id=tenant_id,
-                    call_id=call.id,
-                    event_type=CallEventType.STATUS.value,
-                    event_value=CallStatus.FAILED.value,
+        if not browser_callee:
+            if dial_attempted:
+                await asyncio.sleep(dial_pacing_s)
+            dial_attempted = True
+            try:
+                await livekit.create_sip_participant(
+                    room_name, form.insurance_provider_phone_number, trunk_id
                 )
-            )
-            continue
+            except OutboundDialError as exc:
+                # str(exc), not .diagnostic: keeps the detail when there is no code to render.
+                logger.warning("dispatch: outbound dial failed for call %s: %s", call.id, exc)
+                with contextlib.suppress(Exception):  # room teardown is best-effort
+                    await livekit.delete_room(room_name)
+                requeued = apply_terminal_call_status(
+                    call,
+                    form,
+                    CallStatus.FAILED,
+                    tenant_max_retries=tenant.max_retries,
+                    auto_retry_enabled=tenant.auto_retry_enabled,
+                )
+                call.ended_at = func.now()
+                if requeued:
+                    form.enqueued_at = func.now()
+                session.add(
+                    CallEvent(
+                        tenant_id=tenant_id,
+                        call_id=call.id,
+                        event_type=CallEventType.STATUS.value,
+                        event_value=CallStatus.FAILED.value,
+                    )
+                )
+                continue
 
         dispatched += 1
         if recording is not None:

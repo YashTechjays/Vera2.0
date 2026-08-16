@@ -498,23 +498,36 @@ async def test_concurrent_enqueues_at_limit_admit_exactly_one(
 
 
 # ---------------------------------------------------------------------------
-# `ivr_navigation_enabled` — the per-form voice-lab-style toggle (default True),
+# `ivr_navigation_enabled` — the per-form voice-lab-style toggle (default False),
 # persisted on the row so a later dispatch (freed slot / sweeper / retry) and any
 # requeue keep the operator's choice.
 # ---------------------------------------------------------------------------
 
 
+async def _stored_ivr_flag(sessionmaker: async_sessionmaker[AsyncSession], form_id: UUID) -> bool:
+    """Read `ivr_navigation_enabled` off the row, bypassing the API."""
+    async with sessionmaker() as session:
+        enabled = (
+            await session.execute(
+                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
+                    fid=form_id
+                )
+            )
+        ).scalar_one()
+    return bool(enabled)
+
+
 @pytest.mark.asyncio
-async def test_intake_defaults_ivr_navigation_on(
+async def test_intake_defaults_ivr_navigation_off(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
     ibv_schema: tuple[UUID, UUID],
     cleanup_forms: None,
 ) -> None:
-    """A freshly-intaken form defaults `ivr_navigation_enabled` to True (column
-    default) — every real payer call navigates the IVR unless an operator opts out
-    at enqueue time."""
+    """A freshly-intaken form defaults `ivr_navigation_enabled` to False (column
+    default) — operators opt IN to IVR navigation at enqueue time (product
+    decision 2026-08-10)."""
     form_type_id, version_id = ibv_schema
     token = await _issue_key(admin_sessionmaker, rbac_world.tenant_id)
     resp = await client.post(
@@ -529,15 +542,7 @@ async def test_intake_defaults_ivr_navigation_on(
     assert resp.status_code == 200, resp.text
     form_id = UUID(resp.json()["data"]["id"])
 
-    async with admin_sessionmaker() as session:
-        enabled = (
-            await session.execute(
-                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
-                    fid=form_id
-                )
-            )
-        ).scalar_one()
-    assert enabled is True
+    assert await _stored_ivr_flag(admin_sessionmaker, form_id) is False
 
 
 @pytest.mark.asyncio
@@ -557,15 +562,7 @@ async def test_enqueue_can_disable_ivr_navigation(
     )
     assert resp.status_code == 200, resp.text
 
-    async with admin_sessionmaker() as session:
-        enabled = (
-            await session.execute(
-                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
-                    fid=queue_form_id
-                )
-            )
-        ).scalar_one()
-    assert enabled is False
+    assert await _stored_ivr_flag(admin_sessionmaker, queue_form_id) is False
 
 
 @pytest.mark.asyncio
@@ -602,25 +599,25 @@ async def test_requeue_without_toggle_keeps_stored_choice(
     )
     assert resp.status_code == 200, resp.text
 
-    async with admin_sessionmaker() as session:
-        enabled = (
-            await session.execute(
-                text("SELECT ivr_navigation_enabled FROM patient_form WHERE id = :fid").bindparams(
-                    fid=queue_form_id
-                )
-            )
-        ).scalar_one()
-    assert enabled is False
+    assert await _stored_ivr_flag(admin_sessionmaker, queue_form_id) is False
 
 
 @pytest.mark.asyncio
 async def test_detail_exposes_ivr_toggle(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
     queue_form_id: UUID,
 ) -> None:
     """`GET /patient-forms/{id}` mirrors the row's `ivr_navigation_enabled` so the
-    UI's requeue toggle can pre-load from it."""
+    UI's requeue toggle can pre-load from it. The row is set True (against the
+    False column default) so a hardcoded response value cannot pass."""
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE patient_form SET ivr_navigation_enabled = true WHERE id = :fid"
+            ).bindparams(fid=queue_form_id)
+        )
     resp = await client.get(
         f"/api/v1/patient-forms/{queue_form_id}",
         headers=_auth(rbac_world.admin_token),

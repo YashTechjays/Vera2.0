@@ -18,6 +18,24 @@ def test_cartesia_guide_survives_plan_only() -> None:
     assert "<spell>" in CARTESIA_MARKUP_GUIDE
 
 
+def test_no_prompt_text_spells_icd_with_digits() -> None:
+    """ "ICD-10" is voiced "I-C-D one zero" — heard on a live call. Every prompt string the
+    agent copies into speech says "ICD ten"; the space rather than a hyphen keeps any TTS
+    provider from reading the separator aloud as "dash". The Excel export column is
+    deliberately still "ICD-10" — that one is read, not spoken."""
+    import agent_worker.prompt as prompt_module
+
+    spoken = [
+        value
+        for name, value in vars(prompt_module).items()
+        if isinstance(value, str) and not name.startswith("__")
+    ]
+    assert spoken, "no prompt constants found — did the module move?"
+    for text in spoken:
+        assert "ICD-10" not in text
+        assert "ICD-Ten" not in text
+
+
 def test_voice_lab_instructions_carry_persona_and_markup_guide() -> None:
     instructions = build_voice_lab_instructions()
     assert "infertility" in instructions.lower()  # the preview persona

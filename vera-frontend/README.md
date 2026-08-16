@@ -7,6 +7,20 @@ Currently, two official plugins are available:
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
 - [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
+## Environment variables
+
+This project ships no dotenv sample file — this README is where env vars are recorded.
+
+- `VITE_API_BASE_URL` — control-plane base URL. Defaults to `http://localhost:8000/api/v1`.
+- `VITE_DEFAULT_TENANT_SLUG` — prefills the tenant slug on the login and forgot-password forms.
+- `VITE_DEV_EMAIL` / `VITE_DEV_PASSWORD` — prefill the tenant login form. Dev convenience only.
+- `VITE_DEV_PLATFORM_EMAIL` / `VITE_DEV_PLATFORM_PASSWORD` — the same for the platform login.
+- `VITE_BROWSER_CALLEE_TRANSPORT` — off by default; test transport only. Controls only
+  whether the "Join as payer rep" button renders in Live Monitoring. The backend's
+  `VERA_BROWSER_CALLEE_TRANSPORT` is the authority — if the two drift, the join request
+  returns 409 and the UI falls back to listen-only. Set both to `true` together for local
+  end-to-end testing; the runbook is in `vera-backend/README.md` → "Browser callee".
+
 ## React Compiler
 
 The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).

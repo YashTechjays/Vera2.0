@@ -14,7 +14,7 @@ from vera_core.forms.call_plan import (
     compile_call_plan,
     fuse_prefill,
 )
-from vera_core.forms.dsl import FormSchemaDoc, load_document
+from vera_core.forms.dsl import Codes, FormSchemaDoc, load_document
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
     PromptDocument,
@@ -22,8 +22,17 @@ from vera_core.forms.prompting import (
     RenderedTaskPrompt,
     SessionBlock,
     TaskTextOverride,
+    numbered_questions,
+    render_digest,
+    render_panels,
     render_task_prompts,
 )
+from vera_core.forms.question_plan import PromptOption, PromptPanel, PromptQuestion
+
+
+def _q(text: str, *paths: str) -> PromptQuestion:
+    return PromptQuestion(text=text, options=[PromptOption(target_paths=list(paths))])
+
 
 FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
 SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
@@ -52,14 +61,6 @@ def disease_only_prompts() -> RenderedPrompts:
         (FORM_SCHEMA_DIR / "disease_only_verification.json").read_text(encoding="utf-8")
     )
     return render_task_prompts(doc)
-
-
-def tasks_with_phrasing_guidance(rendered: RenderedPrompts) -> set[str]:
-    return {
-        t.task_key
-        for t in rendered.tasks
-        if "vary how you" in t.prompt.lower() and "That is wording only" in t.prompt
-    }
 
 
 class TestSession:
@@ -169,31 +170,34 @@ class TestTaskText:
         for t in RENDERED.tasks:
             assert "sections." not in CONFIRM_SLOT_RE.sub("", t.prompt), t.task_key
 
-    def test_multi_gate_or_condition_parenthesized(self) -> None:
+    def test_a_covered_gate_reads_as_prose_not_a_field_comparison(self) -> None:
+        # Inside a panel `"Covered" is "Yes"` has no antecedent, and on a fanned-out question
+        # there is no single field it could name.
         infertility = task("infertility_coverage").prompt
-        assert " and (" in infertility
-        assert " or " in infertility.split(" and (", 1)[1]
+        assert "Ask only if this service is covered." in infertility
+        assert 'Ask only if "Covered" is "Yes"' not in infertility
 
-    def test_numeric_range_note_renders(self) -> None:
+    def test_numeric_bounds_render_on_the_option_line(self) -> None:
         infertility = task("infertility_coverage").prompt
-        assert "Expected numeric range: 0 to 100." in infertility
-        assert "Expected numeric range: at least 0." in infertility
+        assert "Coinsurance (%): 0-100" in infertility
+        assert "Copay ($): also: $0, None; at least 0" in infertility
 
     def test_icd10_codes_render_for_speak_sections(self) -> None:
-        assert "ICD-10 Z31.41" in task("diagnostic_coverage").prompt
+        """Spelled "ICD ten", never "ICD-10": the agent copies this line into what it says, and
+        Cartesia voiced the digits as "I-C-D one zero" on a live call. Space, not hyphen, so no
+        TTS provider can read the separator aloud as "dash"."""
+        prompt = task("diagnostic_coverage").prompt
+        assert "ICD ten Z31.41" in prompt
+        assert "ICD-10" not in prompt and "ICD-Ten" not in prompt
 
-    def test_phrasing_guidance_rides_on_the_cpt_tasks_only(self) -> None:
-        # Authored per task in the schema, so it never depends on the runtime spotting
-        # "CPT code" in the rendered question list.
-        assert tasks_with_phrasing_guidance(RENDERED) == {
-            "infertility_coverage",
-            "diagnostic_coverage",
-            "general_office_coverage",
-            "male_partner",
-        }
-
-    def test_disease_only_coverage_task_carries_phrasing_guidance(self) -> None:
-        assert tasks_with_phrasing_guidance(disease_only_prompts()) == {"disease_coverage"}
+    def test_no_task_re_explains_the_structure_the_list_already_carries(self) -> None:
+        # The old renderer flattened groups/ask_groups away, so every CPT-heavy task carried
+        # prose re-describing the grouping and asking for phrasing variety. The panels carry
+        # it now, so that prose is gone — and cannot silently come back.
+        for rendered in (RENDERED, disease_only_prompts()):
+            for t in rendered.tasks:
+                assert "vary how you" not in t.prompt.lower()
+                assert "That is wording only" not in t.prompt
 
     def test_cpt_questions_carry_no_answer_instruction(self) -> None:
         # The rendered "- Answers: Yes | No | N/A" line already states the vocabulary.
@@ -241,3 +245,224 @@ class TestSnapshots:
         text = plan_task(plan, "insurance_basics").prompt
         assert "{{" not in text
         self._check("ibv_insurance_basics.fused_without_spouse.prompt.txt", text)
+
+
+class TestContinuousNumbering:
+    """A task's list is numbered once end to end, so its last ordinal IS its question total.
+    The voice agent is told that total; if the two ever diverge the prompt lies about the list
+    right in front of it."""
+
+    def test_every_real_task_numbers_1_to_n_across_its_sections(self) -> None:
+        for task in PLAN.tasks:
+            ordinals = [
+                int(line.split(".", 1)[0])
+                for line in render_panels(task.panels).splitlines()
+                if line[:1].isdigit()
+            ]
+            assert ordinals == list(range(1, len(ordinals) + 1)), task.task_key
+            assert numbered_questions(task.panels) == len(ordinals), task.task_key
+
+    def test_a_nested_panel_continues_the_parents_count(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Outer",
+                items=[
+                    _q("First?", "a.one"),
+                    PromptPanel(title="Inner", items=[_q("Second?", "a.two")]),
+                    _q("Third?", "a.three"),
+                ],
+            )
+        ]
+        rendered = render_panels(panels)
+        assert "1. First?" in rendered
+        assert "2. Second?" in rendered  # was "1." while numbering restarted per panel
+        assert "3. Third?" in rendered
+        assert numbered_questions(panels) == 3
+
+    def test_a_routing_question_is_neither_numbered_nor_counted(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Coverage",
+                items=[
+                    PromptQuestion(text="Individual or family?", routes_between=["Ind", "Fam"]),
+                    _q("Spouse name?", "a.spouse"),
+                ],
+            )
+        ]
+        assert numbered_questions(panels) == 1
+        assert "1. Spouse name?" in render_panels(panels)
+
+    def test_an_empty_tree_counts_nothing(self) -> None:
+        assert numbered_questions([]) == 0
+
+
+class TestStillNeeded:
+    """A partially-answered fan-out is one question with some members already on file."""
+
+    def test_still_needed_is_rendered_under_the_question(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Labs",
+                items=[
+                    PromptQuestion(
+                        text="Are codes 58340, 82670 covered?",
+                        options=[
+                            PromptOption(
+                                answers="Yes | No",
+                                target_paths=["a.cpt_58340.covered", "a.cpt_82670.covered"],
+                            )
+                        ],
+                        still_needed=["CPT 58340"],
+                    )
+                ],
+            )
+        ]
+        rendered = render_panels(panels)
+        assert "1. Are codes 58340, 82670 covered?" in rendered
+        assert "   - Still needed for: CPT 58340." in rendered
+
+    def test_an_unstamped_question_renders_no_such_line(self) -> None:
+        panels = [
+            PromptPanel(title="Labs", items=[_q("Are codes covered?", "a.cpt_58340.covered")])
+        ]
+        assert "Still needed" not in render_panels(panels)
+
+    def test_still_needed_does_not_take_an_ordinal(self) -> None:
+        panels = [
+            PromptPanel(
+                items=[
+                    PromptQuestion(
+                        text="Q",
+                        options=[PromptOption(target_paths=["a.x", "a.y"])],
+                        still_needed=["CPT 1", "CPT 2"],
+                    )
+                ]
+            )
+        ]
+        assert numbered_questions(panels) == 1
+
+
+def _digest_tree() -> list[PromptPanel]:
+    """One section panel over two service panels — the real compiled shape."""
+    return [
+        PromptPanel(
+            title="Infertility Treatment",
+            items=[
+                PromptPanel(
+                    title="Ovulation Induction (OI/TI)",
+                    codes=Codes(icd10=["Z31.89"]),
+                    items=[
+                        PromptQuestion(
+                            text="What is the cycle limit for ovulation induction?",
+                            options=[PromptOption(target_paths=["a.oi.cycle"])],
+                            gate_text="this service is covered",
+                        )
+                    ],
+                ),
+                PromptPanel(
+                    title="IUI",
+                    codes=Codes(cpt=["58323", "58322"]),
+                    items=[
+                        PromptQuestion(
+                            text="What is the copay or coinsurance for IUI?",
+                            options=[
+                                PromptOption(label="Copay ($)", target_paths=["a.iui.copay"]),
+                                PromptOption(label="Coinsurance (%)", target_paths=["a.iui.coins"]),
+                            ],
+                            gate_text="this service is covered",
+                        ),
+                        PromptQuestion(
+                            text="What is the cycle limit for IUI?",
+                            options=[PromptOption(target_paths=["a.iui.cycle"])],
+                        ),
+                    ],
+                ),
+            ],
+        )
+    ]
+
+
+class TestRenderDigest:
+    def test_a_crumb_is_printed_once_per_panel_with_its_codes(self) -> None:
+        digest = render_digest(_digest_tree())
+        assert "Ovulation Induction (OI/TI) [ICD ten Z31.89]:" in digest
+        assert "IUI [CPT 58323, 58322]:" in digest
+        # The sole root section panel names the task, so it never enters a crumb.
+        assert "Infertility Treatment" not in digest
+        assert digest.count("IUI [CPT 58323, 58322]:") == 1
+
+    def test_numbering_is_continuous_across_panels(self) -> None:
+        digest = render_digest(_digest_tree())
+        assert "1. What is the cycle limit for ovulation induction?" in digest
+        assert "2. What is the copay or coinsurance for IUI?" in digest
+        assert "3. What is the cycle limit for IUI?" in digest
+
+    def test_the_last_ordinal_is_numbered_questions(self) -> None:
+        # The refusal's ordinals have to mean the same thing as the list the agent is reading.
+        tree = _digest_tree()
+        assert f"{numbered_questions(tree)}. What is the cycle limit for IUI?" in render_digest(
+            tree
+        )
+
+    def test_either_or_labels_and_gate_are_carried_inline(self) -> None:
+        assert (
+            "What is the copay or coinsurance for IUI? "
+            "[either: Copay ($) / Coinsurance (%)] (only if this service is covered)"
+        ) in render_digest(_digest_tree())
+
+    def test_still_needed_is_carried_inline(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Labs",
+                items=[
+                    PromptQuestion(
+                        text="Are codes 58340, 82670 covered?",
+                        options=[PromptOption(target_paths=["a.cpt_58340.cov", "a.cpt_82670.cov"])],
+                        still_needed=["CPT 58340"],
+                    )
+                ],
+            )
+        ]
+        assert "(still needed for: CPT 58340)" in render_digest(panels)
+
+    def test_a_routing_question_takes_no_ordinal(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Egg cryo",
+                items=[
+                    PromptQuestion(text="Elective or cancer?", routes_between=["Elec", "Canc"]),
+                    _q("Elective covered?", "a.elec"),
+                ],
+            )
+        ]
+        digest = render_digest(panels)
+        assert "First settle which applies: Elective or cancer?" in digest
+        assert "Elec or Canc — only one applies" in digest
+        assert "1. Elective covered?" in digest
+        assert "1. Elective or cancer?" not in digest
+
+    def test_a_confirm_node_takes_no_ordinal(self) -> None:
+        panels = [
+            PromptPanel(
+                title="Basics",
+                items=[
+                    _q("Spouse name?", "a.spouse"),
+                    PromptQuestion(
+                        text="Read back the DOB",
+                        options=[PromptOption(target_paths=["a.dob"])],
+                        is_confirm=True,
+                    ),
+                ],
+            )
+        ]
+        digest = render_digest(panels)
+        assert "1. Spouse name?" in digest
+        assert "Read back the DOB" in digest
+        assert "2." not in digest
+
+    def test_an_untitled_panel_yields_lines_with_no_crumb(self) -> None:
+        # Hand-built fixtures (and any panel the compiler leaves untitled) still render.
+        assert render_digest([PromptPanel(items=[_q("Rep name?", "a.rep")])]) == "1. Rep name?"
+
+    def test_an_empty_tree_renders_empty(self) -> None:
+        assert render_digest([]) == ""

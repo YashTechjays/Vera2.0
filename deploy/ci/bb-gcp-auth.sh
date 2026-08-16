@@ -6,8 +6,8 @@
 # ever touches the runner.
 #
 # Required env (Bitbucket repository variables):
-#   GCP_WIF_PROVIDER  full provider resource, e.g.
-#                     //iam.googleapis.com/projects/N/locations/global/workloadIdentityPools/POOL/providers/bitbucket
+#   GCP_WIF_PROVIDER  provider resource (bare, no scheme — create-cred-config adds it), e.g.
+#                     projects/N/locations/global/workloadIdentityPools/POOL/providers/bitbucket
 #   GCP_DEPLOYER_SA   deployer SA email to impersonate (same SA the GitHub pipeline used)
 #   GCP_PROJECT_ID    project to set as active
 set -euo pipefail

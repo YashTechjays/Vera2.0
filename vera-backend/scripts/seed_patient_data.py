@@ -107,25 +107,32 @@ _OVERRIDES: dict[str, dict[str, str]] = {
     },
 }
 
-# (section_key, field_key) -> (ai_call_value, confidence, evidence): EXCEPTION_REVIEW
+# Section-rooted leaf path -> (ai_call_value, confidence, evidence): EXCEPTION_REVIEW
 # only. Each becomes an INTAKE baseline (the `_OVERRIDES`/generic-fill value, superseded)
 # plus a diverging current AI_CALL answer — the dispute signal `is_disputed` reads
 # (`vera_core.forms.review`).
-_DISPUTES: dict[tuple[str, str], tuple[str, int, str]] = {
-    ("insurance_information", "doctor_inside_network"): (
+_DISPUTES: dict[str, tuple[str, int, str]] = {
+    "insurance_information.doctor_inside_network": (
         "No",
         92,
         "representative said the doctor is out-of-network this year",
     ),
-    ("benefit_coverage", "coverage_type"): (
+    "benefit_coverage.coverage_type": (
         "Individual",
         88,
         "representative corrected the policy to individual-only",
     ),
-    ("hospital_information", "tax_id"): (
+    "hospital_information.tax_id": (
         "123456789",
         95,
         "representative read back a different tax ID",
+    ),
+    # A matrix-cell leaf, so the `ui.layout: "table"` section header exercises the
+    # same per-section resolve as a plain field row.
+    "diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered": (
+        "No",
+        90,
+        "representative said labs are not covered under this plan",
     ),
 }
 
@@ -259,7 +266,7 @@ async def seed_patient(status: FormStatus) -> None:
         payload_root = {"sections": payload} if is_v2(schema_json) else payload
         prefix = "sections." if is_v2(schema_json) else ""
         disputes = (
-            {f"{prefix}{section}.{field}": value for (section, field), value in _DISPUTES.items()}
+            {f"{prefix}{path}": value for path, value in _DISPUTES.items()}
             if status is FormStatus.EXCEPTION_REVIEW
             else {}
         )

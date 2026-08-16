@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 
 import {
   Dialog,
@@ -10,6 +10,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { Select } from "@/components/ui/select"
 import { listIntakeSchemas } from "@/lib/patient-forms/api"
+import { showFormPicker } from "@/lib/devFlags"
+import { cn } from "@/lib/utils"
 import type { IntakeSchemaOption } from "@/lib/patient-forms/types"
 import { humanizeSegment } from "@/lib/patient-forms/display"
 import { useIbv } from "./IbvProvider"
@@ -38,17 +40,21 @@ function revealField(dialog: HTMLElement | null, path: string): void {
 function SchemaPicker({
   createError,
   loading,
+  autoPickedRef,
   onContinue,
   onCancel,
 }: {
   createError: string | null
   loading: boolean
-  onContinue: (option: IntakeSchemaOption) => void
+  /** Guards the one auto-skip per dialog open; the parent resets it on close. */
+  autoPickedRef: RefObject<boolean>
+  onContinue: (option: IntakeSchemaOption, viaAutoSkip?: boolean) => void
   onCancel: () => void
 }) {
   const [options, setOptions] = useState<IntakeSchemaOption[] | null>(null)
   const [optionsError, setOptionsError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState("")
+  const [forwarding, setForwarding] = useState(false)
 
   // Fresh catalog read on mount — cheap read, and it avoids offering a family
   // whose version was demoted since the dialog was last opened.
@@ -56,18 +62,36 @@ function SchemaPicker({
     let cancelled = false
     listIntakeSchemas()
       .then((res) => {
-        if (!cancelled) setOptions(res)
+        if (cancelled) return
+        setOptions(res)
+        // Infertility treatment is the dominant intake — open it directly; the picker stays as fallback.
+        const preferred = res.find((o) => o.insurance_type === "infertility_treatment")
+        if (!preferred) return
+        setSelectedId(preferred.schema_id)
+        if (showFormPicker() || autoPickedRef.current) return
+        autoPickedRef.current = true
+        setForwarding(true)
+        onContinue(preferred, true)
       })
       .catch((err) => {
-        if (!cancelled)
-          setOptionsError(
-            err instanceof Error ? err.message : "Could not load form schemas.",
-          )
+        if (cancelled) return
+        setOptionsError(
+          err instanceof Error ? err.message : "Could not load form schemas.",
+        )
       })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [autoPickedRef, onContinue])
+
+  // Auto-forward in flight — never flash the picker; createError falls back to it.
+  if (forwarding && !createError) {
+    return (
+      <div className="space-y-4 p-4">
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4 p-4">
@@ -136,6 +160,22 @@ export function CreatePatientFormModal() {
 
   const picking = createSelection === null
 
+  // Reset only on close: Back re-opens the picker, which must not bounce forward again.
+  const autoPickedRef = useRef(false)
+  useEffect(() => {
+    if (!createModalOpen) autoPickedRef.current = false
+  }, [createModalOpen])
+
+  // No Back after an auto-skip: the picker was never the entry step.
+  const [autoEntered, setAutoEntered] = useState(false)
+  const continueCreate = useCallback(
+    (option: IntakeSchemaOption, viaAutoSkip = false) => {
+      setAutoEntered(viaAutoSkip)
+      void beginCreate(option)
+    },
+    [beginCreate],
+  )
+
   return (
     <Dialog open={createModalOpen} onOpenChange={(o) => (o ? null : closeCreate())}>
       <DialogContent
@@ -166,7 +206,8 @@ export function CreatePatientFormModal() {
           <SchemaPicker
             createError={createError}
             loading={loading}
-            onContinue={(option) => void beginCreate(option)}
+            autoPickedRef={autoPickedRef}
+            onContinue={continueCreate}
             onCancel={closeCreate}
           />
         ) : (
@@ -182,10 +223,17 @@ export function CreatePatientFormModal() {
             <div className="flex-1 overflow-auto bg-[#f8f9fa] p-4 font-ibv">
               <SchemaForm />
             </div>
-            <div className="flex items-center justify-between gap-4 border-t border-border p-4">
-              <Button variant="outline" onClick={openCreate} disabled={createSubmitting}>
-                Back
-              </Button>
+            <div
+              className={cn(
+                "flex items-center gap-4 border-t border-border p-4",
+                autoEntered ? "justify-end" : "justify-between",
+              )}
+            >
+              {!autoEntered && (
+                <Button variant="outline" onClick={openCreate} disabled={createSubmitting}>
+                  Back
+                </Button>
+              )}
               <div className="flex items-center gap-3">
                 <Button
                   variant="outline"

@@ -87,8 +87,9 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
   // Voice-call participation tint on the label cell (see UsageLegend).
   const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
-  // Highlight + badge only while an unresolved dispute is present.
-  const showDispute = !!dispute && !flags.applied && applicable
+  // Drawn even on a gate-failed (grayed) field: the backend still counts its dispute
+  // against completion, so hiding the controls would block the form invisibly (VR2-166).
+  const showDispute = !!dispute && !flags.applied
   const highlightClass = showDispute
     ? confidenceHighlightClass(dispute!.confidence)
     : undefined
@@ -135,6 +136,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
               dispute={dispute!}
               flags={flags}
               className="top-1/2 right-1 -translate-y-1/2"
+              canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
             />
@@ -142,7 +144,8 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
             <InlineDisputeControls
               dispute={dispute!}
               flags={flags}
-              className="right-1.5"
+              className="top-1/2 right-1.5 -translate-y-1/2"
+              canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
             />

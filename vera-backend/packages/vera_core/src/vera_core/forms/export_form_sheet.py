@@ -262,6 +262,8 @@ def _title_bar(ws: Worksheet, row: int, col: int, span: int, text: str, *, conte
 
 def _leaf_row(ws: Worksheet, row: int, col: int, path: str, leaf: Leaf, ctx: _Ctx) -> None:
     applicable = ctx.applicable(path)
+    # `*` marks REQUIRED, not still-owed: an answered required field keeps its marker, and both
+    # members of an either/or are genuinely required as a pair.
     star = " *" if applicable and is_required(leaf, ctx.values, ctx.shared) else ""
     ws.cell(row=row, column=col, value=f"{leaf.title}{star}")
     ws.cell(row=row, column=col + 1, value=_leaf_value(path, leaf, ctx) if applicable else "")
