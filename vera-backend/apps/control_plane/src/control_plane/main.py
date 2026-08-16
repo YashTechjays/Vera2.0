@@ -318,6 +318,8 @@ def create_app(
                 project=settings.gcp_project,
                 location=settings.vertex_location,
                 model=settings.gemini_flash_model,
+                timeout_ms=settings.post_call_llm_timeout_ms,
+                max_concurrency=settings.post_call_llm_max_concurrency,
             )
             post_call_consumer = PostCallConsumer(
                 post_call_redis,

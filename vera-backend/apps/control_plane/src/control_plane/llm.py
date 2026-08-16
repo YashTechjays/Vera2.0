@@ -1,6 +1,7 @@
 """Vertex AI Gemini implementation of the post-call LLMClient. Structured output;
 Flash by default. Consumes only the de-identified transcript — no raw PHI."""
 
+import asyncio
 import json
 import logging
 from itertools import batched
@@ -53,7 +54,7 @@ def parse_extract_response(data: list[dict[str, Any]]) -> list[ExtractedField]:
     ]
 
 
-def build_judge_prompt(extracted: list[ExtractedField], turns: list[TranscriptTurn]) -> str:
+def build_judge_prompt(extracted: list[ExtractedField], turns_block: str) -> str:
     items = [
         {"field_path": e.field_path, "value": e.value, "evidence_seq": e.evidence_seq}
         for e in extracted
@@ -62,7 +63,7 @@ def build_judge_prompt(extracted: list[ExtractedField], turns: list[TranscriptTu
         "For each extracted field, decide whether the transcript SUPPORTS the value. "
         "Return exactly one entry for EVERY extracted field_path — never omit any — "
         "with supported (bool), 0-100 confidence, and a short evidence quote.\n\n"
-        f"extracted:\n{json.dumps(items)}\n\ntranscript:\n{_turns_block(turns)}"
+        f"extracted:\n{json.dumps(items)}\n\ntranscript:\n{turns_block}"
     )
 
 
@@ -102,6 +103,9 @@ _JUDGE_MAX_ATTEMPTS = 3
 # schema limit and 400 the whole call. Chunk to bound the enum AND the batch the
 # model must return in full (smaller batches drop fewer items).
 _JUDGE_CHUNK_SIZE = 50
+# Errored chunks retry after this pause — concurrent chunks fail together (429
+# bursts), and an instant re-fire lands in the same exhausted quota window.
+_JUDGE_RETRY_BACKOFF_S = 2.0
 
 
 def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
@@ -122,9 +126,25 @@ def _judge_schema(field_paths: list[str]) -> dict[str, Any]:
 
 
 class VertexLLMClient(LLMClient):
-    def __init__(self, *, project: str, location: str, model: str) -> None:
-        self._client = genai.Client(vertexai=True, project=project, location=location)
+    def __init__(
+        self,
+        *,
+        project: str,
+        location: str,
+        model: str,
+        timeout_ms: int = 120_000,
+        max_concurrency: int = 8,
+    ) -> None:
+        self._client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+            http_options=types.HttpOptions(timeout=timeout_ms),
+        )
         self._model = model
+        # One shared client serves every post-call job, so this caps process-wide
+        # Vertex fan-out (the consumer gathers up to 16 jobs, each with several chunks).
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     @staticmethod
     def _loads_response(text: str | None) -> list[dict[str, Any]]:
@@ -138,14 +158,15 @@ class VertexLLMClient(LLMClient):
         return json.loads(text)  # type: ignore[no-any-return]
 
     async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
-        resp = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=schema,
-            ),
-        )
+        async with self._semaphore:
+            resp = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            )
         return self._loads_response(resp.text)
 
     async def extract(
@@ -154,6 +175,16 @@ class VertexLLMClient(LLMClient):
         data = await self._generate(build_extract_prompt(field_paths, turns), _EXTRACT_SCHEMA)
         return parse_extract_response(data)
 
+    async def _judge_chunk(
+        self, chunk: tuple[ExtractedField, ...], turns_block: str
+    ) -> list[JudgeVerdict]:
+        chunk_paths = [ef.field_path for ef in chunk]
+        data = await self._generate(
+            build_judge_prompt(list(chunk), turns_block), _judge_schema(chunk_paths)
+        )
+        # ignore reworded/stray paths
+        return [v for v in parse_judge_response(data) if v.field_path in chunk_paths]
+
     async def judge(
         self, *, extracted: list[ExtractedField], turns: list[TranscriptTurn]
     ) -> list[JudgeVerdict]:
@@ -161,30 +192,39 @@ class VertexLLMClient(LLMClient):
             return []
         by_path: dict[str, JudgeVerdict] = {}
         last_error: Exception | None = None
+        turns_block = _turns_block(turns)
+        errored = False
         for _ in range(_JUDGE_MAX_ATTEMPTS):
             pending = [ef for ef in extracted if ef.field_path not in by_path]
             if not pending:
                 break
+            if errored:
+                await asyncio.sleep(_JUDGE_RETRY_BACKOFF_S)
+            chunks = list(batched(pending, _JUDGE_CHUNK_SIZE))
+            # gather, not TaskGroup: a failed chunk must not cancel its siblings (salvage contract).
+            results = await asyncio.gather(
+                *(self._judge_chunk(chunk, turns_block) for chunk in chunks),
+                return_exceptions=True,
+            )
+            errored = any(isinstance(r, Exception) for r in results)
             progressed = False
-            for chunk in batched(pending, _JUDGE_CHUNK_SIZE):
-                chunk_paths = [ef.field_path for ef in chunk]
-                try:
-                    data = await self._generate(
-                        build_judge_prompt(list(chunk), turns), _judge_schema(chunk_paths)
-                    )
-                except Exception as exc:  # salvage the other chunks / prior attempts
-                    last_error = exc
+            for chunk, result in zip(chunks, results, strict=True):
+                if isinstance(result, BaseException):
+                    if not isinstance(result, Exception):
+                        raise result  # CancelledError and friends must propagate
+                    last_error = result
                     logger.warning(
                         "judge: chunk of %d field(s) failed (%s) — salvaging remaining verdicts",
                         len(chunk),
-                        type(exc).__name__,
+                        type(result).__name__,
                     )
                     continue
-                for v in parse_judge_response(data):
-                    if v.field_path in chunk_paths:  # ignore reworded/stray paths
-                        by_path[v.field_path] = v
-                        progressed = True
-            if not progressed:  # a whole failed/empty attempt — don't spin the rest
+                for v in result:
+                    by_path[v.field_path] = v
+                    progressed = True
+            # Errors are transient-shaped, so an errored attempt keeps its retries;
+            # a clean attempt that returned nothing new won't improve on a re-ask.
+            if not progressed and not errored:
                 break
         # An error that left ANY field unjudged must surface so the caller routes to
         # LLM_ERROR review — otherwise those fields look unsatisfied and the payer is
