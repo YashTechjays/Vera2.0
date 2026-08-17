@@ -41,6 +41,14 @@ class _FakeRedis:
         return value.encode() if value is not None else None
 
 
+class _NonUtf8Redis:
+    """Stands in for data corruption or a stray writer: `get` returns bytes that
+    cannot be UTF-8 decoded."""
+
+    async def get(self, key: str) -> bytes | None:
+        return b"\xff\xfe"
+
+
 class TestKey:
     def test_key_follows_the_per_call_convention(self) -> None:
         # Matches vera:call-plan:<room> / vera:summary:<room> / vera:call-events:<room>.
@@ -115,3 +123,8 @@ class TestStore:
         store = TraceLinkStore(_FakeRedis(fails=True))
         await store.publish(_ROOM, "00-" + "a" * 32 + "-" + "b" * 16 + "-01")
         assert await store.resolve(_ROOM) is None
+
+    @pytest.mark.asyncio
+    async def test_non_utf8_bytes_resolve_to_none_rather_than_raise(self) -> None:
+        # A read failure includes a decode failure, not just a Redis outage (design §6).
+        assert await TraceLinkStore(_NonUtf8Redis()).resolve(_ROOM) is None

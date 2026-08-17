@@ -86,9 +86,9 @@ class TraceLinkStore:
     async def resolve(self, room_name: str) -> Context | None:
         try:
             raw = await self._redis.get(trace_link_key(room_name))
+            if raw is None:
+                return None
+            return remote_parent(raw.decode() if isinstance(raw, bytes) else str(raw))
         except Exception as exc:
             logger.warning("trace link resolve failed: %s", type(exc).__name__)
             return None
-        if raw is None:
-            return None
-        return remote_parent(raw.decode() if isinstance(raw, bytes) else str(raw))
