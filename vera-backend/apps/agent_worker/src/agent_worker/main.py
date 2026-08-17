@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from typing import Any
 
 from google.genai.types import ThinkingConfig
 from livekit import rtc
@@ -44,7 +45,7 @@ from agent_worker.intervention import AgentTakeoverController, intervener_presen
 from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
 from agent_worker.prompt import parse_persona_tweak
-from agent_worker.takeover_transcript import TakeoverTranscriber
+from agent_worker.takeover_transcript import SpeakerAttribution, TakeoverTranscriber
 from agent_worker.transcript_publisher import (
     FanOutTurnPublisher,
     ReorderingEmitter,
@@ -63,7 +64,7 @@ from vera_core.events import (
     WorkerEventBus,
 )
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
-from vera_core.observability import TraceLinkStore, current_traceparent
+from vera_core.observability import TraceLinkStore, attach_usage_spans, current_traceparent
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     TRANSPORT_ATTR,
@@ -618,11 +619,26 @@ async def entrypoint(ctx: JobContext) -> None:
 
         takeover_transcriber: TakeoverTranscriber | None = None
         if turn_sink is not None and speaker is not None:
+
+            def _takeover_stt(attribution: SpeakerAttribution) -> Any:
+                # One STT per subscribed track, so one listener per track. The parent
+                # context is the entrypoint's, NOT the ambient one: a supervisor who
+                # joins after takeover starts arrives via room.on("track_subscribed"),
+                # whose task does not carry the entrypoint span.
+                stt = deepgram.STT(model="nova-3")
+                attach_usage_spans(
+                    stt,
+                    parent_context=usage_parent_ctx,
+                    room_name=room_name,
+                    source=attribution.source,
+                )
+                return stt
+
             takeover_transcriber = TakeoverTranscriber(
                 ctx.room,
                 turn_sink,
                 room_name,
-                stt_factory=lambda: deepgram.STT(model="nova-3"),
+                stt_factory=_takeover_stt,
                 callee_identity=speaker.identity,
             )
 
