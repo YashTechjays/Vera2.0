@@ -81,3 +81,36 @@ never raw values. Any trace or log of transcript content must be scrubbed to IDs
 shapes first — there is no in-pipeline tokenizer to lean on now (`vera_core.phi` is gone), so
 treat raw transcript text as unloggable. Langfuse may carry reference IDs and timings
 (operational shape), never raw PHI.
+
+### Cost tracking — the contracts you can break silently
+
+Vera emits raw **usage** and holds **no prices**; Langfuse prices it against entries seeded
+by `scripts/seed_langfuse_prices.py`. Every failure mode below renders a plausible number or
+a blank `$` rather than an error, and **no test fails**, so treat these as hard rules.
+
+- **Usage-key strings are a cross-system contract.** `stt_audio_ms`, `tts_characters`,
+  `input`, `output`, `cached` live once in `observability/usage_spans.py` and are imported
+  everywhere — the emitters (`usage_spans.py`, `llm_usage_export.py`, `control_plane/llm.py`)
+  and the seeder. Renaming one without the other zeroes that cost with a green suite, because
+  the tests assert against the same constant. If you rename, change the seeded entry too.
+- **Only `generation` (and `embedding`) observations carry cost.** A plain span ingests
+  cleanly and prices at nothing. Set `langfuse.observation.type` explicitly; never rely on
+  Langfuse's implicit "span with a model attribute" promotion.
+- **Usage values must be integers.** Langfuse stores them as `Map(String, UInt64)`: a float is
+  truncated on the OTel route and dropped entirely on the SDK route. Audio is reported in
+  whole **milliseconds**, rounded in Vera — never seconds, and never left to ingestion.
+- **`input` excludes cached tokens.** Providers report a prompt count that *includes* them, so
+  `input + cached` must always reconstruct that original count. Over-count and cache hits are
+  billed twice; omit `cached` and they vanish. `just langfuse-verify` checks this invariant.
+- **Thinking tokens bill as output.** The Google plugin's `completion_tokens` excludes them
+  while `total_tokens` includes them, so `llm_usage_export` derives them as the residual. Any
+  new LLM surface must count them too, or its output is understated.
+- **Never price a span twice.** The SDK's own `llm_request` span is corrected *in place* by
+  the export wrapper. A sibling Vera-owned generation for the same request would be summed by
+  Langfuse and double-count it.
+- Cross-process spans join the call's trace via `TraceLinkStore` (a traceparent in Redis under
+  the room name). Langfuse's per-**session** cost rollup is unreliable for model-calculated
+  cost, so per-**trace** is the unit that must hold.
+
+Adding a model Vera can route to means adding its price entry (`GEMINI_MODELS` or `MODELS`)
+— otherwise its spend renders blank. The seeder and `just langfuse-verify` both warn by name.

@@ -123,3 +123,9 @@ worker-console:
 # Print a QR code from an otpauth:// URI for local MFA testing (no network, secret stays local)
 mfa-qr uri:
     uv run python scripts/mfa_qr.py '{{uri}}'
+
+# Verify a real call's cost actually landed in Langfuse: price entries present,
+# every generation priced, usage reconciling, control-plane spans in the call's
+# trace. Exits non-zero on a problem, so it works as a gate. Optional trace id.
+langfuse-verify *trace_id:
+    uv run python -m scripts.verify_langfuse_traces {{trace_id}}
