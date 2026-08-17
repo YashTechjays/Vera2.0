@@ -251,8 +251,7 @@ class TestConstruction:
     def test_task_agent_is_dialogue_only(self) -> None:
         controller, _ = _controller()
         names = [t.info.name for t in controller.agents[0].tools if isinstance(t, FunctionTool)]
-        # Both tools only ROUTE the call — no answer-write tools, and no end_call.
-        assert sorted(names) == ["representative_requests_end_call", "task_complete"]
+        assert names == ["task_complete"]  # no answer-write tools, no end_call
 
     def test_task_of_path_maps_every_collectable_field_to_its_task(self) -> None:
         controller, _ = _controller(_gap_plan())
@@ -3247,113 +3246,6 @@ class TestTheObserverCannotReArmTheDeletion:
         controller.update_answers({"sections.insurance_representative.rep_name": "Pat"})
         owed = {f.path for f in controller.gap_fields(_plan_task_index(plan, "insurance_basics"))}
         assert policy not in owed
-
-
-class TestEndCallRequest:
-    """A representative can ask to end the call at any point. Nothing in the plan is a
-    condition over that — it is an utterance — so the agent holding the turn routes it,
-    to the closing task (which asks for the name and reference number), never straight to
-    the wrap-up agent (which has no fields and would hang up without asking)."""
-
-    @pytest.mark.asyncio
-    async def test_the_request_hands_off_to_the_closing_task(self) -> None:
-        controller, _ = _controller(_gap_plan())
-        agent = await _enter(controller, 0)
-        with _session_patch(agent, MagicMock()):
-            successor = await _tool(agent, "representative_requests_end_call")()
-        assert successor is controller.agents[_CLOSER]
-        assert successor is not controller.wrap_up_agent
-
-    @pytest.mark.asyncio
-    async def test_the_request_skips_the_gap_pass(self) -> None:
-        """Nothing sets a flag for this — it falls out of the call graph — so pin it."""
-        controller, _ = _controller(_gap_plan())
-        controller.update_answers({"sections.a.in_network": "Yes"})
-        agent = await _enter(controller, 0)
-        with _session_patch(agent, MagicMock()):
-            successor = await _tool(agent, "representative_requests_end_call")()
-        assert successor is controller.agents[_CLOSER]
-        assert controller._next_gap_task(0) is not None  # a gap really was outstanding
-        # and completing the closer still goes straight out, never back into the sweep
-        controller.note_task_entered(_CLOSER)
-        assert await controller.advance_from(_CLOSER) is controller.wrap_up_agent
-
-    @pytest.mark.asyncio
-    async def test_the_request_bypasses_the_premature_completion_guard(self) -> None:
-        """Abandoning the questions this task still owes is the point."""
-        controller, _ = _controller(_gap_plan())
-        agent = await _enter(controller, 0)
-        with _session_patch(agent, MagicMock()):
-            assert isinstance(await _tool(agent, "task_complete")(), str)  # refused
-            successor = await _tool(agent, "representative_requests_end_call")()
-        assert successor is controller.agents[_CLOSER]
-
-    @pytest.mark.asyncio
-    async def test_the_request_is_inert_on_the_closing_task(self) -> None:
-        controller, _ = _controller(_gap_plan())
-        agent = await _enter(controller, _CLOSER)
-        with _session_patch(agent, MagicMock()):
-            assert isinstance(await _tool(agent, "representative_requests_end_call")(), str)
-
-    @pytest.mark.asyncio
-    async def test_a_single_task_plan_has_nowhere_to_jump(self) -> None:
-        plan = _gap_plan()
-        plan.tasks = [plan.tasks[0]]
-        controller, _ = _controller(plan)
-        agent = await _enter(controller, 0)
-        with _session_patch(agent, MagicMock()):
-            assert isinstance(await _tool(agent, "representative_requests_end_call")(), str)
-
-    @pytest.mark.asyncio
-    async def test_a_second_advancing_call_in_one_turn_is_inert(self) -> None:
-        controller, _ = _controller(_gap_plan())
-        agent = await _enter(controller, 0)
-        controller.update_answers({"sections.intro.rep_name": "Pat", "sections.intro.notes": "-"})
-        with _session_patch(agent, MagicMock()):
-            first = await _tool(agent, "representative_requests_end_call")()
-            second = await _tool(agent, "task_complete")()
-        assert first is controller.agents[_CLOSER]
-        assert isinstance(second, str)
-
-    @pytest.mark.asyncio
-    async def test_takeover_refuses_the_request(self) -> None:
-        controller, _ = _controller(_gap_plan())
-        agent = await _enter(controller, 0)
-        session = MagicMock()
-        with _session_patch(agent, session):
-            session.userdata.engaged = True  # _session_patch installs a fresh latch
-            assert isinstance(await _tool(agent, "representative_requests_end_call")(), str)
-        assert controller.active_task_index == 0
-
-    @pytest.mark.asyncio
-    async def test_an_inapplicable_closer_still_gets_a_spoken_goodbye(self) -> None:
-        # The abandoned task's outro must not leak into `signed_off`, or the wrap-up agent
-        # hangs up silently believing a closing line was already spoken.
-        plan = _gap_plan()
-        plan.tasks[_CLOSER].applicable_when = Comparison(
-            field="sections.a.in_network", op="eq", value="Yes"
-        )
-        controller, _ = _controller(plan)
-        controller.note_task_outro("Moving on.")  # an earlier task's outro
-        agent = await _enter(controller, 0)
-        with _session_patch(agent, MagicMock()):
-            successor = await _tool(agent, "representative_requests_end_call")()
-        assert successor is controller.wrap_up_agent
-        assert controller.signed_off is False
-
-    @pytest.mark.asyncio
-    async def test_the_handoff_span_names_the_reason(self, otel_spans: Any) -> None:
-        from opentelemetry import trace
-
-        controller, _ = _controller(_gap_plan())
-        agent = await _enter(controller, 0)
-        tracer = trace.get_tracer("test")
-        with _session_patch(agent, MagicMock()), tracer.start_as_current_span("probe"):
-            await _tool(agent, "representative_requests_end_call")()
-        span = next(s for s in otel_spans.get_finished_spans() if s.name == "probe")
-        assert span.attributes["vera.handoff.from_task"] == "intro_task"
-        assert span.attributes["vera.handoff.to_task"] == "closing_task"
-        assert span.attributes["vera.handoff.reason"] == "end_call_requested"
 
 
 def _titled_gap_plan() -> CallPlan:
