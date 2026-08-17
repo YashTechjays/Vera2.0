@@ -31,6 +31,10 @@ import logging
 from typing import Any
 
 from livekit.agents.metrics import STTMetrics, TTSMetrics
+from opentelemetry import trace
+from opentelemetry.context import Context
+
+from vera_core.observability.correlation import call_trace_attributes
 
 logger = logging.getLogger("vera.observability")
 
@@ -59,6 +63,8 @@ USAGE_OUTPUT = "output"
 USAGE_CACHED = "cached"
 
 type UsageAttributes = dict[str, str | int | float | bool]
+
+_tracer = trace.get_tracer("vera.observability.usage")
 
 
 def _billable_tokens(metrics: STTMetrics | TTSMetrics) -> dict[str, int]:
@@ -113,3 +119,64 @@ def usage_span_attributes(metrics: Any) -> UsageAttributes | None:
         if meta.model_provider:
             attrs["gen_ai.provider.name"] = meta.model_provider
     return attrs
+
+
+def _emit_usage_span(
+    metrics: Any,
+    *,
+    parent_context: Context | None,
+    room_name: str | None,
+    source: str | None,
+) -> None:
+    attrs = usage_span_attributes(metrics)
+    if attrs is None:
+        return
+    if room_name is not None:
+        attrs.update(call_trace_attributes(room_name))
+    if source is not None:
+        attrs["vera.usage.source"] = source
+    name = SPAN_TTS_USAGE if isinstance(metrics, TTSMetrics) else SPAN_STT_USAGE
+    # A point-in-time observation: every attribute is known up front, so open and close
+    # immediately. `context=None` means "use the ambient context", which is what the
+    # per-request coaching path needs; the worker paths pass an explicitly captured one.
+    _tracer.start_span(name, context=parent_context, attributes=attrs).end()
+
+
+def attach_usage_spans(
+    emitter: Any,
+    *,
+    parent_context: Context | None = None,
+    room_name: str | None = None,
+    source: str | None = None,
+) -> None:
+    """Emit one usage generation per billable `metrics_collected` event from *emitter*.
+
+    *emitter* is any livekit `rtc.EventEmitter` that emits `metrics_collected` — a
+    plugin STT/TTS instance or an STT `FallbackAdapter` (which re-emits its inner
+    metrics verbatim, so the model name stays the real provider's).
+
+    *parent_context* MUST be captured where the intended parent span is genuinely
+    ambient. In the agent worker that is the job entrypoint: the takeover STT is also
+    reached from a room-event callback whose task does not carry the entrypoint's
+    context, so capturing at emit time would silently produce a new trace root. Leave
+    it None only when the intended parent is per-invocation (the coaching-whisper
+    request span), where ambient context is the correct answer.
+
+    Listens on the component-level emitter, NOT `session.on("metrics_collected")` —
+    the latter is deprecated in livekit-agents 1.6.7 and warns per registration.
+    """
+
+    def _on_metrics(metrics: Any) -> None:
+        try:
+            _emit_usage_span(
+                metrics, parent_context=parent_context, room_name=room_name, source=source
+            )
+        except Exception as exc:
+            # Never let a tracing failure reach the call, the transcript, or the request.
+            # Type name only: a provider error can embed the request payload.
+            logger.warning("usage span emit failed: %s", type(exc).__name__)
+
+    try:
+        emitter.on("metrics_collected", _on_metrics)
+    except Exception as exc:
+        logger.warning("usage span attach failed: %s", type(exc).__name__)

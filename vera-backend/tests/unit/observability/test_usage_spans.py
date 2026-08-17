@@ -1,18 +1,29 @@
-"""Usage-generation attribute shape (design §3.1, §5) — the Langfuse contract, tested pure."""
+"""Usage generations: the Langfuse attribute contract (design §3.1, §5), the
+`metrics_collected` listener that emits them, and its trace parenting (design §3.5)."""
 
+import asyncio
 import json
 from typing import Any
 
+import pytest
+from livekit import rtc
 from livekit.agents.metrics import STTMetrics, TTSMetrics
 from livekit.agents.metrics.base import Metadata
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.observability.usage_spans import (
     GENERATION,
     OBSERVATION_MODEL_ATTR,
     OBSERVATION_TYPE_ATTR,
+    SPAN_STT_USAGE,
+    SPAN_TTS_USAGE,
     STT_AUDIO_MS,
     TTS_CHARACTERS,
     USAGE_DETAILS_ATTR,
+    attach_usage_spans,
     usage_span_attributes,
 )
 
@@ -160,3 +171,134 @@ class TestDefensiveHandling:
 
     def test_vad_metrics_are_not_priced(self) -> None:
         assert usage_span_attributes(None) is None
+
+
+class _FakeEmitter(rtc.EventEmitter[str]):
+    """Stands in for deepgram.STTv2 / cartesia.TTS / stt.FallbackAdapter — all of
+    which are rtc.EventEmitters that emit 'metrics_collected'."""
+
+
+def _only(exporter: InMemorySpanExporter, name: str) -> Any:
+    return next(s for s in exporter.get_finished_spans() if s.name == name)
+
+
+class TestListener:
+    def test_stt_event_emits_a_named_generation(self, otel_spans: Any) -> None:
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)
+        emitter.emit("metrics_collected", _stt())
+        assert [span.name for span in otel_spans.get_finished_spans()] == [SPAN_STT_USAGE]
+
+    def test_tts_event_emits_a_named_generation(self, otel_spans: Any) -> None:
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)
+        emitter.emit("metrics_collected", _tts())
+        assert [span.name for span in otel_spans.get_finished_spans()] == [SPAN_TTS_USAGE]
+
+    def test_zero_usage_event_emits_nothing(self, otel_spans: Any) -> None:
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)
+        emitter.emit("metrics_collected", _stt(audio_duration=0.0, request_id=""))
+        assert otel_spans.get_finished_spans() == ()
+
+    def test_room_name_adds_call_correlation(self, otel_spans: Any) -> None:
+        tenant = "00000000-0000-0000-0000-0000000000aa"
+        call = "00000000-0000-0000-0000-0000000000bb"
+        room = f"call--{tenant}--{call}"
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter, room_name=room)
+        emitter.emit("metrics_collected", _stt())
+        span = _only(otel_spans, SPAN_STT_USAGE)
+        assert span.attributes["langfuse.session.id"] == room
+        assert span.attributes["vera.call_id"] == call
+
+    def test_source_is_set_only_when_given(self, otel_spans: Any) -> None:
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter, source="supervisor")
+        emitter.emit("metrics_collected", _stt())
+        assert _only(otel_spans, SPAN_STT_USAGE).attributes["vera.usage.source"] == "supervisor"
+
+    def test_cascade_span_has_no_source(self, otel_spans: Any) -> None:
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)
+        emitter.emit("metrics_collected", _stt())
+        assert "vera.usage.source" not in _only(otel_spans, SPAN_STT_USAGE).attributes
+
+    def test_no_phi_reaches_the_span(self, otel_spans: Any) -> None:
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)
+        emitter.emit("metrics_collected", _tts())
+        # Substring check: an attribute merely EMBEDDING a transcript fails too.
+        assert_no_phi_values(_only(otel_spans, SPAN_TTS_USAGE), "Jane Doe", "member id 1234")
+
+    def test_a_broken_event_never_propagates_to_the_caller(self, otel_spans: Any) -> None:
+        # A tracing failure must never break the call (design §6).
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)
+        emitter.emit("metrics_collected", None)  # must not raise
+        assert otel_spans.get_finished_spans() == ()
+
+
+class TestTraceParenting:
+    """Design §3.5: the takeover STT is reached via a room-event callback whose task
+    does NOT carry job_entrypoint's context. Without an explicitly captured parent,
+    usage spans become NEW TRACE ROOTS — they fall out of the call's trace and never
+    sum into its cost, and nothing else about the output looks wrong."""
+
+    @pytest.mark.asyncio
+    async def test_captured_context_survives_a_foreign_task(self, otel_spans: Any) -> None:
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("job_entrypoint") as parent:
+            captured = otel_context.get_current()
+            parent_ctx = parent.get_span_context()
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter, parent_context=captured)
+
+        async def foreign_task() -> None:
+            # A task created OUTSIDE the parent span's context, like LiveKit's room
+            # event dispatch task.
+            emitter.emit("metrics_collected", _stt())
+
+        await asyncio.create_task(foreign_task())
+
+        span = _only(otel_spans, SPAN_STT_USAGE)
+        assert span.parent is not None
+        assert span.parent.span_id == parent_ctx.span_id
+        assert span.context.trace_id == parent_ctx.trace_id
+
+    @pytest.mark.asyncio
+    async def test_without_a_captured_context_the_span_is_orphaned(self, otel_spans: Any) -> None:
+        """Documents exactly what §3.5 prevents, so the guarantee above is meaningful."""
+        tracer = trace.get_tracer("test")
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)  # no parent_context — the bug
+
+        ready = asyncio.Event()
+        done = asyncio.Event()
+
+        async def dispatch_task() -> None:
+            await ready.wait()
+            emitter.emit("metrics_collected", _stt())
+            done.set()
+
+        task = asyncio.create_task(dispatch_task())
+        with tracer.start_as_current_span("job_entrypoint"):
+            ready.set()
+            await done.wait()
+        await task
+
+        # No parent: a root span in its own trace, which is the failure mode.
+        assert _only(otel_spans, SPAN_STT_USAGE).parent is None
+
+    def test_ambient_context_is_used_when_no_parent_is_captured(self, otel_spans: Any) -> None:
+        # The coaching-whisper path relies on this: its parent span is per-request, so
+        # it CANNOT be captured at attach time (Task 6).
+        tracer = trace.get_tracer("test")
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter)
+        with tracer.start_as_current_span("vera.coaching.whisper") as parent:
+            emitter.emit("metrics_collected", _stt())
+            expected = parent.get_span_context()
+        span = _only(otel_spans, SPAN_STT_USAGE)
+        assert span.parent is not None
+        assert span.parent.span_id == expected.span_id
