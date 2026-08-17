@@ -14,6 +14,7 @@ import socket
 from typing import Any, cast
 from uuid import UUID
 
+from opentelemetry import trace
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -31,11 +32,14 @@ from vera_core.events import (
     parse_post_call_job,
 )
 from vera_core.integrations.llm import LLMClient, TranscriptTurn
+from vera_core.observability import TraceLinkStore, call_trace_attributes, room_name_for_call
 from vera_core.services.post_call_eval import EvalDeps, evaluate_call
 
 logger = logging.getLogger("control_plane.post_call_consumer")
 
 type _StreamEntries = list[tuple[str, dict[str, str]]]
+
+_tracer = trace.get_tracer("vera.control_plane.post_call")
 
 # A job that keeps failing (poison: bad schema shape, persistent DB violation)
 # is dropped after this many deliveries instead of re-billing the LLM on every
@@ -75,6 +79,7 @@ class PostCallConsumer:
         review_floor: int = 60,
         auto_retry_enabled: bool = False,
         consumer_name: str | None = None,
+        trace_links: TraceLinkStore | None = None,
     ) -> None:
         self._redis = redis
         self._sessionmaker = sessionmaker
@@ -82,6 +87,7 @@ class PostCallConsumer:
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
+        self._trace_links = trace_links
         self._bus = PostCallJobBus(redis)
         self._deps = EvalDeps(
             llm=llm,
@@ -184,23 +190,39 @@ class PostCallConsumer:
         return int(pending[0].get("times_delivered", 0))
 
     async def _process_job(self, job: PostCallJob) -> None:
-        turns = await build_turns(self._call_stream, self._sessionmaker, job.tenant_id, job.call_id)
-        async with tenant_session(self._sessionmaker, job.tenant_id) as session:
-            outcome = await evaluate_call(
-                session,
-                self._deps,
-                tenant_id=job.tenant_id,
-                form_id=job.form_id,
-                call_id=job.call_id,
-                turns=turns,
+        room_name = room_name_for_call(job.tenant_id, job.call_id)
+        parent = None
+        if self._trace_links is not None:
+            # Joins the worker's trace for this call, so every eval generation below
+            # sums into that call's total cost. A missing/expired link yields None and
+            # this becomes its own trace root — degraded, not broken.
+            parent = await self._trace_links.resolve(room_name)
+        with _tracer.start_as_current_span(
+            "vera.post_call.eval",
+            context=parent,
+            attributes=call_trace_attributes(room_name),
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
+            turns = await build_turns(
+                self._call_stream, self._sessionmaker, job.tenant_id, job.call_id
             )
-        logger.info(
-            "post-call eval form=%s -> %s (%d answers, %d reviewed)",
-            job.form_id,
-            outcome.status.value,
-            outcome.answers_written,
-            len(outcome.reviewed_fields),
-        )
+            async with tenant_session(self._sessionmaker, job.tenant_id) as session:
+                outcome = await evaluate_call(
+                    session,
+                    self._deps,
+                    tenant_id=job.tenant_id,
+                    form_id=job.form_id,
+                    call_id=job.call_id,
+                    turns=turns,
+                )
+            logger.info(
+                "post-call eval form=%s -> %s (%d answers, %d reviewed)",
+                job.form_id,
+                outcome.status.value,
+                outcome.answers_written,
+                len(outcome.reviewed_fields),
+            )
 
     async def _ack(self, entry_id: str) -> None:
         await self._redis.xack(POST_CALL_STREAM, POST_CALL_GROUP, entry_id)
