@@ -48,6 +48,12 @@ langfuse-up:
 langfuse-down:
     docker compose --profile langfuse down
 
+# Seed the Langfuse model price entries Vera's usage attributes are priced against.
+# Idempotent; refuses to run without every rate env var set (see the script header —
+# note the audio rates are PER MILLISECOND, i.e. published per-minute / 60000).
+langfuse-seed-prices:
+    uv run python scripts/seed_langfuse_prices.py
+
 # Database
 migrate:
     uv run alembic upgrade head
