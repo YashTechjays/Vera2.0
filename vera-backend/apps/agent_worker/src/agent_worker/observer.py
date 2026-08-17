@@ -31,7 +31,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from opentelemetry import trace
@@ -39,9 +39,14 @@ from opentelemetry import trace
 from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
 from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
+from vera_core.forms.answers import canonical_answer, literals_of
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
-from vera_core.forms.extraction_prompt import ANSWER_UNIT_FORMAT_RULE
+from vera_core.forms.extraction_prompt import (
+    ANSWER_UNIT_FORMAT_RULE,
+    EXACT_VALUE_RULE,
+    special_values_hint,
+)
 from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
@@ -120,26 +125,54 @@ class ResilientAnswerExtractor:
             set_status_on_exception=False,
         ):
             reply = await self._llm.complete(system=_extraction_instructions(task), user=transcript)
-        return _parse_extraction(reply)
+        return _canonicalized(_parse_extraction(reply), task)
+
+
+def _canonicalized(answers: list[ExtractedAnswer], task: PlanTask) -> list[ExtractedAnswer]:
+    """Every answer spelled as its leaf declares it — see `canonical_answer`."""
+    fields = {f.path: f for f in task.fields}
+    return [
+        replace(
+            answer,
+            value=canonical_answer(
+                answer.value,
+                literals_of(field) if (field := fields.get(answer.field_path)) else None,
+            ),
+        )
+        for answer in answers
+    ]
 
 
 def _extraction_instructions(task: PlanTask) -> str:
-    lines = [
+    lines: list[str] = []
+    names_exact = False
+    for f in task.fields:
+        # An enum's vocabulary is one clause, and deliberately NOT `literals_of().gate`: a rep
+        # never states the `inapplicable_value` the either/or auto-fill writes. Every other
+        # leaf's named answers are ALTERNATIVES to a normal answer, so they get "exact:".
+        if f.values:
+            vocabulary = f" (one of: {', '.join([*f.values, *(f.special_values or [])])})"
+        else:
+            vocabulary = special_values_hint(f.special_values)
+            # The rule explains that clause, so only a task carrying one carries it (227 chars).
+            names_exact = names_exact or bool(vocabulary)
+        # Routing branches are not gated on the choice, so without this the extractor infers `No`
+        # for the branch the rep did not take — a coverage claim, where `N/A` is the truth.
+        note = f" — {f.exclusive_note}" if f.exclusive_note else ""
+        # The PATH disambiguates a repeated title, so `owner_title` is not prefixed: measured
+        # over three services with three different cycle limits it changed neither attribution
+        # nor formatting, and cost ~1.3k chars on the CPT panel, re-sent every pass.
+        lines.append(f"- {f.path}: {f.title}{vocabulary}{note}")
+    preamble = (
         "You extract answers from a phone call between an insurance-verification agent and "
         "a payer representative. Return ONLY the fields below that the representative has "
         "clearly answered in the transcript. Output a JSON array of "
         '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
         "Omit a field entirely if it is not yet answered. "
-        f"{ANSWER_UNIT_FORMAT_RULE} "
-        "Use only these field_path values:",
-    ]
-    for f in task.fields:
-        allowed = f" (one of: {', '.join(f.values)})" if f.values else ""
-        # Routing branches are not gated on the choice, so without this the extractor infers `No`
-        # for the branch the rep did not take — a coverage claim, where `N/A` is the truth.
-        note = f" — {f.exclusive_note}" if f.exclusive_note else ""
-        lines.append(f"- {f.path}: {f.title}{allowed}{note}")
-    return "\n".join(lines)
+        f"{ANSWER_UNIT_FORMAT_RULE} {EXACT_VALUE_RULE + ' ' if names_exact else ''}"
+        "Use only these field_path values:"
+    )
+    return "\n".join([preamble, *lines])
 
 
 def _parse_extraction(text: str) -> list[ExtractedAnswer]:
@@ -362,7 +395,13 @@ class ObserverManager:
         # gate-evaluation set: three behaviours here need the intake values, namely the dedup in
         # `_record_locked`, `_derive_remaining_locked`'s "a prefilled remaining wins", and the
         # rule engine, whose terminate rules read ask-role paths a clinic may fill.
-        self._on_file: dict[str, Any] = dict(plan.prefilled)
+        # Snapped on the way in: the rule engine compares byte-exact, and a prefill written
+        # before the writers canonicalized carries whatever spelling its source used.
+        literals = {f.path: literals_of(f) for t in plan.tasks for f in t.fields}
+        self._on_file: dict[str, Any] = {
+            path: canonical_answer(value, literals.get(path))
+            for path, value in plan.prefilled.items()
+        }
         # What THIS CALL collected, which is all the controller may gate on — see
         # `PlanRunController.update_answers`.
         self._recorded: dict[str, Any] = {}

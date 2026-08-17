@@ -65,6 +65,11 @@ def unwrap_value(stored: Any) -> Any:
 _ASCII_WHITESPACE = " \t\n\r\f\v"
 
 
+def strip_answer(value: str) -> str:
+    """Trim an answer's padding under the one whitespace rule `normalize_value` folds by."""
+    return value.strip(_ASCII_WHITESPACE)
+
+
 def normalize_value(value: Any) -> Any:
     """Canonicalize a value for dispute comparison: strings are stripped (ASCII whitespace
     only) + lowercased so case- and whitespace-only differences are not disputes;

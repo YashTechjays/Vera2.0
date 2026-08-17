@@ -5,6 +5,7 @@ vera_core only knows this interface so the eval service stays provider-agnostic 
 unit-testable with FakeLLMClient.
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -37,9 +38,19 @@ class JudgeVerdict:
     evidence: str
 
 
+#: Authored literals the requested paths accept, keyed by field_path — an extractor never shown
+#: them declines to write a non-numeric answer at all, so the sentinel is dropped rather than
+#: mis-spelled (`forms.extraction_prompt.special_values_hint`).
+SpecialValues = Mapping[str, Sequence[str]]
+
+
 class LLMClient(Protocol):
     async def extract(
-        self, *, field_paths: list[str], turns: list[TranscriptTurn]
+        self,
+        *,
+        field_paths: list[str],
+        turns: list[TranscriptTurn],
+        special_values: SpecialValues | None = None,
     ) -> list[ExtractedField]: ...
 
     async def judge(
@@ -68,12 +79,18 @@ class FakeLLMClient:
         self._verdicts = verdicts
         self._raise_on_extract = raise_on_extract
         self.extract_calls: list[list[str]] = []
+        self.extract_special_values: list[SpecialValues | None] = []
         self.judge_calls: list[list[ExtractedField]] = []
 
     async def extract(
-        self, *, field_paths: list[str], turns: list[TranscriptTurn]
+        self,
+        *,
+        field_paths: list[str],
+        turns: list[TranscriptTurn],
+        special_values: SpecialValues | None = None,
     ) -> list[ExtractedField]:
         self.extract_calls.append(list(field_paths))
+        self.extract_special_values.append(special_values)
         if self._raise_on_extract is not None:
             raise self._raise_on_extract
         return list(self._extracted)

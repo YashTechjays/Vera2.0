@@ -1255,12 +1255,11 @@ async def test_observer_answer_without_evidence_anchor_is_judged_with_none(
     assert by_path[_NOTES_PATH].evidence_seq == 2
 
 
-async def _require_notes_and_set_threshold(ctx: _SeedCtx, threshold: float) -> None:
-    """Scope a two-required-field schema (notes flipped to required) and the fill
-    threshold to a single test — leaves the shared `_SCHEMA_JSON` untouched so the
-    fraction can land strictly between 0 and 1 for the gate tests only."""
+async def _repoint_notes_schema(ctx: _SeedCtx, **overrides: Any) -> None:
+    """Scope a patched `notes` leaf to a single test — leaves the shared `_SCHEMA_JSON`
+    untouched, so a required flag or a sentinel list is never visible to its neighbours."""
     schema: Any = copy.deepcopy(_SCHEMA_JSON)
-    schema["sections"]["coverage"]["fields"]["notes"]["required"] = True
+    schema["sections"]["coverage"]["fields"]["notes"].update(overrides)
     await ctx.session.execute(
         update(SchemaVersion)
         .where(
@@ -1271,6 +1270,103 @@ async def _require_notes_and_set_threshold(ctx: _SeedCtx, threshold: float) -> N
         )
         .values(schema_json=schema)
     )
+
+
+async def test_a_special_value_is_stored_as_the_schema_spells_it(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """This writer builds its `FieldAnswer` rows directly, and gates compare byte-exact — so
+    an un-snapped "unlimited" here leaves met/remaining unsatisfied and can redial the payer
+    (`retryable_required_paths`), as well as shipping the variant into the export."""
+    ctx = seeded_ai_processing_form
+    await _repoint_notes_schema(ctx, special_values=["No Limit", "Unlimited"])
+    await ctx.session.flush()
+
+    turns = [TranscriptTurn(0, "user", "that one is unlimited")]
+    llm = FakeLLMClient(
+        extracted=[ExtractedField(_NOTES_PATH, " unlimited ", 92, 0)],
+        verdicts=[JudgeVerdict(_NOTES_PATH, True, 90, "that one is unlimited")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    stored = (
+        await ctx.session.execute(
+            select(FieldAnswer.value).where(
+                FieldAnswer.form_id == ctx.form_id,
+                FieldAnswer.field_path == _NOTES_PATH,
+                FieldAnswer.is_current.is_(True),
+            )
+        )
+    ).scalar_one()
+    assert stored == {"value": "Unlimited"}
+    # Snapping is the second half; the extractor also has to be SHOWN the literals, or it
+    # writes no non-numeric answer at all and there is nothing to snap.
+    assert llm.extract_special_values[0] == {_NOTES_PATH: ("No Limit", "Unlimited")}
+
+
+async def test_an_intake_special_value_is_snapped_before_the_gates_read_it(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A path already answered is never topped up, so an intake, human or older-release
+    variant reaches the decision map unsnapped — and every gate below reads that map, not
+    the rows this call wrote."""
+    ctx = seeded_ai_processing_form
+    await _repoint_notes_schema(ctx, special_values=["No Limit"])
+    ctx.session.add(
+        FieldAnswer(
+            tenant_id=ctx.tenant_id,
+            form_id=ctx.form_id,
+            field_path=_NOTES_PATH,
+            value={"value": " no limit "},
+            source=AnswerSource.INTAKE.value,
+            is_current=True,
+        )
+    )
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network"))
+    await ctx.session.flush()
+
+    turns = [TranscriptTurn(0, "user", "yes in network")]
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[JudgeVerdict(ctx.collection_path, True, 90, "yes in network")],
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    snapshot = (
+        await ctx.session.execute(
+            select(CallFormSnapshot).where(CallFormSnapshot.call_id == ctx.call_id)
+        )
+    ).scalar_one()
+    assert snapshot.after_state[_NOTES_PATH] == "No Limit"
+
+
+async def _require_notes_and_set_threshold(ctx: _SeedCtx, threshold: float) -> None:
+    """Scope a two-required-field schema (notes flipped to required) and the fill
+    threshold to a single test — leaves the shared `_SCHEMA_JSON` untouched so the
+    fraction can land strictly between 0 and 1 for the gate tests only."""
+    await _repoint_notes_schema(ctx, required=True)
     await ctx.session.execute(
         update(Tenant).where(Tenant.id == ctx.tenant_id).values(retry_fill_threshold=threshold)
     )
