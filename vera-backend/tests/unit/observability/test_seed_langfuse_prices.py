@@ -5,6 +5,7 @@ import re
 
 import pytest
 
+from agent_worker.cascade import _CARTESIA_TTS_MODEL
 from scripts.seed_langfuse_prices import (
     MODELS,
     MissingRateError,
@@ -47,6 +48,22 @@ class TestRates:
         with pytest.raises(MissingRateError):
             resolve_rates({**_RATES, "LANGFUSE_PRICE_STT_FLUX_PER_MS": "cheap"})
 
+    def test_a_zero_rate_refuses_to_seed(self) -> None:
+        # $0.00 renders identically to a free tier, not to "unset" — reject it the
+        # same as a missing rate rather than silently seeding it.
+        with pytest.raises(MissingRateError):
+            resolve_rates({**_RATES, "LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN": "0"})
+
+    def test_a_negative_rate_refuses_to_seed(self) -> None:
+        with pytest.raises(MissingRateError):
+            resolve_rates({**_RATES, "LANGFUSE_PRICE_STT_FLUX_PER_MS": "-0.001"})
+
+    @pytest.mark.parametrize("raw", ["inf", "nan"])
+    def test_a_non_finite_rate_refuses_to_seed(self, raw: str) -> None:
+        # Both parse fine as float() and would otherwise serialize to invalid JSON.
+        with pytest.raises(MissingRateError):
+            resolve_rates({**_RATES, "LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER": raw})
+
 
 class TestPayload:
     def test_a_new_model_carries_no_model_id(self) -> None:
@@ -70,7 +87,7 @@ class TestPayload:
     def test_patterns_match_the_models_vera_actually_uses(self) -> None:
         assert re.match(_BY_NAME["vera-deepgram-flux"].match_pattern, "flux-general-en")
         assert re.match(_BY_NAME["vera-deepgram-nova"].match_pattern, "nova-3")
-        assert re.match(_BY_NAME["vera-cartesia-sonic"].match_pattern, "sonic-3.5-2026-05-04")
+        assert re.match(_BY_NAME["vera-cartesia-sonic"].match_pattern, _CARTESIA_TTS_MODEL)
         assert re.match(_BY_NAME["vera-gemini"].match_pattern, "gemini-2.5-flash")
         assert re.match(_BY_NAME["vera-gemini"].match_pattern, "gemini-3.1-flash-lite")
 

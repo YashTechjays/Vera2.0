@@ -36,6 +36,7 @@ Writes to whatever VERA_LANGFUSE_HOST resolves to — the target host is logged.
 import asyncio
 import base64
 import logging
+import math
 import os
 import sys
 from collections.abc import Mapping
@@ -57,8 +58,9 @@ logger = logging.getLogger("vera.seed_langfuse_prices")
 
 
 class MissingRateError(RuntimeError):
-    """A rate env var is absent or unparseable. Refuse to seed rather than write a
-    $0.00 entry, which is indistinguishable from broken instrumentation in the UI."""
+    """A rate env var is absent, unparseable, or not a strictly positive finite number.
+    Refuse to seed rather than write a $0.00 entry, which is indistinguishable from
+    broken instrumentation in the UI."""
 
 
 @dataclass(frozen=True)
@@ -117,11 +119,20 @@ def resolve_rates(env: Mapping[str, str]) -> dict[str, float]:
                 missing.append(env_var)
                 continue
             try:
-                rates[env_var] = float(raw)
+                value = float(raw)
             except ValueError:
                 missing.append(env_var)
+                continue
+            # Zero/negative/inf/nan all parse fine but must never seed: $0.00 reads as
+            # a free tier, and inf/nan would serialize to invalid JSON.
+            if not math.isfinite(value) or value <= 0:
+                missing.append(env_var)
+                continue
+            rates[env_var] = value
     if missing:
-        raise MissingRateError(f"missing or unparseable rate env vars: {sorted(set(missing))}")
+        raise MissingRateError(
+            f"missing, unparseable, or non-positive rate env vars: {sorted(set(missing))}"
+        )
     return rates
 
 
@@ -192,22 +203,23 @@ async def main() -> int:
         written = await seed(client, rates)
     logger.info("seeded %d model price entries: %s", len(written), ", ".join(written))
     # Configured selectors that match no entry above would render blank cost silently.
+    # Strip any "provider:" prefix first: LLMSpec.parse splits it off before a span
+    # ever sees it, so logging selectors verbatim would never match a pattern here.
+    configured_selectors = {
+        settings.voice_llm_default_model,
+        settings.gemini_flash_model,
+        settings.summary_primary_model,
+        settings.observer_extract_primary_model,
+        settings.health_primary_model,
+        settings.whisper_stt_primary_model,
+        *settings.summary_fallback_models,
+        *settings.observer_extract_fallback_models,
+        *settings.health_fallback_models,
+        *settings.whisper_stt_fallback_models,
+    }
     logger.info(
         "verify these configured models match a pattern above: %s",
-        sorted(
-            {
-                settings.voice_llm_default_model,
-                settings.gemini_flash_model,
-                settings.summary_primary_model,
-                settings.observer_extract_primary_model,
-                settings.health_primary_model,
-                settings.whisper_stt_primary_model,
-                *settings.summary_fallback_models,
-                *settings.observer_extract_fallback_models,
-                *settings.health_fallback_models,
-                *settings.whisper_stt_fallback_models,
-            }
-        ),
+        sorted({selector.rpartition(":")[2] for selector in configured_selectors}),
     )
     return 0
 
