@@ -711,18 +711,17 @@ export function IbvProvider({
         setSavedTick((t) => t + 1)
         return
       }
-      // API: edited values are corrections; applied-but-unchanged disputes are accepts.
+      // API: edited values are corrections; applied disputes are accepts. A resolved
+      // dispute is sent even when edited — the backend prefers a real correction, and a
+      // normalize-equal edit (e.g. case-only) needs the accept or the dispute stays open.
       const form_data: Record<string, string> = {}
       const dispute_fields: string[] = []
       const paths = new Set([...Object.keys(values), ...Object.keys(disputes)])
       for (const path of paths) {
         const changed = values[path] !== originalValues[path]
-        if (changed) {
-          form_data[path] = values[path] ?? ""
-        } else if (disputes[path] && flags[path]?.applied) {
-          form_data[path] = values[path] ?? ""
-          dispute_fields.push(path)
-        }
+        const resolved = Boolean(disputes[path] && flags[path]?.applied)
+        if (changed || resolved) form_data[path] = values[path] ?? ""
+        if (resolved) dispute_fields.push(path)
       }
       try {
         const refreshed = await resolveDisputes(formId, {

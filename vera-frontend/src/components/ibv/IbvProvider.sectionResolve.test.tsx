@@ -137,10 +137,11 @@ describe("section-wise resolve keeps the reviewer's edited value", () => {
 
     await user.click(screen.getByRole("button", { name: "save" }))
     await waitFor(() => expect(mockedResolve).toHaveBeenCalledTimes(1))
-    // A changed value is a correction (form_data), not a bare accept (dispute_fields).
+    // The correction rides in form_data; the resolved dispute is still sent as an
+    // accept so a normalize-equal edit (case-only) cannot leave the dispute open.
     expect(mockedResolve).toHaveBeenCalledWith(FORM_ID, {
       form_data: { [PATIENT_NAME]: "Ava Smith" },
-      dispute_fields: [],
+      dispute_fields: [PATIENT_NAME],
       reasked_fields: [],
     })
   })
