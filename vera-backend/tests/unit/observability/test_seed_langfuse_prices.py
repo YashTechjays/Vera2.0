@@ -7,9 +7,11 @@ import pytest
 
 from agent_worker.cascade import _CARTESIA_TTS_MODEL
 from scripts.seed_langfuse_prices import (
+    GEMINI_MODELS,
     MODELS,
     MissingRateError,
     build_payload,
+    matching_entry,
     resolve_rates,
     seed,
 )
@@ -18,9 +20,13 @@ _RATES = {
     "LANGFUSE_PRICE_STT_FLUX_PER_MS": "0.00000010833",
     "LANGFUSE_PRICE_STT_NOVA_PER_MS": "0.00000012833",
     "LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER": "0.000022",
-    "LANGFUSE_PRICE_LLM_GEMINI_INPUT_PER_TOKEN": "0.0000003",
-    "LANGFUSE_PRICE_LLM_GEMINI_OUTPUT_PER_TOKEN": "0.0000025",
-    "LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN": "0.000000075",
+    # Per-model, not per-family: each Gemini model carries its own three rates.
+    **{
+        env_var: "0.0000003"
+        for model in MODELS
+        for env_var in model.env_vars.values()
+        if "GEMINI" in env_var
+    },
 }
 
 _BY_NAME = {m.model_name: m for m in MODELS}
@@ -51,9 +57,12 @@ class TestRates:
 
     def test_a_zero_rate_refuses_to_seed(self) -> None:
         # $0.00 renders identically to a free tier, not to "unset" — reject it the
-        # same as a missing rate rather than silently seeding it.
+        # same as a missing rate rather than silently seeding it. Targets a cached
+        # rate specifically: that is the one an operator is most tempted to zero out
+        # when they have input/output rates but no contracted cache rate yet.
+        cached_var = _BY_NAME["vera-gemini-3.6-flash"].env_vars["cached"]
         with pytest.raises(MissingRateError):
-            resolve_rates({**_RATES, "LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN": "0"})
+            resolve_rates({**_RATES, cached_var: "0"})
 
     def test_a_negative_rate_refuses_to_seed(self) -> None:
         with pytest.raises(MissingRateError):
@@ -82,15 +91,17 @@ class TestPayload:
         rates = resolve_rates(_RATES)
         flux = build_payload(_BY_NAME["vera-deepgram-flux"], None, rates=rates)
         assert set(flux["pricingTiers"][0]["prices"]) == {"stt_audio_ms"}
-        gemini = build_payload(_BY_NAME["vera-gemini"], None, rates=rates)
+        gemini = build_payload(_BY_NAME["vera-gemini-3.6-flash"], None, rates=rates)
         assert set(gemini["pricingTiers"][0]["prices"]) == {"input", "output", "cached"}
 
     def test_patterns_match_the_models_vera_actually_uses(self) -> None:
         assert re.match(_BY_NAME["vera-deepgram-flux"].match_pattern, "flux-general-en")
         assert re.match(_BY_NAME["vera-deepgram-nova"].match_pattern, "nova-3")
         assert re.match(_BY_NAME["vera-cartesia-sonic"].match_pattern, _CARTESIA_TTS_MODEL)
-        assert re.match(_BY_NAME["vera-gemini"].match_pattern, "gemini-2.5-flash")
-        assert re.match(_BY_NAME["vera-gemini"].match_pattern, "gemini-3.1-flash-lite")
+        assert re.match(_BY_NAME["vera-gemini-2.5-flash"].match_pattern, "gemini-2.5-flash")
+        assert re.match(
+            _BY_NAME["vera-gemini-3.1-flash-lite"].match_pattern, "gemini-3.1-flash-lite"
+        )
 
     def test_patterns_survive_a_model_version_bump(self) -> None:
         # Family patterns, not exact versions: an exact pattern would silently zero cost
@@ -163,3 +174,47 @@ class TestIdempotentUpsert:
         client = _FakeClient(listing)
         await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
         assert [p["modelId"] for p in client.posted] == [f"id-{m.model_name}" for m in MODELS]
+
+
+class TestPerModelCoverage:
+    """Per-model entries buy accurate attribution but give up the family pattern's
+    safety net: a model nobody listed matches nothing and renders blank cost, which
+    reads as 'this surface is free'. `matching_entry` is what makes that detectable."""
+
+    def test_every_gemini_model_vera_routes_to_has_its_own_entry(self) -> None:
+        for model in GEMINI_MODELS:
+            entry = matching_entry(model)
+            assert entry is not None, model
+            assert entry.model_name == f"vera-{model}"
+
+    def test_each_gemini_model_is_priced_separately(self) -> None:
+        # The point of the split: no two models may share a rate variable, or they
+        # would silently be billed at one another's price.
+        env_vars = [v for m in MODELS for v in m.env_vars.values() if "GEMINI" in v]
+        assert len(env_vars) == len(set(env_vars)) == len(GEMINI_MODELS) * 3
+
+    def test_an_unlisted_model_matches_nothing(self) -> None:
+        # The failure the coverage warning exists to announce.
+        assert matching_entry("gemini-4.0-ultra") is None
+
+    def test_a_vertex_version_suffix_still_matches(self) -> None:
+        # Langfuse's own built-in Gemini patterns allow @version; a pinned Vertex
+        # model must not fall off its price entry.
+        assert matching_entry("gemini-3.6-flash@20260101") is not None
+
+    def test_speech_models_still_match_their_families(self) -> None:
+        # Deepgram/Cartesia stay family-matched on purpose: their versions are
+        # rate-compatible, so a bump must not zero the cost.
+        for model, expected in (
+            ("flux-general-en", "vera-deepgram-flux"),
+            ("nova-3", "vera-deepgram-nova"),
+            (_CARTESIA_TTS_MODEL, "vera-cartesia-sonic"),
+        ):
+            entry = matching_entry(model)
+            assert entry is not None, model
+            assert entry.model_name == expected
+
+    def test_flux_and_nova_are_priced_independently(self) -> None:
+        flux = _BY_NAME["vera-deepgram-flux"].env_vars["stt_audio_ms"]
+        nova = _BY_NAME["vera-deepgram-nova"].env_vars["stt_audio_ms"]
+        assert flux != nova

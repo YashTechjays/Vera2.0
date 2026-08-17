@@ -26,7 +26,7 @@ looks exactly like broken instrumentation instead of "missing price entry."
 
    | UI field | API field | Notes |
    |---|---|---|
-   | Model name | `modelName` | Exact string from the table below, e.g. `vera-gemini`. |
+   | Model name | `modelName` | Exact string from the table below, e.g. `vera-<gemini-model>` (one entry PER MODEL). |
    | Match pattern | `matchPattern` | A regex tested against the ingested model name. Use the family pattern as-is — do not narrow it to one version (see "family patterns" note below). |
    | Match config → case-insensitive | (embedded in `matchPattern`) | The patterns below already start with `(?i)`; leave the UI's own case-insensitive toggle off to avoid double-applying it, or drop the `(?i)` prefix if the UI applies it for you — check the resulting match either way (see "discover the usage keys" below for how to test). |
    | Prices → usage type / unit | key inside `pricingTiers[0].prices` | This is a **free-text key**, not a dropdown of "input/output tokens" — type the exact usage key from the table (e.g. `stt_audio_ms`), not a token-billing label. |
@@ -51,7 +51,7 @@ of truth; if this table and the script ever disagree, the script wins and this t
 | `vera-deepgram-flux` | `(?i)^flux-.*$` | `stt_audio_ms` | **per millisecond** — see warning below | `LANGFUSE_PRICE_STT_FLUX_PER_MS` |
 | `vera-deepgram-nova` | `(?i)^nova-.*$` | `stt_audio_ms` | **per millisecond** — see warning below | `LANGFUSE_PRICE_STT_NOVA_PER_MS` |
 | `vera-cartesia-sonic` | `(?i)^sonic-.*$` | `tts_characters` | per character | `LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER` |
-| `vera-gemini` | `(?i)^gemini-.*$` | `input`, `output`, `cached` (all three — see note below) | per token, one price per key | `LANGFUSE_PRICE_LLM_GEMINI_INPUT_PER_TOKEN`, `LANGFUSE_PRICE_LLM_GEMINI_OUTPUT_PER_TOKEN`, `LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN` |
+| `vera-<gemini-model>` (one entry PER MODEL) | `(?i)^gemini-.*$` | `input`, `output`, `cached` (all three — see note below) | per token, one price per key | `LANGFUSE_PRICE_LLM_GEMINI_INPUT_PER_TOKEN`, `LANGFUSE_PRICE_LLM_GEMINI_OUTPUT_PER_TOKEN`, `LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN` |
 
 **Family patterns, not exact versions.** `(?i)^sonic-.*$` matches the pinned
 `sonic-3.5-2026-05-04` today and will still match `sonic-4` after a bump. Do not narrow a pattern
@@ -128,3 +128,28 @@ rates are contract-specific and must come from the actual vendor agreement.
 If your computed per-millisecond or per-character rate is off from these by several orders of
 magnitude, you likely have a unit conversion error (see the unit warning above) rather than an
 unusually priced contract.
+
+
+## Gemini is priced per model, not per family
+
+Every Gemini model Vera routes to gets its OWN entry — `vera-gemini-2.5-flash`,
+`vera-gemini-3.1-flash-lite`, `vera-gemini-3.5-flash`, `vera-gemini-3.6-flash` —
+because their rates differ by roughly 2x and one family rate would be right for one
+model and wrong for the rest, with nothing in the trace to say which.
+
+Deepgram and Cartesia stay FAMILY-matched (`^flux-.*$`, `^nova-.*$`, `^sonic-.*$`)
+on purpose: their version bumps are rate-compatible, so a family pattern there
+prevents a bump from silently zeroing cost.
+
+**The tradeoff to know:** a Gemini model that is not listed matches nothing and
+renders blank cost. There is deliberately no catch-all — Langfuse resolves ties by
+`project_id ASC, start_date DESC NULLS LAST` and model name is not in the ordering,
+so which entry won would hinge on `start_date` rather than on specificity. The
+safety net is the seeder's own coverage check: it WARNS, naming any configured model
+with no price entry. If you see that warning, add the model to `GEMINI_MODELS` and
+re-run with its three rates.
+
+**Flux and Nova are separately priced** (`LANGFUSE_PRICE_STT_FLUX_PER_MS` vs
+`LANGFUSE_PRICE_STT_NOVA_PER_MS`). Deepgram lists them at different rates — Flux
+~$0.0065/min, Nova ~$0.0077/min streaming — so giving both the same value silently
+misprices whichever one is wrong.

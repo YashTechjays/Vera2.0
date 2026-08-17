@@ -11,12 +11,18 @@ second copy inside Vera to drift.
 
     just langfuse-seed-prices
 
-    LANGFUSE_PRICE_STT_FLUX_PER_MS              Deepgram Flux, $ per MILLISECOND of audio
-    LANGFUSE_PRICE_STT_NOVA_PER_MS              Deepgram Nova, $ per MILLISECOND of audio
-    LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER      Cartesia Sonic, $ per character
-    LANGFUSE_PRICE_LLM_GEMINI_INPUT_PER_TOKEN   Gemini, $ per uncached input token
-    LANGFUSE_PRICE_LLM_GEMINI_OUTPUT_PER_TOKEN  Gemini, $ per output token
-    LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN  Gemini, $ per CACHED input token
+    LANGFUSE_PRICE_STT_FLUX_PER_MS          Deepgram Flux, $ per MILLISECOND of audio
+    LANGFUSE_PRICE_STT_NOVA_PER_MS          Deepgram Nova, $ per MILLISECOND of audio
+    LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER  Cartesia Sonic, $ per character
+
+Each Gemini model in GEMINI_MODELS is priced SEPARATELY — they differ by ~2x — so
+each needs three vars named after it, e.g. for gemini-3.6-flash:
+
+    LANGFUSE_PRICE_LLM_GEMINI_3_6_FLASH_INPUT_PER_TOKEN    $ per uncached input token
+    LANGFUSE_PRICE_LLM_GEMINI_3_6_FLASH_OUTPUT_PER_TOKEN   $ per output token
+    LANGFUSE_PRICE_LLM_GEMINI_3_6_FLASH_CACHED_PER_TOKEN   $ per CACHED input token
+
+Run it with none set to have it list every name it wants.
 
 The audio rates are PER MILLISECOND because Langfuse stores usage as integers and
 fractional seconds are truncated. Published rates are per minute, so converting is
@@ -38,6 +44,7 @@ import base64
 import logging
 import math
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -78,6 +85,45 @@ class ModelPrice:
     env_vars: Mapping[str, str] = field(default_factory=dict)
 
 
+# Every Gemini model Vera can route to, priced INDIVIDUALLY rather than as one family.
+# They differ materially — Langfuse's own table has gemini-2.5-flash at $3e-7/input
+# token against gemini-3-flash-preview at $5e-7 — so a single family rate would be
+# right for one model and wrong for the rest, with no way to tell from the trace.
+#
+# The cost of per-model entries is that a model NOT listed here matches nothing and
+# renders blank cost. A catch-all `^gemini-.*$` alongside these would paper over that,
+# but Langfuse resolves ties by `project_id ASC, start_date DESC NULLS LAST` — model
+# name is not in the ordering — so which entry wins would hinge on start_date rather
+# than on specificity. Cost accuracy should not rest on that, so the safety net is the
+# coverage warning in main() instead: it names any configured model with no entry.
+GEMINI_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash",  # voice_llm_default_model, and the post-call eval
+    "gemini-3.1-flash-lite",  # summary, health observer
+    "gemini-3.5-flash",  # observer extraction
+    "gemini-3.6-flash",  # seen live via a tenant llm_model_override
+)
+
+
+def _gemini_entry(model: str) -> ModelPrice:
+    """One price entry for one Gemini model.
+
+    The `(@version)?` suffix mirrors Langfuse's own built-in Gemini patterns, so a
+    Vertex-pinned `model@20250101` still matches. The `cached` key is REQUIRED:
+    without it Langfuse prices cache hits at $0 and understates cost — the mirror
+    image of the bug the export-time correction fixes.
+    """
+    slug = model.upper().replace("-", "_").replace(".", "_")
+    return ModelPrice(
+        f"vera-{model}",
+        rf"(?i)^{re.escape(model)}(@[a-zA-Z0-9]+)?$",
+        {
+            USAGE_INPUT: f"LANGFUSE_PRICE_LLM_{slug}_INPUT_PER_TOKEN",
+            USAGE_OUTPUT: f"LANGFUSE_PRICE_LLM_{slug}_OUTPUT_PER_TOKEN",
+            USAGE_CACHED: f"LANGFUSE_PRICE_LLM_{slug}_CACHED_PER_TOKEN",
+        },
+    )
+
+
 MODELS: tuple[ModelPrice, ...] = (
     ModelPrice(
         "vera-deepgram-flux",
@@ -94,19 +140,7 @@ MODELS: tuple[ModelPrice, ...] = (
         r"(?i)^sonic-.*$",
         {TTS_CHARACTERS: "LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER"},
     ),
-    # One family entry covers every Gemini surface (cascade, observer, health, summary,
-    # post-call eval). The `cached` key is REQUIRED: without it Langfuse prices cache
-    # hits at $0 and understates cost — the mirror image of the bug the export-time
-    # correction fixes.
-    ModelPrice(
-        "vera-gemini",
-        r"(?i)^gemini-.*$",
-        {
-            USAGE_INPUT: "LANGFUSE_PRICE_LLM_GEMINI_INPUT_PER_TOKEN",
-            USAGE_OUTPUT: "LANGFUSE_PRICE_LLM_GEMINI_OUTPUT_PER_TOKEN",
-            USAGE_CACHED: "LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN",
-        },
-    ),
+    *(_gemini_entry(model) for model in GEMINI_MODELS),
 )
 
 
@@ -138,6 +172,15 @@ def resolve_rates(env: Mapping[str, str]) -> dict[str, float]:
             f"missing, unparseable, or non-positive rate env vars: {sorted(set(missing))}"
         )
     return rates
+
+
+def matching_entry(model: str) -> ModelPrice | None:
+    """The entry whose pattern matches *model*, or None when nothing prices it.
+
+    Mirrors how Langfuse resolves a price, so the coverage check answers the same
+    question the cost engine will: does this model have a price at all?
+    """
+    return next((m for m in MODELS if re.match(m.match_pattern, model)), None)
 
 
 def build_payload(
@@ -234,10 +277,19 @@ async def main() -> int:
         *settings.health_fallback_models,
         *settings.whisper_stt_fallback_models,
     }
-    logger.info(
-        "verify these configured models match a pattern above: %s",
-        sorted({selector.rpartition(":")[2] for selector in configured_selectors}),
-    )
+    models = sorted({selector.rpartition(":")[2] for selector in configured_selectors})
+    if unpriced := [m for m in models if not matching_entry(m)]:
+        # The whole point of per-model entries: an unlisted model matches nothing and
+        # renders blank cost, which reads as "this surface is free". Say so loudly here
+        # rather than leaving it to be rediscovered in the UI as broken instrumentation.
+        logger.warning(
+            "NO PRICE ENTRY for these configured models — their observations will "
+            "render BLANK cost: %s",
+            unpriced,
+        )
+        logger.warning("add each to GEMINI_MODELS (or MODELS) and re-run with its rates")
+    else:
+        logger.info("every configured model matches a seeded entry: %s", models)
     return 0
 
 
