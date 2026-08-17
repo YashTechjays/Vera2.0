@@ -56,6 +56,10 @@ from vera_core.observability.usage_spans import (
 
 logger = logging.getLogger("vera.seed_langfuse_prices")
 
+# Runaway guard for the model-listing walk, not an expected bound: ~160 built-ins
+# plus our handful fit well inside this.
+_MAX_MODEL_PAGES = 20
+
 
 class MissingRateError(RuntimeError):
     """A rate env var is absent, unparseable, or not a strictly positive finite number.
@@ -154,10 +158,23 @@ def build_payload(
 
 
 async def _existing_ids(client: httpx.AsyncClient) -> dict[str, str]:
-    response = await client.get("/api/public/models", params={"limit": 100})
-    response.raise_for_status()
-    data: list[dict[str, Any]] = response.json().get("data", [])
-    return {m["modelName"]: m["id"] for m in data if "modelName" in m and "id" in m}
+    """Every model name -> id, across ALL pages.
+
+    Paginating is not optional: the listing includes Langfuse's ~160 built-in
+    entries alongside ours, so a single page misses the `vera-*` ones entirely.
+    Missing them makes the upsert POST omit `modelId`, which Langfuse rejects on
+    the (projectId, modelName) uniqueness check — the seeder then fails on its
+    first re-run instead of being idempotent.
+    """
+    ids: dict[str, str] = {}
+    for page in range(1, _MAX_MODEL_PAGES + 1):
+        response = await client.get("/api/public/models", params={"limit": 100, "page": page})
+        response.raise_for_status()
+        data: list[dict[str, Any]] = response.json().get("data", [])
+        if not data:
+            break
+        ids.update({m["modelName"]: m["id"] for m in data if "modelName" in m and "id" in m})
+    return ids
 
 
 async def seed(client: httpx.AsyncClient, rates: Mapping[str, float]) -> list[str]:

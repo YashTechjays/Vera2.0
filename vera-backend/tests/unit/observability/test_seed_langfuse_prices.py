@@ -11,6 +11,7 @@ from scripts.seed_langfuse_prices import (
     MissingRateError,
     build_payload,
     resolve_rates,
+    seed,
 )
 
 _RATES = {
@@ -95,3 +96,70 @@ class TestPayload:
         # Family patterns, not exact versions: an exact pattern would silently zero cost
         # on the next bump, and a missing match looks identical to "no data".
         assert re.match(_BY_NAME["vera-cartesia-sonic"].match_pattern, "sonic-4")
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
+class _FakeClient:
+    """Stands in for httpx.AsyncClient. `existing` is the full model listing the
+    server would return, served 100-per-page like the real API."""
+
+    def __init__(self, existing: list[dict[str, str]]) -> None:
+        self._existing = existing
+        self.posted: list[dict[str, object]] = []
+
+    async def get(self, _url: str, params: dict[str, int]) -> _FakeResponse:
+        limit, page = params["limit"], params.get("page", 1)
+        start = (page - 1) * limit
+        return _FakeResponse({"data": self._existing[start : start + limit]})
+
+    async def post(self, _url: str, json: dict[str, object]) -> _FakeResponse:
+        self.posted.append(json)
+        return _FakeResponse({})
+
+
+def _filler(count: int) -> list[dict[str, str]]:
+    """Langfuse ships ~160 built-in model entries; they share the listing with ours."""
+    return [{"modelName": f"built-in-{i}", "id": f"b{i}"} for i in range(count)]
+
+
+class TestIdempotentUpsert:
+    """The seam `build_payload`'s tests do NOT cover: `build_payload` proves an id is
+    USED when handed one, not that `_existing_ids` FINDS one."""
+
+    @pytest.mark.asyncio
+    async def test_a_first_run_posts_every_model_without_an_id(self) -> None:
+        client = _FakeClient([])
+        written = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert written == [m.model_name for m in MODELS]
+        assert all("modelId" not in p for p in client.posted)
+
+    @pytest.mark.asyncio
+    async def test_a_second_run_threads_each_existing_id_back_in(self) -> None:
+        # Without the id, Langfuse rejects a duplicate modelName on its
+        # (projectId, modelName) uniqueness check and the re-run fails outright.
+        listing = [{"modelName": m.model_name, "id": f"id-{m.model_name}"} for m in MODELS]
+        client = _FakeClient(listing)
+        await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert [p["modelId"] for p in client.posted] == [f"id-{m.model_name}" for m in MODELS]
+
+    @pytest.mark.asyncio
+    async def test_existing_entries_are_found_beyond_the_first_page(self) -> None:
+        # The regression this exists for: a real instance carries ~160 built-ins, so
+        # our entries land on page 2. Reading only page 1 loses every id, and the
+        # "idempotent" re-run then fails on its first POST.
+        listing = _filler(160) + [
+            {"modelName": m.model_name, "id": f"id-{m.model_name}"} for m in MODELS
+        ]
+        client = _FakeClient(listing)
+        await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert [p["modelId"] for p in client.posted] == [f"id-{m.model_name}" for m in MODELS]
