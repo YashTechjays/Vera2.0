@@ -116,6 +116,7 @@ def _tts(**over: Any) -> TTSMetrics:
     base: dict[str, Any] = {
         "request_id": "req-2",
         "timestamp": 1.0,
+        "label": "cartesia.TTS",
         "ttfb": 0.134,
         "duration": 4.72,
         "audio_duration": 27.64,
@@ -1020,6 +1021,7 @@ class TestUsageSpanWiring:
             TTSMetrics(
                 request_id="r",
                 timestamp=1.0,
+                label="cartesia.TTS",  # required by the pydantic model
                 ttfb=0.1,
                 duration=1.0,
                 audio_duration=2.0,
