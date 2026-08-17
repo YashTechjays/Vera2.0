@@ -8,6 +8,8 @@ column, which is the defect this text exists to prevent. Same pattern as
 `vera_core.call_health.HEALTH_SYSTEM_PROMPT`: prompt text in `vera_core`, consumed by an app.
 """
 
+from collections.abc import Sequence
+
 # `percent`-typed leaves (coinsurance) were stored inconsistently — a bare "20" from the
 # extractor sitting beside the "0%" the either/or auto-fill writes from the leaf's authored
 # `inapplicable_value`. Storage IS display here (the review UI and the xlsx export render the
@@ -27,3 +29,23 @@ ANSWER_UNIT_FORMAT_RULE = (
     'Write a percentage answer as digits with the sign and nothing else — "20%", never '
     '"20" or "twenty percent"; "0%" for none.'
 )
+
+
+# "ADDITIONAL possibilities, not the full range" is load-bearing: read as the field's WHOLE
+# vocabulary, the model treats a normal answer as not belonging and diverts it to a neighbouring
+# free-text leaf. Said once here rather than per-field, which cost +18% of the whole prompt.
+EXACT_VALUE_RULE = (
+    'Some fields list a few named answers after "or exactly:". Those are ADDITIONAL '
+    "possibilities, not the full range — answer normally in every other case, and only when "
+    "the answer really is one of them, write it exactly as shown."
+)
+
+
+def special_values_hint(special_values: Sequence[str] | None) -> str:
+    """The clause naming a NON-enum leaf's declared answers, or "" when it has none."""
+    # Not optional on a currency leaf: without it the model writes no non-numeric answer at all.
+    # Kept out of the enum `(one of: …)` clause because here they are ALTERNATIVES to a normal
+    # answer, and "one of" pushes the model to pick a sentinel over the figure it was told.
+    if not special_values:
+        return ""
+    return f" (or exactly: {', '.join(special_values)})"

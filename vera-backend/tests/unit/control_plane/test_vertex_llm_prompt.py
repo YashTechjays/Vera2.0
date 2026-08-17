@@ -104,6 +104,29 @@ def test_extract_prompt_states_the_percent_shape_and_says_nothing_about_money() 
     assert "$20" not in prompt
 
 
+def test_extract_prompt_names_the_literals_a_requested_path_declares() -> None:
+    """The top-up runs on exactly the paths the Observer missed, which for a currency leaf is
+    the sentinel case — never shown the literals, the model writes no non-numeric answer at
+    all, so an "unlimited" deductible comes back empty and the payer is redialed."""
+    prompt = build_extract_prompt(
+        ["sections.deductibles.individual.total", "sections.cov.coinsurance"],
+        [],
+        {"sections.deductibles.individual.total": ["$0", "Unlimited", "No Limit"]},
+    )
+    assert "- sections.deductibles.individual.total (or exactly: $0, Unlimited, No Limit)" in prompt
+    assert "ADDITIONAL" in prompt  # EXACT_VALUE_RULE, which explains the clause
+    assert "- sections.cov.coinsurance (" not in prompt  # a path declaring none is not annotated
+
+
+def test_extract_prompt_is_unchanged_when_no_requested_path_declares_a_literal() -> None:
+    """The rule explains a clause, so a form with no such clause must not pay for it."""
+    paths = ["sections.cov.network_status"]
+    assert build_extract_prompt(paths, [], {"sections.other.total": ["$0"]}) == (
+        build_extract_prompt(paths, [])
+    )
+    assert "or exactly:" not in build_extract_prompt(paths, [])
+
+
 def test_parse_extract_response_maps_fields() -> None:
     data = [{"field_path": "p", "value": "in-network", "confidence": 90, "evidence_seq": 1}]
     out = parse_extract_response(data)

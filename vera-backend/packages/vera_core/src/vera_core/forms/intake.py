@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from vera_core.forms.answers import literals_of
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import PATH_PREFIX, FormSchemaDoc, format_date, parse_date_format
 
@@ -272,15 +273,15 @@ def unknown_payload_paths(answers: list[tuple[str, Any]], doc: FormSchemaDoc) ->
 
 
 def enum_accepted_values(doc: FormSchemaDoc) -> dict[str, set[str]]:
-    """Accepted intake answers per enum leaf — declared `values` plus `special_values`,
-    the leaf's own `default` and its `inapplicable_value`."""
-    accepted: dict[str, set[str]] = {}
-    for path, leaf in doc.leaf_items():
-        if leaf.type != "enum" or not leaf.values:
-            continue
-        extras = (*(leaf.special_values or []), leaf.default, leaf.inapplicable_value)
-        accepted[path] = set(leaf.values) | {value for value in extras if value is not None}
-    return accepted
+    """Accepted intake answers per enum leaf — the literals a gate may compare it against.
+
+    Shares `answers.literals_of`'s union rather than restating it: a value intake accepts
+    but a gate does not recognize is a question nothing can close."""
+    return {
+        path: set(literals_of(leaf).gate)
+        for path, leaf in doc.leaf_items()
+        if leaf.type == "enum" and leaf.values
+    }
 
 
 def validate_enum_answers(answers: list[tuple[str, Any]], doc: FormSchemaDoc) -> None:

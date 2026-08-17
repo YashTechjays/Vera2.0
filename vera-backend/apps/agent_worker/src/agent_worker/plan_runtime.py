@@ -106,11 +106,12 @@ _REFUSAL_DRAIN_TIMEOUT_S = 4.0
 # Shared by both completion guards, and shared deliberately: the drain above is bounded and
 # best-effort, so either guard can still be judging a snapshot the agent has already heard past.
 # Neither may claim a question is unanswered — only that nothing is recorded YET.
-_STALE_ANSWER_CAVEAT = (
-    "If you have already asked one and the representative answered it, do NOT ask it again — "
-    "that answer is still being written down. Ask only the ones you have not asked yet, one at "
-    "a time,"
-)
+#
+# It must NOT forbid re-asking: when the whole digest is already asked, a prohibition leaves silence
+# as the only legal move (45s of dead air on call 01a008f8). Nor may anything here tell the agent
+# what to do once they are all answered — prose about calling the tool makes it emit the call as
+# TEXT, which TTS speaks aloud. Both measured; see the Obsidian issue note before editing.
+_STALE_ANSWER_CAVEAT = "Ask only the ones you have not asked yet, one at a time,"
 
 # Both refusals are PRIVATE instructions, and both used to open on "Not yet —", which the agent
 # read as a rebuke and relayed: "Sorry, I got ahead of myself." The representative experienced no
@@ -234,9 +235,8 @@ def _instructions(plan: CallPlan, task_block: str, *, extra_instructions: str | 
 
 
 class PlanTaskAgent(Agent):
-    """One schema task's conversation. Dialogue-only by construction: its tools
-    (`task_complete`, `representative_requests_end_call`) only route the call — neither
-    writes an answer — and its sole shared-state write is the cursor."""
+    """One schema task's conversation. Dialogue-only by construction: its sole
+    tool is `task_complete`, and its sole shared-state write is the cursor."""
 
     def __init__(self, controller: "PlanRunController", task_index: int) -> None:
         self._controller = controller
@@ -381,8 +381,14 @@ class PlanTaskAgent(Agent):
         ),
     )
     async def _task_complete(self, reason: str) -> Agent | str:
-        if (blocked := self._refuse_handoff()) is not None:
-            return blocked
+        if takeover_engaged(self.session):
+            # A str is a tool result, so the plan parks here. Returning `self` would
+            # re-fire on_enter and speak the intro again.
+            return "A human supervisor has taken over this call. Stay silent."
+        if self._advanced_this_turn:
+            # A second chain-advancing call in one turn traverses a task without ever
+            # entering its question loop. Inert, not a second Agent.
+            return "Already moving on — continue with the next question."
         # Only when a refusal is still reachable. Past the turn ceiling the guard returns None
         # unconditionally, so draining there buys nothing and spends up to 4s of silence on
         # every remaining handoff of the call.
@@ -405,52 +411,8 @@ class PlanTaskAgent(Agent):
         # Carry the conversation into the successor — LiveKit doesn't for a
         # tool-returned agent, so without this it re-greets and re-asks.
         await self._controller.prepare_successor(self, successor)
-        self._tag_handoff(successor, reason="task_complete")
+        self._tag_task_complete_handoff(successor)
         return successor
-
-    # The rep's own words are the trigger, so the rule lives where the model decides: this
-    # description. The "hold on" carve-out is the list the introduction task already waits through.
-    @llm.function_tool(
-        name="representative_requests_end_call",
-        description=(
-            "The representative has asked to end the call — they must go, they have another "
-            "call, or they asked to wrap up. Call this IMMEDIATELY, in that same turn: it "
-            "abandons every remaining questions. Never call it for 'hold on', 'let me "
-            "check', 'one moment' or any other pause, and never because the current task is "
-            "finished — that is what task_complete is for. " + TOOL_REASON_ARG
-        ),
-    )
-    async def _request_end_call(self, reason: str) -> Agent | str:
-        """Abandon the rest of the plan and hand to the closing task, which collects the
-        representative's name and the call reference number and then ends the call.
-
-        Deliberately skips `_refuse_premature_completion`: giving up the questions this task
-        still owes is the point, so the guard that protects them is wrong here."""
-        if (blocked := self._refuse_handoff()) is not None:
-            return blocked
-        if self._task_index >= self._controller.closing_task_index:
-            return "You are already on the closing questions — finish them, then task_complete."
-        # Set before the first await, for the reason given in `_task_complete`.
-        self._advanced_this_turn = True
-        # No outro: announcing "I have everything I need" to a rep who just asked to go is a lie,
-        # and clearing a stale sign-off keeps the goodbye if the closer is gated out.
-        self._controller.note_task_outro(None)
-        successor = await self._controller.request_closing_task()
-        await self._controller.prepare_successor(self, successor)
-        self._tag_handoff(successor, reason="end_call_requested")
-        return successor
-
-    def _refuse_handoff(self) -> str | None:
-        """Why this turn must not route the call onward at all — shared by every routing tool."""
-        if takeover_engaged(self.session):
-            # A str is a tool result, so the plan parks here. Returning `self` would
-            # re-fire on_enter and speak the intro again.
-            return "A human supervisor has taken over this call. Stay silent."
-        if self._advanced_this_turn:
-            # A second chain-advancing call in one turn traverses a task without ever
-            # entering its question loop. Inert, not a second Agent.
-            return "Already moving on — continue with the next question."
-        return None
 
     def _refuse_premature_completion(self) -> str | None:
         """Send the agent back for this task's still-open required questions.
@@ -524,22 +486,22 @@ class PlanTaskAgent(Agent):
                 type(exc).__name__,
             )
 
-    def _tag_handoff(self, successor: Agent, *, reason: str) -> None:
+    def _tag_task_complete_handoff(self, successor: Agent) -> None:
         try:
             trace.get_current_span().set_attributes(
                 {
                     "vera.handoff.from_task": self._task.task_key,
                     "vera.handoff.to_task": successor.id,
-                    "vera.handoff.reason": reason,
+                    "vera.handoff.reason": "task_complete",
                 }
             )
         except Exception as exc:
             logger.warning(
-                "plan run %s: handoff span tagging failed (%s)",
+                "plan run %s: task-complete handoff span tagging failed (%s)",
                 self._controller.room_name,
                 type(exc).__name__,
             )
-        logger.info("handoff: %s -> %s (reason=%s)", self._task.task_key, successor.id, reason)
+        logger.info("handoff: %s -> %s (reason=task_complete)", self._task.task_key, successor.id)
 
 
 class WrapUpAgent(VeraAgent):
@@ -869,21 +831,6 @@ class PlanRunController:
             gap_agent = self._maybe_enter_gap_pass(next_index)
             return gap_agent if gap_agent is not None else self._agent_at(next_index)
 
-    @property
-    def closing_task_index(self) -> int:
-        """The last task — the one that collects the rep's name and the call reference number."""
-        return self._closing_task_index
-
-    async def request_closing_task(self) -> Agent:
-        """Jump to the closing task because the representative asked to end the call.
-
-        Nothing has to suppress the gap pass: `_maybe_enter_gap_pass` has one caller,
-        `advance_from`, so entering the closer directly never reaches it — and leaving the
-        closer doesn't either, since `_next_applicable(closing + 1)` is None."""
-        async with self.lock:
-            self.generation += 1
-            return self._closing_agent()
-
     async def advance_gap_from(self, index: int) -> Agent:
         async with self.lock:
             self.generation += 1
@@ -891,7 +838,9 @@ class PlanRunController:
             if gap_index is not None:
                 return self.gap_agents[gap_index]
             self._gap_pass_done = True
-            return self._closing_agent()
+            # Re-check applicability like every other transition: the Observer keeps writing
+            # answers during the pass, so the closer's gate can have flipped since entry.
+            return self._agent_at(self._next_applicable(self._closing_task_index))
 
     async def prepare_successor(self, source: Agent, target: Agent) -> None:
         """Give `target` the conversation it needs before it becomes active — the single seam
@@ -1353,9 +1302,6 @@ class PlanRunController:
 
     def _agent_at(self, index: int | None) -> Agent:
         return self.agents[index] if index is not None else self.wrap_up_agent
-
-    def _closing_agent(self) -> Agent:
-        return self._agent_at(self._next_applicable(self._closing_task_index))
 
     def _next_applicable(self, start: int) -> int | None:
         for i in range(start, len(self.plan.tasks)):
