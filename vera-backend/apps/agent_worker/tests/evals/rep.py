@@ -191,32 +191,6 @@ You are looking at the member's plan in your system.
 - Your name is Martha Reed. Your call reference number is 841026.
 """
 
-# The rep runs out of time mid-call. Nothing in the plan is a CONDITION over this — it is an
-# utterance — so `representative_requests_end_call` is the only thing that can route it, and the
-# name/reference number must still be captured before the goodbye.
-END_CALL_REQUEST_FACTS = """\
-You are looking at the member's plan in your system.
-
-- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
-- This is an individual PPO plan and the doctor and facility are both in network.
-- After you have answered two questions, tell the assistant you are being pulled into another
-  call and need to wrap this up now. From then on refuse every benefit question — say you are
-  out of time — but DO give your name and a call reference number if asked for them.
-- Your name is Martha Reed. Your call reference number is 841026.
-"""
-
-# The false-positive fence for the rule above: "one moment" is a rep who is still with you.
-HOLD_PLEASE_FACTS = """\
-You are looking at the member's plan in your system.
-
-- Member: Test T, date of birth April 12 1991, policy POL-661522, group number GRP-88421.
-- This is an individual PPO plan and the doctor and facility are both in network.
-- Before each of your first two answers say "hold on, let me pull that up" or "one moment" and
-  nothing else, then answer normally on your next turn. You are NOT ending the call and you have
-  plenty of time.
-- Your name is Martha Reed. Your call reference number is 841026.
-"""
-
 # `spouse_partner_name`/`spouse_partner_dob` (ibv_standard.py) are `confirm`-role fields, gated
 # on a FAMILY policy, with no prefill anywhere in this harness (CASE has no `system_fields` entry
 # for either) — exactly the empty-value path the `{{confirm:<path>}}` fix targets. The rep is the

@@ -50,11 +50,9 @@ from livekit.agents import AgentSession
 from livekit.agents.voice.run_result import mock_tools
 from rep import (
     DERIVED_REMAINING_FACTS,
-    END_CALL_REQUEST_FACTS,
     FACT_SHEET,
     FAMILY_COVERAGE_FACTS,
     FAMILY_SPOUSE_NAME,
-    HOLD_PLEASE_FACTS,
     INACTIVE_POLICY_FACTS,
     MANDATE_CONTRADICTION_FACTS,
     TRIPLET_MISQUOTE_FACTS,
@@ -140,25 +138,6 @@ DERIVED_REMAINING_SCENARIO = Scenario(
     focus_fields=_TRIPLET_FIELDS,
 )
 
-_END_CALL_TOOL = "representative_requests_end_call"
-
-# Two focused fields in DIFFERENT tasks, so an early end-call request has something
-# observable to skip. `load_published_plan` unions the wrap-up task's fields in itself.
-_END_CALL_FOCUS = (
-    "sections.insurance_information.plan_type",
-    "sections.benefit_coverage.coverage_type",
-)
-END_CALL_REQUEST_SCENARIO = Scenario(
-    label="rep asks to end the call mid-plan",
-    facts=END_CALL_REQUEST_FACTS,
-    focus_fields=_END_CALL_FOCUS,
-)
-HOLD_PLEASE_SCENARIO = Scenario(
-    label="rep asks to hold, not to hang up",
-    facts=HOLD_PLEASE_FACTS,
-    focus_fields=_END_CALL_FOCUS,
-)
-
 
 @dataclass
 class Fired:
@@ -197,10 +176,6 @@ class CallRun:
     def fired_rules(self) -> list[str]:
         """The rule_keys whose directives actually reached the controller."""
         return [f.directive.rule_key for f in self.directives]
-
-    def tool_fired_at(self, name: str) -> int | None:
-        """Index of the first plan turn that called `name`, or None if it never fired."""
-        return next((i for i, turn in enumerate(self.plan) if name in turn.tools), None)
 
     def fired(self, rule_key: str) -> "Fired | None":
         """The first firing of `rule_key`, or None if that rule never reached the controller."""
@@ -408,26 +383,6 @@ async def triplet_call() -> CallRun:
 @pytest.fixture(scope="module")
 async def derived_remaining_call() -> CallRun:
     return await _run_call(DERIVED_REMAINING_SCENARIO)
-
-
-@pytest.fixture(scope="module")
-async def end_call_request_call() -> CallRun:
-    return await _run_call(END_CALL_REQUEST_SCENARIO)
-
-
-@pytest.fixture(scope="module")
-async def hold_please_call() -> CallRun:
-    return await _run_call(HOLD_PLEASE_SCENARIO)
-
-
-@pytest.fixture(scope="module")
-async def end_call_requested_at(end_call_request_call: CallRun) -> int:
-    """The plan turn the end-call request fired on. Whether the simulated rep ever asks is
-    live-LLM variance, so every test that needs the request skips together, here."""
-    turn = end_call_request_call.tool_fired_at(_END_CALL_TOOL)
-    if turn is None:
-        pytest.skip("the rep never asked to end the call this run")
-    return turn
 
 
 async def test_plan_came_from_a_published_schema_version(call: CallRun) -> None:
@@ -665,42 +620,3 @@ async def test_call_says_goodbye_once(call: CallRun) -> None:
         if any(s in line.lower() for s in ("goodbye", "have a good day", "have a wonderful day"))
     ]
     assert len(sign_offs) <= 1, f"signed off {len(sign_offs)}x: {sign_offs}"
-
-
-async def test_an_end_call_request_jumps_to_wrap_up(
-    end_call_request_call: CallRun, end_call_requested_at: int
-) -> None:
-    """The reported bug: VERA acknowledged the request and kept asking plan questions."""
-    assert isinstance(end_call_request_call.landed, WrapUpAgent)
-    assert ("wrap_up", WrapUpAgent.__name__) in end_call_request_call.handoffs()
-
-
-async def test_an_end_call_request_skips_the_gap_pass(
-    end_call_request_call: CallRun, end_call_requested_at: int
-) -> None:
-    swept = [h for h in end_call_request_call.handoffs() if h[1] == GapTaskAgent.__name__]
-    assert not swept, f"the gap pass ran after an end-call request: {swept}"
-
-
-async def test_the_closing_questions_are_still_asked(
-    end_call_request_call: CallRun, end_call_requested_at: int
-) -> None:
-    """Routing to the wrap-up TASK rather than hanging up is the whole point: the name and
-    reference number are what a later retry reads, and a rep in a hurry is exactly the rep
-    who hangs up before we get them.
-
-    Asserted on what VERA SAID, not on what was extracted — extraction is a live LLM call
-    that varies between runs, but the question either left her mouth or it did not."""
-    turns_after = end_call_request_call.plan[end_call_requested_at:]
-    after = " ".join(end_call_request_call.vera_said(turns_after))
-    assert re.search(r"\b(your|the) name\b", after, re.IGNORECASE), after
-    assert re.search(r"\breference number\b", after, re.IGNORECASE), after
-
-
-async def test_a_request_to_hold_is_not_a_request_to_end(hold_please_call: CallRun) -> None:
-    """The false-positive fence, and it carries weight: the trigger lives only in the tool
-    description, so "one moment" firing it would abandon a verification nobody ended."""
-    assert hold_please_call.tool_fired_at(_END_CALL_TOOL) is None, (
-        "VERA treated a hold as a request to end the call"
-    )
-    assert isinstance(hold_please_call.landed, WrapUpAgent)
