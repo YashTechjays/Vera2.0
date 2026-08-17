@@ -14,14 +14,17 @@ from vera_core.observability.llm_usage_export import (
 )
 
 
-def _metrics(prompt: int, cached: int, completion: int) -> str:
-    return json.dumps(
-        {
-            "prompt_tokens": prompt,
-            "prompt_cached_tokens": cached,
-            "completion_tokens": completion,
-        }
-    )
+def _metrics(prompt: int, cached: int, completion: int, total: int | None = None) -> str:
+    """`total` mirrors the provider's own total_token_count. Omitted means the blob
+    carries none, which must leave the derived thinking count at zero."""
+    blob = {
+        "prompt_tokens": prompt,
+        "prompt_cached_tokens": cached,
+        "completion_tokens": completion,
+    }
+    if total is not None:
+        blob["total_tokens"] = total
+    return json.dumps(blob)
 
 
 class TestCorrectedUsage:
@@ -173,3 +176,43 @@ class TestCacheVisibility:
         )
         usage = json.loads(inner.exported[0].attributes["langfuse.observation.usage_details"])
         assert set(usage) == {"input", "cached", "output"}
+
+
+class TestThinkingTokens:
+    """Gemini bills thinking as OUTPUT, but the Google plugin sets
+    `completion_tokens = candidates_token_count`, which EXCLUDES thoughts, while
+    `total_tokens` includes them. Reading completion alone understates output on any
+    thinking-enabled model — and Vera configures thinking per tenant. The post-call
+    eval path reads `thoughts_token_count` directly, so these keep them in agreement."""
+
+    def test_thinking_tokens_are_folded_into_output(self) -> None:
+        # prompt 1000 (300 cached) + completion 40 + 260 thoughts -> total 1300
+        usage = corrected_usage_details(_metrics(1000, 300, 40, total=1300))
+        assert usage == {"input": 700, "cached": 300, "output": 300}
+
+    def test_usage_reconciles_against_the_providers_own_total(self) -> None:
+        # The strongest invariant available: nothing billed is invented or dropped.
+        total = 1300
+        usage = corrected_usage_details(_metrics(1000, 300, 40, total=total))
+        assert usage is not None
+        assert usage["input"] + usage["cached"] + usage["output"] == total
+
+    def test_no_thinking_leaves_output_untouched(self) -> None:
+        # total == prompt + completion, so the residual is zero.
+        usage = corrected_usage_details(_metrics(1000, 300, 40, total=1040))
+        assert usage == {"input": 700, "cached": 300, "output": 40}
+
+    def test_an_sdk_that_starts_including_thoughts_does_not_double_count(self) -> None:
+        # Self-correcting: if completion_tokens ever grows to include thoughts, the
+        # residual collapses to 0 rather than adding them a second time.
+        usage = corrected_usage_details(_metrics(1000, 300, 300, total=1300))
+        assert usage == {"input": 700, "cached": 300, "output": 300}
+
+    def test_a_missing_total_cannot_subtract_usage(self) -> None:
+        # A provider reporting no total yields a negative residual; clamping keeps
+        # output at the reported completion instead of eroding it.
+        assert corrected_usage_details(_metrics(1000, 300, 40)) == {
+            "input": 700,
+            "cached": 300,
+            "output": 40,
+        }

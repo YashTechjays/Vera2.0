@@ -64,14 +64,35 @@ def corrected_usage_details(raw_metrics: str) -> dict[str, int] | None:
         return None
     if not isinstance(metrics, dict):
         return None
+    prompt = int(metrics.get("prompt_tokens", 0) or 0)
+    completion = int(metrics.get("completion_tokens", 0) or 0)
     return (
         llm_token_usage(
-            prompt=int(metrics.get("prompt_tokens", 0) or 0),
+            prompt=prompt,
             cached=int(metrics.get("prompt_cached_tokens", 0) or 0),
-            output=int(metrics.get("completion_tokens", 0) or 0),
+            output=completion
+            + _thinking_tokens(int(metrics.get("total_tokens", 0) or 0), prompt, completion),
         )
         or None
     )
+
+
+def _thinking_tokens(total: int, prompt: int, completion: int) -> int:
+    """Thinking tokens, derived as the residual of the provider's own total.
+
+    Gemini bills thinking as OUTPUT, but the Google plugin sets
+    `completion_tokens = candidates_token_count` — which EXCLUDES thoughts — while
+    `total_tokens = total_token_count` includes them. Reading `completion_tokens`
+    alone therefore understates output on any thinking-enabled model, and Vera
+    configures thinking per tenant. The post-call eval path reads
+    `thoughts_token_count` directly; this keeps the two in agreement.
+
+    A residual rather than a field because `LLMMetrics` carries no thoughts count.
+    It is self-correcting: if a future SDK folds thoughts into `completion_tokens`,
+    the residual becomes 0 and nothing double-counts. Clamped at 0 so a provider
+    that reports no total (or an inclusive prompt count) cannot subtract usage.
+    """
+    return max(0, total - prompt - completion)
 
 
 def _enrich(span: ReadableSpan) -> ReadableSpan:
