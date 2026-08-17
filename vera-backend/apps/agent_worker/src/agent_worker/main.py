@@ -26,6 +26,7 @@ from livekit.agents import (
     cli,
 )
 from livekit.plugins import deepgram
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from redis.asyncio import Redis
 
@@ -62,6 +63,7 @@ from vera_core.events import (
     WorkerEventBus,
 )
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
+from vera_core.observability import TraceLinkStore, current_traceparent
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     TRANSPORT_ATTR,
@@ -386,6 +388,19 @@ async def entrypoint(ctx: JobContext) -> None:
         # console/connect mic test (foreign room) this sets only `vera.room`.
         trace.get_current_span().set_attributes(call_trace_attributes(room_name))
 
+        # Captured HERE, where LiveKit's job_entrypoint span is genuinely ambient.
+        # Usage-span listeners are registered from code that later runs in other tasks
+        # — notably the takeover STT, reached via a room-event callback whose task does
+        # NOT carry this context. Capturing now and closing over the value keeps every
+        # usage span inside this call's trace; reading ambient context at emit time
+        # would silently produce new trace roots that never sum into the call's cost.
+        usage_parent_ctx = otel_context.get_current()
+        # Publish this call's trace id so the control plane's later spans (post-call
+        # eval, summary, coaching whisper) join THIS trace rather than forming their
+        # own. Langfuse's per-trace cost rollup is what makes a per-call total real.
+        if events_redis is not None and (traceparent := current_traceparent()):
+            await TraceLinkStore(events_redis).publish(room_name, traceparent)
+
         # Dispatch metadata gates greeting timing. The /calls path passes none, so it
         # keeps the immediate behavior; Voice Lab passes {"wait_for_speaker": true} so
         # the agent holds until the human/phone participant can actually hear it.
@@ -482,6 +497,8 @@ async def entrypoint(ctx: JobContext) -> None:
             llm_model=meta.get("llm_model_override"),
             thinking_override=meta.get("llm_thinking_override"),
             default_model=settings.voice_llm_default_model,
+            room_name=room_name,
+            parent_context=usage_parent_ctx,
         )
 
         # THE call event stream: transcript turns + call_status frames, feeding the
