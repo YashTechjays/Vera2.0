@@ -57,6 +57,7 @@ class _RecordingExporter:
         self.exported: list[Any] = []
         self.shutdown_called = False
         self.flushed = False
+        self.flush_timeout: int | None = None
 
     def export(self, spans: Any) -> Any:
         self.exported.extend(spans)
@@ -67,6 +68,7 @@ class _RecordingExporter:
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         self.flushed = True
+        self.flush_timeout = timeout_millis
         return True
 
 
@@ -108,6 +110,14 @@ class TestExporter:
         # Without delegation, spans queued at process exit are silently lost.
         inner = _RecordingExporter()
         exporter = UsageEnrichingExporter(inner)
-        exporter.force_flush()
         exporter.shutdown()
-        assert inner.flushed and inner.shutdown_called
+        assert inner.shutdown_called
+
+    def test_force_flush_forwards_its_timeout_to_the_wrapped_exporter(self) -> None:
+        # A non-default value: forwarding the default would coincidentally match the
+        # fake's own default and hide a regression that drops the argument entirely.
+        inner = _RecordingExporter()
+        exporter = UsageEnrichingExporter(inner)
+        exporter.force_flush(1234)
+        assert inner.flushed
+        assert inner.flush_timeout == 1234
