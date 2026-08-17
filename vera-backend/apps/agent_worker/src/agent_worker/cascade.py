@@ -110,8 +110,8 @@ def cascade_session_kwargs(turn_detector: Any) -> dict[str, Any]:
             "turn_detection": turn_detector,
             "interruption": {
                 "mode": "vad",
-                "min_duration": 0.5,
-                "false_interruption_timeout": 2.0,
+                "min_duration": 0.2,
+                "false_interruption_timeout": 1.0,
                 "resume_false_interruption": True,
             },
         },
