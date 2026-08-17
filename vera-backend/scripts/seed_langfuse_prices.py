@@ -74,6 +74,19 @@ class MissingRateError(RuntimeError):
     broken instrumentation in the UI."""
 
 
+# Langfuse's own unit enum, validated server-side. MILLISECONDS being first-class
+# is what makes the per-millisecond audio decision the native one rather than a
+# workaround: usage stays integral AND the unit is declared, so the UI reads right.
+UNIT_MILLISECONDS = "MILLISECONDS"
+UNIT_CHARACTERS = "CHARACTERS"
+UNIT_TOKENS = "TOKENS"
+
+# Every pricing tier must be named, ordered, and carry its (possibly empty) match
+# conditions, and EXACTLY ONE tier per model must be flagged isDefault. Vera prices
+# flat, so each model gets one unconditional default tier.
+_DEFAULT_TIER_NAME = "default"
+
+
 @dataclass(frozen=True)
 class ModelPrice:
     model_name: str
@@ -83,6 +96,9 @@ class ModelPrice:
     # usage key -> env var holding its rate. Keys MUST equal what the instrumentation
     # puts in usage_details (vera_core.observability.usage_spans / llm_usage_export).
     env_vars: Mapping[str, str] = field(default_factory=dict)
+    # Langfuse validates this against its own enum; it must match what the usage keys
+    # actually measure, or the UI reports the wrong dimension for real money.
+    unit: str = UNIT_TOKENS
 
 
 # Every Gemini model Vera can route to, priced INDIVIDUALLY rather than as one family.
@@ -129,16 +145,19 @@ MODELS: tuple[ModelPrice, ...] = (
         "vera-deepgram-flux",
         r"(?i)^flux-.*$",
         {STT_AUDIO_MS: "LANGFUSE_PRICE_STT_FLUX_PER_MS"},
+        UNIT_MILLISECONDS,
     ),
     ModelPrice(
         "vera-deepgram-nova",
         r"(?i)^nova-.*$",
         {STT_AUDIO_MS: "LANGFUSE_PRICE_STT_NOVA_PER_MS"},
+        UNIT_MILLISECONDS,
     ),
     ModelPrice(
         "vera-cartesia-sonic",
         r"(?i)^sonic-.*$",
         {TTS_CHARACTERS: "LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER"},
+        UNIT_CHARACTERS,
     ),
     *(_gemini_entry(model) for model in GEMINI_MODELS),
 )
@@ -183,20 +202,32 @@ def matching_entry(model: str) -> ModelPrice | None:
     return next((m for m in MODELS if re.match(m.match_pattern, model)), None)
 
 
-def build_payload(
-    price: ModelPrice, model_id: str | None, *, rates: Mapping[str, float]
-) -> dict[str, Any]:
-    """The POST body for one model entry. Prices go in pricingTiers[0].prices — the
-    deprecated flat inputPrice/outputPrice cannot express a custom usage key at all."""
+def build_payload(price: ModelPrice, *, rates: Mapping[str, float]) -> dict[str, Any]:
+    """The POST body for one model entry.
+
+    Prices go in `pricingTiers[0].prices` — the deprecated flat
+    inputPrice/outputPrice cannot express a custom usage key at all. The tier must
+    also be named, prioritised, carry its (empty) conditions and be flagged
+    isDefault; the endpoint rejects the body outright otherwise.
+
+    No `modelId`: this API has no upsert. POST rejects a duplicate `modelName` even
+    when handed the existing id, and PUT/PATCH are 405 — so replacing an entry means
+    deleting it first (see `seed`).
+    """
     payload: dict[str, Any] = {
         "modelName": price.model_name,
         "matchPattern": price.match_pattern,
+        "unit": price.unit,
         "pricingTiers": [
-            {"prices": {key: rates[env_var] for key, env_var in price.env_vars.items()}}
+            {
+                "name": _DEFAULT_TIER_NAME,
+                "isDefault": True,
+                "priority": 0,
+                "conditions": [],
+                "prices": {key: rates[env_var] for key, env_var in price.env_vars.items()},
+            }
         ],
     }
-    if model_id is not None:
-        payload["modelId"] = model_id
     return payload
 
 
@@ -225,8 +256,34 @@ async def seed(client: httpx.AsyncClient, rates: Mapping[str, float]) -> list[st
     existing = await _existing_ids(client)
     written: list[str] = []
     for price in MODELS:
-        payload = build_payload(price, existing.get(price.model_name), rates=rates)
+        if (model_id := existing.get(price.model_name)) is not None:
+            # There is no update endpoint: POST rejects a duplicate modelName even
+            # with the id, and PUT/PATCH are 405. Replacing means deleting first.
+            # Rates are all resolved before any request is issued, so a delete is
+            # only ever followed by a create that already has its values in hand.
+            deleted = await client.delete(f"/api/public/models/{model_id}")
+            if deleted.is_error:
+                logger.error(
+                    "could not replace %s (DELETE %s): %s",
+                    price.model_name,
+                    deleted.status_code,
+                    deleted.text[:500],
+                )
+            deleted.raise_for_status()
+            logger.info("replacing existing %s", price.model_name)
+        payload = build_payload(price, rates=rates)
         response = await client.post("/api/public/models", json=payload)
+        if response.is_error:
+            # Surface the server's own explanation. `raise_for_status()` alone reports
+            # only "400 Bad Request", which says nothing about WHICH field is wrong —
+            # and this endpoint validates a fair few (unit, and every pricing-tier
+            # field). The body names them; hiding it turns a 30-second fix into a hunt.
+            logger.error(
+                "POST %s failed (%s): %s",
+                price.model_name,
+                response.status_code,
+                response.text[:1000],
+            )
         response.raise_for_status()
         written.append(price.model_name)
         logger.info(

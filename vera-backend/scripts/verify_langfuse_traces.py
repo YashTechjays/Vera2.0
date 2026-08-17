@@ -100,8 +100,12 @@ async def _newest_call_trace(client: httpx.AsyncClient) -> str | None:
     return None
 
 
-async def _price_entry_report(client: httpx.AsyncClient, settings: Any) -> bool:
-    """Seeded entries vs configured models. False when something is unpriced."""
+async def _price_entry_report(client: httpx.AsyncClient, settings: Any) -> tuple[bool, bool]:
+    """(all Vera entries exist, every configured model is covered).
+
+    Kept separate because they mean different things: the first says the seeder ran,
+    the second says nothing Vera routes to is unpriced. A blank cost is only a
+    "go seed" instruction when the first is False."""
     seeded: dict[str, str] = {}
     for page in range(1, 21):
         response = await client.get("/api/public/models", params={"limit": 100, "page": page})
@@ -123,10 +127,10 @@ async def _price_entry_report(client: httpx.AsyncClient, settings: Any) -> bool:
     if unpriced:
         print(f"\n  NO PRICE ENTRY for configured models: {unpriced}")
         print("  their observations will render BLANK cost, which looks like broken tracing")
-    return not missing_entries and not unpriced
+    return not missing_entries, not unpriced
 
 
-def _report_trace(full: dict[str, Any]) -> bool:
+def _report_trace(full: dict[str, Any], *, prices_ok: bool) -> bool:
     """Print the per-trace findings. False when the trace has a real problem."""
     obs = full.get("observations", [])
     print(f"\n=== TRACE {full.get('id')} ===")
@@ -177,8 +181,16 @@ def _report_trace(full: dict[str, Any]) -> bool:
         print("    (none ran, or they formed their own trace — exercise whisper/summary")
         print("     and let post-call eval run, then re-check)")
 
-    if blank:
+    if blank and not prices_ok:
         print(f"\n  {len(blank)} generation(s) with BLANK cost — seed the missing model entries")
+    elif blank:
+        # Every entry exists, so the gap is chronological rather than configuration:
+        # Langfuse computes cost at INGESTION and stores it. Seeding afterwards never
+        # backfills. Saying "seed the missing entries" here would send someone to
+        # re-run a seeder that is already correct.
+        print(f"\n  {len(blank)} generation(s) with BLANK cost, but every price entry EXISTS.")
+        print("  This trace was ingested BEFORE those entries were seeded — Langfuse")
+        print("  prices at ingestion time and does not backfill. Place a new call.")
     return not blank and not mismatched
 
 
@@ -196,7 +208,7 @@ async def main() -> int:
         headers={"Authorization": _auth(settings)},
         timeout=60.0,
     ) as client:
-        prices_ok = await _price_entry_report(client, settings)
+        entries_present, all_covered = await _price_entry_report(client, settings)
 
         trace_id = wanted or await _newest_call_trace(client)
         if trace_id is None:
@@ -204,10 +216,11 @@ async def main() -> int:
             return 1
         response = await client.get(f"/api/public/traces/{trace_id}")
         response.raise_for_status()
-        trace_ok = _report_trace(response.json())
+        trace_ok = _report_trace(response.json(), prices_ok=entries_present)
 
-    print("\n" + ("PASS" if prices_ok and trace_ok else "FAIL"))
-    return 0 if prices_ok and trace_ok else 1
+    ok = entries_present and all_covered and trace_ok
+    print("\n" + ("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

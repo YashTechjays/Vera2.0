@@ -77,21 +77,22 @@ class TestRates:
 
 class TestPayload:
     def test_a_new_model_carries_no_model_id(self) -> None:
-        payload = build_payload(MODELS[0], None, rates=resolve_rates(_RATES))
+        payload = build_payload(MODELS[0], rates=resolve_rates(_RATES))
         assert "modelId" not in payload
         assert payload["modelName"] == MODELS[0].model_name
 
-    def test_an_existing_model_threads_its_id_back_in(self) -> None:
-        # POST /api/public/models upserts ONLY when given an existing modelId; a
-        # duplicate modelName without one is rejected on (projectId, modelName).
-        payload = build_payload(MODELS[0], "clx123", rates=resolve_rates(_RATES))
-        assert payload["modelId"] == "clx123"
+    def test_no_payload_carries_a_model_id(self) -> None:
+        # There is no upsert: POST rejects a duplicate modelName even WITH the id
+        # ("already exists in project"), and PUT/PATCH are 405. Sending one would
+        # just be noise on a request that can only ever create.
+        for model in MODELS:
+            assert "modelId" not in build_payload(model, rates=resolve_rates(_RATES))
 
     def test_prices_use_the_usage_keys_the_instrumentation_sends(self) -> None:
         rates = resolve_rates(_RATES)
-        flux = build_payload(_BY_NAME["vera-deepgram-flux"], None, rates=rates)
+        flux = build_payload(_BY_NAME["vera-deepgram-flux"], rates=rates)
         assert set(flux["pricingTiers"][0]["prices"]) == {"stt_audio_ms"}
-        gemini = build_payload(_BY_NAME["vera-gemini-3.6-flash"], None, rates=rates)
+        gemini = build_payload(_BY_NAME["vera-gemini-3.6-flash"], rates=rates)
         assert set(gemini["pricingTiers"][0]["prices"]) == {"input", "output", "cached"}
 
     def test_patterns_match_the_models_vera_actually_uses(self) -> None:
@@ -112,6 +113,9 @@ class TestPayload:
 class _FakeResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self._payload = payload
+        self.is_error = False
+        self.status_code = 200
+        self.text = ""
 
     def raise_for_status(self) -> None:
         return None
@@ -127,6 +131,7 @@ class _FakeClient:
     def __init__(self, existing: list[dict[str, str]]) -> None:
         self._existing = existing
         self.posted: list[dict[str, object]] = []
+        self.deleted: list[str] = []
 
     async def get(self, _url: str, params: dict[str, int]) -> _FakeResponse:
         limit, page = params["limit"], params.get("page", 1)
@@ -137,6 +142,10 @@ class _FakeClient:
         self.posted.append(json)
         return _FakeResponse({})
 
+    async def delete(self, url: str) -> _FakeResponse:
+        self.deleted.append(url.rsplit("/", 1)[-1])
+        return _FakeResponse({})
+
 
 def _filler(count: int) -> list[dict[str, str]]:
     """Langfuse ships ~160 built-in model entries; they share the listing with ours."""
@@ -144,15 +153,16 @@ def _filler(count: int) -> list[dict[str, str]]:
 
 
 class TestIdempotentUpsert:
-    """The seam `build_payload`'s tests do NOT cover: `build_payload` proves an id is
-    USED when handed one, not that `_existing_ids` FINDS one."""
+    """Re-running must converge, and this API gives no upsert to lean on: an existing
+    entry has to be deleted before it can be recreated. The seam `build_payload`'s
+    tests do NOT cover is whether `_existing_ids` FINDS what is already there."""
 
     @pytest.mark.asyncio
     async def test_a_first_run_posts_every_model_without_an_id(self) -> None:
         client = _FakeClient([])
         written = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
         assert written == [m.model_name for m in MODELS]
-        assert all("modelId" not in p for p in client.posted)
+        assert client.deleted == []  # nothing to replace on a fresh project
 
     @pytest.mark.asyncio
     async def test_a_second_run_threads_each_existing_id_back_in(self) -> None:
@@ -161,7 +171,8 @@ class TestIdempotentUpsert:
         listing = [{"modelName": m.model_name, "id": f"id-{m.model_name}"} for m in MODELS]
         client = _FakeClient(listing)
         await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
-        assert [p["modelId"] for p in client.posted] == [f"id-{m.model_name}" for m in MODELS]
+        assert client.deleted == [f"id-{m.model_name}" for m in MODELS]
+        assert len(client.posted) == len(MODELS)
 
     @pytest.mark.asyncio
     async def test_existing_entries_are_found_beyond_the_first_page(self) -> None:
@@ -173,7 +184,7 @@ class TestIdempotentUpsert:
         ]
         client = _FakeClient(listing)
         await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
-        assert [p["modelId"] for p in client.posted] == [f"id-{m.model_name}" for m in MODELS]
+        assert client.deleted == [f"id-{m.model_name}" for m in MODELS]
 
 
 class TestPerModelCoverage:
@@ -218,3 +229,34 @@ class TestPerModelCoverage:
         flux = _BY_NAME["vera-deepgram-flux"].env_vars["stt_audio_ms"]
         nova = _BY_NAME["vera-deepgram-nova"].env_vars["stt_audio_ms"]
         assert flux != nova
+
+
+class TestPayloadShape:
+    """The POST body Langfuse actually validates. Discovered by running the seeder
+    against a live instance: the design assumed `pricingTiers[0].prices` sufficed,
+    but the endpoint rejects that with a 400 naming four more required fields."""
+
+    def test_a_unit_is_declared_and_matches_what_the_keys_measure(self) -> None:
+        # Langfuse validates `unit` against its own enum. It must describe what the
+        # usage keys actually count, or the UI reports the wrong dimension for money.
+        by_unit = {m.model_name: m.unit for m in MODELS}
+        assert by_unit["vera-deepgram-flux"] == "MILLISECONDS"
+        assert by_unit["vera-deepgram-nova"] == "MILLISECONDS"
+        assert by_unit["vera-cartesia-sonic"] == "CHARACTERS"
+        assert by_unit["vera-gemini-3.6-flash"] == "TOKENS"
+
+    def test_every_payload_carries_a_complete_default_tier(self) -> None:
+        # The 400 that blocked the first real seed: name, priority, conditions and
+        # isDefault are all required, and EXACTLY ONE tier must be the default.
+        rates = resolve_rates(_RATES)
+        for model in MODELS:
+            payload = build_payload(model, rates=rates)
+            assert payload["unit"] == model.unit
+            tiers = payload["pricingTiers"]
+            assert len(tiers) == 1, model.model_name
+            tier = tiers[0]
+            assert tier["isDefault"] is True
+            assert isinstance(tier["name"], str) and tier["name"]
+            assert isinstance(tier["priority"], int)
+            assert tier["conditions"] == []
+            assert tier["prices"]
